@@ -24,6 +24,7 @@
 #include "vm/ArgumentsObject.h"
 #include "vm/DebuggerMemory.h"
 #include "vm/SPSProfiler.h"
+#include "vm/TraceLogging.h"
 #include "vm/WrapperObject.h"
 
 #include "jsgcinlines.h"
@@ -3037,6 +3038,26 @@ Debugger::makeGlobalObjectReference(JSContext *cx, unsigned argc, Value *vp)
     return dbg->wrapDebuggeeValue(cx, args.rval());
 }
 
+bool
+Debugger::enableTraceItem(JSContext *cx, unsigned argc, Value *vp)
+{
+    THIS_DEBUGGER(cx, argc, vp, "enableTraceItem", args, dbg);
+    if (!args.requireAtLeast(cx, "Debugger.enableTraceItem", 1))
+        return false;
+
+    uint32_t id = args[0].toInt32();
+
+    if (!TLTextIdIsToggable(id)) {
+        args.rval().setBoolean(false);
+        return true;
+    }
+
+    TraceLogEnableTextId(cx, id);
+
+    args.rval().setBoolean(true);
+    return true;
+}
+
 const JSPropertySpec Debugger::properties[] = {
     JS_PSGS("enabled", Debugger::getEnabled, Debugger::setEnabled, 0),
     JS_PSGS("onDebuggerStatement", Debugger::getOnDebuggerStatement,
@@ -3063,10 +3084,10 @@ const JSFunctionSpec Debugger::methods[] = {
     JS_FN("findScripts", Debugger::findScripts, 1, 0),
     JS_FN("findAllGlobals", Debugger::findAllGlobals, 0, 0),
     JS_FN("makeGlobalObjectReference", Debugger::makeGlobalObjectReference, 1, 0),
+    JS_FN("enableTraceItem", Debugger::enableTraceItem, 1, 0),
     JS_FS_END
 };
 
-
 /*** Debugger.Script *****************************************************************************/
 
 static inline JSScript *
