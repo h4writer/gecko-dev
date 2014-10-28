@@ -30,8 +30,8 @@ Cu.import("resource://services-sync/policies.js");
 Cu.import("resource://services-sync/record.js");
 Cu.import("resource://services-sync/resource.js");
 Cu.import("resource://services-sync/rest.js");
-Cu.import("resource://services-sync/stages/cluster.js");
 Cu.import("resource://services-sync/stages/enginesync.js");
+Cu.import("resource://services-sync/stages/declined.js");
 Cu.import("resource://services-sync/status.js");
 Cu.import("resource://services-sync/userapi.js");
 Cu.import("resource://services-sync/util.js");
@@ -51,6 +51,14 @@ const STORAGE_INFO_TYPES = [INFO_COLLECTIONS,
                             INFO_COLLECTION_COUNTS,
                             INFO_QUOTA];
 
+// A structure mapping a (boolean) telemetry probe name to a preference name.
+// The probe will record true if the pref is modified, false otherwise.
+const TELEMETRY_CUSTOM_SERVER_PREFS = {
+  WEAVE_CUSTOM_LEGACY_SERVER_CONFIGURATION: "services.sync.serverURL",
+  WEAVE_CUSTOM_FXA_SERVER_CONFIGURATION: "identity.fxaccounts.auth.uri",
+  WEAVE_CUSTOM_TOKEN_SERVER_CONFIGURATION: "services.sync.tokenServerURI",
+};
+
 
 function Sync11Service() {
   this._notify = Utils.notify("weave:service:");
@@ -61,15 +69,10 @@ Sync11Service.prototype = {
   _locked: false,
   _loggedIn: false,
 
-  userBaseURL: null,
   infoURL: null,
   storageURL: null,
   metaURL: null,
   cryptoKeyURL: null,
-
-  get enabledEngineNames() {
-    return [e.name for each (e in this.engineManager.getEnabled())];
-  },
 
   get serverURL() Svc.Prefs.get("serverURL"),
   set serverURL(value) {
@@ -157,13 +160,18 @@ Sync11Service.prototype = {
     return Utils.catch.call(this, func, lockExceptions);
   },
 
+  get userBaseURL() {
+    if (!this._clusterManager) {
+      return null;
+    }
+    return this._clusterManager.getUserBaseURL();
+  },
+
   _updateCachedURLs: function _updateCachedURLs() {
     // Nothing to cache yet if we don't have the building blocks
-    if (this.clusterURL == "" || this.identity.username == "")
+    if (!this.clusterURL || !this.identity.username)
       return;
 
-    let storageAPI = this.clusterURL + SYNC_API_VERSION + "/";
-    this.userBaseURL = storageAPI + this.identity.username + "/";
     this._log.debug("Caching URLs under storage user base: " + this.userBaseURL);
 
     // Generate and cache various URLs under the storage API for this user
@@ -323,7 +331,7 @@ Sync11Service.prototype = {
 
     this._log.info("Loading Weave " + WEAVE_VERSION);
 
-    this._clusterManager = new ClusterManager(this);
+    this._clusterManager = this.identity.createClusterManager(this);
     this.recordManager = new RecordManager(this);
 
     this.enabled = true;
@@ -354,6 +362,12 @@ Sync11Service.prototype = {
     let status = this._checkSetup();
     if (status != STATUS_DISABLED && status != CLIENT_NOT_CONFIGURED) {
       Svc.Obs.notify("weave:engine:start-tracking");
+    }
+
+    // Telemetry probes to indicate if the user is using custom servers.
+    for (let [probeName, prefName] of Iterator(TELEMETRY_CUSTOM_SERVER_PREFS)) {
+      let isCustomized = Services.prefs.prefHasUserValue(prefName);
+      Services.telemetry.getHistogramById(probeName).add(isCustomized);
     }
 
     // Send an event now that Weave service is ready.  We don't do this
@@ -427,6 +441,12 @@ Sync11Service.prototype = {
       engines = pref.split(",");
     }
 
+    let declined = [];
+    pref = Svc.Prefs.get("declinedEngines");
+    if (pref) {
+      declined = pref.split(",");
+    }
+
     this.clientsEngine = new ClientEngine(this);
 
     for (let name of engines) {
@@ -445,12 +465,14 @@ Sync11Service.prototype = {
           continue;
         }
 
-        this.engineManager.register(ns[engineName], this);
+        this.engineManager.register(ns[engineName]);
       } catch (ex) {
         this._log.warn("Could not register engine " + name + ": " +
                        CommonUtils.exceptionStr(ex));
       }
     }
+
+    this.engineManager.setDeclined(declined);
   },
 
   QueryInterface: XPCOMUtils.generateQI([Ci.nsIObserver,
@@ -648,24 +670,35 @@ Sync11Service.prototype = {
     }
   },
 
-  verifyLogin: function verifyLogin() {
+  verifyLogin: function verifyLogin(allow40XRecovery = true) {
+    // If the identity isn't ready it  might not know the username...
+    if (!this.identity.readyToAuthenticate) {
+      this._log.info("Not ready to authenticate in verifyLogin.");
+      this.status.login = LOGIN_FAILED_NOT_READY;
+      return false;
+    }
+
     if (!this.identity.username) {
       this._log.warn("No username in verifyLogin.");
       this.status.login = LOGIN_FAILED_NO_USERNAME;
       return false;
     }
 
-    // Unlock master password, or return.
     // Attaching auth credentials to a request requires access to
     // passwords, which means that Resource.get can throw MP-related
     // exceptions!
-    // Try to fetch the passphrase first, while we still have control.
-    try {
-      this.identity.syncKey;
-    } catch (ex) {
-      this._log.debug("Fetching passphrase threw " + ex +
-                      "; assuming master password locked.");
-      this.status.login = MASTER_PASSWORD_LOCKED;
+    // So we ask the identity to verify the login state after unlocking the
+    // master password (ie, this call is expected to prompt for MP unlock
+    // if necessary) while we still have control.
+    let cb = Async.makeSpinningCallback();
+    this.identity.unlockAndVerifyAuthState().then(
+      result => cb(null, result),
+      cb
+    );
+    let unlockedState = cb.wait();
+    this._log.debug("Fetching unlocked auth state returned " + unlockedState);
+    if (unlockedState != STATUS_OK) {
+      this.status.login = unlockedState;
       return false;
     }
 
@@ -675,7 +708,6 @@ Sync11Service.prototype = {
       // to succeed, since that probably means we just don't have storage.
       if (this.clusterURL == "" && !this._clusterManager.setCluster()) {
         this.status.sync = NO_SYNC_NODE_FOUND;
-        Svc.Obs.notify("weave:service:sync:delayed");
         return true;
       }
 
@@ -697,7 +729,7 @@ Sync11Service.prototype = {
 
           // Go ahead and do remote setup, so that we can determine
           // conclusively that our passphrase is correct.
-          if (this._remoteSetup()) {
+          if (this._remoteSetup(test)) {
             // Username/password verified.
             this.status.login = LOGIN_SUCCEEDED;
             return true;
@@ -713,8 +745,8 @@ Sync11Service.prototype = {
 
         case 404:
           // Check that we're verifying with the correct cluster
-          if (this._clusterManager.setCluster()) {
-            return this.verifyLogin();
+          if (allow40XRecovery && this._clusterManager.setCluster()) {
+            return this.verifyLogin(false);
           }
 
           // We must have the right cluster, but the server doesn't expect us
@@ -765,20 +797,20 @@ Sync11Service.prototype = {
 
     info = info.obj;
     if (!(CRYPTO_COLLECTION in info)) {
-      this._log.error("Consistency failure: info/collections excludes " + 
+      this._log.error("Consistency failure: info/collections excludes " +
                       "crypto after successful upload.");
       throw new Error("Symmetric key upload failed.");
     }
 
     // Can't check against local modified: clock drift.
     if (info[CRYPTO_COLLECTION] < serverModified) {
-      this._log.error("Consistency failure: info/collections crypto entry " + 
+      this._log.error("Consistency failure: info/collections crypto entry " +
                       "is stale after successful upload.");
       throw new Error("Symmetric key upload failed.");
     }
-    
+
     // Doesn't matter if the timestamp is ahead.
-    
+
     // Download and install them.
     let cryptoKeys = new CryptoWrapper(CRYPTO_COLLECTION, KEYS_WBO);
     let cryptoResp = cryptoKeys.fetch(this.resource(this.cryptoKeysURL)).response;
@@ -842,14 +874,6 @@ Sync11Service.prototype = {
     Svc.Obs.notify("weave:engine:stop-tracking");
     this.status.resetSync();
 
-    // We want let UI consumers of the following notification know as soon as
-    // possible, so let's fake for the CLIENT_NOT_CONFIGURED status for now
-    // by emptying the passphrase (we still need the password).
-    this.identity.syncKey = null;
-    this.status.login = LOGIN_FAILED_NO_PASSPHRASE;
-    this.logout();
-    Svc.Obs.notify("weave:service:start-over");
-
     // Deletion doesn't make sense if we aren't set up yet!
     if (this.clusterURL != "") {
       // Clear client-specific data from the server, including disabled engines.
@@ -861,9 +885,19 @@ Sync11Service.prototype = {
                          + Utils.exceptionStr(ex));
         }
       }
+      this._log.debug("Finished deleting client data.");
     } else {
       this._log.debug("Skipping client data removal: no cluster URL.");
     }
+
+    // We want let UI consumers of the following notification know as soon as
+    // possible, so let's fake for the CLIENT_NOT_CONFIGURED status for now
+    // by emptying the passphrase (we still need the password).
+    this._log.info("Service.startOver dropping sync key and logging out.");
+    this.identity.resetSyncKey();
+    this.status.login = LOGIN_FAILED_NO_PASSPHRASE;
+    this.logout();
+    Svc.Obs.notify("weave:service:start-over");
 
     // Reset all engines and clear keys.
     this.resetClient();
@@ -879,7 +913,33 @@ Sync11Service.prototype = {
 
     this.identity.deleteSyncCredentials();
 
-    Svc.Obs.notify("weave:service:start-over:finish");
+    // If necessary, reset the identity manager, then re-initialize it so the
+    // FxA manager is used.  This is configurable via a pref - mainly for tests.
+    let keepIdentity = false;
+    try {
+      keepIdentity = Services.prefs.getBoolPref("services.sync-testing.startOverKeepIdentity");
+    } catch (_) { /* no such pref */ }
+    if (keepIdentity) {
+      Svc.Obs.notify("weave:service:start-over:finish");
+      return;
+    }
+
+    this.identity.finalize().then(
+      () => {
+        this.identity.username = "";
+        this.status.__authManager = null;
+        this.identity = Status._authManager;
+        this._clusterManager = this.identity.createClusterManager(this);
+        Svc.Obs.notify("weave:service:start-over:finish");
+      }
+    ).then(null,
+      err => {
+        this._log.error("startOver failed to re-initialize the identity manager: " + err);
+        // Still send the observer notification so the current state is
+        // reflected in the UI.
+        Svc.Obs.notify("weave:service:start-over:finish");
+      }
+    );
   },
 
   persistLogin: function persistLogin() {
@@ -913,14 +973,20 @@ Sync11Service.prototype = {
         throw "Aborting login, client not configured.";
       }
 
+      // Ask the identity manager to explicitly login now.
+      let cb = Async.makeSpinningCallback();
+      this.identity.ensureLoggedIn().then(cb, cb);
+
+      // Just let any errors bubble up - they've more context than we do!
+      cb.wait();
+
       // Calling login() with parameters when the client was
       // previously not configured means setup was completed.
       if (initialStatus == CLIENT_NOT_CONFIGURED
           && (username || password || passphrase)) {
         Svc.Obs.notify("weave:service:setup-complete");
       }
-
-      this._log.info("Logging in user " + this.identity.username);
+      this._log.info("Logging in the user.");
       this._updateCachedURLs();
 
       if (!this.verifyLogin()) {
@@ -938,11 +1004,11 @@ Sync11Service.prototype = {
   },
 
   logout: function logout() {
-    // No need to do anything if we're already logged out.
-    if (!this._loggedIn)
-      return;
-
+    // If we failed during login, we aren't going to have this._loggedIn set,
+    // but we still want to ask the identity to logout, so it doesn't try and
+    // reuse any old credentials next time we sync.
     this._log.info("Logging out");
+    this.identity.logout();
     this._loggedIn = false;
 
     Svc.Obs.notify("weave:service:logout:finish");
@@ -1010,11 +1076,20 @@ Sync11Service.prototype = {
       // ... fetch the current record from the server, and COPY THE FLAGS.
       let newMeta = this.recordManager.get(this.metaURL);
 
+      // If we got a 401, we do not want to create a new meta/global - we
+      // should be able to get the existing meta after we get a new node.
+      if (this.recordManager.response.status == 401) {
+        this._log.debug("Fetching meta/global record on the server returned 401.");
+        this.errorHandler.checkServerError(this.recordManager.response);
+        return false;
+      }
+
       if (!this.recordManager.response.success || !newMeta) {
         this._log.debug("No meta/global record on the server. Creating one.");
         newMeta = new WBORecord("meta", "global");
         newMeta.payload.syncID = this.syncID;
         newMeta.payload.storageVersion = STORAGE_VERSION;
+        newMeta.payload.declined = this.engineManager.getDeclined();
 
         newMeta.isNew = true;
 
@@ -1190,6 +1265,9 @@ Sync11Service.prototype = {
     return this._lock("service.js: sync",
                       this._notify("sync", "", function onNotify() {
 
+      let histogram = Services.telemetry.getHistogramById("WEAVE_START_COUNT");
+      histogram.add(1);
+
       let synchronizer = new EngineSynchronizer(this);
       let cb = Async.makeSpinningCallback();
       synchronizer.onComplete = cb;
@@ -1198,7 +1276,44 @@ Sync11Service.prototype = {
       // wait() throws if the first argument is truthy, which is exactly what
       // we want.
       let result = cb.wait();
+
+      histogram = Services.telemetry.getHistogramById("WEAVE_COMPLETE_SUCCESS_COUNT");
+      histogram.add(1);
+
+      // We successfully synchronized. Now let's update our declined engines.
+      let meta = this.recordManager.get(this.metaURL);
+      if (!meta) {
+        this._log.warn("No meta/global; can't update declined state.");
+        return;
+      }
+
+      let declinedEngines = new DeclinedEngines(this);
+      let didChange = declinedEngines.updateDeclined(meta, this.engineManager);
+      if (!didChange) {
+        this._log.info("No change to declined engines. Not reuploading meta/global.");
+        return;
+      }
+
+      this.uploadMetaGlobal(meta);
     }))();
+  },
+
+  /**
+   * Upload meta/global, throwing the response on failure.
+   */
+  uploadMetaGlobal: function (meta) {
+    this._log.debug("Uploading meta/global: " + JSON.stringify(meta));
+
+    // It would be good to set the X-If-Unmodified-Since header to `timestamp`
+    // for this PUT to ensure at least some level of transactionality.
+    // Unfortunately, the servers don't support it after a wipe right now
+    // (bug 693893), so we're going to defer this until bug 692700.
+    let res = this.resource(this.metaURL);
+    let response = res.put(meta);
+    if (!response.success) {
+      throw response;
+    }
+    this.recordManager.set(this.metaURL, meta);
   },
 
   /**
@@ -1256,26 +1371,19 @@ Sync11Service.prototype = {
     let meta = new WBORecord("meta", "global");
     meta.payload.syncID = this.syncID;
     meta.payload.storageVersion = STORAGE_VERSION;
+    meta.payload.declined = this.engineManager.getDeclined();
     meta.isNew = true;
 
-    this._log.debug("New metadata record: " + JSON.stringify(meta.payload));
-    let res = this.resource(this.metaURL);
-    // It would be good to set the X-If-Unmodified-Since header to `timestamp`
-    // for this PUT to ensure at least some level of transactionality.
-    // Unfortunately, the servers don't support it after a wipe right now
-    // (bug 693893), so we're going to defer this until bug 692700.
-    let resp = res.put(meta);
-    if (!resp.success) {
-      // If we got into a race condition, we'll abort the sync this way, too.
-      // That's fine. We'll just wait till the next sync. The client that we're
-      // racing is probably busy uploading stuff right now anyway.
-      throw resp;
-    }
-    this.recordManager.set(this.metaURL, meta);
+    // uploadMetaGlobal throws on failure -- including race conditions.
+    // If we got into a race condition, we'll abort the sync this way, too.
+    // That's fine. We'll just wait till the next sync. The client that we're
+    // racing is probably busy uploading stuff right now anyway.
+    this.uploadMetaGlobal(meta);
 
     // Wipe everything we know about except meta because we just uploaded it
     let engines = [this.clientsEngine].concat(this.engineManager.getAll());
     let collections = [engine.name for each (engine in engines)];
+    // TODO: there's a bug here. We should be calling resetClient, no?
 
     // Generate, upload, and download new keys. Do this last so we don't wipe
     // them...

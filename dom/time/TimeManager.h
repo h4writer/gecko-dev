@@ -21,7 +21,7 @@ class TimeManager MOZ_FINAL : public nsISupports
                             , public nsWrapperCache
 {
 public:
-  static bool PrefEnabled()
+  static bool PrefEnabled(JSContext* aCx, JSObject* aGlobal)
   {
 #ifdef MOZ_TIME_MANAGER
     return true;
@@ -36,19 +36,20 @@ public:
   explicit TimeManager(nsPIDOMWindow* aWindow)
     : mWindow(aWindow)
   {
-    SetIsDOMBinding();
   }
 
   nsPIDOMWindow* GetParentObject() const
   {
     return mWindow;
   }
-  JSObject* WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope);
+  JSObject* WrapObject(JSContext* aCx);
 
   void Set(Date& aDate);
   void Set(double aTime);
 
 private:
+  ~TimeManager() {}
+
   nsCOMPtr<nsPIDOMWindow> mWindow;
 };
 

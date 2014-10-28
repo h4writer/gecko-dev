@@ -8,15 +8,16 @@ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Task.jsm");
-Cu.import("resource://gre/modules/devtools/Loader.jsm");
 Cu.import("resource:///modules/devtools/SideMenuWidget.jsm");
 Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
 
 const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
 const promise = Cu.import("resource://gre/modules/Promise.jsm", {}).Promise;
-const EventEmitter = require("devtools/shared/event-emitter");
+const EventEmitter = require("devtools/toolkit/event-emitter");
 const {Tooltip} = require("devtools/shared/widgets/Tooltip");
 const Editor = require("devtools/sourceeditor/editor");
+const Telemetry = require("devtools/shared/telemetry");
+const telemetry = new Telemetry();
 
 // The panel's window global is an EventEmitter firing the following events:
 const EVENTS = {
@@ -84,6 +85,7 @@ let EventsHandler = {
    * Listen for events emitted by the current tab target.
    */
   initialize: function() {
+    telemetry.toolOpened("shadereditor");
     this._onHostChanged = this._onHostChanged.bind(this);
     this._onTabNavigated = this._onTabNavigated.bind(this);
     this._onProgramLinked = this._onProgramLinked.bind(this);
@@ -99,6 +101,7 @@ let EventsHandler = {
    * Remove events emitted by the current tab target.
    */
   destroy: function() {
+    telemetry.toolClosed("shadereditor");
     gToolbox.off("host-changed", this._onHostChanged);
     gTarget.off("will-navigate", this._onTabNavigated);
     gTarget.off("navigate", this._onTabNavigated);
@@ -117,17 +120,26 @@ let EventsHandler = {
   /**
    * Called for each location change in the debugged tab.
    */
-  _onTabNavigated: function(event) {
+  _onTabNavigated: function(event, {isFrameSwitching}) {
     switch (event) {
       case "will-navigate": {
         Task.spawn(function() {
           // Make sure the backend is prepared to handle WebGL contexts.
-          gFront.setup({ reload: false });
+          if (!isFrameSwitching) {
+            gFront.setup({ reload: false });
+          }
 
           // Reset UI.
           ShadersListView.empty();
-          $("#reload-notice").hidden = true;
-          $("#waiting-notice").hidden = false;
+          // When switching to an iframe, ensure displaying the reload button.
+          // As the document has already been loaded without being hooked.
+          if (isFrameSwitching) {
+            $("#reload-notice").hidden = false;
+            $("#waiting-notice").hidden = true;
+          } else {
+            $("#reload-notice").hidden = true;
+            $("#waiting-notice").hidden = false;
+          }
           yield ShadersEditorsView.setText({ vs: "", fs: "" });
           $("#content").hidden = true;
         }).then(() => window.emit(EVENTS.UI_RESET));
@@ -186,13 +198,13 @@ let ShadersListView = Heritage.extend(WidgetMethods, {
 
     this._onProgramSelect = this._onProgramSelect.bind(this);
     this._onProgramCheck = this._onProgramCheck.bind(this);
-    this._onProgramMouseEnter = this._onProgramMouseEnter.bind(this);
-    this._onProgramMouseLeave = this._onProgramMouseLeave.bind(this);
+    this._onProgramMouseOver = this._onProgramMouseOver.bind(this);
+    this._onProgramMouseOut = this._onProgramMouseOut.bind(this);
 
     this.widget.addEventListener("select", this._onProgramSelect, false);
     this.widget.addEventListener("check", this._onProgramCheck, false);
-    this.widget.addEventListener("mouseenter", this._onProgramMouseEnter, true);
-    this.widget.addEventListener("mouseleave", this._onProgramMouseLeave, true);
+    this.widget.addEventListener("mouseover", this._onProgramMouseOver, true);
+    this.widget.addEventListener("mouseout", this._onProgramMouseOut, true);
   },
 
   /**
@@ -201,8 +213,8 @@ let ShadersListView = Heritage.extend(WidgetMethods, {
   destroy: function() {
     this.widget.removeEventListener("select", this._onProgramSelect, false);
     this.widget.removeEventListener("check", this._onProgramCheck, false);
-    this.widget.removeEventListener("mouseenter", this._onProgramMouseEnter, true);
-    this.widget.removeEventListener("mouseleave", this._onProgramMouseLeave, true);
+    this.widget.removeEventListener("mouseover", this._onProgramMouseOver, true);
+    this.widget.removeEventListener("mouseout", this._onProgramMouseOut, true);
   },
 
   /**
@@ -221,12 +233,17 @@ let ShadersListView = Heritage.extend(WidgetMethods, {
     // standard of allowing debuggees to add some identifiable metadata to their
     // program sources or instances.
     let label = L10N.getFormatStr("shadersList.programLabel", this.itemCount);
+    let contents = document.createElement("label");
+    contents.className = "plain program-item";
+    contents.setAttribute("value", label);
+    contents.setAttribute("crop", "start");
+    contents.setAttribute("flex", "1");
 
     // Append a program item to this container.
-    this.push([label, ""], {
+    this.push([contents], {
       index: -1, /* specifies on which position should the item be appended */
-      relaxed: true, /* this container should allow dupes & degenerates */
       attachment: {
+        label: label,
         programActor: programActor,
         checkboxState: true,
         checkboxTooltip: L10N.getStr("shadersList.blackboxLabel")
@@ -303,9 +320,9 @@ let ShadersListView = Heritage.extend(WidgetMethods, {
   },
 
   /**
-   * The mouseenter listener for the programs container.
+   * The mouseover listener for the programs container.
    */
-  _onProgramMouseEnter: function(e) {
+  _onProgramMouseOver: function(e) {
     let sourceItem = this.getItemForElement(e.target, { noSiblings: true });
     if (sourceItem && !sourceItem.attachment.isBlackBoxed) {
       sourceItem.attachment.programActor.highlight(HIGHLIGHT_TINT);
@@ -318,9 +335,9 @@ let ShadersListView = Heritage.extend(WidgetMethods, {
   },
 
   /**
-   * The mouseleave listener for the programs container.
+   * The mouseout listener for the programs container.
    */
-  _onProgramMouseLeave: function(e) {
+  _onProgramMouseOut: function(e) {
     let sourceItem = this.getItemForElement(e.target, { noSiblings: true });
     if (sourceItem && !sourceItem.attachment.isBlackBoxed) {
       sourceItem.attachment.programActor.unhighlight();
@@ -351,9 +368,14 @@ let ShadersEditorsView = {
   /**
    * Destruction function, called when the tool is closed.
    */
-  destroy: function() {
+  destroy: Task.async(function*() {
+    this._destroyed = true;
     this._toggleListeners("off");
-  },
+    for (let p of this._editorPromises.values()) {
+      let editor = yield p;
+      editor.destroy();
+    }
+  }),
 
   /**
    * Sets the text displayed in the vertex and fragment shader editors.
@@ -407,7 +429,12 @@ let ShadersEditorsView = {
     let parent = $("#" + type +"-editor");
     let editor = new Editor(DEFAULT_EDITOR_CONFIG);
     editor.config.mode = Editor.modes[type];
-    editor.appendTo(parent).then(() => deferred.resolve(editor));
+
+    if (this._destroyed) {
+      deferred.resolve(editor);
+    } else {
+      editor.appendTo(parent).then(() => deferred.resolve(editor));
+    }
 
     return deferred.promise;
   },
@@ -490,7 +517,7 @@ let ShadersEditorsView = {
   _onFailedCompilation: function(type, editor, errors) {
     let lineCount = editor.lineCount();
     let currentLine = editor.getCursor().line;
-    let listeners = { mouseenter: this._onMarkerMouseEnter };
+    let listeners = { mouseover: this._onMarkerMouseOver };
 
     function matchLinesAndMessages(string) {
       return {
@@ -553,16 +580,16 @@ let ShadersEditorsView = {
   },
 
   /**
-   * Event listener for the 'mouseenter' event on a marker in the editor gutter.
+   * Event listener for the 'mouseover' event on a marker in the editor gutter.
    */
-  _onMarkerMouseEnter: function(line, node, messages) {
+  _onMarkerMouseOver: function(line, node, messages) {
     if (node._markerErrorsTooltip) {
       return;
     }
 
     let tooltip = node._markerErrorsTooltip = new Tooltip(document);
     tooltip.defaultOffsetX = GUTTER_ERROR_PANEL_OFFSET_X;
-    tooltip.setTextContent(messages);
+    tooltip.setTextContent({ messages: messages });
     tooltip.startTogglingOnHover(node, () => true, GUTTER_ERROR_PANEL_DELAY);
   },
 

@@ -48,10 +48,10 @@ public:
 
   nsTableColFrame* GetNextCol() const;
 
-  NS_IMETHOD Reflow(nsPresContext*          aPresContext,
-                    nsHTMLReflowMetrics&     aDesiredSize,
-                    const nsHTMLReflowState& aReflowState,
-                    nsReflowStatus&          aStatus) MOZ_OVERRIDE;
+  virtual void Reflow(nsPresContext*           aPresContext,
+                      nsHTMLReflowMetrics&     aDesiredSize,
+                      const nsHTMLReflowState& aReflowState,
+                      nsReflowStatus&          aStatus) MOZ_OVERRIDE;
 
   /**
    * Table columns never paint anything, nor receive events.
@@ -67,8 +67,8 @@ public:
    */
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
   
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
 #endif
 
   virtual nsSplittableType GetSplittableType() const MOZ_OVERRIDE;
@@ -275,7 +275,7 @@ public:
 
 protected:
 
-  nsTableColFrame(nsStyleContext* aContext);
+  explicit nsTableColFrame(nsStyleContext* aContext);
   ~nsTableColFrame();
 
   nscoord mMinCoord;
@@ -286,7 +286,7 @@ protected:
   float mSpanPrefPercent; // XXX...
   // ...XXX the four members marked above could be allocated as part of
   // a separate array allocated only during
-  // BasicTableLayoutStrategy::ComputeColumnIntrinsicWidths (and only
+  // BasicTableLayoutStrategy::ComputeColumnIntrinsicISizes (and only
   // when colspans were present).
   nscoord mFinalWidth;
 

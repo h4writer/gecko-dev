@@ -77,16 +77,23 @@ public:
   AnnotateCrashReport(const nsCString& key, const nsCString& data);
 
  protected:
+  virtual void ActorDestroy(ActorDestroyReason aWhy) MOZ_OVERRIDE;
+
   virtual bool
-    RecvAnnotateCrashReport(const nsCString& key, const nsCString& data) {
+    RecvAnnotateCrashReport(const nsCString& key, const nsCString& data) MOZ_OVERRIDE {
     AnnotateCrashReport(key, data);
     return true;
   }
   virtual bool
-    RecvAppendAppNotes(const nsCString& data);
+    RecvAppendAppNotes(const nsCString& data) MOZ_OVERRIDE;
   virtual mozilla::ipc::IProtocol*
   CloneProtocol(Channel* aChannel,
                 mozilla::ipc::ProtocolCloneContext *aCtx) MOZ_OVERRIDE;
+
+#ifdef MOZ_CRASHREPORTER
+  void
+  NotifyCrashService();
+#endif
 
 #ifdef MOZ_CRASHREPORTER
   AnnotationTable mNotes;

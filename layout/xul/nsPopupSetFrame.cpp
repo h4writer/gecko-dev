@@ -23,9 +23,9 @@ NS_NewPopupSetFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
 NS_IMPL_FRAMEARENA_HELPERS(nsPopupSetFrame)
 
 void
-nsPopupSetFrame::Init(nsIContent*      aContent,
-                      nsIFrame*        aParent,
-                      nsIFrame*        aPrevInFlow)
+nsPopupSetFrame::Init(nsIContent*       aContent,
+                      nsContainerFrame* aParent,
+                      nsIFrame*         aPrevInFlow)
 {
   nsBoxFrame::Init(aContent, aParent, aPrevInFlow);
 
@@ -43,41 +43,41 @@ nsPopupSetFrame::GetType() const
   return nsGkAtoms::popupSetFrame;
 }
 
-NS_IMETHODIMP
+void
 nsPopupSetFrame::AppendFrames(ChildListID     aListID,
                               nsFrameList&    aFrameList)
 {
   if (aListID == kPopupList) {
     AddPopupFrameList(aFrameList);
-    return NS_OK;
+    return;
   }
-  return nsBoxFrame::AppendFrames(aListID, aFrameList);
+  nsBoxFrame::AppendFrames(aListID, aFrameList);
 }
 
-NS_IMETHODIMP
+void
 nsPopupSetFrame::RemoveFrame(ChildListID     aListID,
                              nsIFrame*       aOldFrame)
 {
   if (aListID == kPopupList) {
     RemovePopupFrame(aOldFrame);
-    return NS_OK;
+    return;
   }
-  return nsBoxFrame::RemoveFrame(aListID, aOldFrame);
+  nsBoxFrame::RemoveFrame(aListID, aOldFrame);
 }
 
-NS_IMETHODIMP
+void
 nsPopupSetFrame::InsertFrames(ChildListID     aListID,
                               nsIFrame*       aPrevFrame,
                               nsFrameList&    aFrameList)
 {
   if (aListID == kPopupList) {
     AddPopupFrameList(aFrameList);
-    return NS_OK;
+    return;
   }
-  return nsBoxFrame::InsertFrames(aListID, aPrevFrame, aFrameList);
+  nsBoxFrame::InsertFrames(aListID, aPrevFrame, aFrameList);
 }
 
-NS_IMETHODIMP
+void
 nsPopupSetFrame::SetInitialChildList(ChildListID     aListID,
                                      nsFrameList&    aChildList)
 {
@@ -85,9 +85,9 @@ nsPopupSetFrame::SetInitialChildList(ChildListID     aListID,
     NS_ASSERTION(mPopupList.IsEmpty(),
                  "SetInitialChildList on non-empty child list");
     AddPopupFrameList(aChildList);
-    return NS_OK;
+    return;
   }
-  return nsBoxFrame::SetInitialChildList(aListID, aChildList);
+  nsBoxFrame::SetInitialChildList(aListID, aChildList);
 }
 
 const nsFrameList&
@@ -130,7 +130,7 @@ nsPopupSetFrame::DoLayout(nsBoxLayoutState& aState)
   // lay out all of our currently open popups.
   for (nsFrameList::Enumerator e(mPopupList); !e.AtEnd(); e.Next()) {
     nsMenuPopupFrame* popupChild = static_cast<nsMenuPopupFrame*>(e.get());
-    popupChild->LayoutPopup(aState, nullptr, false);
+    popupChild->LayoutPopup(aState, nullptr, nullptr, false);
   }
 
   return rv;

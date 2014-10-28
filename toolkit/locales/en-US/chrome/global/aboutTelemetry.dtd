@@ -12,12 +12,20 @@
   Telemetry is <span>disabled</span>.
 ">
 
+<!ENTITY aboutTelemetry.generalDataSection "
+  General Data
+">
+
 <!ENTITY aboutTelemetry.slowSqlSection "
   Slow SQL Statements
 ">
 
 <!ENTITY aboutTelemetry.chromeHangsSection "
   Browser Hangs
+">
+
+<!ENTITY aboutTelemetry.threadHangStatsSection "
+  Thread Hangs
 ">
 
 <!ENTITY aboutTelemetry.histogramsSection "

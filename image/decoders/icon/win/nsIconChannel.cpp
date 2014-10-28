@@ -23,6 +23,7 @@
 #include "nsIMIMEService.h"
 #include "nsCExternalHandlerService.h"
 #include "nsDirectoryServiceDefs.h"
+#include "nsProxyRelease.h"
 
 #ifdef _WIN32_WINNT
 #undef _WIN32_WINNT
@@ -55,16 +56,10 @@ struct ICONENTRY {
   uint32_t ieFileOffset;
 };
 
-typedef HRESULT (WINAPI*SHGetStockIconInfoPtr) (SHSTOCKICONID siid, UINT uFlags, SHSTOCKICONINFO *psii);
-
 // Match stock icons with names
 static SHSTOCKICONID GetStockIconIDForName(const nsACString &aStockName)
 {
-  // UAC shield icon
-  if (aStockName == NS_LITERAL_CSTRING("uac-shield"))
-    return SIID_SHIELD;
-
-  return SIID_INVALID;
+  return aStockName.EqualsLiteral("uac-shield") ? SIID_SHIELD : SIID_INVALID;
 }
 
 // nsIconChannel methods
@@ -73,13 +68,22 @@ nsIconChannel::nsIconChannel()
 }
 
 nsIconChannel::~nsIconChannel() 
-{}
+{
+  if (mLoadInfo) {
+    nsCOMPtr<nsIThread> mainThread;
+    NS_GetMainThread(getter_AddRefs(mainThread));
 
-NS_IMPL_ISUPPORTS4(nsIconChannel, 
-                              nsIChannel, 
-                              nsIRequest,
-                              nsIRequestObserver,
-                              nsIStreamListener)
+    nsILoadInfo *forgetableLoadInfo;
+    mLoadInfo.forget(&forgetableLoadInfo);
+    NS_ProxyRelease(mainThread, forgetableLoadInfo, false);
+  }
+}
+
+NS_IMPL_ISUPPORTS(nsIconChannel, 
+                  nsIChannel, 
+                  nsIRequest,
+                  nsIRequestObserver,
+                  nsIStreamListener)
 
 nsresult nsIconChannel::Init(nsIURI* uri)
 {
@@ -349,8 +353,8 @@ nsresult nsIconChannel::GetStockHIcon(nsIMozIconURI *aIconURI, HICON *hIcon)
 
   // We can only do this on Vista or above
   HMODULE hShellDLL = ::LoadLibraryW(L"shell32.dll");
-  SHGetStockIconInfoPtr pSHGetStockIconInfo =
-    (SHGetStockIconInfoPtr) ::GetProcAddress(hShellDLL, "SHGetStockIconInfo");
+  decltype(SHGetStockIconInfo)* pSHGetStockIconInfo =
+    (decltype(SHGetStockIconInfo)*) ::GetProcAddress(hShellDLL, "SHGetStockIconInfo");
 
   if (pSHGetStockIconInfo)
   {
@@ -667,6 +671,18 @@ NS_IMETHODIMP nsIconChannel::GetOwner(nsISupports* *aOwner)
 NS_IMETHODIMP nsIconChannel::SetOwner(nsISupports* aOwner)
 {
   mOwner = aOwner;
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsIconChannel::GetLoadInfo(nsILoadInfo* *aLoadInfo)
+{
+  NS_IF_ADDREF(*aLoadInfo = mLoadInfo);
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsIconChannel::SetLoadInfo(nsILoadInfo* aLoadInfo)
+{
+  mLoadInfo = aLoadInfo;
   return NS_OK;
 }
 

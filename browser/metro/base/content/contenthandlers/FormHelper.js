@@ -1,4 +1,4 @@
-// -*- Mode: js2; tab-width: 2; indent-tabs-mode: nil; js2-basic-offset: 2; js2-skip-preprocessor-directives: t; -*-
+// -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -450,7 +450,8 @@ FormAssistant.prototype = {
     if (element && (element.mozIsTextField && element.mozIsTextField(false) ||
         element instanceof HTMLTextAreaElement) && focusedElement == element && this._isVisibleElement(element)) {
       let utils = Util.getWindowUtils(element.ownerDocument.defaultView);
-      let rect = utils.sendQueryContentEvent(utils.QUERY_CARET_RECT, element.selectionEnd, 0, 0, 0);
+      let rect = utils.sendQueryContentEvent(utils.QUERY_CARET_RECT, element.selectionEnd, 0, 0, 0,
+                                             utils.QUERY_CONTENT_FLAG_USE_XP_LINE_BREAK);
       if (rect) {
         let scroll = ContentScroll.getScrollOffset(element.ownerDocument.defaultView);
         return new Rect(scroll.x + rect.left, scroll.y + rect.top, rect.width, rect.height);
@@ -560,6 +561,7 @@ FormAssistant.prototype = {
     return result;
   }
 };
+this.FormAssistant = FormAssistant;
 
 
 /******************************************************************************
@@ -688,6 +690,7 @@ SelectWrapper.prototype = {
     }, 0);
   }
 };
+this.SelectWrapper = SelectWrapper;
 
 
 // bug 559792
@@ -745,3 +748,4 @@ MenulistWrapper.prototype = {
     }, 0);
   }
 };
+this.MenulistWrapper = MenulistWrapper;

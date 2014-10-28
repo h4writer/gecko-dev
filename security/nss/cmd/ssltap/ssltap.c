@@ -403,6 +403,7 @@ const char * V2CipherString(int cs_int)
   case 0x00009E:    cs_str = "TLS/DHE-RSA/AES128-GCM/SHA256";	break;     
 
   case 0x0000FF:    cs_str = "TLS_EMPTY_RENEGOTIATION_INFO_SCSV"; break;
+  case 0x005600:    cs_str = "TLS_FALLBACK_SCSV"; break;
 
   case 0x00C001:    cs_str = "TLS/ECDH-ECDSA/NULL/SHA";         break;
   case 0x00C002:    cs_str = "TLS/ECDH-ECDSA/RC4-128/SHA";      break;
@@ -493,13 +494,13 @@ const char * helloExtensionNameString(int ex_num)
 
 static int isNULLmac(int cs_int)
 {
-    return (cs_int == SSL_NULL_WITH_NULL_NULL); 
+    return (cs_int == TLS_NULL_WITH_NULL_NULL);
 }
 
 static int isNULLcipher(int cs_int)
 {
- return ((cs_int == SSL_RSA_WITH_NULL_MD5) ||
-         (cs_int == SSL_RSA_WITH_NULL_SHA) ||
+ return ((cs_int == TLS_RSA_WITH_NULL_MD5) ||
+         (cs_int == TLS_RSA_WITH_NULL_SHA) ||
          (cs_int == SSL_FORTEZZA_DMS_WITH_NULL_SHA) ||
          (cs_int == TLS_ECDH_ECDSA_WITH_NULL_SHA) ||
          (cs_int == TLS_ECDHE_ECDSA_WITH_NULL_SHA) ||

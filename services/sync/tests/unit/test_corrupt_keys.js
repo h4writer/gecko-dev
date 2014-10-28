@@ -1,6 +1,7 @@
 /* Any copyright is dedicated to the Public Domain.
    http://creativecommons.org/publicdomain/zero/1.0/ */
 
+Cu.import("resource://gre/modules/PlacesUtils.jsm");
 Cu.import("resource://gre/modules/Log.jsm");
 Cu.import("resource://services-sync/constants.js");
 Cu.import("resource://services-sync/engines.js");
@@ -46,10 +47,8 @@ add_task(function test_locally_changed_keys() {
                           }],
                           attributes: {
                             image: "image"
-                          },
-                          extData: {
-                            weaveLastUsed: 1
-                          }}]}]};
+                          }
+                          }]}]};
     delete Svc.Session;
     Svc.Session = {
       getBrowserState: function () JSON.stringify(myTabs)
@@ -205,6 +204,8 @@ add_task(function test_locally_changed_keys() {
 function run_test() {
   let logger = Log.repository.rootLogger;
   Log.repository.rootLogger.addAppender(new Log.DumpAppender());
+
+  ensureLegacyIdentityManager();
 
   run_next_test();
 }

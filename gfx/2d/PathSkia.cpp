@@ -31,7 +31,7 @@ void
 PathBuilderSkia::SetFillRule(FillRule aFillRule)
 {
   mFillRule = aFillRule;
-  if (mFillRule == FILL_WINDING) {
+  if (mFillRule == FillRule::FILL_WINDING) {
     mPath.setFillType(SkPath::kWinding_FillType);
   } else {
     mPath.setFillType(SkPath::kEvenOdd_FillType);
@@ -88,7 +88,7 @@ void
 PathBuilderSkia::Arc(const Point &aOrigin, float aRadius, float aStartAngle,
                      float aEndAngle, bool aAntiClockwise)
 {
-  ArcToBezier(this, aOrigin, aRadius, aStartAngle, aEndAngle, aAntiClockwise);
+  ArcToBezier(this, aOrigin, Size(aRadius, aRadius), aStartAngle, aEndAngle, aAntiClockwise);
 }
 
 Point
@@ -105,8 +105,7 @@ PathBuilderSkia::CurrentPoint() const
 TemporaryRef<Path>
 PathBuilderSkia::Finish()
 {
-  RefPtr<PathSkia> path = new PathSkia(mPath, mFillRule);
-  return path;
+  return new PathSkia(mPath, mFillRule);
 }
 
 void
@@ -124,8 +123,7 @@ PathSkia::CopyToBuilder(FillRule aFillRule) const
 TemporaryRef<PathBuilder>
 PathSkia::TransformedCopyToBuilder(const Matrix &aTransform, FillRule aFillRule) const
 {
-  RefPtr<PathBuilderSkia> builder = new PathBuilderSkia(aTransform, mPath, aFillRule);
-  return builder;
+  return new PathBuilderSkia(aTransform, mPath, aFillRule);
 }
 
 bool
@@ -143,22 +141,14 @@ PathSkia::ContainsPoint(const Point &aPoint, const Matrix &aTransform) const
   }
 
   SkRegion pointRect;
-  pointRect.setRect(int32_t(SkFloatToScalar(transformed.x - 1)),
-                    int32_t(SkFloatToScalar(transformed.y - 1)),
-                    int32_t(SkFloatToScalar(transformed.x + 1)),
-                    int32_t(SkFloatToScalar(transformed.y + 1)));
+  pointRect.setRect(int32_t(SkFloatToScalar(transformed.x - 1.f)),
+                    int32_t(SkFloatToScalar(transformed.y - 1.f)),
+                    int32_t(SkFloatToScalar(transformed.x + 1.f)),
+                    int32_t(SkFloatToScalar(transformed.y + 1.f)));
 
   SkRegion pathRegion;
   
   return pathRegion.setPath(mPath, pointRect);
-}
-
-static Rect SkRectToRect(const SkRect& aBounds)
-{
-  return Rect(SkScalarToFloat(aBounds.fLeft),
-              SkScalarToFloat(aBounds.fTop),
-              SkScalarToFloat(aBounds.fRight - aBounds.fLeft),
-              SkScalarToFloat(aBounds.fBottom - aBounds.fTop));
 }
 
 bool
@@ -184,10 +174,10 @@ PathSkia::StrokeContainsPoint(const StrokeOptions &aStrokeOptions,
   }
 
   SkRegion pointRect;
-  pointRect.setRect(int32_t(SkFloatToScalar(transformed.x - 1)),
-                    int32_t(SkFloatToScalar(transformed.y - 1)),
-                    int32_t(SkFloatToScalar(transformed.x + 1)),
-                    int32_t(SkFloatToScalar(transformed.y + 1)));
+  pointRect.setRect(int32_t(SkFloatToScalar(transformed.x - 1.f)),
+                    int32_t(SkFloatToScalar(transformed.y - 1.f)),
+                    int32_t(SkFloatToScalar(transformed.x + 1.f)),
+                    int32_t(SkFloatToScalar(transformed.y + 1.f)));
 
   SkRegion pathRegion;
   

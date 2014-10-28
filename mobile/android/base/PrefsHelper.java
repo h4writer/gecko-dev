@@ -12,10 +12,9 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import android.util.Log;
+import android.util.SparseArray;
 
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * Helper class to get/set gecko prefs.
@@ -23,9 +22,9 @@ import java.util.Map;
 public final class PrefsHelper {
     private static final String LOGTAG = "GeckoPrefsHelper";
 
-    private static boolean sRegistered = false;
-    private static final Map<Integer, PrefHandler> sCallbacks = new HashMap<Integer, PrefHandler>();
+    private static boolean sRegistered;
     private static int sUniqueRequestId = 1;
+    static final SparseArray<PrefHandler> sCallbacks = new SparseArray<PrefHandler>();
 
     public static int getPref(String prefName, PrefHandler callback) {
         return getPrefsInternal(new String[] { prefName }, callback);
@@ -64,8 +63,9 @@ public final class PrefsHelper {
             return;
         }
 
-        GeckoAppShell.getEventDispatcher().registerEventListener("Preferences:Data", new GeckoEventListener() {
-            @Override public void handleMessage(String event, JSONObject message) {
+        GeckoEventListener listener = new GeckoEventListener() {
+            @Override
+            public void handleMessage(String event, JSONObject message) {
                 try {
                     PrefHandler callback;
                     synchronized (PrefsHelper.class) {
@@ -73,12 +73,13 @@ public final class PrefsHelper {
                             int requestId = message.getInt("requestId");
                             callback = sCallbacks.get(requestId);
                             if (callback != null && !callback.isObserver()) {
-                                sCallbacks.remove(requestId);
+                                sCallbacks.delete(requestId);
                             }
                         } catch (Exception e) {
                             callback = null;
                         }
                     }
+
                     if (callback == null) {
                         Log.d(LOGTAG, "Preferences:Data message had an unknown requestId; ignoring");
                         return;
@@ -108,7 +109,8 @@ public final class PrefsHelper {
                     Log.e(LOGTAG, "Error handling Preferences:Data message", e);
                 }
             }
-        });
+        };
+        EventDispatcher.getInstance().registerGeckoThreadListener(listener, "Preferences:Data");
         sRegistered = true;
     }
 
@@ -144,7 +146,9 @@ public final class PrefsHelper {
         }
 
         synchronized (PrefsHelper.class) {
-            PrefHandler callback = sCallbacks.remove(requestId);
+            PrefHandler callback = sCallbacks.get(requestId);
+            sCallbacks.delete(requestId);
+
             if (callback == null) {
                 Log.e(LOGTAG, "Unknown request ID " + requestId);
                 return;

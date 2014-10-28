@@ -14,6 +14,7 @@
 #include "nsIDOMNode.h"
 #include "nsIFormControl.h"
 #include "nsStyleSet.h"
+#include "nsIDocument.h"
 
 using mozilla::dom::Element;
 
@@ -31,6 +32,7 @@ NS_NewColorControlFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
 NS_IMPL_FRAMEARENA_HELPERS(nsColorControlFrame)
 
 NS_QUERYFRAME_HEAD(nsColorControlFrame)
+  NS_QUERYFRAME_ENTRY(nsColorControlFrame)
   NS_QUERYFRAME_ENTRY(nsIAnonymousContentCreator)
 NS_QUERYFRAME_TAIL_INHERITING(nsColorControlFrameSuper)
 
@@ -48,8 +50,8 @@ nsColorControlFrame::GetType() const
   return nsGkAtoms::colorControlFrame;
 }
 
-#ifdef DEBUG
-NS_IMETHODIMP
+#ifdef DEBUG_FRAME_DUMP
+nsresult
 nsColorControlFrame::GetFrameName(nsAString& aResult) const
 {
   return MakeFrameName(NS_LITERAL_STRING("ColorControl"), aResult);
@@ -61,7 +63,7 @@ nsColorControlFrame::GetFrameName(nsAString& aResult) const
 nsresult
 nsColorControlFrame::CreateAnonymousContent(nsTArray<ContentInfo>& aElements)
 {
-  nsCOMPtr<nsIDocument> doc = mContent->GetCurrentDoc();
+  nsCOMPtr<nsIDocument> doc = mContent->GetComposedDoc();
   mColorContent = doc->CreateHTMLElement(nsGkAtoms::div);
 
   // Mark the element to be native anonymous before setting any attributes.
@@ -82,10 +84,12 @@ nsColorControlFrame::CreateAnonymousContent(nsTArray<ContentInfo>& aElements)
 }
 
 void
-nsColorControlFrame::AppendAnonymousContentTo(nsBaseContentList& aElements,
+nsColorControlFrame::AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
                                               uint32_t aFilter)
 {
-  aElements.MaybeAppendElement(mColorContent);
+  if (mColorContent) {
+    aElements.AppendElement(mColorContent);
+  }
 }
 
 nsresult
@@ -105,7 +109,7 @@ nsColorControlFrame::UpdateColor()
       NS_LITERAL_STRING("background-color:") + color, true);
 }
 
-NS_IMETHODIMP
+nsresult
 nsColorControlFrame::AttributeChanged(int32_t  aNameSpaceID,
                                       nsIAtom* aAttribute,
                                       int32_t  aModType)
@@ -124,7 +128,7 @@ nsColorControlFrame::AttributeChanged(int32_t  aNameSpaceID,
                                                     aModType);
 }
 
-nsIFrame*
+nsContainerFrame*
 nsColorControlFrame::GetContentInsertionFrame()
 {
   return this;

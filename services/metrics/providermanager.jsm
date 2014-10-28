@@ -2,9 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#ifndef MERGED_COMPARTMENT
 "use strict";
 
-#ifndef MERGED_COMPARTMENT
 this.EXPORTED_SYMBOLS = ["ProviderManager"];
 
 const {classes: Cc, interfaces: Ci, utils: Cu} = Components;
@@ -160,10 +160,14 @@ this.ProviderManager.prototype = Object.freeze({
    * @return Promise<null>
    */
   registerProvider: function (provider) {
-    if (!(provider instanceof Provider)) {
-      throw new Error("Argument must be a Provider instance.");
+    // We should perform an instanceof check here. However, due to merged
+    // compartments, the Provider type may belong to one of two JSMs
+    // isinstance gets confused depending on which module Provider comes
+    // from. Some code references Provider from dataprovider.jsm; others from
+    // Metrics.jsm.
+    if (!provider.name) {
+      throw new Error("Provider is not valid: does not have a name.");
     }
-
     if (this._providers.has(provider.name)) {
       return CommonUtils.laterTickResolvingPromise();
     }
@@ -524,7 +528,7 @@ this.ProviderManager.prototype = Object.freeze({
    * Record an error that occurred operating on a provider.
    */
   _recordProviderError: function (name, msg, ex) {
-    let msg = "Provider error: " + name + ": " + msg;
+    msg = "Provider error: " + name + ": " + msg;
     if (ex) {
       msg += ": " + CommonUtils.exceptionStr(ex);
     }

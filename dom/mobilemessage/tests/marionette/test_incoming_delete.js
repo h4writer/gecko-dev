@@ -36,8 +36,7 @@ function simulateIncomingSms() {
     is(incomingSms.receiver, RECEIVER, "receiver");
     is(incomingSms.sender, SENDER, "sender");
     is(incomingSms.messageClass, "normal", "messageClass");
-    ok(incomingSms.timestamp instanceof Date, "timestamp is istanceof date");
-    ok(incomingSms.deliveryTimestamp === null, "deliveryTimestamp is null");
+    is(incomingSms.deliveryTimestamp, 0, "deliveryTimestamp is 0");
 
     verifySmsExists(incomingSms);
   };
@@ -131,7 +130,7 @@ function verifySmsDeleted(smsId) {
 function cleanUp() {
   manager.onreceived = null;
   SpecialPowers.removePermission("sms", document);
-  SpecialPowers.setBoolPref("dom.sms.enabled", false);
+  SpecialPowers.clearUserPref("dom.sms.enabled");
   finish();
 }
 

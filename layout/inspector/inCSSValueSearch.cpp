@@ -4,9 +4,10 @@
 
 #include "inCSSValueSearch.h"
 
+#include "mozilla/CSSStyleSheet.h"
+#include "mozilla/dom/StyleSheetList.h"
 #include "nsIComponentManager.h"
 #include "nsIServiceManager.h"
-#include "nsVoidArray.h"
 #include "nsReadableUtils.h"
 #include "nsIDOMDocument.h"
 #include "nsIDOMStyleSheetList.h"
@@ -20,6 +21,8 @@
 #include "nsIURI.h"
 #include "nsIDocument.h"
 #include "nsNetUtil.h"
+
+using namespace mozilla;
 
 ///////////////////////////////////////////////////////////////////////////////
 inCSSValueSearch::inCSSValueSearch()
@@ -43,7 +46,7 @@ inCSSValueSearch::~inCSSValueSearch()
   nsCSSProps::ReleaseTable();
 }
 
-NS_IMPL_ISUPPORTS2(inCSSValueSearch, inISearchProcess, inICSSValueSearch)
+NS_IMPL_ISUPPORTS(inCSSValueSearch, inISearchProcess, inICSSValueSearch)
 
 ///////////////////////////////////////////////////////////////////////////////
 // inISearchProcess
@@ -85,24 +88,18 @@ inCSSValueSearch::SearchSync()
     return NS_OK;
   }
 
-  nsCOMPtr<nsIURI> baseURI;
-  nsCOMPtr<nsIDocument> idoc = do_QueryInterface(mDocument);
-  if (idoc) {
-    baseURI = idoc->GetBaseURI();
-  }
+  nsCOMPtr<nsIDocument> document = do_QueryInterface(mDocument);
+  MOZ_ASSERT(document);
 
-  nsCOMPtr<nsIDOMStyleSheetList> sheets;
-  nsresult rv = mDocument->GetStyleSheets(getter_AddRefs(sheets));
-  NS_ENSURE_SUCCESS(rv, NS_OK);
+  nsCOMPtr<nsIURI> baseURI = document->GetBaseURI();
 
-  uint32_t length;
-  sheets->GetLength(&length);
+  nsRefPtr<dom::StyleSheetList> sheets = document->StyleSheets();
+  MOZ_ASSERT(sheets);
+
+  uint32_t length = sheets->Length();
   for (uint32_t i = 0; i < length; ++i) {
-    nsCOMPtr<nsIDOMStyleSheet> sheet;
-    sheets->Item(i, getter_AddRefs(sheet));
-    nsCOMPtr<nsIDOMCSSStyleSheet> cssSheet = do_QueryInterface(sheet);
-    if (cssSheet)
-      SearchStyleSheet(cssSheet, baseURI);
+    nsRefPtr<CSSStyleSheet> sheet = sheets->Item(i);
+    SearchStyleSheet(sheet, baseURI);
   }
 
   // XXX would be nice to search inline style as well.
@@ -180,7 +177,7 @@ inCSSValueSearch::SetDocument(nsIDOMDocument* aDocument)
 }
 
 NS_IMETHODIMP 
-inCSSValueSearch::GetBaseURL(PRUnichar** aBaseURL)
+inCSSValueSearch::GetBaseURL(char16_t** aBaseURL)
 {
   if (!(*aBaseURL = ToNewUnicode(mBaseURL)))
     return NS_ERROR_OUT_OF_MEMORY;
@@ -188,7 +185,7 @@ inCSSValueSearch::GetBaseURL(PRUnichar** aBaseURL)
 }
 
 NS_IMETHODIMP 
-inCSSValueSearch::SetBaseURL(const PRUnichar* aBaseURL)
+inCSSValueSearch::SetBaseURL(const char16_t* aBaseURL)
 {
   mBaseURL.Assign(aBaseURL);
   return NS_OK;
@@ -223,18 +220,18 @@ inCSSValueSearch::SetNormalizeChromeURLs(bool aNormalizeChromeURLs)
 }
 
 NS_IMETHODIMP 
-inCSSValueSearch::AddPropertyCriteria(const PRUnichar *aPropName)
+inCSSValueSearch::AddPropertyCriteria(const char16_t *aPropName)
 {
   nsCSSProperty prop =
     nsCSSProps::LookupProperty(nsDependentString(aPropName),
-                               nsCSSProps::eAny);
+                               nsCSSProps::eIgnoreEnabledState);
   mProperties[mPropertyCount] = prop;
   mPropertyCount++;
   return NS_OK;
 }
 
 NS_IMETHODIMP 
-inCSSValueSearch::GetTextCriteria(PRUnichar** aTextCriteria)
+inCSSValueSearch::GetTextCriteria(char16_t** aTextCriteria)
 {
   if (!(*aTextCriteria = ToNewUnicode(mTextCriteria)))
     return NS_ERROR_OUT_OF_MEMORY;
@@ -242,7 +239,7 @@ inCSSValueSearch::GetTextCriteria(PRUnichar** aTextCriteria)
 }
 
 NS_IMETHODIMP 
-inCSSValueSearch::SetTextCriteria(const PRUnichar* aTextCriteria)
+inCSSValueSearch::SetTextCriteria(const char16_t* aTextCriteria)
 {
   mTextCriteria.Assign(aTextCriteria);
   return NS_OK;
@@ -381,8 +378,8 @@ inCSSValueSearch::EqualizeURL(nsAutoString* aURL)
   if (mNormalizeChromeURLs) {
     if (aURL->Find("chrome://", false, 0, 1) >= 0) {
       uint32_t len = aURL->Length();
-      PRUnichar* result = new PRUnichar[len-8];
-      const PRUnichar* src = aURL->get();
+      char16_t* result = new char16_t[len-8];
+      const char16_t* src = aURL->get();
       uint32_t i = 9;
       uint32_t milestone = 0;
       uint32_t s = 0;

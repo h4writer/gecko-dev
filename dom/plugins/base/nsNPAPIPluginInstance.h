@@ -21,7 +21,7 @@
 #include "nsAutoPtr.h"
 #include "nsIRunnable.h"
 #include "GLContextTypes.h"
-#include "nsSurfaceTexture.h"
+#include "AndroidSurfaceTexture.h"
 #include "AndroidBridge.h"
 #include <map>
 class PluginEventRunnable;
@@ -165,7 +165,7 @@ public:
   void SetWakeLock(bool aLock);
 
   mozilla::gl::GLContext* GLContext();
-  
+
   // For ANPOpenGL
   class TextureInfo {
   public:
@@ -191,12 +191,13 @@ public:
   // For ANPNativeWindow
   void* AcquireContentWindow();
 
-  mozilla::gl::SharedTextureHandle CreateSharedHandle();
+  EGLImage AsEGLImage();
+  mozilla::gl::AndroidSurfaceTexture* AsSurfaceTexture();
 
   // For ANPVideo
   class VideoInfo {
   public:
-    VideoInfo(nsSurfaceTexture* aSurfaceTexture) :
+    VideoInfo(mozilla::gl::AndroidSurfaceTexture* aSurfaceTexture) :
       mSurfaceTexture(aSurfaceTexture)
     {
     }
@@ -206,7 +207,7 @@ public:
       mSurfaceTexture = nullptr;
     }
 
-    nsRefPtr<nsSurfaceTexture> mSurfaceTexture;
+    nsRefPtr<mozilla::gl::AndroidSurfaceTexture> mSurfaceTexture;
     gfxRect mDimensions;
   };
 
@@ -226,7 +227,6 @@ public:
                              nsNPAPIPluginStreamListener** listener);
 
   nsNPAPIPluginInstance();
-  virtual ~nsNPAPIPluginInstance();
 
   // To be called when an instance becomes orphaned, when
   // it's plugin is no longer guaranteed to be around.
@@ -274,11 +274,6 @@ public:
 
   void URLRedirectResponse(void* notifyData, NPBool allow);
 
-  NPError InitAsyncSurface(NPSize *size, NPImageFormat format,
-                           void *initData, NPAsyncSurface *surface);
-  NPError FinalizeAsyncSurface(NPAsyncSurface *surface);
-  void SetCurrentAsyncSurface(NPAsyncSurface *surface, NPRect *changed);
-
   // Called when the instance fails to instantiate beceause the Carbon
   // event model is not supported.
   void CarbonNPAPIFailure();
@@ -303,11 +298,9 @@ public:
 
 protected:
 
+  virtual ~nsNPAPIPluginInstance();
+
   nsresult GetTagType(nsPluginTagType *result);
-  nsresult GetAttributes(uint16_t& n, const char*const*& names,
-                         const char*const*& values);
-  nsresult GetParameters(uint16_t& n, const char*const*& names,
-                         const char*const*& values);
   nsresult GetMode(int32_t *result);
 
   // check if this is a Java applet and affected by bug 750480
@@ -326,7 +319,7 @@ protected:
 
   friend class PluginEventRunnable;
 
-  nsTArray<nsCOMPtr<PluginEventRunnable>> mPostedEvents;
+  nsTArray<nsRefPtr<PluginEventRunnable>> mPostedEvents;
   void PopPostedEvent(PluginEventRunnable* r);
   void OnSurfaceTextureFrameAvailable();
 
@@ -336,7 +329,7 @@ protected:
   bool mInverted;
 
   nsRefPtr<SharedPluginTexture> mContentTexture;
-  nsRefPtr<nsSurfaceTexture> mContentSurface;
+  nsRefPtr<mozilla::gl::AndroidSurfaceTexture> mContentSurface;
 #endif
 
   enum {
@@ -385,7 +378,7 @@ private:
 
 #ifdef MOZ_WIDGET_ANDROID
   void EnsureSharedTexture();
-  nsSurfaceTexture* CreateSurfaceTexture();
+  mozilla::gl::AndroidSurfaceTexture* CreateSurfaceTexture();
 
   std::map<void*, VideoInfo*> mVideos;
   bool mOnScreen;
@@ -397,6 +390,12 @@ private:
   bool mHaveJavaC2PJSObjectQuirk;
 
   static uint32_t gInUnsafePluginCalls;
+
+  // The arrays can only be released when the plugin instance is destroyed,
+  // because the plugin, in in-process mode, might keep a reference to them.
+  uint32_t mCachedParamLength;
+  char **mCachedParamNames;
+  char **mCachedParamValues;
 };
 
 // On Android, we need to guard against plugin code leaking entries in the local

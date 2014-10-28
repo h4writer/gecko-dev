@@ -52,6 +52,8 @@
  *  Mihai Sucan (Mozilla Corp.)
  */
 
+"use strict";
+
 const {components, Cc, Ci, Cu} = require("chrome");
 loader.lazyImporter(this, "NetUtil", "resource://gre/modules/NetUtil.jsm");
 
@@ -187,6 +189,40 @@ let NetworkHelper = {
   },
 
   /**
+   * Gets the web appId that is associated with aRequest.
+   *
+   * @param nsIHttpChannel aRequest
+   * @returns number|null
+   *          The appId for the given request, if available.
+   */
+  getAppIdForRequest: function NH_getAppIdForRequest(aRequest)
+  {
+    try {
+      return this.getRequestLoadContext(aRequest).appId;
+    } catch (ex) {
+      // request loadContent is not always available.
+    }
+    return null;
+  },
+
+  /**
+   * Gets the topFrameElement that is associated with aRequest.
+   *
+   * @param nsIHttpChannel aRequest
+   * @returns nsIDOMElement|null
+   *          The top frame element for the given request, if available.
+   */
+  getTopFrameForRequest: function NH_getTopFrameForRequest(aRequest)
+  {
+    try {
+      return this.getRequestLoadContext(aRequest).topFrameElement;
+    } catch (ex) {
+      // request loadContent is not always available.
+    }
+    return null;
+  },
+
+  /**
    * Gets the nsIDOMWindow that is associated with aRequest.
    *
    * @param nsIHttpChannel aRequest
@@ -243,7 +279,7 @@ let NetworkHelper = {
       Ci.nsICachingChannel.LOAD_ONLY_FROM_CACHE |
       Ci.nsICachingChannel.LOAD_BYPASS_LOCAL_CACHE_IF_BUSY;
 
-    NetUtil.asyncFetch(channel, function (aInputStream, aStatusCode, aRequest) {
+    NetUtil.asyncFetch(channel, (aInputStream, aStatusCode, aRequest) => {
       if (!components.isSuccessCode(aStatusCode)) {
         aCallback(null);
         return;
@@ -406,6 +442,7 @@ let NetworkHelper = {
     "application/x-json": "json",
     "application/json-rpc": "json",
     "application/x-web-app-manifest+json": "json",
+    "application/manifest+json": "json"
   },
 
   /**
@@ -422,13 +459,14 @@ let NetworkHelper = {
 
     // XML and JSON often come with custom MIME types, so in addition to the
     // standard "application/xml" and "application/json", we also look for
-    // variants like "application/x-bigcorp-xml" by checking for either string
-    // after any word boundary.
-    if (/^application\/[a-z-]+\b(xml|json)/.test(aMimeType)) {
+    // variants like "application/x-bigcorp+xml". For JSON we allow "+json" and
+    // "-json" as suffixes.
+    if (/^application\/\w+(?:[\.-]\w+)*(?:\+xml|[-+]json)$/.test(aMimeType)) {
       return true;
     }
 
-    switch (this.mimeCategoryMap[aMimeType]) {
+    let category = this.mimeCategoryMap[aMimeType] || null;
+    switch (category) {
       case "txt":
       case "js":
       case "json":

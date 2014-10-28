@@ -23,6 +23,7 @@
 #include "nsASocketHandler.h"
 
 #include "prerror.h"
+#include "nsAutoPtr.h"
 
 class nsSocketTransport;
 class nsICancelable;
@@ -46,7 +47,7 @@ public:
     NS_DECL_NSIINPUTSTREAM
     NS_DECL_NSIASYNCINPUTSTREAM
 
-    nsSocketInputStream(nsSocketTransport *);
+    explicit nsSocketInputStream(nsSocketTransport *);
     virtual ~nsSocketInputStream();
 
     bool     IsReferenced() { return mReaderRefCnt > 0; }
@@ -76,7 +77,7 @@ public:
     NS_DECL_NSIOUTPUTSTREAM
     NS_DECL_NSIASYNCOUTPUTSTREAM
 
-    nsSocketOutputStream(nsSocketTransport *);
+    explicit nsSocketOutputStream(nsSocketTransport *);
     virtual ~nsSocketOutputStream();
 
     bool     IsReferenced() { return mWriterRefCnt > 0; }
@@ -130,6 +131,12 @@ public:
     nsresult InitWithConnectedSocket(PRFileDesc *socketFD,
                                      const mozilla::net::NetAddr *addr);
 
+    // this method instructs the socket transport to use an already connected
+    // socket with the given address, and additionally supplies security info.
+    nsresult InitWithConnectedSocket(PRFileDesc* aSocketFD,
+                                     const mozilla::net::NetAddr* aAddr,
+                                     nsISupports* aSecInfo);
+
     // This method instructs the socket transport to open a socket
     // connected to the given Unix domain address. We can only create
     // unlayered, simple, stream sockets.
@@ -139,6 +146,7 @@ public:
     void OnSocketReady(PRFileDesc *, int16_t outFlags);
     void OnSocketDetached(PRFileDesc *);
     void IsLocal(bool *aIsLocal);
+    void OnKeepaliveEnabledPrefChange(bool aEnabled) MOZ_OVERRIDE MOZ_FINAL;
 
     // called when a socket event is handled
     void OnSocketEvent(uint32_t type, nsresult status, nsISupports *param);
@@ -148,6 +156,7 @@ public:
 protected:
 
     virtual ~nsSocketTransport();
+    void     CleanupTypes();
 
 private:
 
@@ -172,6 +181,87 @@ private:
         STATE_TRANSFERRING
     };
 
+    // Safer way to get and automatically release PRFileDesc objects.
+    class MOZ_STACK_CLASS PRFileDescAutoLock
+    {
+    public:
+      typedef mozilla::MutexAutoLock MutexAutoLock;
+
+      explicit PRFileDescAutoLock(nsSocketTransport *aSocketTransport,
+                                  nsresult *aConditionWhileLocked = nullptr)
+        : mSocketTransport(aSocketTransport)
+        , mFd(nullptr)
+      {
+        MOZ_ASSERT(aSocketTransport);
+        MutexAutoLock lock(mSocketTransport->mLock);
+        if (aConditionWhileLocked) {
+          *aConditionWhileLocked = mSocketTransport->mCondition;
+          if (NS_FAILED(mSocketTransport->mCondition)) {
+            return;
+          }
+        }
+        mFd = mSocketTransport->GetFD_Locked();
+      }
+      ~PRFileDescAutoLock() {
+        MutexAutoLock lock(mSocketTransport->mLock);
+        if (mFd) {
+          mSocketTransport->ReleaseFD_Locked(mFd);
+        }
+      }
+      bool IsInitialized() {
+        return mFd;
+      }
+      operator PRFileDesc*() {
+        return mFd;
+      }
+      nsresult SetKeepaliveEnabled(bool aEnable);
+      nsresult SetKeepaliveVals(bool aEnabled, int aIdleTime,
+                                int aRetryInterval, int aProbeCount);
+    private:
+      operator PRFileDescAutoLock*() { return nullptr; }
+
+      // Weak ptr to nsSocketTransport since this is a stack class only.
+      nsSocketTransport *mSocketTransport;
+      PRFileDesc        *mFd;
+    };
+    friend class PRFileDescAutoLock;
+
+    class LockedPRFileDesc
+    {
+    public:
+      explicit LockedPRFileDesc(nsSocketTransport *aSocketTransport)
+        : mSocketTransport(aSocketTransport)
+        , mFd(nullptr)
+      {
+        MOZ_ASSERT(aSocketTransport);
+      }
+      ~LockedPRFileDesc() {}
+      bool IsInitialized() {
+        return mFd;
+      }
+      LockedPRFileDesc& operator=(PRFileDesc *aFd) {
+        mSocketTransport->mLock.AssertCurrentThreadOwns();
+        mFd = aFd;
+        return *this;
+      }
+      operator PRFileDesc*() {
+        if (mSocketTransport->mAttached) {
+          mSocketTransport->mLock.AssertCurrentThreadOwns();
+        }
+        return mFd;
+      }
+      bool operator==(PRFileDesc *aFd) {
+        mSocketTransport->mLock.AssertCurrentThreadOwns();
+        return mFd == aFd;
+      }
+    private:
+      operator LockedPRFileDesc*() { return nullptr; }
+      // Weak ptr to nsSocketTransport since it owns this class.
+      nsSocketTransport *mSocketTransport;
+      PRFileDesc        *mFd;
+    };
+    friend class LockedPRFileDesc;
+
     //-------------------------------------------------------------------------
     // these members are "set" at initialization time and are never modified
     // afterwards.  this allows them to be safely accessed from any thread.
@@ -186,6 +276,7 @@ private:
     uint16_t     mProxyPort;
     bool mProxyTransparent;
     bool mProxyTransparentResolvesHost;
+    bool mHttpsProxy;
     uint32_t     mConnectionFlags;
     
     uint16_t         SocketPort() { return (!mProxyHost.IsEmpty() && !mProxyTransparent) ? mProxyPort : mPort; }
@@ -213,6 +304,8 @@ private:
     // reached STATE_TRANSFERRING. It must not change after that.
     mozilla::net::NetAddr   mNetAddr;
     bool                    mNetAddrIsSet;
+
+    nsAutoPtr<mozilla::net::NetAddr> mBindAddr;
 
     // socket methods (these can only be called on the socket thread):
 
@@ -242,10 +335,15 @@ private:
     // socket input/output objects.  these may be accessed on any thread with
     // the exception of some specific methods (XXX).
 
-    Mutex       mLock;  // protects members in this section
-    PRFileDesc *mFD;
-    nsrefcnt    mFDref;       // mFD is closed when mFDref goes to zero.
-    bool        mFDconnected; // mFD is available to consumer when TRUE.
+    Mutex            mLock;  // protects members in this section.
+    LockedPRFileDesc mFD;
+    nsrefcnt         mFDref;       // mFD is closed when mFDref goes to zero.
+    bool             mFDconnected; // mFD is available to consumer when TRUE.
+
+    // A delete protector reference to gSocketTransportService held for lifetime
+    // of 'this'. Sometimes used interchangably with gSocketTransportService due
+    // to scoping.
+    nsRefPtr<nsSocketTransportService> mSocketTransportService;
 
     nsCOMPtr<nsIInterfaceRequestor> mCallbacks;
     nsCOMPtr<nsITransportEventSink> mEventSink;
@@ -309,6 +407,21 @@ private:
     void TraceInBuf(const char *buf, int32_t n);
     void TraceOutBuf(const char *buf, int32_t n);
 #endif
+
+    // Reads prefs to get default keepalive config.
+    nsresult EnsureKeepaliveValsAreInitialized();
+
+    // Groups calls to fd.SetKeepaliveEnabled and fd.SetKeepaliveVals.
+    nsresult SetKeepaliveEnabledInternal(bool aEnable);
+
+    // True if keepalive has been enabled by the socket owner. Note: Keepalive
+    // must also be enabled globally for it to be enabled in TCP.
+    bool mKeepaliveEnabled;
+
+    // Keepalive config (support varies by platform).
+    int32_t mKeepaliveIdleTimeS;
+    int32_t mKeepaliveRetryIntervalS;
+    int32_t mKeepaliveProbeCount;
 };
 
 #endif // !nsSocketTransport_h__

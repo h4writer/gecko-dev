@@ -4,27 +4,22 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "GLContextProvider.h"
-#include "GLContext.h"
+#include "GLContextCGL.h"
 #include "TextureImageCGL.h"
 #include "nsDebug.h"
 #include "nsIWidget.h"
-#include "OpenGL/OpenGL.h"
 #include <OpenGL/gl.h>
-#include <AppKit/NSOpenGL.h>
-#include "gfxASurface.h"
-#include "gfxImageSurface.h"
-#include "gfxQuartzSurface.h"
-#include "gfxPlatform.h"
+#include "gfxPrefs.h"
 #include "gfxFailure.h"
 #include "prenv.h"
 #include "mozilla/Preferences.h"
 #include "GeckoProfiler.h"
 #include "mozilla/gfx/MacIOSurface.h"
 
-using namespace mozilla::gfx;
-
 namespace mozilla {
 namespace gl {
+
+using namespace mozilla::gfx;
 
 static bool gUseDoubleBufferedWindows = true;
 
@@ -80,125 +75,112 @@ private:
     bool mInitialized;
     PRLibrary *mOGLLibrary;
     NSOpenGLPixelFormat *mPixelFormat;
-}; 
+};
 
 CGLLibrary sCGLLibrary;
 
-class GLContextCGL : public GLContext
+GLContextCGL::GLContextCGL(
+                  const SurfaceCaps& caps,
+                  GLContext *shareContext,
+                  NSOpenGLContext *context,
+                  bool isOffscreen)
+    : GLContext(caps, shareContext, isOffscreen),
+      mContext(context)
 {
-    friend class GLContextProviderCGL;
+    SetProfileVersion(ContextProfile::OpenGLCompatibility, 210);
+}
 
-public:
-    GLContextCGL(const SurfaceCaps& caps,
-                 GLContext *shareContext,
-                 NSOpenGLContext *context,
-                 bool isOffscreen = false)
-        : GLContext(caps, shareContext, isOffscreen),
-          mContext(context),
-          mTempTextureName(0)
-    {
-        SetProfileVersion(ContextProfile::OpenGLCompatibility, 210);
-    }
+GLContextCGL::~GLContextCGL()
+{
+    MarkDestroyed();
 
-    ~GLContextCGL()
-    {
-        MarkDestroyed();
-
-        if (mContext) {
-            if ([NSOpenGLContext currentContext] == mContext) {
-                // Clear the current context before releasing. If we don't do
-                // this, the next time we call [NSOpenGLContext currentContext],
-                // "invalid context" will be printed to the console.
-                [NSOpenGLContext clearCurrentContext];
-            }
-            [mContext release];
+    if (mContext) {
+        if ([NSOpenGLContext currentContext] == mContext) {
+            // Clear the current context before releasing. If we don't do
+            // this, the next time we call [NSOpenGLContext currentContext],
+            // "invalid context" will be printed to the console.
+            [NSOpenGLContext clearCurrentContext];
         }
-
+        [mContext release];
     }
 
-    GLContextType GetContextType() {
-        return ContextTypeCGL;
-    }
-
-    bool Init()
-    {
-        if (!InitWithPrefix("gl", true))
-            return false;
-
-        return true;
-    }
-
-    void *GetNativeData(NativeDataType aType)
-    { 
-        switch (aType) {
-        case NativeGLContext:
-            return mContext;
-        case NativeCGLContext:
-            return [mContext CGLContextObj];
-        default:
-            return nullptr;
-        }
-    }
-
-    bool MakeCurrentImpl(bool aForce = false)
-    {
-        if (!aForce && [NSOpenGLContext currentContext] == mContext) {
-            return true;
-        }
-
-        if (mContext) {
-            [mContext makeCurrentContext];
-            // Use non-blocking swap in "ASAP mode".
-            // ASAP mode means that rendering is iterated as fast as possible.
-            // ASAP mode is entered when layout.frame_rate=0 (requires restart).
-            // If swapInt is 1, then glSwapBuffers will block and wait for a vblank signal.
-            // When we're iterating as fast as possible, however, we want a non-blocking
-            // glSwapBuffers, which will happen when swapInt==0.
-            GLint swapInt = gfxPlatform::GetPrefLayoutFrameRate() == 0 ? 0 : 1;
-            [mContext setValues:&swapInt forParameter:NSOpenGLCPSwapInterval];
-        }
-        return true;
-    }
-
-    virtual bool IsCurrent() {
-        return [NSOpenGLContext currentContext] == mContext;
-    }
-
-    virtual GLenum GetPreferredARGB32Format() MOZ_OVERRIDE { return LOCAL_GL_BGRA; }
-
-    bool SetupLookupFunction()
-    {
-        return false;
-    }
-
-    bool IsDoubleBuffered() 
-    { 
-      return gUseDoubleBufferedWindows; 
-    }
-
-    bool SupportsRobustness()
-    {
-        return false;
-    }
-
-    bool SwapBuffers()
-    {
-      PROFILER_LABEL("GLContext", "SwapBuffers");
-      [mContext flushBuffer];
-      return true;
-    }
-
-    bool ResizeOffscreen(const gfxIntSize& aNewSize);
-
-    NSOpenGLContext *mContext;
-    GLuint mTempTextureName;
-};
+}
 
 bool
-GLContextCGL::ResizeOffscreen(const gfxIntSize& aNewSize)
+GLContextCGL::Init()
 {
-    return ResizeScreenBuffer(aNewSize);
+    if (!InitWithPrefix("gl", true))
+        return false;
+
+    return true;
 }
+
+CGLContextObj
+GLContextCGL::GetCGLContext() const
+{
+    return static_cast<CGLContextObj>([mContext CGLContextObj]);
+}
+
+bool
+GLContextCGL::MakeCurrentImpl(bool aForce)
+{
+    if (!aForce && [NSOpenGLContext currentContext] == mContext) {
+        return true;
+    }
+
+    if (mContext) {
+        [mContext makeCurrentContext];
+        // Use non-blocking swap in "ASAP mode".
+        // ASAP mode means that rendering is iterated as fast as possible.
+        // ASAP mode is entered when layout.frame_rate=0 (requires restart).
+        // If swapInt is 1, then glSwapBuffers will block and wait for a vblank signal.
+        // When we're iterating as fast as possible, however, we want a non-blocking
+        // glSwapBuffers, which will happen when swapInt==0.
+        GLint swapInt = gfxPrefs::LayoutFrameRate() == 0 ? 0 : 1;
+        [mContext setValues:&swapInt forParameter:NSOpenGLCPSwapInterval];
+    }
+    return true;
+}
+
+bool
+GLContextCGL::IsCurrent() {
+    return [NSOpenGLContext currentContext] == mContext;
+}
+
+GLenum
+GLContextCGL::GetPreferredARGB32Format() const
+{
+    return LOCAL_GL_BGRA;
+}
+
+bool
+GLContextCGL::SetupLookupFunction()
+{
+    return false;
+}
+
+bool
+GLContextCGL::IsDoubleBuffered() const
+{
+  return gUseDoubleBufferedWindows;
+}
+
+bool
+GLContextCGL::SupportsRobustness() const
+{
+    return false;
+}
+
+bool
+GLContextCGL::SwapBuffers()
+{
+  PROFILER_LABEL("GLContextCGL", "SwapBuffers",
+    js::ProfileEntry::Category::GRAPHICS);
+
+  [mContext flushBuffer];
+  return true;
+}
+
 
 static GLContextCGL *
 GetGlobalContextCGL()
@@ -207,12 +189,14 @@ GetGlobalContextCGL()
 }
 
 already_AddRefed<GLContext>
+GLContextProviderCGL::CreateWrappingExisting(void*, void*)
+{
+    return nullptr;
+}
+
+already_AddRefed<GLContext>
 GLContextProviderCGL::CreateForWindow(nsIWidget *aWidget)
 {
-    if (!sCGLLibrary.EnsureInitialized()) {
-        return nullptr;
-    }
-
     GLContextCGL *shareContext = GetGlobalContextCGL();
 
     NSOpenGLContext *context = [[NSOpenGLContext alloc]
@@ -252,7 +236,7 @@ CreateOffscreenFBOContext(bool aShare = true)
 
     NSOpenGLContext *context = [[NSOpenGLContext alloc]
                                 initWithFormat:sCGLLibrary.PixelFormat()
-                                shareContext:shareContext ? shareContext->mContext : NULL];
+                                shareContext:shareContext ? shareContext->GetNSOpenGLContext() : NULL];
     if (!context) {
         return nullptr;
     }
@@ -264,26 +248,33 @@ CreateOffscreenFBOContext(bool aShare = true)
 }
 
 already_AddRefed<GLContext>
-GLContextProviderCGL::CreateOffscreen(const gfxIntSize& size,
-                                      const SurfaceCaps& caps,
-                                      const ContextFlags flags)
+GLContextProviderCGL::CreateHeadless()
 {
     nsRefPtr<GLContextCGL> glContext = CreateOffscreenFBOContext();
-    if (glContext &&
-        glContext->Init() &&
-        glContext->InitOffscreen(size, caps))
-    {
-        return glContext.forget();
-    }
+    if (!glContext)
+        return nullptr;
 
-    // everything failed
-    return nullptr;
+    if (!glContext->Init())
+        return nullptr;
+
+    return glContext.forget();
+}
+
+already_AddRefed<GLContext>
+GLContextProviderCGL::CreateOffscreen(const gfxIntSize& size,
+                                      const SurfaceCaps& caps)
+{
+    nsRefPtr<GLContext> glContext = CreateHeadless();
+    if (!glContext->InitOffscreen(ToIntSize(size), caps))
+        return nullptr;
+
+    return glContext.forget();
 }
 
 static nsRefPtr<GLContext> gGlobalContext;
 
-GLContext *
-GLContextProviderCGL::GetGlobalContext(const ContextFlags)
+GLContext*
+GLContextProviderCGL::GetGlobalContext()
 {
     if (!sCGLLibrary.EnsureInitialized()) {
         return nullptr;
@@ -298,10 +289,8 @@ GLContextProviderCGL::GetGlobalContext(const ContextFlags)
         if (!gGlobalContext || !static_cast<GLContextCGL*>(gGlobalContext.get())->Init()) {
             NS_WARNING("Couldn't init gGlobalContext.");
             gGlobalContext = nullptr;
-            return nullptr; 
+            return nullptr;
         }
-
-        gGlobalContext->SetIsGlobalSharedContext(true);
     }
 
     return gGlobalContext;

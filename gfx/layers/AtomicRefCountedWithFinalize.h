@@ -7,6 +7,11 @@
 #define MOZILLA_ATOMICREFCOUNTEDWITHFINALIZE_H_
 
 #include "mozilla/RefPtr.h"
+#include "mozilla/NullPtr.h"
+#include "mozilla/Likely.h"
+#include "MainThreadUtils.h"
+#include "base/message_loop.h"
+#include "base/task.h"
 
 namespace mozilla {
 
@@ -15,10 +20,22 @@ class AtomicRefCountedWithFinalize
 {
   protected:
     AtomicRefCountedWithFinalize()
-      : mRefCount(0)
+      : mRecycleCallback(nullptr)
+      , mRefCount(0)
+      , mMessageLoopToPostDestructionTo(nullptr)
     {}
 
     ~AtomicRefCountedWithFinalize() {}
+
+    void SetMessageLoopToPostDestructionTo(MessageLoop* l) {
+      MOZ_ASSERT(NS_IsMainThread());
+      mMessageLoopToPostDestructionTo = l;
+    }
+
+    static void DestroyToBeCalledOnMainThread(T* ptr) {
+      MOZ_ASSERT(NS_IsMainThread());
+      delete ptr;
+    }
 
   public:
     void AddRef() {
@@ -28,18 +45,58 @@ class AtomicRefCountedWithFinalize
 
     void Release() {
       MOZ_ASSERT(mRefCount > 0);
-      if (0 == --mRefCount) {
+      // Read mRecycleCallback early so that it does not get set to
+      // deleted memory, if the object is goes away.
+      RecycleCallback recycleCallback = mRecycleCallback;
+      int currCount = --mRefCount;
+      if (0 == currCount) {
+        // Recycle listeners must call ClearRecycleCallback
+        // before releasing their strong reference.
+        MOZ_ASSERT(mRecycleCallback == nullptr);
 #ifdef DEBUG
         mRefCount = detail::DEAD;
 #endif
         T* derived = static_cast<T*>(this);
         derived->Finalize();
-        delete derived;
+        if (MOZ_LIKELY(!mMessageLoopToPostDestructionTo)) {
+          delete derived;
+        } else {
+          if (MOZ_LIKELY(NS_IsMainThread())) {
+            delete derived;
+          } else {
+            mMessageLoopToPostDestructionTo->PostTask(
+              FROM_HERE,
+              NewRunnableFunction(&DestroyToBeCalledOnMainThread, derived));
+          }
+        }
+      } else if (1 == currCount && recycleCallback) {
+        T* derived = static_cast<T*>(this);
+        recycleCallback(derived, mClosure);
       }
     }
 
+    typedef void (*RecycleCallback)(T* aObject, void* aClosure);
+    /**
+     * Set a callback responsible for recycling this object
+     * before it is finalized.
+     */
+    void SetRecycleCallback(RecycleCallback aCallback, void* aClosure)
+    {
+      mRecycleCallback = aCallback;
+      mClosure = aClosure;
+    }
+    void ClearRecycleCallback() { SetRecycleCallback(nullptr, nullptr); }
+
+    bool HasRecycleCallback() const
+    {
+      return !!mRecycleCallback;
+    }
+
 private:
+    RecycleCallback mRecycleCallback;
+    void *mClosure;
     Atomic<int> mRefCount;
+    MessageLoop *mMessageLoopToPostDestructionTo;
 };
 
 }

@@ -12,94 +12,114 @@
 #include "mozilla/gfx/Point.h"          // for IntSize
 #include "mozilla/layers/CompositorTypes.h"
 #include "mozilla/layers/LayersSurfaces.h"  // for SurfaceDescriptor
-#include "mozilla/layers/TextureClient.h"  // for DeprecatedTextureClient, etc
+#include "mozilla/layers/TextureClient.h"  // for TextureClient, etc
+#include "AndroidSurfaceTexture.h"
 
 namespace mozilla {
+
 namespace layers {
 
 class CompositableForwarder;
 
-/**
- * A TextureClient implementation to share TextureMemory that is already
- * on the GPU, for the OpenGL backend.
- */
-class SharedTextureClientOGL : public TextureClient
+class EGLImageTextureClient : public TextureClient
 {
 public:
-  SharedTextureClientOGL(TextureFlags aFlags);
+  EGLImageTextureClient(TextureFlags aFlags,
+                        EGLImage aImage,
+                        gfx::IntSize aSize,
+                        bool aInverted);
 
-  ~SharedTextureClientOGL();
+  ~EGLImageTextureClient();
 
-  virtual bool IsAllocated() const MOZ_OVERRIDE;
+  virtual bool IsAllocated() const MOZ_OVERRIDE { return true; }
 
-  virtual bool ToSurfaceDescriptor(SurfaceDescriptor& aOutDescriptor) MOZ_OVERRIDE;
-
-  void InitWith(gl::SharedTextureHandle aHandle,
-                gfx::IntSize aSize,
-                gl::SharedTextureShareType aShareType,
-                bool aInverted = false);
+  virtual bool HasInternalBuffer() const MOZ_OVERRIDE { return false; }
 
   virtual gfx::IntSize GetSize() const { return mSize; }
 
-  virtual TextureClientData* DropTextureData() MOZ_OVERRIDE
+  virtual bool ToSurfaceDescriptor(SurfaceDescriptor& aOutDescriptor) MOZ_OVERRIDE;
+
+  // Useless functions.
+  virtual bool Lock(OpenMode mode) MOZ_OVERRIDE;
+
+  virtual void Unlock() MOZ_OVERRIDE;
+
+  virtual bool IsLocked() const MOZ_OVERRIDE { return mIsLocked; }
+
+  virtual gfx::SurfaceFormat GetFormat() const MOZ_OVERRIDE
   {
-    // XXX - right now the code paths using this are managing the shared texture
-    // data, although they should use a TextureClientData for this to ensure that
-    // the destruction sequence is race-free.
-    MarkInvalid();
+    return gfx::SurfaceFormat::UNKNOWN;
+  }
+
+  virtual TemporaryRef<TextureClient>
+  CreateSimilar(TextureFlags aFlags = TextureFlags::DEFAULT,
+                TextureAllocationFlags aAllocFlags = ALLOC_DEFAULT) const MOZ_OVERRIDE
+  {
     return nullptr;
   }
 
-protected:
-  gl::SharedTextureHandle mHandle;
-  gfx::IntSize mSize;
-  gl::SharedTextureShareType mShareType;
-  bool mInverted;
-};
-
-class DeprecatedTextureClientSharedOGL : public DeprecatedTextureClient
-{
-public:
-  DeprecatedTextureClientSharedOGL(CompositableForwarder* aForwarder, const TextureInfo& aTextureInfo);
-  ~DeprecatedTextureClientSharedOGL() { ReleaseResources(); }
-
-  virtual bool SupportsType(DeprecatedTextureClientType aType) MOZ_OVERRIDE { return aType == TEXTURE_SHARED_GL; }
-  virtual bool EnsureAllocated(gfx::IntSize aSize, gfxContentType aType);
-  virtual void ReleaseResources();
-  virtual gfxContentType GetContentType() MOZ_OVERRIDE { return GFX_CONTENT_COLOR_ALPHA; }
+  virtual bool AllocateForSurface(gfx::IntSize aSize, TextureAllocationFlags aFlags) MOZ_OVERRIDE
+  {
+    return false;
+  }
 
 protected:
-  gl::GLContext* mGL;
-  gfx::IntSize mSize;
-
-  friend class CompositingFactory;
+  const EGLImage mImage;
+  const gfx::IntSize mSize;
+  bool mIsLocked;
 };
 
-// Doesn't own the surface descriptor, so we shouldn't delete it
-class DeprecatedTextureClientSharedOGLExternal : public DeprecatedTextureClientSharedOGL
+#ifdef MOZ_WIDGET_ANDROID
+
+class SurfaceTextureClient : public TextureClient
 {
 public:
-  DeprecatedTextureClientSharedOGLExternal(CompositableForwarder* aForwarder, const TextureInfo& aTextureInfo)
-    : DeprecatedTextureClientSharedOGL(aForwarder, aTextureInfo)
-  {}
+  SurfaceTextureClient(TextureFlags aFlags,
+                       gl::AndroidSurfaceTexture* aSurfTex,
+                       gfx::IntSize aSize,
+                       bool aInverted);
 
-  virtual bool SupportsType(DeprecatedTextureClientType aType) MOZ_OVERRIDE { return aType == TEXTURE_SHARED_GL_EXTERNAL; }
-  virtual void ReleaseResources() {}
+  ~SurfaceTextureClient();
+
+  virtual bool IsAllocated() const MOZ_OVERRIDE { return true; }
+
+  virtual bool HasInternalBuffer() const MOZ_OVERRIDE { return false; }
+
+  virtual gfx::IntSize GetSize() const { return mSize; }
+
+  virtual bool ToSurfaceDescriptor(SurfaceDescriptor& aOutDescriptor) MOZ_OVERRIDE;
+
+  // Useless functions.
+  virtual bool Lock(OpenMode mode) MOZ_OVERRIDE;
+
+  virtual void Unlock() MOZ_OVERRIDE;
+
+  virtual bool IsLocked() const MOZ_OVERRIDE { return mIsLocked; }
+
+  virtual gfx::SurfaceFormat GetFormat() const MOZ_OVERRIDE
+  {
+    return gfx::SurfaceFormat::UNKNOWN;
+  }
+
+  virtual TemporaryRef<TextureClient>
+  CreateSimilar(TextureFlags aFlags = TextureFlags::DEFAULT,
+                TextureAllocationFlags aAllocFlags = ALLOC_DEFAULT) const MOZ_OVERRIDE
+  {
+    return nullptr;
+  }
+
+  virtual bool AllocateForSurface(gfx::IntSize aSize, TextureAllocationFlags aFlags) MOZ_OVERRIDE
+  {
+    return false;
+  }
+
+protected:
+  const RefPtr<gl::AndroidSurfaceTexture> mSurfTex;
+  const gfx::IntSize mSize;
+  bool mIsLocked;
 };
 
-class DeprecatedTextureClientStreamOGL : public DeprecatedTextureClient
-{
-public:
-  DeprecatedTextureClientStreamOGL(CompositableForwarder* aForwarder, const TextureInfo& aTextureInfo)
-    : DeprecatedTextureClient(aForwarder, aTextureInfo)
-  {}
-  ~DeprecatedTextureClientStreamOGL() { ReleaseResources(); }
-
-  virtual bool SupportsType(DeprecatedTextureClientType aType) MOZ_OVERRIDE { return aType == TEXTURE_STREAM_GL; }
-  virtual bool EnsureAllocated(gfx::IntSize aSize, gfxContentType aType) { return true; }
-  virtual void ReleaseResources() { mDescriptor = SurfaceDescriptor(); }
-  virtual gfxContentType GetContentType() MOZ_OVERRIDE { return GFX_CONTENT_COLOR_ALPHA; }
-};
+#endif // MOZ_WIDGET_ANDROID
 
 } // namespace
 } // namespace

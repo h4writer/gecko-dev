@@ -20,7 +20,7 @@
     <command id="cmd_handleBackspace" oncommand="BrowserHandleBackspace();" />
     <command id="cmd_handleShiftBackspace" oncommand="BrowserHandleShiftBackspace();" />
 
-    <command id="cmd_newNavigatorTab" oncommand="BrowserOpenTab();"/>
+    <command id="cmd_newNavigatorTab" oncommand="BrowserOpenNewTabOrWindow(event);"/>
     <command id="Browser:OpenFile"  oncommand="BrowserOpenFileWindow();"/>
     <command id="Browser:SavePage" oncommand="saveDocument(window.content.document);"/>
 
@@ -38,7 +38,7 @@
 
     <commandset id="editMenuCommands"/>
 
-    <command id="View:PageSource" oncommand="BrowserViewSourceOfDocument(content.document);" observes="isImage"/>
+    <command id="View:PageSource" oncommand="BrowserViewSourceOfDocument(window.gBrowser.selectedBrowser.contentDocumentAsCPOW);" observes="isImage"/>
     <command id="View:PageInfo" oncommand="BrowserPageInfo();"/>
     <command id="View:FullScreen" oncommand="BrowserFullScreen();"/>
     <command id="cmd_find"
@@ -50,6 +50,9 @@
     <command id="cmd_findPrevious"
              oncommand="gFindBar.onFindAgainCommand(true);"
              observes="isImage"/>
+#ifdef XP_MACOSX
+    <command id="cmd_findSelection" oncommand="gFindBar.onFindSelectionCommand();"/>
+#endif
     <!-- work-around bug 392512 -->
     <command id="Browser:AddBookmarkAs"
              oncommand="PlacesCommandHook.bookmarkCurrentPage(true, PlacesUtils.bookmarksMenuFolderId);"/>
@@ -95,10 +98,12 @@
     <command id="Tools:DevToolbar" oncommand="DeveloperToolbar.toggle();" disabled="true" hidden="true"/>
     <command id="Tools:DevToolbarFocus" oncommand="DeveloperToolbar.focusToggle();" disabled="true"/>
     <command id="Tools:DevAppMgr" oncommand="gDevToolsBrowser.openAppManager(gBrowser);" disabled="true" hidden="true"/>
+    <command id="Tools:WebIDE" oncommand="gDevToolsBrowser.openWebIDE();" disabled="true" hidden="true"/>
     <command id="Tools:BrowserToolbox" oncommand="BrowserToolboxProcess.init();" disabled="true" hidden="true"/>
     <command id="Tools:BrowserConsole" oncommand="HUDService.toggleBrowserConsole();"/>
     <command id="Tools:Scratchpad" oncommand="Scratchpad.openScratchpad();"/>
     <command id="Tools:ResponsiveUI" oncommand="ResponsiveUI.toggle();"/>
+    <command id="Tools:Eyedropper" oncommand="openEyedropper();"/>
     <command id="Tools:Addons" oncommand="BrowserOpenAddonsMgr();"/>
     <command id="Tools:ErrorConsole" oncommand="toJavaScriptConsole()" disabled="true" hidden="true"/>
     <command id="Tools:DevToolsConnect" oncommand="gDevToolsBrowser.openConnectScreen(gBrowser)" disabled="true" hidden="true"/>
@@ -106,15 +111,19 @@
      oncommand="Cc['@mozilla.org/browser/browserglue;1'].getService(Ci.nsIBrowserGlue).sanitize(window);"/>
     <command id="Tools:PrivateBrowsing"
       oncommand="OpenBrowserWindow({private: true});"/>
+#ifdef E10S_TESTING_ONLY
+    <command id="Tools:RemoteWindow"
+      oncommand="OpenBrowserWindow({remote: true});"/>
+    <command id="Tools:NonRemoteWindow"
+      oncommand="OpenBrowserWindow({remote: false});"/>
+#endif
     <command id="History:UndoCloseTab" oncommand="undoCloseTab();"/>
     <command id="History:UndoCloseWindow" oncommand="undoCloseWindow();"/>
-    <command id="Social:SharePage" oncommand="SocialShare.sharePage();" disabled="true"/>
-    <command id="Social:ToggleSidebar" oncommand="Social.toggleSidebar();" hidden="true"/>
+    <command id="Social:SharePage" oncommand="SocialShare.sharePage();"/>
+    <command id="Social:ToggleSidebar" oncommand="SocialSidebar.toggleSidebar();" hidden="true"/>
     <command id="Social:ToggleNotifications" oncommand="Social.toggleNotifications();" hidden="true"/>
-    <command id="Social:FocusChat" oncommand="SocialChatBar.focus();" hidden="true" disabled="true"/>
-    <command id="Social:Toggle" oncommand="Social.toggle();" hidden="true"/>
     <command id="Social:Addons" oncommand="BrowserOpenAddonsMgr('addons://list/service');"/>
-    <command id="MenuPanel:Toggle" oncommand="PanelUI.toggle(event);"/>
+    <command id="Chat:Focus" oncommand="Cu.import('resource:///modules/Chat.jsm', {}).Chat.focus(window);"/>
   </commandset>
 
   <commandset id="placesCommands">
@@ -125,6 +134,7 @@
   </commandset>
 
   <broadcasterset id="mainBroadcasterSet">
+    <broadcaster id="Social:PageShareOrMark" disabled="true"/>
     <broadcaster id="viewBookmarksSidebar" autoCheck="false" label="&bookmarksButton.label;"
                  type="checkbox" group="sidebar" sidebarurl="chrome://browser/content/bookmarks/bookmarksPanel.xul"
                  oncommand="toggleSidebar('viewBookmarksSidebar');"/>
@@ -140,6 +150,11 @@
     <broadcaster id="viewWebPanelsSidebar" autoCheck="false"
                  type="checkbox" group="sidebar" sidebarurl="chrome://browser/content/web-panels.xul"
                  oncommand="toggleSidebar('viewWebPanelsSidebar');"/>
+
+    <broadcaster id="bookmarkThisPageBroadcaster"
+                 label="&bookmarkThisPageCmd.label;"
+                 bookmarklabel="&bookmarkThisPageCmd.label;"
+                 editlabel="&editThisBookmarkCmd.label;"/>
 
     <!-- popup blocking menu items -->
     <broadcaster id="blockedPopupAllowSite"
@@ -165,11 +180,11 @@
     <broadcaster id="tabviewGroupsNumber" groups="1"/>
 #ifdef MOZ_SERVICES_SYNC
     <broadcaster id="sync-setup-state"/>
-    <broadcaster id="sync-syncnow-state"/>
+    <broadcaster id="sync-syncnow-state" hidden="true"/>
+    <broadcaster id="sync-reauth-state" hidden="true"/>
 #endif
     <broadcaster id="workOfflineMenuitemState"/>
     <broadcaster id="socialSidebarBroadcaster" hidden="true"/>
-    <broadcaster id="socialActiveBroadcaster" hidden="true"/>
 
     <!-- DevTools broadcasters -->
     <broadcaster id="devtoolsMenuBroadcaster_DevToolbox"
@@ -185,6 +200,10 @@
     <broadcaster id="devtoolsMenuBroadcaster_DevAppMgr"
                  label="&devAppMgrMenu.label;"
                  command="Tools:DevAppMgr"/>
+    <broadcaster id="devtoolsMenuBroadcaster_webide"
+                 label="&webide.label;"
+                 command="Tools:WebIDE"
+                 key="key_webide"/>
     <broadcaster id="devtoolsMenuBroadcaster_BrowserToolbox"
                  label="&browserToolboxMenu.label;"
                  command="Tools:BrowserToolbox"/>
@@ -201,6 +220,10 @@
                  type="checkbox" autocheck="false"
                  command="Tools:ResponsiveUI"
                  key="key_responsiveUI"/>
+    <broadcaster id="devtoolsMenuBroadcaster_Eyedropper"
+                 label="&eyedropper.label;"
+                 type="checkbox" autocheck="false"
+                 command="Tools:Eyedropper"/>
     <broadcaster id="devtoolsMenuBroadcaster_PageSource"
                  label="&pageSourceCmd.label;"
                  key="key_viewSource"
@@ -214,10 +237,6 @@
     <broadcaster id="devtoolsMenuBroadcaster_connect"
                  label="&devtoolsConnect.label;"
                  command="Tools:DevToolsConnect"/>
-
-    <!-- SocialAPI broadcasters -->
-    <broadcaster id="socialBroadcaster_userDetails"
-                 notLoggedInLabel="&social.notLoggedIn.label;"/>
   </broadcasterset>
 
   <keyset id="mainKeyset">
@@ -275,7 +294,8 @@
         modifiers="accel,shift"
 #endif
     />
-
+    <key id="key_webide" keycode="&webide.keycode;" command="Tools:WebIDE"
+         modifiers="shift" keytext="&webide.keytext;"/>
     <key id="key_devToolboxMenuItem" keytext="&devToolboxMenuItem.keytext;"
          command="Tools:DevToolbox" key="&devToolboxMenuItem.keytext;"
 #ifdef XP_MACOSX
@@ -327,11 +347,11 @@
 #endif
     <key id="goHome" keycode="VK_HOME" command="Browser:Home" modifiers="alt"/>
     <key keycode="VK_F5" command="Browser:Reload"/>
+    <key keycode="VK_F6" command="Browser:FocusNextFrame"/>
+    <key keycode="VK_F6" command="Browser:FocusNextFrame" modifiers="shift"/>
 #ifndef XP_MACOSX
     <key id="showAllHistoryKb" key="&showAllHistoryCmd.commandkey;" command="Browser:ShowAllHistory" modifiers="accel,shift"/>
     <key keycode="VK_F5" command="Browser:ReloadSkipCache" modifiers="accel"/>
-    <key keycode="VK_F6" command="Browser:FocusNextFrame"/>
-    <key keycode="VK_F6" command="Browser:FocusNextFrame" modifiers="shift"/>
     <key id="key_fullScreen" keycode="VK_F11" command="View:FullScreen"/>
 #else
     <key id="key_fullScreen" key="&fullScreenCmd.macCommandKey;" command="View:FullScreen" modifiers="accel,control"/>
@@ -347,6 +367,9 @@
     <key id="key_find" key="&findOnCmd.commandkey;" command="cmd_find" modifiers="accel"/>
     <key id="key_findAgain" key="&findAgainCmd.commandkey;" command="cmd_findAgain" modifiers="accel"/>
     <key id="key_findPrevious" key="&findAgainCmd.commandkey;" command="cmd_findPrevious" modifiers="accel,shift"/>
+#ifdef XP_MACOSX
+    <key id="key_findSelection" key="&findSelectionCmd.commandkey;" command="cmd_findSelection" modifiers="accel"/>
+#endif
     <key keycode="&findAgainCmd.commandkey2;" command="cmd_findAgain"/>
     <key keycode="&findAgainCmd.commandkey2;"  command="cmd_findPrevious" modifiers="shift"/>
 
@@ -366,7 +389,15 @@
 #endif
 
     <!--<key id="markPage" key="&markPageCmd.commandkey;" command="Social:TogglePageMark" modifiers="accel,shift"/>-->
-    <key id="focusChatBar" key="&social.chatBar.commandkey;" command="Social:FocusChat" modifiers="accel,shift"/>
+    <key id="focusChatBar" key="&social.chatBar.commandkey;" command="Chat:Focus"
+#ifdef XP_MACOSX
+# Sadly the devtools uses shift-accel-c on non-mac and alt-accel-c everywhere else
+# So we just use the other
+         modifiers="accel,shift"
+#else
+         modifiers="accel,alt"
+#endif
+    />
 
     <key id="key_stop" keycode="VK_ESCAPE" command="Browser:Stop"/>
 
@@ -401,8 +432,8 @@
     <key id="key_sanitize" command="Tools:Sanitize" keycode="VK_DELETE" modifiers="accel,shift"/>
 #ifdef XP_MACOSX
     <key id="key_sanitize_mac" command="Tools:Sanitize" keycode="VK_BACK" modifiers="accel,shift"/>
-#endif
-#ifdef XP_UNIX
+    <key id="key_quitApplication" key="&quitApplicationCmdUnix.key;" modifiers="accel"/>
+#elifdef XP_UNIX
     <key id="key_quitApplication" key="&quitApplicationCmdUnix.key;" command="cmd_quitApplication" modifiers="accel"/>
 #endif
 
@@ -410,13 +441,6 @@
     <key id="key_undoCloseTab" command="History:UndoCloseTab" key="&tabCmd.commandkey;" modifiers="accel,shift"/>
 #endif
     <key id="key_undoCloseWindow" command="History:UndoCloseWindow" key="&newNavigatorCmd.key;" modifiers="accel,shift"/>
-
-    <key id="key_menuButton" command="MenuPanel:Toggle"
-#ifdef XP_MACOSX
-         key="&toggleMenuPanelMac.key;" modifiers="accel,shift"/>
-#else
-         key="&toggleMenuPanel.key;" modifiers="accel"/>
-#endif
 
 #ifdef XP_GNOME
 #define NUM_SELECT_TAB_MODIFIER alt

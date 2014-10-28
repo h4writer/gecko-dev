@@ -95,28 +95,27 @@ struct JSSettings
   // Settings that change based on chrome/content context.
   struct JSContentChromeSettings
   {
-    JS::ContextOptions contextOptions;
     JS::CompartmentOptions compartmentOptions;
     int32_t maxScriptRuntime;
 
     JSContentChromeSettings()
-    : contextOptions(), compartmentOptions(), maxScriptRuntime(0)
+    : compartmentOptions(), maxScriptRuntime(0)
     { }
   };
 
   JSContentChromeSettings chrome;
   JSContentChromeSettings content;
   JSGCSettingsArray gcSettings;
-  bool jitHardening;
+  JS::RuntimeOptions runtimeOptions;
+
 #ifdef JS_GC_ZEAL
   uint8_t gcZeal;
   uint32_t gcZealFrequency;
 #endif
 
   JSSettings()
-  : jitHardening(false)
 #ifdef JS_GC_ZEAL
-  , gcZeal(0), gcZealFrequency(0)
+  : gcZeal(0), gcZealFrequency(0)
 #endif
   {
     for (uint32_t index = 0; index < ArrayLength(gcSettings); index++) {
@@ -166,14 +165,11 @@ struct JSSettings
 enum WorkerPreference
 {
   WORKERPREF_DUMP = 0, // browser.dom.window.dump.enabled
-  WORKERPREF_PROMISE,  // dom.promise.enabled
+  WORKERPREF_DOM_FETCH,// dom.fetch.enabled
   WORKERPREF_COUNT
 };
 
 // All of these are implemented in RuntimeService.cpp
-bool
-ResolveWorkerClasses(JSContext* aCx, JS::Handle<JSObject*> aObj, JS::Handle<jsid> aId,
-                     unsigned aFlags, JS::MutableHandle<JSObject*> aObjp);
 
 void
 CancelWorkersForWindow(nsPIDOMWindow* aWindow);
@@ -184,39 +180,52 @@ SuspendWorkersForWindow(nsPIDOMWindow* aWindow);
 void
 ResumeWorkersForWindow(nsPIDOMWindow* aWindow);
 
-class WorkerTask {
+class WorkerTask
+{
+protected:
+  WorkerTask()
+  { }
+
+  virtual ~WorkerTask()
+  { }
+
 public:
-    NS_INLINE_DECL_THREADSAFE_REFCOUNTING(WorkerTask)
+  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(WorkerTask)
 
-    virtual ~WorkerTask() { }
-
-    virtual bool RunTask(JSContext* aCx) = 0;
+  virtual bool
+  RunTask(JSContext* aCx) = 0;
 };
 
-class WorkerCrossThreadDispatcher {
+class WorkerCrossThreadDispatcher
+{
+   friend class WorkerPrivate;
+
+  // Must be acquired *before* the WorkerPrivate's mutex, when they're both
+  // held.
+  Mutex mMutex;
+  WorkerPrivate* mWorkerPrivate;
+
+private:
+  // Only created by WorkerPrivate.
+  explicit WorkerCrossThreadDispatcher(WorkerPrivate* aWorkerPrivate);
+
+  // Only called by WorkerPrivate.
+  void
+  Forget()
+  {
+    MutexAutoLock lock(mMutex);
+    mWorkerPrivate = nullptr;
+  }
+
+  ~WorkerCrossThreadDispatcher() {}
+
 public:
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(WorkerCrossThreadDispatcher)
 
-  WorkerCrossThreadDispatcher(WorkerPrivate* aPrivate) :
-    mMutex("WorkerCrossThreadDispatcher"), mPrivate(aPrivate) {}
-  void Forget()
-  {
-    mozilla::MutexAutoLock lock(mMutex);
-    mPrivate = nullptr;
-  }
-
-  /**
-   * Generically useful function for running a bit of C++ code on the worker
-   * thread.
-   */
-  bool PostTask(WorkerTask* aTask);
-
-protected:
-  friend class WorkerPrivate;
-
-  // Must be acquired *before* the WorkerPrivate's mutex, when they're both held.
-  mozilla::Mutex mMutex;
-  WorkerPrivate* mPrivate;
+  // Generically useful function for running a bit of C++ code on the worker
+  // thread.
+  bool
+  PostTask(WorkerTask* aTask);
 };
 
 WorkerCrossThreadDispatcher*

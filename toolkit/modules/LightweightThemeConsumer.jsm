@@ -4,10 +4,13 @@
 
 this.EXPORTED_SYMBOLS = ["LightweightThemeConsumer"];
 
-Components.utils.import("resource://gre/modules/XPCOMUtils.jsm");
+const {utils: Cu} = Components;
+
+Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+Cu.import("resource://gre/modules/Services.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "LightweightThemeImageOptimizer",
-  "resource://gre/modules/LightweightThemeImageOptimizer.jsm");
+  "resource://gre/modules/addons/LightweightThemeImageOptimizer.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "PrivateBrowsingUtils",
   "resource://gre/modules/PrivateBrowsingUtils.jsm");
@@ -27,12 +30,10 @@ this.LightweightThemeConsumer =
   this._lastScreenWidth = screen.width;
   this._lastScreenHeight = screen.height;
 
-  Components.classes["@mozilla.org/observer-service;1"]
-            .getService(Components.interfaces.nsIObserverService)
-            .addObserver(this, "lightweight-theme-styling-update", false);
+  Services.obs.addObserver(this, "lightweight-theme-styling-update", false);
 
   var temp = {};
-  Components.utils.import("resource://gre/modules/LightweightThemeManager.jsm", temp);
+  Cu.import("resource://gre/modules/LightweightThemeManager.jsm", temp);
   this._update(temp.LightweightThemeManager.currentThemeForDisplay);
   this._win.addEventListener("resize", this);
 }
@@ -41,10 +42,10 @@ LightweightThemeConsumer.prototype = {
   _lastData: null,
   _lastScreenWidth: null,
   _lastScreenHeight: null,
+  // Whether the active lightweight theme should be shown on the window.
   _enabled: true,
-#ifdef XP_MACOSX
-  _chromemarginDefault: undefined,
-#endif
+  // Whether a lightweight theme is enabled.
+  _active: false,
 
   enable: function() {
     this._enabled = true;
@@ -57,6 +58,10 @@ LightweightThemeConsumer.prototype = {
     this._update(null);
     this._enabled = false;
     this._lastData = lastData;
+  },
+
+  getData: function() {
+    return this._enabled ? Cu.cloneInto(this._lastData, this._win) : null;
   },
 
   observe: function (aSubject, aTopic, aData) {
@@ -72,16 +77,18 @@ LightweightThemeConsumer.prototype = {
     if (this._lastScreenWidth != width || this._lastScreenHeight != height) {
       this._lastScreenWidth = width;
       this._lastScreenHeight = height;
+      if (!this._active)
+        return;
       this._update(this._lastData);
+      Services.obs.notifyObservers(this._win, "lightweight-theme-optimized",
+                                   JSON.stringify(this._lastData));
     }
   },
 
   destroy: function () {
     if (!PrivateBrowsingUtils.isWindowPrivate(this._win) ||
         PrivateBrowsingUtils.permanentPrivateBrowsing) {
-      Components.classes["@mozilla.org/observer-service;1"]
-                .getService(Components.interfaces.nsIObserverService)
-                .removeObserver(this, "lightweight-theme-styling-update");
+      Services.obs.removeObserver(this, "lightweight-theme-styling-update");
 
       this._win.removeEventListener("resize", this);
     }
@@ -100,8 +107,9 @@ LightweightThemeConsumer.prototype = {
     if (!this._enabled)
       return;
 
-    var root = this._doc.documentElement;
-    var active = !!aData.headerURL;
+    let root = this._doc.documentElement;
+    let active = !!aData.headerURL;
+    let stateChanging = (active != this._active);
 
     if (active) {
       root.style.color = aData.textcolor || "black";
@@ -117,6 +125,8 @@ LightweightThemeConsumer.prototype = {
       root.removeAttribute("lwtheme");
     }
 
+    this._active = active;
+
     _setImage(root, active, aData.headerURL);
     if (this._footerId) {
       let footer = this._doc.getElementById(this._footerId);
@@ -129,22 +139,30 @@ LightweightThemeConsumer.prototype = {
     }
 
 #ifdef XP_MACOSX
-    // Sample whether or not we draw in the titlebar by default the first time we update.
-    // If the root has no chromemargin attribute, getAttribute will return null, and
-    // we'll remove the attribute when the lw-theme is deactivated.
-    if (this._chromemarginDefault === undefined)
-      this._chromemarginDefault = root.getAttribute("chromemargin");
+    // On OS X, we extend the lightweight theme into the titlebar, which means setting
+    // the chromemargin attribute. Some XUL applications already draw in the titlebar,
+    // so we need to save the chromemargin value before we overwrite it with the value
+    // that lets us draw in the titlebar. We stash this value on the root attribute so
+    // that XUL applications have the ability to invalidate the saved value.
+    if (stateChanging) {
+      if (!root.hasAttribute("chromemargin-nonlwtheme")) {
+        root.setAttribute("chromemargin-nonlwtheme", root.getAttribute("chromemargin"));
+      }
 
-    if (active) {
-      root.setAttribute("chromemargin", "0,-1,-1,-1");
-    }
-    else {
-      if (this._chromemarginDefault)
-        root.setAttribute("chromemargin", this._chromemarginDefault);
-      else
-        root.removeAttribute("chromemargin");
+      if (active) {
+        root.setAttribute("chromemargin", "0,-1,-1,-1");
+      } else {
+        let defaultChromemargin = root.getAttribute("chromemargin-nonlwtheme");
+        if (defaultChromemargin) {
+          root.setAttribute("chromemargin", defaultChromemargin);
+        } else {
+          root.removeAttribute("chromemargin");
+        }
+      }
     }
 #endif
+    Services.obs.notifyObservers(this._win, "lightweight-theme-window-updated",
+                                 JSON.stringify(aData));
   }
 }
 

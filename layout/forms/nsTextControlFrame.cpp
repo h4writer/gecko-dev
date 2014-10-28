@@ -6,6 +6,7 @@
 #include "mozilla/DebugOnly.h"
 
 #include "nsCOMPtr.h"
+#include "nsFontMetrics.h"
 #include "nsTextControlFrame.h"
 #include "nsIPlaintextEditor.h"
 #include "nsCaret.h"
@@ -15,8 +16,7 @@
 #include "nsIPhonetic.h"
 #include "nsTextFragment.h"
 #include "nsIDOMHTMLTextAreaElement.h"
-#include "nsINameSpaceManager.h"
-#include "nsINodeInfo.h"
+#include "nsNameSpaceManager.h"
 #include "nsFormControlFrame.h" //for registering accesskeys
 
 #include "nsIContent.h"
@@ -40,11 +40,12 @@
 #include "nsPresState.h"
 #include "nsContentList.h"
 #include "nsAttrValueInlines.h"
-#include "mozilla/Selection.h"
+#include "mozilla/dom/Selection.h"
 #include "nsContentUtils.h"
 #include "nsTextNode.h"
 #include "nsStyleSet.h"
 #include "mozilla/dom/ScriptSettings.h"
+#include "mozilla/MathAlgorithms.h"
 
 #define DEFAULT_COLUMN_WIDTH 20
 
@@ -155,11 +156,10 @@ nsTextControlFrame::CalcIntrinsicSize(nsRenderingContext* aRenderingContext,
     nsLayoutUtils::GetFontMetricsForFrame(this, getter_AddRefs(fontMet),
                                           aFontSizeInflation);
   NS_ENSURE_SUCCESS(rv, rv);
-  aRenderingContext->SetFont(fontMet);
 
   lineHeight =
-    nsHTMLReflowState::CalcLineHeight(StyleContext(), NS_AUTOHEIGHT,
-                                      aFontSizeInflation);
+    nsHTMLReflowState::CalcLineHeight(GetContent(), StyleContext(),
+                                      NS_AUTOHEIGHT, aFontSizeInflation);
   charWidth = fontMet->AveCharWidth();
   charMaxAdvance = fontMet->MaxAdvance();
 
@@ -169,11 +169,10 @@ nsTextControlFrame::CalcIntrinsicSize(nsRenderingContext* aRenderingContext,
 
   // To better match IE, take the maximum character width(in twips) and remove
   // 4 pixels add this on as additional padding(internalPadding). But only do
-  // this if charMaxAdvance != charWidth; if they are equal, this is almost
-  // certainly a fixed-width font.
-  if (charWidth != charMaxAdvance) {
-    nscoord internalPadding = std::max(0, charMaxAdvance -
-                                        nsPresContext::CSSPixelsToAppUnits(4));
+  // this if we think we have a fixed-width font.
+  if (mozilla::Abs(charWidth - charMaxAdvance) > (unsigned)nsPresContext::CSSPixelsToAppUnits(1)) {
+    nscoord internalPadding =
+      std::max(0, charMaxAdvance - nsPresContext::CSSPixelsToAppUnits(4));
     nscoord t = nsPresContext::CSSPixelsToAppUnits(1); 
    // Round to a multiple of t
     nscoord rest = internalPadding % t; 
@@ -189,17 +188,6 @@ nsTextControlFrame::CalcIntrinsicSize(nsRenderingContext* aRenderingContext,
     // in Full Standards mode, see BRFrame::Reflow and bug 228752.
     if (PresContext()->CompatibilityMode() == eCompatibility_FullStandards) {
       aIntrinsicSize.width += 1;
-    }
-
-    // Also add in the padding of our value div child.  Note that it hasn't
-    // been reflowed yet, so we can't get its used padding, but it shouldn't be
-    // using percentage padding anyway.
-    nsMargin childPadding;
-    nsIFrame* firstChild = GetFirstPrincipalChild();
-    if (firstChild && firstChild->StylePadding()->GetPadding(childPadding)) {
-      aIntrinsicSize.width += childPadding.LeftRight();
-    } else {
-      NS_ERROR("Percentage padding on value div?");
     }
   }
 
@@ -256,7 +244,7 @@ nsTextControlFrame::EnsureEditorInitialized()
   if (mEditorHasBeenInitialized)
     return NS_OK;
 
-  nsIDocument* doc = mContent->GetCurrentDoc();
+  nsIDocument* doc = mContent->GetComposedDoc();
   NS_ENSURE_TRUE(doc, NS_ERROR_FAILURE);
 
   nsWeakFrame weakFrame(this);
@@ -274,7 +262,7 @@ nsTextControlFrame::EnsureEditorInitialized()
 
     // Time to mess with our security context... See comments in GetValue()
     // for why this is needed.
-    mozilla::dom::AutoSystemCaller asc;
+    mozilla::dom::AutoNoJSAPI nojsapi;
 
     // Make sure that we try to focus the content even if the method fails
     class EnsureSetFocus {
@@ -406,20 +394,25 @@ nsTextControlFrame::CreateAnonymousContent(nsTArray<ContentInfo>& aElements)
 }
 
 void
-nsTextControlFrame::AppendAnonymousContentTo(nsBaseContentList& aElements,
+nsTextControlFrame::AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
                                              uint32_t aFilter)
 {
   nsCOMPtr<nsITextControlElement> txtCtrl = do_QueryInterface(GetContent());
   NS_ASSERTION(txtCtrl, "Content not a text control element");
 
-  aElements.MaybeAppendElement(txtCtrl->GetRootEditorNode());
-  if (!(aFilter & nsIContent::eSkipPlaceholderContent))
-    aElements.MaybeAppendElement(txtCtrl->GetPlaceholderNode());
+  nsIContent* root = txtCtrl->GetRootEditorNode();
+  if (root) {
+    aElements.AppendElement(root);
+  }
+
+  nsIContent* placeholder = txtCtrl->GetPlaceholderNode();
+  if (placeholder && !(aFilter & nsIContent::eSkipPlaceholderContent))
+    aElements.AppendElement(placeholder);
   
 }
 
 nscoord
-nsTextControlFrame::GetPrefWidth(nsRenderingContext* aRenderingContext)
+nsTextControlFrame::GetPrefISize(nsRenderingContext* aRenderingContext)
 {
     DebugOnly<nscoord> result = 0;
     DISPLAY_PREF_WIDTH(this, result);
@@ -432,24 +425,29 @@ nsTextControlFrame::GetPrefWidth(nsRenderingContext* aRenderingContext)
 }
 
 nscoord
-nsTextControlFrame::GetMinWidth(nsRenderingContext* aRenderingContext)
+nsTextControlFrame::GetMinISize(nsRenderingContext* aRenderingContext)
 {
   // Our min width is just our preferred width if we have auto width.
   nscoord result;
   DISPLAY_MIN_WIDTH(this, result);
 
-  result = GetPrefWidth(aRenderingContext);
+  result = GetPrefISize(aRenderingContext);
 
   return result;
 }
 
-nsSize
+LogicalSize
 nsTextControlFrame::ComputeAutoSize(nsRenderingContext *aRenderingContext,
-                                    nsSize aCBSize, nscoord aAvailableWidth,
-                                    nsSize aMargin, nsSize aBorder,
-                                    nsSize aPadding, bool aShrinkWrap)
+                                    WritingMode aWM,
+                                    const LogicalSize& aCBSize,
+                                    nscoord aAvailableISize,
+                                    const LogicalSize& aMargin,
+                                    const LogicalSize& aBorder,
+                                    const LogicalSize& aPadding,
+                                    bool aShrinkWrap)
 {
   float inflation = nsLayoutUtils::FontSizeInflationFor(this);
+  // XXX CalcIntrinsicSize needs to be updated to use a LogicalSize
   nsSize autoSize;
   nsresult rv = CalcIntrinsicSize(aRenderingContext, autoSize, inflation);
   if (NS_FAILED(rv)) {
@@ -459,21 +457,22 @@ nsTextControlFrame::ComputeAutoSize(nsRenderingContext *aRenderingContext,
 #ifdef DEBUG
   // Note: Ancestor ComputeAutoSize only computes a width if we're auto-width
   else if (StylePosition()->mWidth.GetUnit() == eStyleUnit_Auto) {
-    nsSize ancestorAutoSize =
-      nsContainerFrame::ComputeAutoSize(aRenderingContext,
-                                        aCBSize, aAvailableWidth,
+    LogicalSize ancestorAutoSize =
+      nsContainerFrame::ComputeAutoSize(aRenderingContext, aWM,
+                                        aCBSize, aAvailableISize,
                                         aMargin, aBorder,
                                         aPadding, aShrinkWrap);
     // Disabled when there's inflation; see comment in GetPrefSize.
-    NS_ASSERTION(inflation != 1.0f || ancestorAutoSize.width == autoSize.width,
+    NS_ASSERTION(inflation != 1.0f ||
+                 ancestorAutoSize.Width(aWM) == autoSize.width,
                  "Incorrect size computed by ComputeAutoSize?");
   }
 #endif
 
-  return autoSize;
+  return LogicalSize(aWM, autoSize);
 }
 
-NS_IMETHODIMP
+void
 nsTextControlFrame::Reflow(nsPresContext*   aPresContext,
                            nsHTMLReflowMetrics&     aDesiredSize,
                            const nsHTMLReflowState& aReflowState,
@@ -488,27 +487,29 @@ nsTextControlFrame::Reflow(nsPresContext*   aPresContext,
   }
 
   // set values of reflow's out parameters
-  aDesiredSize.width = aReflowState.ComputedWidth() +
-                       aReflowState.mComputedBorderPadding.LeftRight();
-  aDesiredSize.height = aReflowState.ComputedHeight() +
-                        aReflowState.mComputedBorderPadding.TopBottom();
+  WritingMode wm = aReflowState.GetWritingMode();
+  LogicalSize
+    finalSize(wm,
+              aReflowState.ComputedISize() +
+              aReflowState.ComputedLogicalBorderPadding().IStartEnd(wm),
+              aReflowState.ComputedBSize() +
+              aReflowState.ComputedLogicalBorderPadding().BStartEnd(wm));
+  aDesiredSize.SetSize(wm, finalSize);
 
   // computation of the ascent wrt the input height
-  nscoord lineHeight = aReflowState.ComputedHeight();
+  nscoord lineHeight = aReflowState.ComputedBSize();
   float inflation = nsLayoutUtils::FontSizeInflationFor(this);
   if (!IsSingleLineTextControl()) {
-    lineHeight = nsHTMLReflowState::CalcLineHeight(StyleContext(), 
-                                                  NS_AUTOHEIGHT, inflation);
+    lineHeight = nsHTMLReflowState::CalcLineHeight(GetContent(), StyleContext(),
+                                                   NS_AUTOHEIGHT, inflation);
   }
   nsRefPtr<nsFontMetrics> fontMet;
-  nsresult rv = nsLayoutUtils::GetFontMetricsForFrame(this, 
-                                                      getter_AddRefs(fontMet), 
-                                                      inflation);
-  NS_ENSURE_SUCCESS(rv, rv);
+  nsLayoutUtils::GetFontMetricsForFrame(this, getter_AddRefs(fontMet),
+                                        inflation);
   // now adjust for our borders and padding
-  aDesiredSize.ascent = 
-        nsLayoutUtils::GetCenteredFontBaseline(fontMet, lineHeight) 
-        + aReflowState.mComputedBorderPadding.top;
+  aDesiredSize.SetBlockStartAscent(
+    nsLayoutUtils::GetCenteredFontBaseline(fontMet, lineHeight) +
+    aReflowState.ComputedLogicalBorderPadding().BStart(wm));
 
   // overflow handling
   aDesiredSize.SetOverflowAreasToDesiredBounds();
@@ -524,7 +525,6 @@ nsTextControlFrame::Reflow(nsPresContext*   aPresContext,
 
   aStatus = NS_FRAME_COMPLETE;
   NS_FRAME_SET_TRUNCATION(aStatus, aReflowState, aDesiredSize);
-  return NS_OK;
 }
 
 void
@@ -535,41 +535,34 @@ nsTextControlFrame::ReflowTextControlChild(nsIFrame*                aKid,
                                            nsHTMLReflowMetrics& aParentDesiredSize)
 {
   // compute available size and frame offsets for child
-  nsSize availSize(aReflowState.ComputedWidth(), 
-                   aReflowState.ComputedHeight());
-  availSize.width = std::max(availSize.width, 0);
-  availSize.height = std::max(availSize.height, 0);
-  
+  WritingMode wm = aKid->GetWritingMode();
+  LogicalSize availSize = aReflowState.ComputedSizeWithPadding(wm);
+  availSize.BSize(wm) = NS_UNCONSTRAINEDSIZE;
+
   nsHTMLReflowState kidReflowState(aPresContext, aReflowState, 
-                                   aKid, availSize);
+                                   aKid, availSize, -1, -1,
+                                   nsHTMLReflowState::CALLER_WILL_INIT);
+  // Override padding with our computed padding in case we got it from theming or percentage
+  kidReflowState.Init(aPresContext, -1, -1, nullptr, &aReflowState.ComputedPhysicalPadding());
 
   // Set computed width and computed height for the child
-  nscoord width = availSize.width;
-  width -= kidReflowState.mComputedMargin.LeftRight() +
-              kidReflowState.mComputedBorderPadding.LeftRight();
-  width = std::max(width, 0);
-  kidReflowState.SetComputedWidth(width);
+  kidReflowState.SetComputedWidth(aReflowState.ComputedWidth());
+  kidReflowState.SetComputedHeight(aReflowState.ComputedHeight());
 
-  nscoord height = availSize.height;
-  height -= kidReflowState.mComputedMargin.TopBottom() +
-              kidReflowState.mComputedBorderPadding.TopBottom();
-  height = std::max(height, 0);       
-  kidReflowState.SetComputedHeight(height); 
-
-  // compute the offsets
-  nscoord xOffset = aReflowState.mComputedBorderPadding.left
-                      + kidReflowState.mComputedMargin.left;
-  nscoord yOffset = aReflowState.mComputedBorderPadding.top
-                      + kidReflowState.mComputedMargin.top;
+  // Offset the frame by the size of the parent's border
+  nscoord xOffset = aReflowState.ComputedPhysicalBorderPadding().left -
+                    aReflowState.ComputedPhysicalPadding().left;
+  nscoord yOffset = aReflowState.ComputedPhysicalBorderPadding().top -
+                    aReflowState.ComputedPhysicalPadding().top;
 
   // reflow the child
-  nsHTMLReflowMetrics desiredSize;  
+  nsHTMLReflowMetrics desiredSize(aReflowState);
   ReflowChild(aKid, aPresContext, desiredSize, kidReflowState, 
               xOffset, yOffset, 0, aStatus);
 
   // place the child
-  FinishReflowChild(aKid, aPresContext, &kidReflowState, 
-                    desiredSize, xOffset, yOffset, 0);
+  FinishReflowChild(aKid, aPresContext, desiredSize,
+                    &kidReflowState, xOffset, yOffset, 0);
 
   // consider the overflow
   aParentDesiredSize.mOverflowAreas.UnionWith(desiredSize.mOverflowAreas);
@@ -645,12 +638,12 @@ void nsTextControlFrame::SetFocus(bool aOn, bool aRepaint)
   if (!caret) return;
 
   // Scroll the current selection into view
-  nsISelection *caretSelection = caret->GetCaretDOMSelection();
+  nsISelection *caretSelection = caret->GetSelection();
   const bool isFocusedRightNow = ourSel == caretSelection;
   if (!isFocusedRightNow) {
     // Don't scroll the current selection if we've been focused using the mouse.
     uint32_t lastFocusMethod = 0;
-    nsIDocument* doc = GetContent()->GetCurrentDoc();
+    nsIDocument* doc = GetContent()->GetComposedDoc();
     if (doc) {
       nsIFocusManager* fm = nsFocusManager::GetFocusManager();
       if (fm) {
@@ -667,7 +660,7 @@ void nsTextControlFrame::SetFocus(bool aOn, bool aRepaint)
   }
 
   // tell the caret to use our selection
-  caret->SetCaretDOMSelection(ourSel);
+  caret->SetSelection(ourSel);
 
   // mutual-exclusion: the selection is either controlled by the
   // document or by the text input/area. Clear any selection in the
@@ -1034,7 +1027,7 @@ nsTextControlFrame::GetSelectionRange(int32_t* aSelectionStart,
   NS_ENSURE_SUCCESS(rv, rv);
   NS_ENSURE_TRUE(selection, NS_ERROR_FAILURE);
 
-  Selection* sel = static_cast<Selection*>(selection.get());
+  dom::Selection* sel = static_cast<dom::Selection*>(selection.get());
   if (aDirection) {
     nsDirection direction = sel->GetSelectionDirection();
     if (direction == eDirNext) {
@@ -1061,7 +1054,7 @@ nsTextControlFrame::GetSelectionRange(int32_t* aSelectionStart,
 /////END INTERFACE IMPLEMENTATIONS
 
 ////NSIFRAME
-NS_IMETHODIMP
+nsresult
 nsTextControlFrame::AttributeChanged(int32_t         aNameSpaceID,
                                      nsIAtom*        aAttribute,
                                      int32_t         aModType)
@@ -1206,11 +1199,11 @@ nsTextControlFrame::GetMaxLength(int32_t* aSize)
 
 // END IMPLEMENTING NS_IFORMCONTROLFRAME
 
-NS_IMETHODIMP
+void
 nsTextControlFrame::SetInitialChildList(ChildListID     aListID,
                                         nsFrameList&    aChildList)
 {
-  nsresult rv = nsContainerFrame::SetInitialChildList(aListID, aChildList);
+  nsContainerFrame::SetInitialChildList(aListID, aChildList);
 
   nsIFrame* first = GetFirstPrincipalChild();
 
@@ -1238,7 +1231,6 @@ nsTextControlFrame::SetInitialChildList(ChildListID     aListID,
       delete contentScrollPos;
     }
   }
-  return rv;
 }
 
 void
@@ -1389,7 +1381,7 @@ nsTextControlFrame::RestoreState(nsPresState* aState)
   return NS_OK;
 }
 
-NS_IMETHODIMP
+nsresult
 nsTextControlFrame::PeekOffset(nsPeekOffsetStruct *aPos)
 {
   return NS_ERROR_FAILURE;

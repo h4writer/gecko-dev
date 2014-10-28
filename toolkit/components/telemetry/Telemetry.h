@@ -17,6 +17,9 @@ namespace base {
 }
 
 namespace mozilla {
+namespace HangMonitor {
+  class HangAnnotations;
+}
 namespace Telemetry {
 
 #include "TelemetryHistogramEnums.h"
@@ -94,7 +97,7 @@ struct AccumulateDelta_impl<Microsecond>
 template<ID id, TimerResolution res = Millisecond>
 class AutoTimer {
 public:
-  AutoTimer(TimeStamp aStart = TimeStamp::Now() MOZ_GUARD_OBJECT_NOTIFIER_PARAM)
+  explicit AutoTimer(TimeStamp aStart = TimeStamp::Now() MOZ_GUARD_OBJECT_NOTIFIER_PARAM)
      : start(aStart)
   {
     MOZ_GUARD_OBJECT_NOTIFIER_INIT;
@@ -112,7 +115,7 @@ private:
 template<ID id>
 class AutoCounter {
 public:
-  AutoCounter(uint32_t counterStart = 0 MOZ_GUARD_OBJECT_NOTIFIER_PARAM)
+  explicit AutoCounter(uint32_t counterStart = 0 MOZ_GUARD_OBJECT_NOTIFIER_PARAM)
     : counter(counterStart)
   {
     MOZ_GUARD_OBJECT_NOTIFIER_INIT;
@@ -156,6 +159,31 @@ void RecordSlowSQLStatement(const nsACString &statement,
                             uint32_t delay);
 
 /**
+ * Initialize I/O Reporting
+ * Initially this only records I/O for files in the binary directory.
+ *
+ * @param aXreDir - XRE directory
+ */
+void InitIOReporting(nsIFile* aXreDir);
+
+/**
+ * Set the profile directory. Once called, files in the profile directory will
+ * be included in I/O reporting. We can't use the directory
+ * service to obtain this information because it isn't running yet.
+ */
+void SetProfileDir(nsIFile* aProfD);
+
+/**
+ * Called to inform Telemetry that startup has completed.
+ */
+void LeavingStartupStage();
+
+/**
+ * Called to inform Telemetry that shutdown is commencing.
+ */
+void EnteringShutdownStage();
+
+/**
  * Thresholds for a statement to be considered slow, in milliseconds
  */
 const uint32_t kSlowSQLThresholdForMainThread = 50;
@@ -166,13 +194,18 @@ class ProcessedStack;
 /**
  * Record the main thread's call stack after it hangs.
  *
- * @param duration - Approximate duration of main thread hang in seconds
- * @param callStack - Array of PCs from the hung call stack
- * @param moduleMap - Array of info about modules in memory (for symbolication)
+ * @param aDuration - Approximate duration of main thread hang, in seconds
+ * @param aStack - Array of PCs from the hung call stack
+ * @param aSystemUptime - System uptime at the time of the hang, in minutes
+ * @param aFirefoxUptime - Firefox uptime at the time of the hang, in minutes
+ * @param aAnnotations - Any annotations to be added to the report
  */
 #if defined(MOZ_ENABLE_PROFILER_SPS)
-void RecordChromeHang(uint32_t duration,
-                      ProcessedStack &aStack);
+void RecordChromeHang(uint32_t aDuration,
+                      ProcessedStack &aStack,
+                      int32_t aSystemUptime,
+                      int32_t aFirefoxUptime,
+                      mozilla::HangMonitor::HangAnnotations* aAnnotations = nullptr);
 #endif
 
 class ThreadHangStats;

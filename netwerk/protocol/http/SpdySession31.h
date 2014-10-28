@@ -23,28 +23,34 @@ namespace mozilla { namespace net {
 
 class SpdyPushedStream31;
 class SpdyStream31;
+class nsHttpTransaction;
 
 class SpdySession31 MOZ_FINAL : public ASpdySession
-  , public nsAHttpConnection
-  , public nsAHttpSegmentReader
-  , public nsAHttpSegmentWriter
+                              , public nsAHttpConnection
+                              , public nsAHttpSegmentReader
+                              , public nsAHttpSegmentWriter
 {
+  ~SpdySession31();
+
 public:
-  NS_DECL_ISUPPORTS
+  NS_DECL_THREADSAFE_ISUPPORTS
   NS_DECL_NSAHTTPTRANSACTION
   NS_DECL_NSAHTTPCONNECTION(mConnection)
   NS_DECL_NSAHTTPSEGMENTREADER
   NS_DECL_NSAHTTPSEGMENTWRITER
 
-  SpdySession31(nsAHttpTransaction *, nsISocketTransport *, int32_t);
-  ~SpdySession31();
+  explicit SpdySession31(nsISocketTransport *);
 
-  bool AddStream(nsAHttpTransaction *, int32_t);
+  bool AddStream(nsAHttpTransaction *, int32_t,
+                 bool, nsIInterfaceRequestor *);
   bool CanReuse() { return !mShouldGoAway && !mClosed; }
   bool RoomForMoreStreams();
 
-  // When the connection is active this is called every 1 second
-  void ReadTimeoutTick(PRIntervalTime now);
+  // When the connection is active this is called up to once every 1 second
+  // return the interval (in seconds) that the connection next wants to
+  // have this invoked. It might happen sooner depending on the needs of
+  // other connections.
+  uint32_t  ReadTimeoutTick(PRIntervalTime now);
 
   // Idle time represents time since "goodput".. e.g. a data or header frame
   PRIntervalTime IdleTime();
@@ -154,10 +160,6 @@ public:
   static nsresult HandleWindowUpdate(SpdySession31 *);
   static nsresult HandleCredential(SpdySession31 *);
 
-  template<typename T>
-    static void EnsureBuffer(nsAutoArrayPtr<T> &,
-                             uint32_t, uint32_t, uint32_t &);
-
   // For writing the SPDY data stream to LOG4
   static void LogIO(SpdySession31 *, SpdyStream31 *, const char *,
                     const char *, uint32_t);
@@ -170,10 +172,14 @@ public:
 
   // an overload of nsAHttpSegementReader
   virtual nsresult CommitToSegmentSize(uint32_t size, bool forceCommitment);
+  nsresult BufferOutput(const char *, uint32_t, uint32_t *);
+  void     FlushOutputQueue();
+  uint32_t AmountOfOutputBuffered() { return mOutputQueueUsed - mOutputQueueSent; }
 
   uint32_t GetServerInitialStreamWindow() { return mServerInitialStreamWindow; }
 
   void ConnectPushedStream(SpdyStream31 *stream);
+  void DecrementConcurrent(SpdyStream31 *stream);
 
   uint64_t Serial() { return mSerial; }
 
@@ -186,6 +192,8 @@ public:
   nsISocketTransport *SocketTransport() { return mSocketTransport; }
   int64_t RemoteSessionWindow() { return mRemoteSessionWindow; }
   void DecrementRemoteSessionWindow (uint32_t bytes) { mRemoteSessionWindow -= bytes; }
+
+  void SendPing() MOZ_OVERRIDE;
 
 private:
 
@@ -203,7 +211,6 @@ private:
   void        ChangeDownstreamState(enum stateType);
   void        ResetDownstreamState();
   nsresult    UncompressAndDiscard(uint32_t, uint32_t);
-  void        DecrementConcurrent(SpdyStream31 *);
   void        zlibInit();
   void        GeneratePing(uint32_t);
   void        GenerateRstStream(uint32_t, uint32_t);
@@ -214,7 +221,6 @@ private:
   void        RemoveStreamFromQueues(SpdyStream31 *);
 
   void        SetWriteCallbacks();
-  void        FlushOutputQueue();
   void        RealignOutputQueue();
 
   bool        RoomForMoreConcurrent();
@@ -393,6 +399,9 @@ private:
   PRIntervalTime       mPingSentEpoch;
   uint32_t             mNextPingID;
 
+  PRIntervalTime       mPreviousPingThreshold; // backup for the former value
+  bool                 mPreviousUsed;          // true when backup is used
+
   // used as a temporary buffer while enumerating the stream hash during GoAway
   nsDeque  mGoAwayStreamsToRestart;
 
@@ -400,6 +409,15 @@ private:
   // by the load group and the serial number can be used as part of the cache key
   // to make sure streams aren't shared across sessions.
   uint64_t        mSerial;
+
+private:
+/// connect tunnels
+  void DispatchOnTunnel(nsAHttpTransaction *, nsIInterfaceRequestor *);
+  void RegisterTunnel(SpdyStream31 *);
+  void UnRegisterTunnel(SpdyStream31 *);
+  uint32_t FindTunnelCount(nsHttpConnectionInfo *);
+
+  nsDataHashtable<nsCStringHashKey, uint32_t> mTunnelHash;
 };
 
 }} // namespace mozilla::net

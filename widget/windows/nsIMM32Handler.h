@@ -8,11 +8,12 @@
 
 #include "nscore.h"
 #include <windows.h>
+#include "nsCOMPtr.h"
 #include "nsString.h"
 #include "nsTArray.h"
+#include "nsIWidget.h"
 #include "mozilla/EventForwards.h"
 
-class nsIWidget;
 class nsWindow;
 struct nsIntRect;
 
@@ -109,6 +110,7 @@ protected:
 
 class nsIMM32Handler
 {
+  typedef mozilla::widget::IMENotification IMENotification;
   typedef mozilla::widget::MSGResult MSGResult;
 public:
   static void Initialize();
@@ -140,6 +142,14 @@ public:
   // the composition on uexpected window.
   static void CommitComposition(nsWindow* aWindow, bool aForce = false);
   static void CancelComposition(nsWindow* aWindow, bool aForce = false);
+  static void OnUpdateComposition(nsWindow* aWindow);
+
+  static nsIMEUpdatePreference GetIMEUpdatePreference();
+
+  // Returns NS_SUCCESS_EVENT_CONSUMED if the mouse button event is consumed by
+  // IME.  Otherwise, NS_OK.
+  static nsresult OnMouseButtonEvent(nsWindow* aWindow,
+                                     const IMENotification& aIMENotification);
 
 protected:
   static void EnsureHandlerInstance();
@@ -172,8 +182,6 @@ protected:
 
   // On*() methods return true if the caller of message handler shouldn't do
   // anything anymore.  Otherwise, false.
-  bool OnMouseEvent(nsWindow* aWindow, LPARAM lParam, int aAction,
-                    MSGResult& aResult);
   static bool OnKeyDownEvent(nsWindow* aWindow, WPARAM wParam, LPARAM lParam,
                              MSGResult& aResult);
 
@@ -261,7 +269,9 @@ protected:
                              nsACString& aANSIStr);
 
   bool SetIMERelatedWindowsPos(nsWindow* aWindow,
-                                 const nsIMEContext &aIMEContext);
+                               const nsIMEContext& aIMEContext);
+  void SetIMERelatedWindowsPosOnPlugin(nsWindow* aWindow,
+                                       const nsIMEContext& aIMEContext);
   bool GetCharacterRectOfSelectedTextAt(nsWindow* aWindow,
                                           uint32_t aOffset,
                                           nsIntRect &aCharRect);
@@ -280,9 +290,10 @@ protected:
    *  in the composition string, you need to subtract mCompositionStart from it.
    */
   bool GetTargetClauseRange(uint32_t *aOffset, uint32_t *aLength = nullptr);
-  void DispatchTextEvent(nsWindow* aWindow, const nsIMEContext &aIMEContext,
-                         bool aCheckAttr = true);
-  void SetTextRangeList(nsTArray<mozilla::TextRange>& aTextRangeList);
+  void DispatchCompositionChangeEvent(nsWindow* aWindow,
+                                      const nsIMEContext &aIMEContext,
+                                      bool aCheckAttr = true);
+  already_AddRefed<mozilla::TextRangeArray> CreateTextRangeArray();
 
   nsresult EnsureClauseArray(int32_t aCount);
   nsresult EnsureAttributeArray(int32_t aCount);

@@ -21,7 +21,7 @@ namespace reflect {
 
 NS_GENERIC_FACTORY_CONSTRUCTOR(Module)
 
-NS_IMPL_ISUPPORTS1(Module, nsIXPCScriptable)
+NS_IMPL_ISUPPORTS(Module, nsIXPCScriptable)
 
 Module::Module()
 {
@@ -44,7 +44,7 @@ Module::Call(nsIXPConnectWrappedNative* wrapper,
              const JS::CallArgs& args,
              bool* _retval)
 {
-  JSObject* global = JS::CurrentGlobalOrNull(cx);
+  JS::Rooted<JSObject*> global(cx, JS::CurrentGlobalOrNull(cx));
   if (!global)
     return NS_ERROR_NOT_AVAILABLE;
 

@@ -3,10 +3,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifdef MOZ_LOGGING
-#define FORCE_PR_LOG
-#endif
-
 #include "nspr.h"
 #include "prlog.h"
 
@@ -16,7 +12,6 @@
 #include "nsIInterfaceRequestor.h"
 #include "nsIInterfaceRequestorUtils.h"
 #include "nsIServiceManager.h"
-#include "nsIObserverService.h"
 #include "nsCURILoader.h"
 #include "nsIDocShell.h"
 #include "nsIDocShellTreeItem.h"
@@ -47,8 +42,6 @@
 #include "nsCRT.h"
 
 using namespace mozilla;
-
-#define IS_SECURE(state) ((state & 0xFFFF) == STATE_IS_SECURE)
 
 #if defined(PR_LOGGING)
 //
@@ -100,7 +93,7 @@ static const PLDHashTableOps gMapOps = {
 #ifdef DEBUG
 class nsAutoAtomic {
   public:
-    nsAutoAtomic(Atomic<int32_t> &i)
+    explicit nsAutoAtomic(Atomic<int32_t> &i)
     :mI(i) {
       mI++;
     }
@@ -150,13 +143,12 @@ nsSecureBrowserUIImpl::~nsSecureBrowserUIImpl()
   }
 }
 
-NS_IMPL_ISUPPORTS6(nsSecureBrowserUIImpl,
-                   nsISecureBrowserUI,
-                   nsIWebProgressListener,
-                   nsIFormSubmitObserver,
-                   nsIObserver,
-                   nsISupportsWeakReference,
-                   nsISSLStatusProvider)
+NS_IMPL_ISUPPORTS(nsSecureBrowserUIImpl,
+                  nsISecureBrowserUI,
+                  nsIWebProgressListener,
+                  nsIFormSubmitObserver,
+                  nsISupportsWeakReference,
+                  nsISSLStatusProvider)
 
 NS_IMETHODIMP
 nsSecureBrowserUIImpl::Init(nsIDOMWindow *aWindow)
@@ -189,12 +181,6 @@ nsSecureBrowserUIImpl::Init(nsIDOMWindow *aWindow)
   mWindow = do_GetWeakReference(pwin, &rv);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  // hook up to the form post notifications:
-  nsCOMPtr<nsIObserverService> svc(do_GetService("@mozilla.org/observer-service;1", &rv));
-  if (NS_SUCCEEDED(rv)) {
-    rv = svc->AddObserver(this, NS_FORMSUBMIT_SUBJECT, true);
-  }
-  
   nsCOMPtr<nsPIDOMWindow> piwindow(do_QueryInterface(aWindow));
   if (!piwindow) return NS_ERROR_FAILURE;
 
@@ -278,9 +264,8 @@ nsSecureBrowserUIImpl::MapInternalToExternalState(uint32_t* aState, lockIconStat
   if (!docShell)
     return NS_OK;
 
-  int32_t docShellType;
   // For content docShell's, the mixed content security state is set on the root docShell.
-  if (NS_SUCCEEDED(docShell->GetItemType(&docShellType)) && docShellType == nsIDocShellTreeItem::typeContent) {
+  if (docShell->ItemType() == nsIDocShellTreeItem::typeContent) {
     nsCOMPtr<nsIDocShellTreeItem> docShellTreeItem(do_QueryInterface(docShell));
     nsCOMPtr<nsIDocShellTreeItem> sameTypeRoot;
     docShellTreeItem->GetSameTypeRootTreeItem(getter_AddRefs(sameTypeRoot));
@@ -313,6 +298,13 @@ nsSecureBrowserUIImpl::MapInternalToExternalState(uint32_t* aState, lockIconStat
   if (docShell->GetHasMixedDisplayContentBlocked())
     *aState |= nsIWebProgressListener::STATE_BLOCKED_MIXED_DISPLAY_CONTENT;
 
+  // Has Tracking Content been Blocked?
+  if (docShell->GetHasTrackingContentBlocked())
+    *aState |= nsIWebProgressListener::STATE_BLOCKED_TRACKING_CONTENT;
+
+  if (docShell->GetHasTrackingContentLoaded())
+    *aState |= nsIWebProgressListener::STATE_LOADED_TRACKING_CONTENT;
+
   return NS_OK;
 }
 
@@ -323,14 +315,6 @@ nsSecureBrowserUIImpl::SetDocShell(nsIDocShell *aDocShell)
   mDocShell = do_GetWeakReference(aDocShell, &rv);
   return rv;
 }
-
-NS_IMETHODIMP
-nsSecureBrowserUIImpl::Observe(nsISupports*, const char*,
-                               const PRUnichar*)
-{
-  return NS_ERROR_NOT_IMPLEMENTED;
-}
-
 
 static nsresult IsChildOfDomWindow(nsIDOMWindow *parent, nsIDOMWindow *child,
                                    bool* value)
@@ -351,7 +335,8 @@ static nsresult IsChildOfDomWindow(nsIDOMWindow *parent, nsIDOMWindow *child,
   return NS_OK;
 }
 
-static uint32_t GetSecurityStateFromSecurityInfo(nsISupports *info)
+static uint32_t GetSecurityStateFromSecurityInfoAndRequest(nsISupports* info,
+                                                           nsIRequest* request)
 {
   nsresult res;
   uint32_t securityState;
@@ -371,7 +356,32 @@ static uint32_t GetSecurityStateFromSecurityInfo(nsISupports *info)
                                          res));
     securityState = nsIWebProgressListener::STATE_IS_BROKEN;
   }
-  
+
+  if (securityState != nsIWebProgressListener::STATE_IS_INSECURE) {
+    // A secure connection does not yield a secure per-uri channel if the
+    // scheme is plain http.
+
+    nsCOMPtr<nsIURI> uri;
+    nsCOMPtr<nsIChannel> channel(do_QueryInterface(request));
+    if (channel) {
+      channel->GetURI(getter_AddRefs(uri));
+    } else {
+      nsCOMPtr<imgIRequest> imgRequest(do_QueryInterface(request));
+      if (imgRequest) {
+        imgRequest->GetURI(getter_AddRefs(uri));
+      }
+    }
+    if (uri) {
+      bool isHttp, isFtp;
+      if ((NS_SUCCEEDED(uri->SchemeIs("http", &isHttp)) && isHttp) ||
+          (NS_SUCCEEDED(uri->SchemeIs("ftp", &isFtp)) && isFtp)) {
+        PR_LOG(gSecureDocLog, PR_LOG_DEBUG, ("SecureUI: GetSecurityState: - "
+                                             "channel scheme is insecure.\n"));
+        securityState = nsIWebProgressListener::STATE_IS_INSECURE;
+      }
+    }
+  }
+
   PR_LOG(gSecureDocLog, PR_LOG_DEBUG, ("SecureUI: GetSecurityState: - Returning %d\n", 
                                        securityState));
   return securityState;
@@ -390,7 +400,7 @@ nsSecureBrowserUIImpl::Notify(nsIDOMHTMLFormElement* aDOMForm,
   
   nsCOMPtr<nsIContent> formNode = do_QueryInterface(aDOMForm);
 
-  nsCOMPtr<nsIDocument> document = formNode->GetDocument();
+  nsCOMPtr<nsIDocument> document = formNode->GetComposedDoc();
   if (!document) return NS_OK;
 
   nsIPrincipal *principal = formNode->NodePrincipal();
@@ -467,12 +477,14 @@ void nsSecureBrowserUIImpl::ResetStateTracking()
     mTransferringRequests.ops = nullptr;
   }
   PL_DHashTableInit(&mTransferringRequests, &gMapOps, nullptr,
-                    sizeof(RequestHashEntry), 16);
+                    sizeof(RequestHashEntry));
 }
 
 nsresult
-nsSecureBrowserUIImpl::EvaluateAndUpdateSecurityState(nsIRequest* aRequest, nsISupports *info,
-                                                      bool withNewLocation)
+nsSecureBrowserUIImpl::EvaluateAndUpdateSecurityState(nsIRequest* aRequest,
+                                                      nsISupports *info,
+                                                      bool withNewLocation,
+                                                      bool withNewSink)
 {
   /* I explicitly ignore the camelCase variable naming style here,
      I want to make it clear these are temp variables that relate to the 
@@ -484,7 +496,8 @@ nsSecureBrowserUIImpl::EvaluateAndUpdateSecurityState(nsIRequest* aRequest, nsIS
   bool updateStatus = false;
   nsCOMPtr<nsISSLStatus> temp_SSLStatus;
 
-    temp_NewToplevelSecurityState = GetSecurityStateFromSecurityInfo(info);
+    temp_NewToplevelSecurityState =
+      GetSecurityStateFromSecurityInfoAndRequest(info, aRequest);
 
     PR_LOG(gSecureDocLog, PR_LOG_DEBUG,
            ("SecureUI:%p: OnStateChange: remember mNewToplevelSecurityState => %x\n", this,
@@ -530,15 +543,18 @@ nsSecureBrowserUIImpl::EvaluateAndUpdateSecurityState(nsIRequest* aRequest, nsIS
     mRestoreSubrequests = false;
   }
 
-  return UpdateSecurityState(aRequest, withNewLocation, updateStatus);
+  return UpdateSecurityState(aRequest, withNewLocation,
+                             withNewSink || updateStatus);
 }
 
 void
-nsSecureBrowserUIImpl::UpdateSubrequestMembers(nsISupports *securityInfo)
+nsSecureBrowserUIImpl::UpdateSubrequestMembers(nsISupports* securityInfo,
+                                               nsIRequest* request)
 {
   // For wyciwyg channels in subdocuments we only update our
   // subrequest state members.
-  uint32_t reqState = GetSecurityStateFromSecurityInfo(securityInfo);
+  uint32_t reqState = GetSecurityStateFromSecurityInfoAndRequest(securityInfo,
+                                                                 request);
 
   // the code above this line should run without a lock
   ReentrantMonitorAutoEnter lock(mReentrantMonitor);
@@ -831,17 +847,17 @@ nsSecureBrowserUIImpl::OnStateChange(nsIWebProgress* aWebProgress,
   if (testFlags & nsIChannel::LOAD_DOCUMENT_URI)
   {
     testFlags -= nsIChannel::LOAD_DOCUMENT_URI;
-    info2.Append("LOAD_DOCUMENT_URI ");
+    info2.AppendLiteral("LOAD_DOCUMENT_URI ");
   }
   if (testFlags & nsIChannel::LOAD_RETARGETED_DOCUMENT_URI)
   {
     testFlags -= nsIChannel::LOAD_RETARGETED_DOCUMENT_URI;
-    info2.Append("LOAD_RETARGETED_DOCUMENT_URI ");
+    info2.AppendLiteral("LOAD_RETARGETED_DOCUMENT_URI ");
   }
   if (testFlags & nsIChannel::LOAD_REPLACE)
   {
     testFlags -= nsIChannel::LOAD_REPLACE;
-    info2.Append("LOAD_REPLACE ");
+    info2.AppendLiteral("LOAD_REPLACE ");
   }
 
   const char *_status = NS_SUCCEEDED(aStatus) ? "1" : "0";
@@ -851,77 +867,77 @@ nsSecureBrowserUIImpl::OnStateChange(nsIWebProgress* aWebProgress,
   if (f & nsIWebProgressListener::STATE_START)
   {
     f -= nsIWebProgressListener::STATE_START;
-    info.Append("START ");
+    info.AppendLiteral("START ");
   }
   if (f & nsIWebProgressListener::STATE_REDIRECTING)
   {
     f -= nsIWebProgressListener::STATE_REDIRECTING;
-    info.Append("REDIRECTING ");
+    info.AppendLiteral("REDIRECTING ");
   }
   if (f & nsIWebProgressListener::STATE_TRANSFERRING)
   {
     f -= nsIWebProgressListener::STATE_TRANSFERRING;
-    info.Append("TRANSFERRING ");
+    info.AppendLiteral("TRANSFERRING ");
   }
   if (f & nsIWebProgressListener::STATE_NEGOTIATING)
   {
     f -= nsIWebProgressListener::STATE_NEGOTIATING;
-    info.Append("NEGOTIATING ");
+    info.AppendLiteral("NEGOTIATING ");
   }
   if (f & nsIWebProgressListener::STATE_STOP)
   {
     f -= nsIWebProgressListener::STATE_STOP;
-    info.Append("STOP ");
+    info.AppendLiteral("STOP ");
   }
   if (f & nsIWebProgressListener::STATE_IS_REQUEST)
   {
     f -= nsIWebProgressListener::STATE_IS_REQUEST;
-    info.Append("IS_REQUEST ");
+    info.AppendLiteral("IS_REQUEST ");
   }
   if (f & nsIWebProgressListener::STATE_IS_DOCUMENT)
   {
     f -= nsIWebProgressListener::STATE_IS_DOCUMENT;
-    info.Append("IS_DOCUMENT ");
+    info.AppendLiteral("IS_DOCUMENT ");
   }
   if (f & nsIWebProgressListener::STATE_IS_NETWORK)
   {
     f -= nsIWebProgressListener::STATE_IS_NETWORK;
-    info.Append("IS_NETWORK ");
+    info.AppendLiteral("IS_NETWORK ");
   }
   if (f & nsIWebProgressListener::STATE_IS_WINDOW)
   {
     f -= nsIWebProgressListener::STATE_IS_WINDOW;
-    info.Append("IS_WINDOW ");
+    info.AppendLiteral("IS_WINDOW ");
   }
   if (f & nsIWebProgressListener::STATE_IS_INSECURE)
   {
     f -= nsIWebProgressListener::STATE_IS_INSECURE;
-    info.Append("IS_INSECURE ");
+    info.AppendLiteral("IS_INSECURE ");
   }
   if (f & nsIWebProgressListener::STATE_IS_BROKEN)
   {
     f -= nsIWebProgressListener::STATE_IS_BROKEN;
-    info.Append("IS_BROKEN ");
+    info.AppendLiteral("IS_BROKEN ");
   }
   if (f & nsIWebProgressListener::STATE_IS_SECURE)
   {
     f -= nsIWebProgressListener::STATE_IS_SECURE;
-    info.Append("IS_SECURE ");
+    info.AppendLiteral("IS_SECURE ");
   }
   if (f & nsIWebProgressListener::STATE_SECURE_HIGH)
   {
     f -= nsIWebProgressListener::STATE_SECURE_HIGH;
-    info.Append("SECURE_HIGH ");
+    info.AppendLiteral("SECURE_HIGH ");
   }
   if (f & nsIWebProgressListener::STATE_RESTORING)
   {
     f -= nsIWebProgressListener::STATE_RESTORING;
-    info.Append("STATE_RESTORING ");
+    info.AppendLiteral("STATE_RESTORING ");
   }
 
   if (f > 0)
   {
-    info.Append("f contains unknown flag!");
+    info.AppendLiteral("f contains unknown flag!");
   }
 
   PR_LOG(gSecureDocLog, PR_LOG_DEBUG,
@@ -934,7 +950,7 @@ nsSecureBrowserUIImpl::OnStateChange(nsIWebProgress* aWebProgress,
   {
     PR_LOG(gSecureDocLog, PR_LOG_DEBUG,
            ("SecureUI:%p: OnStateChange: seeing STOP with security state: %d\n", this,
-            GetSecurityStateFromSecurityInfo(securityInfo)
+            GetSecurityStateFromSecurityInfoAndRequest(securityInfo, aRequest)
             ));
   }
 #endif
@@ -1174,7 +1190,8 @@ nsSecureBrowserUIImpl::OnStateChange(nsIWebProgress* aWebProgress,
       // OnStateChange, we have to fire the notification here (again).
 
       if (sinkChanged || mOnLocationChangeSeen)
-        return EvaluateAndUpdateSecurityState(aRequest, securityInfo, false);
+        return EvaluateAndUpdateSecurityState(aRequest, securityInfo,
+                                              false, sinkChanged);
     }
     mOnLocationChangeSeen = false;
 
@@ -1233,7 +1250,7 @@ nsSecureBrowserUIImpl::OnStateChange(nsIWebProgress* aWebProgress,
 
     if (allowSecurityStateChange && requestHasTransferedData)
     {  
-      UpdateSubrequestMembers(securityInfo);
+      UpdateSubrequestMembers(securityInfo, aRequest);
       
       // Care for the following scenario:
       // A new top level document load might have already started,
@@ -1462,11 +1479,11 @@ nsSecureBrowserUIImpl::OnLocationChange(nsIWebProgress* aWebProgress,
   if (windowForProgress.get() == window.get()) {
     // For toplevel channels, update the security state right away.
     mOnLocationChangeSeen = true;
-    return EvaluateAndUpdateSecurityState(aRequest, securityInfo, true);
+    return EvaluateAndUpdateSecurityState(aRequest, securityInfo, true, false);
   }
 
   // For channels in subdocuments we only update our subrequest state members.
-  UpdateSubrequestMembers(securityInfo);
+  UpdateSubrequestMembers(securityInfo, aRequest);
 
   // Care for the following scenario:
 
@@ -1495,7 +1512,7 @@ NS_IMETHODIMP
 nsSecureBrowserUIImpl::OnStatusChange(nsIWebProgress* aWebProgress,
                                       nsIRequest* aRequest,
                                       nsresult aStatus,
-                                      const PRUnichar* aMessage)
+                                      const char16_t* aMessage)
 {
   NS_NOTREACHED("notification excluded in AddProgressListener(...)");
   return NS_OK;
@@ -1624,14 +1641,16 @@ public:
   NS_DECL_ISUPPORTS
   NS_DECL_NSIINTERFACEREQUESTOR
 
-  nsUIContext(nsIDOMWindow *window);
+  explicit nsUIContext(nsIDOMWindow *window);
+
+protected:
   virtual ~nsUIContext();
 
 private:
   nsCOMPtr<nsIDOMWindow> mWindow;
 };
 
-NS_IMPL_ISUPPORTS1(nsUIContext, nsIInterfaceRequestor)
+NS_IMPL_ISUPPORTS(nsUIContext, nsIInterfaceRequestor)
 
 nsUIContext::nsUIContext(nsIDOMWindow *aWindow)
 : mWindow(aWindow)

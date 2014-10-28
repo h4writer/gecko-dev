@@ -5,6 +5,11 @@
 from __future__ import unicode_literals
 
 import sys
+import os
+import stat
+import platform
+import urllib2
+import errno
 
 from mach.decorators import (
     CommandArgument,
@@ -32,7 +37,7 @@ class SearchProvider(object):
     def dxr(self, term):
         import webbrowser
         term = ' '.join(term)
-        uri = 'http://dxr.mozilla.org/search?tree=mozilla-central&q=%s' % term
+        uri = 'http://dxr.mozilla.org/mozilla-central/search?q=%s&redirect=true' % term
         webbrowser.open_new_tab(uri)
 
     @Command('mdn', category='misc',
@@ -216,7 +221,6 @@ class PastebinProvider(object):
     def pastebin(self, language, poster, duration, file):
         import sys
         import urllib
-        import urllib2
 
         URL = 'http://pastebin.mozilla.org/'
 
@@ -290,7 +294,7 @@ class PastebinProvider(object):
 
 @CommandProvider
 class ReviewboardToolsProvider(MachCommandBase):
-    @Command('rbt', category='devenv', allow_all_args=True,
+    @Command('rbt', category='devenv',
         description='Run Reviewboard Tools')
     @CommandArgument('args', nargs='...', help='Arguments to rbt tool')
     def rbt(self, args):
@@ -298,7 +302,7 @@ class ReviewboardToolsProvider(MachCommandBase):
             args = ['help']
 
         self._activate_virtualenv()
-        self.virtualenv_manager.install_pip_package('RBTools')
+        self.virtualenv_manager.install_pip_package('RBTools==0.6')
 
         from rbtools.commands.main import main
 
@@ -306,3 +310,87 @@ class ReviewboardToolsProvider(MachCommandBase):
         # we fake it out.
         sys.argv = ['rbt'] + args
         return main()
+
+@CommandProvider
+class FormatProvider(MachCommandBase):
+    @Command('clang-format', category='misc',
+        description='Run clang-format on current changes')
+    @CommandArgument('--show', '-s', action = 'store_true',
+        help = 'Show diff output on instead of applying changes')
+    def clang_format(self, show=False):
+        plat = platform.system()
+        fmt = plat.lower() + "/clang-format-3.5"
+        fmt_diff = "clang-format-diff-3.5"
+
+        # We are currently using a modified version of clang-format hosted on people.mozilla.org.
+        # This is a temporary work around until we upstream the necessary changes and we can use
+        # a system version of clang-format. See bug 961541.
+        if plat == "Windows":
+            fmt += ".exe"
+        else:
+            arch = os.uname()[4]
+            if (plat != "Linux" and plat != "Darwin") or arch != 'x86_64':
+                print("Unsupported platform " + plat + "/" + arch +
+                      ". Supported platforms are Windows/*, Linux/x86_64 and Darwin/x86_64")
+                return 1
+
+        os.chdir(self.topsrcdir)
+        self.prompt = True
+
+        try:
+            if not self.locate_or_fetch(fmt):
+                return 1
+            clang_format_diff = self.locate_or_fetch(fmt_diff)
+            if not clang_format_diff:
+                return 1
+
+        except urllib2.HTTPError as e:
+            print("HTTP error {0}: {1}".format(e.code, e.reason))
+            return 1
+
+        from subprocess import Popen, PIPE
+
+        if os.path.exists(".hg"):
+            diff_process = Popen(["hg", "diff", "-U0", "-r", "tip^",
+                                  "--include", "glob:**.c", "--include", "glob:**.cpp", "--include", "glob:**.h",
+                                  "--exclude", "listfile:.clang-format-ignore"], stdout=PIPE)
+        else:
+            git_process = Popen(["git", "diff", "-U0", "HEAD^"], stdout=PIPE)
+            try:
+                diff_process = Popen(["filterdiff", "--include=*.h", "--include=*.cpp",
+                                      "--exclude-from-file=.clang-format-ignore"],
+                                     stdin=git_process.stdout, stdout=PIPE)
+            except OSError as e:
+                if e.errno == errno.ENOENT:
+                    print("Can't find filterdiff. Please install patchutils.")
+                else:
+                    print("OSError {0}: {1}".format(e.code, e.reason))
+                return 1
+
+
+        args = [sys.executable, clang_format_diff, "-p1"]
+        if not show:
+           args.append("-i")
+        cf_process = Popen(args, stdin=diff_process.stdout)
+        return cf_process.communicate()[0]
+
+    def locate_or_fetch(self, root):
+        target = os.path.join(self._mach_context.state_dir, os.path.basename(root))
+        if not os.path.exists(target):
+            site = "https://people.mozilla.org/~ajones/clang-format/"
+            if self.prompt and raw_input("Download clang-format executables from {0} (yN)? ".format(site)).lower() != 'y':
+                print("Download aborted.")
+                return 1
+            self.prompt = False
+
+            u = site + root
+            print("Downloading {0} to {1}".format(u, target))
+            data = urllib2.urlopen(url=u).read()
+            temp = target + ".tmp"
+            with open(temp, "wb") as fh:
+                fh.write(data)
+                fh.close()
+            os.chmod(temp, os.stat(temp).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            os.rename(temp, target)
+        return target
+

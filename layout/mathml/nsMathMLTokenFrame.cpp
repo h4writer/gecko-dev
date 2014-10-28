@@ -10,6 +10,8 @@
 #include "RestyleManager.h"
 #include <algorithm>
 
+using namespace mozilla;
+
 nsIFrame*
 NS_NewMathMLTokenFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
 {
@@ -42,8 +44,7 @@ nsMathMLTokenFrame::GetMathMLFrameType()
   uint8_t mathVariant = StyleFont()->mMathVariant;
   if ((mathVariant == NS_MATHML_MATHVARIANT_NONE &&
        (StyleFont()->mFont.style == NS_STYLE_FONT_STYLE_ITALIC ||
-        HasAnyStateBits(TEXT_IS_IN_SINGLE_CHAR_MI))) ||
-      mathVariant == NS_MATHML_MATHVARIANT_ITALIC ||
+        HasAnyStateBits(NS_FRAME_IS_IN_SINGLE_CHAR_MI))) ||
       mathVariant == NS_MATHML_MATHVARIANT_ITALIC ||
       mathVariant == NS_MATHML_MATHVARIANT_BOLD_ITALIC ||
       mathVariant == NS_MATHML_MATHVARIANT_SANS_SERIF_ITALIC ||
@@ -76,7 +77,10 @@ nsMathMLTokenFrame::MarkTextFramesAsTokenMathML()
   }
   if (mContent->Tag() == nsGkAtoms::mi_ && childCount == 1) {
     nsAutoString data;
-    nsContentUtils::GetNodeTextContent(mContent, false, data);
+    if (!nsContentUtils::GetNodeTextContent(mContent, false, data)) {
+      NS_RUNTIMEABORT("OOM");
+    }
+
     data.CompressWhitespace();
     int32_t length = data.Length();
 
@@ -84,96 +88,74 @@ nsMathMLTokenFrame::MarkTextFramesAsTokenMathML()
       (length == 2 && NS_IS_HIGH_SURROGATE(data[0]));
 
     if (isSingleCharacter) {
-      child->AddStateBits(TEXT_IS_IN_SINGLE_CHAR_MI);
+      child->AddStateBits(NS_FRAME_IS_IN_SINGLE_CHAR_MI);
+      AddStateBits(NS_FRAME_IS_IN_SINGLE_CHAR_MI);
     }
   }
 }
 
-NS_IMETHODIMP
+void
 nsMathMLTokenFrame::SetInitialChildList(ChildListID     aListID,
                                         nsFrameList&    aChildList)
 {
   // First, let the base class do its work
-  nsresult rv = nsMathMLContainerFrame::SetInitialChildList(aListID, aChildList);
-  if (NS_FAILED(rv))
-    return rv;
-
+  nsMathMLContainerFrame::SetInitialChildList(aListID, aChildList);
   MarkTextFramesAsTokenMathML();
-
-  return rv;
 }
 
-NS_IMETHODIMP
+void
 nsMathMLTokenFrame::AppendFrames(ChildListID aListID,
                                  nsFrameList& aChildList)
 {
-  nsresult rv = nsMathMLContainerFrame::AppendFrames(aListID, aChildList);
-  if (NS_FAILED(rv))
-    return rv;
-
+  nsMathMLContainerFrame::AppendFrames(aListID, aChildList);
   MarkTextFramesAsTokenMathML();
-
-  return rv;
 }
 
-NS_IMETHODIMP
+void
 nsMathMLTokenFrame::InsertFrames(ChildListID aListID,
                                  nsIFrame* aPrevFrame,
                                  nsFrameList& aChildList)
 {
-  nsresult rv = nsMathMLContainerFrame::InsertFrames(aListID, aPrevFrame,
-                                                     aChildList);
-  if (NS_FAILED(rv))
-    return rv;
-
+  nsMathMLContainerFrame::InsertFrames(aListID, aPrevFrame, aChildList);
   MarkTextFramesAsTokenMathML();
-
-  return rv;
 }
 
-nsresult
+void
 nsMathMLTokenFrame::Reflow(nsPresContext*          aPresContext,
                            nsHTMLReflowMetrics&     aDesiredSize,
                            const nsHTMLReflowState& aReflowState,
                            nsReflowStatus&          aStatus)
 {
-  nsresult rv = NS_OK;
-
   // initializations needed for empty markup like <mtag></mtag>
-  aDesiredSize.width = aDesiredSize.height = 0;
-  aDesiredSize.ascent = 0;
+  aDesiredSize.ClearSize();
+  aDesiredSize.SetBlockStartAscent(0);
   aDesiredSize.mBoundingMetrics = nsBoundingMetrics();
 
-  nsSize availSize(aReflowState.ComputedWidth(), NS_UNCONSTRAINEDSIZE);
   nsIFrame* childFrame = GetFirstPrincipalChild();
   while (childFrame) {
     // ask our children to compute their bounding metrics
-    nsHTMLReflowMetrics childDesiredSize(aDesiredSize.mFlags
+    nsHTMLReflowMetrics childDesiredSize(aReflowState.GetWritingMode(),
+                                         aDesiredSize.mFlags
                                          | NS_REFLOW_CALC_BOUNDING_METRICS);
+    WritingMode wm = childFrame->GetWritingMode();
+    LogicalSize availSize = aReflowState.ComputedSize(wm);
+    availSize.BSize(wm) = NS_UNCONSTRAINEDSIZE;
     nsHTMLReflowState childReflowState(aPresContext, aReflowState,
                                        childFrame, availSize);
-    rv = ReflowChild(childFrame, aPresContext, childDesiredSize,
-                     childReflowState, aStatus);
+    ReflowChild(childFrame, aPresContext, childDesiredSize,
+                childReflowState, aStatus);
     //NS_ASSERTION(NS_FRAME_IS_COMPLETE(aStatus), "bad status");
-    if (NS_FAILED(rv)) {
-      // Call DidReflow() for the child frames we successfully did reflow.
-      DidReflowChildren(GetFirstPrincipalChild(), childFrame);
-      return rv;
-    }
-
     SaveReflowAndBoundingMetricsFor(childFrame, childDesiredSize,
                                     childDesiredSize.mBoundingMetrics);
 
     childFrame = childFrame->GetNextSibling();
   }
 
-
   // place and size children
   FinalizeReflow(*aReflowState.rendContext, aDesiredSize);
 
   aStatus = NS_FRAME_COMPLETE;
   NS_FRAME_SET_TRUNCATION(aStatus, aReflowState, aDesiredSize);
-  return NS_OK;
 }
 
 // For token elements, mBoundingMetrics is computed at the ReflowToken
@@ -187,7 +169,7 @@ nsMathMLTokenFrame::Place(nsRenderingContext& aRenderingContext,
   mBoundingMetrics = nsBoundingMetrics();
   for (nsIFrame* childFrame = GetFirstPrincipalChild(); childFrame;
        childFrame = childFrame->GetNextSibling()) {
-    nsHTMLReflowMetrics childSize;
+    nsHTMLReflowMetrics childSize(aDesiredSize.GetWritingMode());
     GetReflowAndBoundingMetricsFor(childFrame, childSize,
                                    childSize.mBoundingMetrics, nullptr);
     // compute and cache the bounding metrics
@@ -200,27 +182,27 @@ nsMathMLTokenFrame::Place(nsRenderingContext& aRenderingContext,
   nscoord descent = fm->MaxDescent();
 
   aDesiredSize.mBoundingMetrics = mBoundingMetrics;
-  aDesiredSize.width = mBoundingMetrics.width;
-  aDesiredSize.ascent = std::max(mBoundingMetrics.ascent, ascent);
-  aDesiredSize.height = aDesiredSize.ascent +
+  aDesiredSize.Width() = mBoundingMetrics.width;
+  aDesiredSize.SetBlockStartAscent(std::max(mBoundingMetrics.ascent, ascent));
+  aDesiredSize.Height() = aDesiredSize.BlockStartAscent() +
                         std::max(mBoundingMetrics.descent, descent);
 
   if (aPlaceOrigin) {
     nscoord dy, dx = 0;
     for (nsIFrame* childFrame = GetFirstPrincipalChild(); childFrame;
          childFrame = childFrame->GetNextSibling()) {
-      nsHTMLReflowMetrics childSize;
+      nsHTMLReflowMetrics childSize(aDesiredSize.GetWritingMode());
       GetReflowAndBoundingMetricsFor(childFrame, childSize,
                                      childSize.mBoundingMetrics);
 
       // place and size the child; (dx,0) makes the caret happy - bug 188146
-      dy = childSize.height == 0 ? 0 : aDesiredSize.ascent - childSize.ascent;
-      FinishReflowChild(childFrame, PresContext(), nullptr, childSize, dx, dy, 0);
-      dx += childSize.width;
+      dy = childSize.Height() == 0 ? 0 : aDesiredSize.BlockStartAscent() - childSize.BlockStartAscent();
+      FinishReflowChild(childFrame, PresContext(), childSize, nullptr, dx, dy, 0);
+      dx += childSize.Width();
     }
   }
 
-  SetReference(nsPoint(0, aDesiredSize.ascent));
+  SetReference(nsPoint(0, aDesiredSize.BlockStartAscent()));
 
   return NS_OK;
 }

@@ -7,44 +7,26 @@ function run_test() {
   run_next_test();
 }
 
-function _getWorker() {
-  let _postedMessage;
-  let _worker = newWorker({
-    postRILMessage: function fakePostRILMessage(data) {
-    },
-    postMessage: function fakePostMessage(message) {
-      _postedMessage = message;
-    }
-  });
-  return {
-    get postedMessage() {
-      return _postedMessage;
-    },
-    get worker() {
-      return _worker;
-    }
-  };
-}
-
 add_test(function test_queryCLIP_provisioned() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
-  worker.Buf.readInt32 = function fakeReadUint32() {
-    return worker.Buf.int32Array.pop();
+  context.Buf.readInt32 = function fakeReadUint32() {
+    return context.Buf.int32Array.pop();
   };
 
-  worker.RIL.queryCLIP = function fakeQueryCLIP(options) {
-    worker.Buf.int32Array = [
+  context.RIL.queryCLIP = function fakeQueryCLIP(options) {
+    context.Buf.int32Array = [
       1,  // CLIP provisioned.
       1   // Length.
     ];
-    worker.RIL[REQUEST_QUERY_CLIP](1, {
+    context.RIL[REQUEST_QUERY_CLIP](1, {
       rilRequestError: ERROR_SUCCESS
     });
   };
 
-  worker.RIL.queryCLIP({});
+  context.RIL.queryCLIP({});
 
   let postedMessage = workerHelper.postedMessage;
 
@@ -55,24 +37,25 @@ add_test(function test_queryCLIP_provisioned() {
 });
 
 add_test(function test_getCLIP_error_generic_failure_invalid_length() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
-  worker.Buf.readInt32 = function fakeReadUint32() {
-    return worker.Buf.int32Array.pop();
+  context.Buf.readInt32 = function fakeReadUint32() {
+    return context.Buf.int32Array.pop();
   };
 
-  worker.RIL.queryCLIP = function fakeQueryCLIP(options) {
-    worker.Buf.int32Array = [
+  context.RIL.queryCLIP = function fakeQueryCLIP(options) {
+    context.Buf.int32Array = [
       1,  // CLIP provisioned.
       0   // Length.
     ];
-    worker.RIL[REQUEST_QUERY_CLIP](1, {
+    context.RIL[REQUEST_QUERY_CLIP](1, {
       rilRequestError: ERROR_SUCCESS
     });
   };
 
-  worker.RIL.queryCLIP({});
+  context.RIL.queryCLIP({});
 
   let postedMessage = workerHelper.postedMessage;
 

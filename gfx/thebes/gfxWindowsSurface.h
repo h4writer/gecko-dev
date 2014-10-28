@@ -35,12 +35,12 @@ public:
 
     // Create a DIB surface
     gfxWindowsSurface(const gfxIntSize& size,
-                      gfxImageFormat imageFormat = gfxImageFormatRGB24);
+                      gfxImageFormat imageFormat = gfxImageFormat::RGB24);
 
     // Create a DDB surface; dc may be nullptr to use the screen DC
     gfxWindowsSurface(HDC dc,
                       const gfxIntSize& size,
-                      gfxImageFormat imageFormat = gfxImageFormatRGB24);
+                      gfxImageFormat imageFormat = gfxImageFormat::RGB24);
 
     gfxWindowsSurface(cairo_surface_t *csurf);
 
@@ -57,25 +57,13 @@ public:
 
     already_AddRefed<gfxImageSurface> GetAsImageSurface();
 
-    already_AddRefed<gfxWindowsSurface> OptimizeToDDB(HDC dc,
-                                                      const gfxIntSize& size,
-                                                      gfxImageFormat format);
-
     nsresult BeginPrinting(const nsAString& aTitle, const nsAString& aPrintToFileName);
     nsresult EndPrinting();
     nsresult AbortPrinting();
     nsresult BeginPage();
     nsresult EndPage();
 
-    virtual int32_t GetDefaultContextFlags() const;
-
     const gfxIntSize GetSize() const;
-
-    void MovePixels(const nsIntRect& aSourceRect,
-                    const nsIntPoint& aDestTopLeft)
-    {
-        FastMovePixels(aSourceRect, aDestTopLeft);
-    }
 
     // The memory used by this surface lives in this process's address space,
     // but not in the heap.

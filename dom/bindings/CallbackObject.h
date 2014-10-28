@@ -24,6 +24,7 @@
 #include "mozilla/Assertions.h"
 #include "mozilla/ErrorResult.h"
 #include "mozilla/HoldDropJSObjects.h"
+#include "mozilla/MemoryReporting.h"
 #include "mozilla/dom/ScriptSettings.h"
 #include "nsContentUtils.h"
 #include "nsWrapperCache.h"
@@ -52,11 +53,6 @@ public:
   explicit CallbackObject(JS::Handle<JSObject*> aCallback, nsIGlobalObject *aIncumbentGlobal)
   {
     Init(aCallback, aIncumbentGlobal);
-  }
-
-  virtual ~CallbackObject()
-  {
-    DropCallback();
   }
 
   JS::Handle<JSObject*> Callback() const
@@ -96,38 +92,70 @@ public:
     eRethrowExceptions
   };
 
+  size_t SizeOfIncludingThis(mozilla::MallocSizeOf aMallocSizeOf) const
+  {
+    return aMallocSizeOf(this);
+  }
+
 protected:
+  virtual ~CallbackObject()
+  {
+    DropJSObjects();
+  }
+
   explicit CallbackObject(CallbackObject* aCallbackObject)
   {
     Init(aCallbackObject->mCallback, aCallbackObject->mIncumbentGlobal);
+  }
+
+  bool operator==(const CallbackObject& aOther) const
+  {
+    JSObject* thisObj =
+      js::UncheckedUnwrap(CallbackPreserveColor());
+    JSObject* otherObj =
+      js::UncheckedUnwrap(aOther.CallbackPreserveColor());
+    return thisObj == otherObj;
   }
 
 private:
   inline void Init(JSObject* aCallback, nsIGlobalObject* aIncumbentGlobal)
   {
     MOZ_ASSERT(aCallback && !mCallback);
-    // Set mCallback before we hold, on the off chance that a GC could somehow
-    // happen in there... (which would be pretty odd, granted).
+    // Set script objects before we hold, on the off chance that a GC could
+    // somehow happen in there... (which would be pretty odd, granted).
     mCallback = aCallback;
+    if (aIncumbentGlobal) {
+      mIncumbentGlobal = aIncumbentGlobal;
+      mIncumbentJSGlobal = aIncumbentGlobal->GetGlobalJSObject();
+    }
     mozilla::HoldJSObjects(this);
-
-    mIncumbentGlobal = aIncumbentGlobal;
   }
 
   CallbackObject(const CallbackObject&) MOZ_DELETE;
   CallbackObject& operator =(const CallbackObject&) MOZ_DELETE;
 
 protected:
-  void DropCallback()
+  void DropJSObjects()
   {
+    MOZ_ASSERT_IF(mIncumbentJSGlobal, mCallback);
     if (mCallback) {
       mCallback = nullptr;
+      mIncumbentJSGlobal = nullptr;
       mozilla::DropJSObjects(this);
     }
   }
 
   JS::Heap<JSObject*> mCallback;
+  // Ideally, we'd just hold a reference to the nsIGlobalObject, since that's
+  // what we need to pass to AutoIncumbentScript. Unfortunately, that doesn't
+  // hold the actual JS global alive. So we maintain an additional pointer to
+  // the JS global itself so that we can trace it.
+  //
+  // At some point we should consider trying to make native globals hold their
+  // scripted global alive, at which point we can get rid of the duplication
+  // here.
   nsCOMPtr<nsIGlobalObject> mIncumbentGlobal;
+  JS::TenuredHeap<JSObject*> mIncumbentJSGlobal;
 
   class MOZ_STACK_CLASS CallSetup
   {
@@ -139,10 +167,11 @@ protected:
      */
   public:
     // If aExceptionHandling == eRethrowContentExceptions then aCompartment
-    // needs to be set to the caller's compartment.
+    // needs to be set to the compartment in which exceptions will be rethrown.
     CallSetup(CallbackObject* aCallback, ErrorResult& aRv,
               ExceptionHandling aExceptionHandling,
-              JSCompartment* aCompartment = nullptr);
+              JSCompartment* aCompartment = nullptr,
+              bool aIsJSImplementedWebIDL = false);
     ~CallSetup();
 
     JSContext* GetContext() const
@@ -304,11 +333,7 @@ public:
       return false;
     }
 
-    JSObject* thisObj =
-      js::UncheckedUnwrap(GetWebIDLCallback()->CallbackPreserveColor());
-    JSObject* otherObj =
-      js::UncheckedUnwrap(aOtherCallback->CallbackPreserveColor());
-    return thisObj == otherObj;
+    return *GetWebIDLCallback() == *aOtherCallback;
   }
 
   bool operator==(XPCOMCallbackT* aOtherCallback) const

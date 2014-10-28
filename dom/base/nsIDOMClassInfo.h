@@ -7,7 +7,6 @@
 #define nsIDOMClassInfo_h___
 
 #include "nsIClassInfoImpl.h"
-#include "nsVoidArray.h"
 #include "nsDOMClassInfoID.h"
 #include "nsIXPCScriptable.h"
 #include "nsIServiceManager.h"
@@ -25,7 +24,6 @@
 #define DEFAULT_SCRIPTABLE_FLAGS                                           \
   (DOM_BASE_SCRIPTABLE_FLAGS |                                             \
    nsIXPCScriptable::WANT_NEWRESOLVE |                                     \
-   nsIXPCScriptable::WANT_CHECKACCESS |                                    \
    nsIXPCScriptable::WANT_PRECREATE)
 
 #define DOM_DEFAULT_SCRIPTABLE_FLAGS                                       \
@@ -139,7 +137,7 @@ NS_DOMCI_EXTENSION_NAME(_module)::~NS_DOMCI_EXTENSION_NAME(_module)()     \
 {                                                                         \
 }                                                                         \
                                                                           \
-NS_IMPL_ISUPPORTS1(NS_DOMCI_EXTENSION_NAME(_module), nsIDOMCIExtension)   \
+NS_IMPL_ISUPPORTS(NS_DOMCI_EXTENSION_NAME(_module), nsIDOMCIExtension)    \
                                                                           \
 NS_IMETHODIMP                                                             \
 NS_DOMCI_EXTENSION_NAME(_module)::RegisterDOMCI(const char* aName,        \

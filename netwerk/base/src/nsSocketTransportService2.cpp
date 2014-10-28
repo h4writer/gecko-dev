@@ -3,10 +3,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifdef MOZ_LOGGING
-#define FORCE_PR_LOG
-#endif
-
 #include "nsSocketTransportService2.h"
 #include "nsSocketTransport2.h"
 #include "nsError.h"
@@ -21,6 +17,8 @@
 #include "mozilla/Preferences.h"
 #include "mozilla/Likely.h"
 #include "mozilla/PublicSSL.h"
+#include "mozilla/ChaosMode.h"
+#include "mozilla/PodOperations.h"
 #include "nsThreadUtils.h"
 #include "nsIFile.h"
 
@@ -35,6 +33,10 @@ nsSocketTransportService *gSocketTransportService = nullptr;
 PRThread                 *gSocketThread           = nullptr;
 
 #define SEND_BUFFER_PREF "network.tcp.sendbuffer"
+#define KEEPALIVE_ENABLED_PREF "network.tcp.keepalive.enabled"
+#define KEEPALIVE_IDLE_TIME_PREF "network.tcp.keepalive.idle_time"
+#define KEEPALIVE_RETRY_INTERVAL_PREF "network.tcp.keepalive.retry_interval"
+#define KEEPALIVE_PROBE_COUNT_PREF "network.tcp.keepalive.probe_count"
 #define SOCKET_LIMIT_TARGET 550U
 #define SOCKET_LIMIT_MIN     50U
 #define BLIP_INTERVAL_PREF "network.activity.blipIntervalMilliseconds"
@@ -61,6 +63,10 @@ nsSocketTransportService::nsSocketTransportService()
     , mSentBytesCount(0)
     , mReceivedBytesCount(0)
     , mSendBufferSize(0)
+    , mKeepaliveIdleTimeS(600)
+    , mKeepaliveRetryIntervalS(1)
+    , mKeepaliveProbeCount(kDefaultTCPKeepCount)
+    , mKeepaliveEnabledPref(false)
     , mProbedMaxCount(false)
 {
 #if defined(PR_LOGGING)
@@ -112,8 +118,8 @@ nsSocketTransportService::Dispatch(nsIRunnable *event, uint32_t flags)
     SOCKET_LOG(("STS dispatch [%p]\n", event));
 
     nsCOMPtr<nsIThread> thread = GetThreadSafely();
-    NS_ENSURE_TRUE(thread, NS_ERROR_NOT_INITIALIZED);
-    nsresult rv = thread->Dispatch(event, flags);
+    nsresult rv;
+    rv = thread ? thread->Dispatch(event, flags) : NS_ERROR_NOT_INITIALIZED;
     if (rv == NS_ERROR_UNEXPECTED) {
         // Thread is no longer accepting events. We must have just shut it
         // down on the main thread. Pretend we never saw it.
@@ -219,12 +225,20 @@ nsSocketTransportService::AddToPollList(SocketContext *sock)
         }
     }
     
-    mActiveList[mActiveCount] = *sock;
+    uint32_t newSocketIndex = mActiveCount;
+    if (ChaosMode::isActive()) {
+      newSocketIndex = ChaosMode::randomUint32LessThan(mActiveCount + 1);
+      PodMove(mActiveList + newSocketIndex + 1, mActiveList + newSocketIndex,
+              mActiveCount - newSocketIndex);
+      PodMove(mPollList + newSocketIndex + 2, mPollList + newSocketIndex + 1,
+              mActiveCount - newSocketIndex);
+    }
+    mActiveList[newSocketIndex] = *sock;
     mActiveCount++;
 
-    mPollList[mActiveCount].fd = sock->mFD;
-    mPollList[mActiveCount].in_flags = sock->mHandler->mPollFlags;
-    mPollList[mActiveCount].out_flags = 0;
+    mPollList[newSocketIndex + 1].fd = sock->mFD;
+    mPollList[newSocketIndex + 1].in_flags = sock->mHandler->mPollFlags;
+    mPollList[newSocketIndex + 1].out_flags = 0;
 
     SOCKET_LOG(("  active=%u idle=%u\n", mActiveCount, mIdleCount));
     return NS_OK;
@@ -356,6 +370,11 @@ nsSocketTransportService::PollTimeout()
         if (r < minR)
             minR = r;
     }
+    // nsASocketHandler defines UINT16_MAX as do not timeout
+    if (minR == UINT16_MAX) {
+        SOCKET_LOG(("poll timeout: none\n"));
+        return NS_SOCKET_POLL_TIMEOUT;
+    }
     SOCKET_LOG(("poll timeout: %lu\n", minR));
     return PR_SecondsToInterval(minR);
 }
@@ -404,13 +423,13 @@ nsSocketTransportService::Poll(bool wait, uint32_t *interval)
 //-----------------------------------------------------------------------------
 // xpcom api
 
-NS_IMPL_ISUPPORTS6(nsSocketTransportService,
-                   nsISocketTransportService,
-                   nsIEventTarget,
-                   nsIThreadObserver,
-                   nsIRunnable,
-                   nsPISocketTransportService,
-                   nsIObserver)
+NS_IMPL_ISUPPORTS(nsSocketTransportService,
+                  nsISocketTransportService,
+                  nsIEventTarget,
+                  nsIThreadObserver,
+                  nsIRunnable,
+                  nsPISocketTransportService,
+                  nsIObserver)
 
 // called from main thread only
 NS_IMETHODIMP
@@ -458,6 +477,10 @@ nsSocketTransportService::Init()
     nsCOMPtr<nsIPrefBranch> tmpPrefService = do_GetService(NS_PREFSERVICE_CONTRACTID);
     if (tmpPrefService) {
         tmpPrefService->AddObserver(SEND_BUFFER_PREF, this, false);
+        tmpPrefService->AddObserver(KEEPALIVE_ENABLED_PREF, this, false);
+        tmpPrefService->AddObserver(KEEPALIVE_IDLE_TIME_PREF, this, false);
+        tmpPrefService->AddObserver(KEEPALIVE_RETRY_INTERVAL_PREF, this, false);
+        tmpPrefService->AddObserver(KEEPALIVE_PROBE_COUNT_PREF, this, false);
     }
     UpdatePrefs();
 
@@ -549,6 +572,39 @@ nsSocketTransportService::SetOffline(bool offline)
 }
 
 NS_IMETHODIMP
+nsSocketTransportService::GetKeepaliveIdleTime(int32_t *aKeepaliveIdleTimeS)
+{
+    MOZ_ASSERT(aKeepaliveIdleTimeS);
+    if (NS_WARN_IF(!aKeepaliveIdleTimeS)) {
+        return NS_ERROR_NULL_POINTER;
+    }
+    *aKeepaliveIdleTimeS = mKeepaliveIdleTimeS;
+    return NS_OK;
+}
+
+NS_IMETHODIMP
+nsSocketTransportService::GetKeepaliveRetryInterval(int32_t *aKeepaliveRetryIntervalS)
+{
+    MOZ_ASSERT(aKeepaliveRetryIntervalS);
+    if (NS_WARN_IF(!aKeepaliveRetryIntervalS)) {
+        return NS_ERROR_NULL_POINTER;
+    }
+    *aKeepaliveRetryIntervalS = mKeepaliveRetryIntervalS;
+    return NS_OK;
+}
+
+NS_IMETHODIMP
+nsSocketTransportService::GetKeepaliveProbeCount(int32_t *aKeepaliveProbeCount)
+{
+    MOZ_ASSERT(aKeepaliveProbeCount);
+    if (NS_WARN_IF(!aKeepaliveProbeCount)) {
+        return NS_ERROR_NULL_POINTER;
+    }
+    *aKeepaliveProbeCount = mKeepaliveProbeCount;
+    return NS_OK;
+}
+
+NS_IMETHODIMP
 nsSocketTransportService::CreateTransport(const char **types,
                                           uint32_t typeCount,
                                           const nsACString &host,
@@ -559,18 +615,13 @@ nsSocketTransportService::CreateTransport(const char **types,
     NS_ENSURE_TRUE(mInitialized, NS_ERROR_NOT_INITIALIZED);
     NS_ENSURE_TRUE(port >= 0 && port <= 0xFFFF, NS_ERROR_ILLEGAL_VALUE);
 
-    nsSocketTransport *trans = new nsSocketTransport();
-    if (!trans)
-        return NS_ERROR_OUT_OF_MEMORY;
-    NS_ADDREF(trans);
-
+    nsRefPtr<nsSocketTransport> trans = new nsSocketTransport();
     nsresult rv = trans->Init(types, typeCount, host, port, proxyInfo);
     if (NS_FAILED(rv)) {
-        NS_RELEASE(trans);
         return rv;
     }
 
-    *result = trans;
+    trans.forget(result);
     return NS_OK;
 }
 
@@ -588,8 +639,6 @@ nsSocketTransportService::CreateUnixDomainTransport(nsIFile *aPath,
         return rv;
 
     nsRefPtr<nsSocketTransport> trans = new nsSocketTransport();
-    if (!trans)
-        return NS_ERROR_OUT_OF_MEMORY;
 
     rv = trans->InitWithFilename(path.get());
     if (NS_FAILED(rv))
@@ -904,15 +953,81 @@ nsSocketTransportService::UpdatePrefs()
         nsresult rv = tmpPrefService->GetIntPref(SEND_BUFFER_PREF, &bufferSize);
         if (NS_SUCCEEDED(rv) && bufferSize > 0)
             mSendBufferSize = bufferSize;
+
+        // Default TCP Keepalive Values.
+        int32_t keepaliveIdleTimeS;
+        rv = tmpPrefService->GetIntPref(KEEPALIVE_IDLE_TIME_PREF,
+                                        &keepaliveIdleTimeS);
+        if (NS_SUCCEEDED(rv))
+            mKeepaliveIdleTimeS = clamped(keepaliveIdleTimeS,
+                                          1, kMaxTCPKeepIdle);
+
+        int32_t keepaliveRetryIntervalS;
+        rv = tmpPrefService->GetIntPref(KEEPALIVE_RETRY_INTERVAL_PREF,
+                                        &keepaliveRetryIntervalS);
+        if (NS_SUCCEEDED(rv))
+            mKeepaliveRetryIntervalS = clamped(keepaliveRetryIntervalS,
+                                               1, kMaxTCPKeepIntvl);
+
+        int32_t keepaliveProbeCount;
+        rv = tmpPrefService->GetIntPref(KEEPALIVE_PROBE_COUNT_PREF,
+                                        &keepaliveProbeCount);
+        if (NS_SUCCEEDED(rv))
+            mKeepaliveProbeCount = clamped(keepaliveProbeCount,
+                                           1, kMaxTCPKeepCount);
+        bool keepaliveEnabled = false;
+        rv = tmpPrefService->GetBoolPref(KEEPALIVE_ENABLED_PREF,
+                                         &keepaliveEnabled);
+        if (NS_SUCCEEDED(rv) && keepaliveEnabled != mKeepaliveEnabledPref) {
+            mKeepaliveEnabledPref = keepaliveEnabled;
+            OnKeepaliveEnabledPrefChange();
+        }
     }
     
     return NS_OK;
 }
 
+void
+nsSocketTransportService::OnKeepaliveEnabledPrefChange()
+{
+    // Dispatch to socket thread if we're not executing there.
+    if (PR_GetCurrentThread() != gSocketThread) {
+        gSocketTransportService->Dispatch(
+            NS_NewRunnableMethod(
+                this, &nsSocketTransportService::OnKeepaliveEnabledPrefChange),
+            NS_DISPATCH_NORMAL);
+        return;
+    }
+
+    SOCKET_LOG(("nsSocketTransportService::OnKeepaliveEnabledPrefChange %s",
+                mKeepaliveEnabledPref ? "enabled" : "disabled"));
+
+    // Notify each socket that keepalive has been en/disabled globally.
+    for (int32_t i = mActiveCount - 1; i >= 0; --i) {
+        NotifyKeepaliveEnabledPrefChange(&mActiveList[i]);
+    }
+    for (int32_t i = mIdleCount - 1; i >= 0; --i) {
+        NotifyKeepaliveEnabledPrefChange(&mIdleList[i]);
+    }
+}
+
+void
+nsSocketTransportService::NotifyKeepaliveEnabledPrefChange(SocketContext *sock)
+{
+    MOZ_ASSERT(sock, "SocketContext cannot be null!");
+    MOZ_ASSERT(sock->mHandler, "SocketContext does not have a handler!");
+
+    if (!sock || !sock->mHandler) {
+        return;
+    }
+
+    sock->mHandler->OnKeepaliveEnabledPrefChange(mKeepaliveEnabledPref);
+}
+
 NS_IMETHODIMP
 nsSocketTransportService::Observe(nsISupports *subject,
                                   const char *topic,
-                                  const PRUnichar *data)
+                                  const char16_t *data)
 {
     if (!strcmp(topic, NS_PREFBRANCH_PREFCHANGE_TOPIC_ID)) {
         UpdatePrefs();

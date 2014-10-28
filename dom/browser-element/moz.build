@@ -4,10 +4,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-TEST_DIRS += ['mochitest']
-
-XPIDL_MODULE = 'dom_browserelement'
-
 EXPORTS.mozilla += [
     'BrowserElementParent.h',
 ]
@@ -30,17 +26,21 @@ FAIL_ON_WARNINGS = True
 
 LOCAL_INCLUDES += [
     '../bluetooth',
-    '/content/html/content/src',
+    '/dom/html',
 ]
 
 include('/ipc/chromium/chromium-config.mozbuild')
 
-FINAL_LIBRARY = 'gklayout'
+FINAL_LIBRARY = 'xul'
 
 LOCAL_INCLUDES += [
-    '/content/base/src',
     '/dom/',
     '/dom/base',
     '/dom/ipc',
 ]
 
+MOCHITEST_MANIFESTS += [
+    'mochitest/mochitest-oop.ini',
+    'mochitest/mochitest.ini',
+    'mochitest/priority/mochitest.ini',
+]

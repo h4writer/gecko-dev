@@ -11,11 +11,9 @@
 #include "nsAutoPtr.h"
 #include "nsCOMArray.h"
 #include "nsCOMPtr.h"
-#include "nsICacheService.h"
 #include "nsIChannelEventSink.h"
 #include "nsIDOMDocument.h"
 #include "nsIDOMNode.h"
-#include "nsIDOMLoadStatus.h"
 #include "nsIInterfaceRequestor.h"
 #include "nsIMutableArray.h"
 #include "nsIObserver.h"
@@ -32,22 +30,22 @@
 #include "nsWeakReference.h"
 #include "nsICryptoHash.h"
 #include "mozilla/Attributes.h"
+#include "mozilla/WeakPtr.h"
+#include "nsTHashtable.h"
+#include "nsHashKeys.h"
 
 class nsOfflineCacheUpdate;
 
-class nsICacheEntryDescriptor;
 class nsIUTF8StringEnumerator;
 class nsILoadContext;
 
-class nsOfflineCacheUpdateItem : public nsIDOMLoadStatus
-                               , public nsIStreamListener
+class nsOfflineCacheUpdateItem : public nsIStreamListener
                                , public nsIRunnable
                                , public nsIInterfaceRequestor
                                , public nsIChannelEventSink
 {
 public:
     NS_DECL_ISUPPORTS
-    NS_DECL_NSIDOMLOADSTATUS
     NS_DECL_NSIREQUESTOBSERVER
     NS_DECL_NSISTREAMLISTENER
     NS_DECL_NSIRUNNABLE
@@ -59,7 +57,6 @@ public:
                              nsIApplicationCache *aApplicationCache,
                              nsIApplicationCache *aPreviousApplicationCache,
                              uint32_t aType);
-    virtual ~nsOfflineCacheUpdateItem();
 
     nsCOMPtr<nsIURI>           mURI;
     nsCOMPtr<nsIURI>           mReferrerURI;
@@ -76,12 +73,23 @@ public:
     bool IsScheduled();
     bool IsCompleted();
 
+    nsresult GetStatus(uint16_t *aStatus);
+
 private:
+    enum LoadStatus MOZ_ENUM_TYPE(uint16_t) {
+      UNINITIALIZED = 0U,
+      REQUESTED = 1U,
+      RECEIVING = 2U,
+      LOADED = 3U
+    };
+
     nsRefPtr<nsOfflineCacheUpdate> mUpdate;
     nsCOMPtr<nsIChannel>           mChannel;
     uint16_t                       mState;
 
 protected:
+    virtual ~nsOfflineCacheUpdateItem();
+
     int64_t                        mBytesRead;
 };
 
@@ -177,8 +185,11 @@ private:
 };
 
 class nsOfflineCacheUpdateOwner
+  : public mozilla::SupportsWeakPtr<nsOfflineCacheUpdateOwner>
 {
 public:
+    MOZ_DECLARE_REFCOUNTED_TYPENAME(nsOfflineCacheUpdateOwner)
+    virtual ~nsOfflineCacheUpdateOwner() {}
     virtual nsresult UpdateFinished(nsOfflineCacheUpdate *aUpdate) = 0;
 };
 
@@ -188,13 +199,13 @@ class nsOfflineCacheUpdate MOZ_FINAL : public nsIOfflineCacheUpdate
                                      , public nsOfflineCacheUpdateOwner
 {
 public:
+    MOZ_DECLARE_REFCOUNTED_TYPENAME(nsOfflineCacheUpdate)
     NS_DECL_ISUPPORTS
     NS_DECL_NSIOFFLINECACHEUPDATE
     NS_DECL_NSIOFFLINECACHEUPDATEOBSERVER
     NS_DECL_NSIRUNNABLE
 
     nsOfflineCacheUpdate();
-    ~nsOfflineCacheUpdate();
 
     static nsresult GetCacheKey(nsIURI *aURI, nsACString &aKey);
 
@@ -210,10 +221,13 @@ public:
     void SetOwner(nsOfflineCacheUpdateOwner *aOwner);
 
     bool IsForGroupID(const nsCSubstring &groupID);
+    bool IsForProfile(nsIFile* aCustomProfileDir);
 
     virtual nsresult UpdateFinished(nsOfflineCacheUpdate *aUpdate);
 
 protected:
+    ~nsOfflineCacheUpdate();
+
     friend class nsOfflineCacheUpdateItem;
     void OnByteProgress(uint64_t byteIncrement);
 
@@ -253,7 +267,7 @@ private:
         STATE_FINISHED
     } mState;
 
-    nsOfflineCacheUpdateOwner *mOwner;
+    mozilla::WeakPtr<nsOfflineCacheUpdateOwner> mOwner;
 
     bool mAddedItems;
     bool mPartialUpdate;
@@ -316,7 +330,6 @@ public:
     NS_DECL_NSIOBSERVER
 
     nsOfflineCacheUpdateService();
-    ~nsOfflineCacheUpdateService();
 
     nsresult Init();
 
@@ -324,6 +337,7 @@ public:
     nsresult FindUpdate(nsIURI *aManifestURI,
                         uint32_t aAppID,
                         bool aInBrowser,
+                        nsIFile *aCustomProfileDir,
                         nsOfflineCacheUpdate **aUpdate);
 
     nsresult Schedule(nsIURI *aManifestURI,
@@ -350,10 +364,15 @@ public:
                                            nsIPrefBranch *aPrefBranch,
                                            bool *aPinned);
 
+    static nsTHashtable<nsCStringHashKey>* AllowedDomains();
+
 private:
+    ~nsOfflineCacheUpdateService();
+
     nsresult ProcessNextUpdate();
 
     nsTArray<nsRefPtr<nsOfflineCacheUpdate> > mUpdates;
+    static nsTHashtable<nsCStringHashKey>* mAllowedDomains;
 
     bool mDisabled;
     bool mUpdateRunning;

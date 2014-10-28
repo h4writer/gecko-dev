@@ -8,11 +8,6 @@
 #include "mozilla/DebugOnly.h"
 #include "mozilla/Likely.h"
 
-#ifdef MOZ_LOGGING
-// this next define has to appear before the include of prlog.h
-#define FORCE_PR_LOG // Allow logging in the release build
-#endif
-
 #include "mozilla/net/CookieServiceChild.h"
 #include "mozilla/net/NeckoCommon.h"
 
@@ -357,7 +352,7 @@ LogSuccess(bool aSetCookie, nsIURI *aHostURI, const nsAFlatCString &aCookieStrin
 class DBListenerErrorHandler : public mozIStorageStatementCallback
 {
 protected:
-  DBListenerErrorHandler(DBState* dbState) : mDBState(dbState) { }
+  explicit DBListenerErrorHandler(DBState* dbState) : mDBState(dbState) { }
   nsRefPtr<DBState> mDBState;
   virtual const char *GetOpType() = 0;
 
@@ -389,13 +384,15 @@ public:
  ******************************************************************************/
 class InsertCookieDBListener MOZ_FINAL : public DBListenerErrorHandler
 {
-protected:
+private:
   virtual const char *GetOpType() { return "INSERT"; }
+
+  ~InsertCookieDBListener() {}
 
 public:
   NS_DECL_ISUPPORTS
 
-  InsertCookieDBListener(DBState* dbState) : DBListenerErrorHandler(dbState) { }
+  explicit InsertCookieDBListener(DBState* dbState) : DBListenerErrorHandler(dbState) { }
   NS_IMETHOD HandleResult(mozIStorageResultSet*)
   {
     NS_NOTREACHED("Unexpected call to InsertCookieDBListener::HandleResult");
@@ -415,7 +412,7 @@ public:
   }
 };
 
-NS_IMPL_ISUPPORTS1(InsertCookieDBListener, mozIStorageStatementCallback)
+NS_IMPL_ISUPPORTS(InsertCookieDBListener, mozIStorageStatementCallback)
 
 /******************************************************************************
  * UpdateCookieDBListener impl:
@@ -423,13 +420,15 @@ NS_IMPL_ISUPPORTS1(InsertCookieDBListener, mozIStorageStatementCallback)
  ******************************************************************************/
 class UpdateCookieDBListener MOZ_FINAL : public DBListenerErrorHandler
 {
-protected:
+private:
   virtual const char *GetOpType() { return "UPDATE"; }
+
+  ~UpdateCookieDBListener() {}
 
 public:
   NS_DECL_ISUPPORTS
 
-  UpdateCookieDBListener(DBState* dbState) : DBListenerErrorHandler(dbState) { }
+  explicit UpdateCookieDBListener(DBState* dbState) : DBListenerErrorHandler(dbState) { }
   NS_IMETHOD HandleResult(mozIStorageResultSet*)
   {
     NS_NOTREACHED("Unexpected call to UpdateCookieDBListener::HandleResult");
@@ -441,7 +440,7 @@ public:
   }
 };
 
-NS_IMPL_ISUPPORTS1(UpdateCookieDBListener, mozIStorageStatementCallback)
+NS_IMPL_ISUPPORTS(UpdateCookieDBListener, mozIStorageStatementCallback)
 
 /******************************************************************************
  * RemoveCookieDBListener impl:
@@ -449,13 +448,15 @@ NS_IMPL_ISUPPORTS1(UpdateCookieDBListener, mozIStorageStatementCallback)
  ******************************************************************************/
 class RemoveCookieDBListener MOZ_FINAL : public DBListenerErrorHandler
 {
-protected:
+private:
   virtual const char *GetOpType() { return "REMOVE"; }
+
+  ~RemoveCookieDBListener() {}
 
 public:
   NS_DECL_ISUPPORTS
 
-  RemoveCookieDBListener(DBState* dbState) : DBListenerErrorHandler(dbState) { }
+  explicit RemoveCookieDBListener(DBState* dbState) : DBListenerErrorHandler(dbState) { }
   NS_IMETHOD HandleResult(mozIStorageResultSet*)
   {
     NS_NOTREACHED("Unexpected call to RemoveCookieDBListener::HandleResult");
@@ -467,7 +468,7 @@ public:
   }
 };
 
-NS_IMPL_ISUPPORTS1(RemoveCookieDBListener, mozIStorageStatementCallback)
+NS_IMPL_ISUPPORTS(RemoveCookieDBListener, mozIStorageStatementCallback)
 
 /******************************************************************************
  * ReadCookieDBListener impl:
@@ -475,14 +476,16 @@ NS_IMPL_ISUPPORTS1(RemoveCookieDBListener, mozIStorageStatementCallback)
  ******************************************************************************/
 class ReadCookieDBListener MOZ_FINAL : public DBListenerErrorHandler
 {
-protected:
+private:
   virtual const char *GetOpType() { return "READ"; }
   bool mCanceled;
+
+  ~ReadCookieDBListener() {}
 
 public:
   NS_DECL_ISUPPORTS
 
-  ReadCookieDBListener(DBState* dbState)
+  explicit ReadCookieDBListener(DBState* dbState)
     : DBListenerErrorHandler(dbState)
     , mCanceled(false)
   {
@@ -546,7 +549,7 @@ public:
   }
 };
 
-NS_IMPL_ISUPPORTS1(ReadCookieDBListener, mozIStorageStatementCallback)
+NS_IMPL_ISUPPORTS(ReadCookieDBListener, mozIStorageStatementCallback)
 
 /******************************************************************************
  * CloseCookieDBListener imp:
@@ -555,8 +558,10 @@ NS_IMPL_ISUPPORTS1(ReadCookieDBListener, mozIStorageStatementCallback)
  ******************************************************************************/
 class CloseCookieDBListener MOZ_FINAL :  public mozIStorageCompletionCallback
 {
+  ~CloseCookieDBListener() {}
+
 public:
-  CloseCookieDBListener(DBState* dbState) : mDBState(dbState) { }
+  explicit CloseCookieDBListener(DBState* dbState) : mDBState(dbState) { }
   nsRefPtr<DBState> mDBState;
   NS_DECL_ISUPPORTS
 
@@ -567,17 +572,20 @@ public:
   }
 };
 
-NS_IMPL_ISUPPORTS1(CloseCookieDBListener, mozIStorageCompletionCallback)
+NS_IMPL_ISUPPORTS(CloseCookieDBListener, mozIStorageCompletionCallback)
 
 namespace {
 
 class AppClearDataObserver MOZ_FINAL : public nsIObserver {
+
+  ~AppClearDataObserver() {}
+
 public:
   NS_DECL_ISUPPORTS
 
   // nsIObserver implementation.
   NS_IMETHODIMP
-  Observe(nsISupports *aSubject, const char *aTopic, const PRUnichar *data)
+  Observe(nsISupports *aSubject, const char *aTopic, const char16_t *data)
   {
     MOZ_ASSERT(!nsCRT::strcmp(aTopic, TOPIC_WEB_APP_CLEAR_DATA));
 
@@ -594,7 +602,7 @@ public:
   }
 };
 
-NS_IMPL_ISUPPORTS1(AppClearDataObserver, nsIObserver)
+NS_IMPL_ISUPPORTS(AppClearDataObserver, nsIObserver)
 
 } // anonymous namespace
 
@@ -617,14 +625,6 @@ nsCookieEntry::SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const
   return amount;
 }
 
-static size_t
-HostTableEntrySizeOfExcludingThis(nsCookieEntry *aEntry,
-                                  MallocSizeOf aMallocSizeOf,
-                                  void *arg)
-{
-  return aEntry->SizeOfExcludingThis(aMallocSizeOf);
-}
-
 size_t
 CookieDomainTuple::SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const
 {
@@ -636,28 +636,18 @@ CookieDomainTuple::SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const
   return amount;
 }
 
-static size_t
-ReadSetEntrySizeOfExcludingThis(nsCookieKey *aEntry,
-                                MallocSizeOf aMallocSizeOf,
-                                void *)
-{
-  return aEntry->SizeOfExcludingThis(aMallocSizeOf);
-}
-
 size_t
 DBState::SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const
 {
   size_t amount = 0;
 
   amount += aMallocSizeOf(this);
-  amount += hostTable.SizeOfExcludingThis(HostTableEntrySizeOfExcludingThis,
-                                          aMallocSizeOf);
+  amount += hostTable.SizeOfExcludingThis(aMallocSizeOf);
   amount += hostArray.SizeOfExcludingThis(aMallocSizeOf);
   for (uint32_t i = 0; i < hostArray.Length(); ++i) {
     amount += hostArray[i].SizeOfExcludingThis(aMallocSizeOf);
   }
-  amount += readSet.SizeOfExcludingThis(ReadSetEntrySizeOfExcludingThis,
-                                        aMallocSizeOf);
+  amount += readSet.SizeOfExcludingThis(aMallocSizeOf);
 
   return amount;
 }
@@ -707,7 +697,7 @@ nsCookieService::GetSingleton()
 nsCookieService::AppClearDataObserverInit()
 {
   nsCOMPtr<nsIObserverService> observerService = do_GetService("@mozilla.org/observer-service;1");
-  nsCOMPtr<AppClearDataObserver> obs = new AppClearDataObserver();
+  nsCOMPtr<nsIObserver> obs = new AppClearDataObserver();
   observerService->AddObserver(obs, TOPIC_WEB_APP_CLEAR_DATA,
                                /* holdsWeak= */ false);
 }
@@ -717,17 +707,16 @@ nsCookieService::AppClearDataObserverInit()
  * public methods
  ******************************************************************************/
 
-NS_IMPL_ISUPPORTS_INHERITED5(nsCookieService, MemoryUniReporter,
-                             nsICookieService,
-                             nsICookieManager,
-                             nsICookieManager2,
-                             nsIObserver,
-                             nsISupportsWeakReference)
+NS_IMPL_ISUPPORTS(nsCookieService,
+                  nsICookieService,
+                  nsICookieManager,
+                  nsICookieManager2,
+                  nsIObserver,
+                  nsISupportsWeakReference,
+                  nsIMemoryReporter)
 
 nsCookieService::nsCookieService()
- : MemoryUniReporter("explicit/cookie-service", KIND_HEAP, UNITS_BYTES,
-                     "Memory used by the cookie service.")
- , mDBState(nullptr)
+ : mDBState(nullptr)
  , mCookieBehavior(BEHAVIOR_ACCEPT)
  , mThirdPartySession(false)
  , mMaxNumberOfCookies(kMaxNumberOfCookies)
@@ -1472,7 +1461,7 @@ RebuildDBCallback(nsCookieEntry *aEntry,
     nsCookie* cookie = cookies[i];
 
     if (!cookie->IsSession()) {
-      bindCookieParameters(paramsArray, aEntry, cookie);
+      bindCookieParameters(paramsArray, nsCookieKey(aEntry), cookie);
     }
   }
 
@@ -1556,14 +1545,14 @@ nsCookieService::~nsCookieService()
 NS_IMETHODIMP
 nsCookieService::Observe(nsISupports     *aSubject,
                          const char      *aTopic,
-                         const PRUnichar *aData)
+                         const char16_t *aData)
 {
   // check the topic
   if (!strcmp(aTopic, "profile-before-change")) {
     // The profile is about to change,
     // or is going away because the application is shutting down.
     if (mDBState && mDBState->dbConn &&
-        !nsCRT::strcmp(aData, NS_LITERAL_STRING("shutdown-cleanse").get())) {
+        !nsCRT::strcmp(aData, MOZ_UTF16("shutdown-cleanse"))) {
       // Clear the cookie db if we're in the default DBState.
       RemoveAll();
     }
@@ -1656,7 +1645,7 @@ nsCookieService::SetCookieString(nsIURI     *aHostURI,
         do_GetService("@mozilla.org/consoleservice;1");
     if (aConsoleService) {
       aConsoleService->LogStringMessage(
-        NS_LITERAL_STRING("Non-null prompt ignored by nsCookieService.").get());
+        MOZ_UTF16("Non-null prompt ignored by nsCookieService."));
     }
   }
   return SetCookieStringCommon(aHostURI, aCookieHeader, nullptr, aChannel,
@@ -1679,7 +1668,7 @@ nsCookieService::SetCookieStringFromHttp(nsIURI     *aHostURI,
         do_GetService("@mozilla.org/consoleservice;1");
     if (aConsoleService) {
       aConsoleService->LogStringMessage(
-        NS_LITERAL_STRING("Non-null prompt ignored by nsCookieService.").get());
+        MOZ_UTF16("Non-null prompt ignored by nsCookieService."));
     }
   }
   return SetCookieStringCommon(aHostURI, aCookieHeader, aServerTime, aChannel,
@@ -1865,7 +1854,7 @@ nsCookieService::NotifyThirdParty(nsIURI *aHostURI, bool aIsAccepted, nsIChannel
   // This can fail for a number of reasons, in which kind we fallback to "?"
   mObserverService->NotifyObservers(aHostURI,
                                     topic,
-                                    NS_LITERAL_STRING("?").get());
+                                    MOZ_UTF16("?"));
 }
 
 // notify observers that the cookie list changed. there are five possible
@@ -1878,7 +1867,7 @@ nsCookieService::NotifyThirdParty(nsIURI *aHostURI, bool aIsAccepted, nsIChannel
 // cookies.
 void
 nsCookieService::NotifyChanged(nsISupports     *aSubject,
-                               const PRUnichar *aData)
+                               const char16_t *aData)
 {
   const char* topic = mDBState == mPrivateDBState ?
       "private-cookie-changed" : "cookie-changed";
@@ -1964,7 +1953,7 @@ nsCookieService::RemoveAll()
     }
   }
 
-  NotifyChanged(nullptr, NS_LITERAL_STRING("cleared").get());
+  NotifyChanged(nullptr, MOZ_UTF16("cleared"));
   return NS_OK;
 }
 
@@ -2090,7 +2079,7 @@ nsCookieService::Remove(const nsACString& aHost, uint32_t aAppId,
 
   if (cookie) {
     // Everything's done. Notify observers.
-    NotifyChanged(cookie, NS_LITERAL_STRING("deleted").get());
+    NotifyChanged(cookie, MOZ_UTF16("deleted"));
   }
 
   return NS_OK;
@@ -3024,7 +3013,7 @@ nsCookieService::AddInternal(const nsCookieKey             &aKey,
       if (aCookie->Expiry() <= currentTime) {
         COOKIE_LOGFAILURE(SET_COOKIE, aHostURI, aCookieHeader,
           "previously stored cookie was deleted");
-        NotifyChanged(oldCookie, NS_LITERAL_STRING("deleted").get());
+        NotifyChanged(oldCookie, MOZ_UTF16("deleted"));
         return;
       }
 
@@ -3075,11 +3064,11 @@ nsCookieService::AddInternal(const nsCookieKey             &aKey,
   // Now that list mutations are complete, notify observers. We do it here
   // because observers may themselves attempt to mutate the list.
   if (purgedList) {
-    NotifyChanged(purgedList, NS_LITERAL_STRING("batch-deleted").get());
+    NotifyChanged(purgedList, MOZ_UTF16("batch-deleted"));
   }
 
-  NotifyChanged(aCookie, foundCookie ? NS_LITERAL_STRING("changed").get()
-                                     : NS_LITERAL_STRING("added").get());
+  NotifyChanged(aCookie, foundCookie ? MOZ_UTF16("changed")
+                                     : MOZ_UTF16("added"));
 }
 
 /******************************************************************************
@@ -4067,9 +4056,12 @@ nsCookieService::RemoveCookiesForApp(uint32_t aAppId, bool aOnlyBrowserElement)
 
   bool hasMore;
   while (NS_SUCCEEDED(enumerator->HasMoreElements(&hasMore)) && hasMore) {
+    nsCOMPtr<nsISupports> supports;
     nsCOMPtr<nsICookie> cookie;
-    rv = enumerator->GetNext(getter_AddRefs(cookie));
+    rv = enumerator->GetNext(getter_AddRefs(supports));
     NS_ENSURE_SUCCESS(rv, rv);
+
+    cookie = do_QueryInterface(supports);
 
     nsAutoCString host;
     cookie->GetHost(host);
@@ -4354,8 +4346,14 @@ nsCookieService::SizeOfIncludingThis(mozilla::MallocSizeOf aMallocSizeOf) const
   return n;
 }
 
-int64_t
-nsCookieService::Amount()
+MOZ_DEFINE_MALLOC_SIZE_OF(CookieServiceMallocSizeOf)
+
+NS_IMETHODIMP
+nsCookieService::CollectReports(nsIHandleReportCallback* aHandleReport,
+                                nsISupports* aData, bool aAnonymize)
 {
-  return SizeOfIncludingThis(MallocSizeOf);
+  return MOZ_COLLECT_REPORT(
+    "explicit/cookie-service", KIND_HEAP, UNITS_BYTES,
+    SizeOfIncludingThis(CookieServiceMallocSizeOf),
+    "Memory used by the cookie service.");
 }

@@ -24,15 +24,15 @@ public:
                                        nsStyleContext *aContext);
   
   // nsIFrame
-  virtual void Init(nsIContent*      aContent,
-                    nsIFrame*        aParent,
-                    nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 
   virtual void DestroyFrom(nsIFrame* aDestructRoot) MOZ_OVERRIDE;
 
-  NS_IMETHOD AttributeChanged(int32_t aNameSpaceID,
-                              nsIAtom* aAttribute,
-                              int32_t aModType) MOZ_OVERRIDE;
+  virtual nsresult AttributeChanged(int32_t aNameSpaceID,
+                                    nsIAtom* aAttribute,
+                                    int32_t aModType) MOZ_OVERRIDE;
 
   /**
    * Get the "type" of the frame
@@ -41,12 +41,12 @@ public:
    */
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
   
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
 #endif
 
 protected:
-  nsXULLabelFrame(nsStyleContext *aContext) : nsBlockFrame(aContext) {}
+  explicit nsXULLabelFrame(nsStyleContext *aContext) : nsBlockFrame(aContext) {}
 
   nsresult RegUnregAccessKey(bool aDoReg);
 };

@@ -154,7 +154,7 @@ PluginHangUIParent::Init(const nsString& aPluginName)
   CommandLine commandLine(exePath.value());
 
   nsXPIDLString localizedStr;
-  const PRUnichar* formatParams[] = { aPluginName.get() };
+  const char16_t* formatParams[] = { aPluginName.get() };
   rv = nsContentUtils::FormatLocalizedString(nsContentUtils::eDOM_PROPERTIES,
                                              "PluginHangUIMessage",
                                              formatParams,
@@ -224,7 +224,7 @@ PluginHangUIParent::Init(const nsString& aPluginName)
   }
   commandLine.AppendLooseValue(ipcCookie);
 
-  ScopedHandle showEvent(::CreateEvent(nullptr, FALSE, FALSE, nullptr));
+  ScopedHandle showEvent(::CreateEventW(nullptr, FALSE, FALSE, nullptr));
   if (!showEvent.IsValid()) {
     return false;
   }
@@ -290,7 +290,7 @@ PluginHangUIParent::UnwatchHangUIChildProcess(bool aWait)
     // constructor) completionEvent
     ScopedHandle completionEvent;
     if (aWait) {
-      completionEvent.Set(::CreateEvent(nullptr, FALSE, FALSE, nullptr));
+      completionEvent.Set(::CreateEventW(nullptr, FALSE, FALSE, nullptr));
       if (!completionEvent.IsValid()) {
         return false;
       }
@@ -356,6 +356,7 @@ PluginHangUIParent::RecvUserResponse(const unsigned int& aResponse)
     mModule->TerminateChildProcess(mMainThreadMessageLoop);
     responseCode = 1;
   } else if(aResponse & HANGUI_USER_RESPONSE_CONTINUE) {
+    mModule->OnHangUIContinue();
     // User clicked Continue
     responseCode = 2;
   } else {
@@ -367,7 +368,7 @@ PluginHangUIParent::RecvUserResponse(const unsigned int& aResponse)
                                                                dontAskCode,
                                                                LastShowDurationMs(),
                                                                mTimeoutPrefMs);
-  NS_DispatchToMainThread(workItem, NS_DISPATCH_NORMAL);
+  NS_DispatchToMainThread(workItem);
   return true;
 }
 
@@ -382,7 +383,7 @@ PluginHangUIParent::GetHangUIOwnerWindowHandle(NativeWindowHandle& windowHandle)
   NS_ENSURE_SUCCESS(rv, rv);
 
   nsCOMPtr<nsIDOMWindow> navWin;
-  rv = winMediator->GetMostRecentWindow(NS_LITERAL_STRING("navigator:browser").get(),
+  rv = winMediator->GetMostRecentWindow(MOZ_UTF16("navigator:browser"),
                                         getter_AddRefs(navWin));
   NS_ENSURE_SUCCESS(rv, rv);
   if (!navWin) {

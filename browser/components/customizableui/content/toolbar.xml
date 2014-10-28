@@ -45,6 +45,25 @@
           Cu.import("resource:///modules/CustomizableUI.jsm", scope);
           let CustomizableUI = scope.CustomizableUI;
 
+          // Bug 989289: Forcibly set the now unsupported "mode" and "iconsize"
+          // attributes, just in case they accidentally get restored from
+          // persistence from a user that's been upgrading and downgrading.
+          if (CustomizableUI.isBuiltinToolbar(this.id)) {
+            const kAttributes = new Map([["mode", "icons"], ["iconsize", "small"]]);
+            for (let [attribute, value] of kAttributes) {
+              if (this.getAttribute(attribute) != value) {
+                this.setAttribute(attribute, value);
+                document.persist(this.id, attribute);
+              }
+              if (this.toolbox) {
+                if (this.toolbox.getAttribute(attribute) != value) {
+                  this.toolbox.setAttribute(attribute, value);
+                  document.persist(this.toolbox.id, attribute);
+                }
+              }
+            }
+          }
+
           // Searching for the toolbox palette in the toolbar binding because
           // toolbars are constructed first.
           let toolbox = this.toolbox;
@@ -375,7 +394,7 @@
       <constructor><![CDATA[
           // Reading these immediately so nobody messes with them anymore:
           this._delegatingToolbar = this.getAttribute("toolbar-delegate");
-          this._wasCollapsed = this.getAttribute("collapsed");
+          this._wasCollapsed = this.getAttribute("collapsed") == "true";
           // Leaving those in here to unbreak some code:
           if (document.readyState == "complete") {
             this._init();
@@ -532,11 +551,14 @@
           this.evictNode(node);
           this._isModifying = false;
           this._updateMigratedSet();
-          // We will now have moved stuff around; kick off an aftercustomization event
+          // We will now have moved stuff around; kick off some events
           // so add-ons know we've just moved their stuff:
-          if (window.gCustomizeMode) {
-            window.gCustomizeMode.dispatchToolboxEvent("aftercustomization");
-          }
+          // XXXgijs: only in this window. It's hard to know for sure what's the right
+          // thing to do here - typically insertItem is used on each window, so
+          // this seems to make the most sense, even if some of the effects of
+          // evictNode might affect multiple windows.
+          CustomizableUI.dispatchToolboxEvent("customizationchange", {}, window);
+          CustomizableUI.dispatchToolboxEvent("aftercustomization", {}, window);
           return node;
         ]]></body>
       </method>

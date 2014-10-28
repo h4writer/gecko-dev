@@ -5,9 +5,14 @@
 
 #include "CompositingRenderTargetOGL.h"
 #include "GLContext.h"
+#include "GLReadTexImageHelper.h"
+#include "mozilla/gfx/2D.h"
 
-using namespace mozilla;
-using namespace mozilla::layers;
+namespace mozilla {
+namespace layers {
+
+using namespace mozilla::gfx;
+using namespace mozilla::gl;
 
 CompositingRenderTargetOGL::~CompositingRenderTargetOGL()
 {
@@ -51,17 +56,17 @@ CompositingRenderTargetOGL::BindRenderTarget()
       }
     }
 
-    mCompositor->PrepareViewport(mInitParams.mSize, mTransform);
+    mCompositor->PrepareViewport(mInitParams.mSize);
   }
 }
 
 #ifdef MOZ_DUMP_PAINTING
-already_AddRefed<gfxImageSurface>
+TemporaryRef<DataSourceSurface>
 CompositingRenderTargetOGL::Dump(Compositor* aCompositor)
 {
   MOZ_ASSERT(mInitParams.mStatus == InitParams::INITIALIZED);
   CompositorOGL* compositorOGL = static_cast<CompositorOGL*>(aCompositor);
-  return mGL->GetTexImage(mTextureHandle, true, compositorOGL->GetFBOFormat());
+  return ReadBackSurface(mGL, mTextureHandle, true, compositorOGL->GetFBOFormat());
 }
 #endif
 
@@ -87,12 +92,16 @@ CompositingRenderTargetOGL::InitializeImpl()
     NS_ERROR(msg.get());
   }
 
-  mCompositor->PrepareViewport(mInitParams.mSize, mTransform);
+  mInitParams.mStatus = InitParams::INITIALIZED;
+
+  mCompositor->PrepareViewport(mInitParams.mSize);
   mGL->fScissor(0, 0, mInitParams.mSize.width, mInitParams.mSize.height);
   if (mInitParams.mInit == INIT_MODE_CLEAR) {
     mGL->fClearColor(0.0, 0.0, 0.0, 0.0);
     mGL->fClear(LOCAL_GL_COLOR_BUFFER_BIT);
   }
 
-  mInitParams.mStatus = InitParams::INITIALIZED;
+}
+
+}
 }

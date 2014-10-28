@@ -91,6 +91,24 @@ function consoleOpened(aHud) {
     is(completeNode.value, prefix + "watch",
         "completeNode.value holds watch");
 
+    let currentSelectionIndex = popup.selectedIndex;
+
+    EventUtils.synthesizeKey("VK_PAGE_DOWN", {});
+
+    ok(popup.selectedIndex > currentSelectionIndex,
+      "Index is greater after PGDN");
+
+    currentSelectionIndex = popup.selectedIndex;
+    EventUtils.synthesizeKey("VK_PAGE_UP", {});
+
+    ok(popup.selectedIndex < currentSelectionIndex, "Index is less after Page UP");
+
+    EventUtils.synthesizeKey("VK_END", {});
+    is(popup.selectedIndex, 17, "index is last after End");
+
+    EventUtils.synthesizeKey("VK_HOME", {});
+    is(popup.selectedIndex, 0, "index is first after Home");
+
     info("press Tab and wait for popup to hide");
     popup._panel.addEventListener("popuphidden", popupHideAfterTab, false);
     EventUtils.synthesizeKey("VK_TAB", {});
@@ -320,5 +338,10 @@ function popupHideAfterCompletionInText()
   is(inputNode.selectionStart, inputNode.selectionEnd, "cursor location (confirmed)");
   ok(!completeNode.value, "completeNode is empty");
 
+  finishUp();
+}
+
+function finishUp() {
+  HUD = popup = jsterm = inputNode = completeNode = null;
   finishTest();
 }

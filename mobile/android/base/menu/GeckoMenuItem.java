@@ -4,11 +4,12 @@
 
 package org.mozilla.gecko.menu;
 
+import org.mozilla.gecko.AppConstants.Versions;
+import org.mozilla.gecko.R;
 import org.mozilla.gecko.widget.GeckoActionProvider;
 
 import android.content.Intent;
 import android.graphics.drawable.Drawable;
-import android.os.Build;
 import android.view.ActionProvider;
 import android.view.ContextMenu;
 import android.view.MenuItem;
@@ -16,36 +17,39 @@ import android.view.SubMenu;
 import android.view.View;
 
 public class GeckoMenuItem implements MenuItem {
-    private static final String LOGTAG = "GeckoMenuItem";
+    public static final int SHOW_AS_ACTION_NEVER = 0;
+    public static final int SHOW_AS_ACTION_IF_ROOM = 1;
+    public static final int SHOW_AS_ACTION_ALWAYS = 2;
 
-    // A View that can show a MenuItem should be able to initialize from 
+    // A View that can show a MenuItem should be able to initialize from
     // the properties of the MenuItem.
     public static interface Layout {
         public void initialize(GeckoMenuItem item);
+        public void setShowIcon(boolean show);
     }
 
     public static interface OnShowAsActionChangedListener {
         public boolean hasActionItemBar();
-        public void onShowAsActionChanged(GeckoMenuItem item, boolean isActionItem);
+        public void onShowAsActionChanged(GeckoMenuItem item);
     }
 
-    private int mId;
-    private int mOrder;
+    private final int mId;
+    private final int mOrder;
     private View mActionView;
-    private boolean mActionItem = false;
+    private int mActionEnum;
     private CharSequence mTitle;
     private CharSequence mTitleCondensed;
-    private boolean mCheckable = false;
-    private boolean mChecked = false;
+    private boolean mCheckable;
+    private boolean mChecked;
     private boolean mVisible = true;
     private boolean mEnabled = true;
     private Drawable mIcon;
     private int mIconRes;
-    private ActionProvider mActionProvider;
-    private GeckoMenu mMenu;
+    private GeckoActionProvider mActionProvider;
     private GeckoSubMenu mSubMenu;
-    private MenuItem.OnMenuItemClickListener mMenuItemClickListener = null;
-    private OnShowAsActionChangedListener mShowAsActionChangedListener;
+    private MenuItem.OnMenuItemClickListener mMenuItemClickListener;
+    final GeckoMenu mMenu;
+    OnShowAsActionChangedListener mShowAsActionChangedListener;
 
     public GeckoMenuItem(GeckoMenu menu, int id, int order, int titleRes) {
         mMenu = menu;
@@ -72,22 +76,30 @@ public class GeckoMenuItem implements MenuItem {
     }
 
     public boolean hasActionProvider() {
-        if (Build.VERSION.SDK_INT < 14) {
+        if (Versions.preICS) {
             return false;
         }
 
         return (mActionProvider != null);
     }
 
-    @Override
-    public ActionProvider getActionProvider() {
+    public int getActionEnum() {
+        return mActionEnum;
+    }
+
+    public GeckoActionProvider getGeckoActionProvider() {
         return mActionProvider;
     }
 
     @Override
+    public ActionProvider getActionProvider() {
+        return null;
+    }
+
+    @Override
     public View getActionView() {
-        if (mActionProvider != null && mActionProvider instanceof GeckoActionProvider) {
-            return ((GeckoActionProvider) mActionProvider).getView();
+        if (mActionProvider != null) {
+            return mActionProvider.getView();
         }
 
         return mActionView;
@@ -164,7 +176,7 @@ public class GeckoMenuItem implements MenuItem {
     }
 
     public boolean isActionItem() {
-        return mActionItem;
+        return (mActionEnum > 0);
     }
 
     @Override
@@ -194,17 +206,24 @@ public class GeckoMenuItem implements MenuItem {
 
     @Override
     public MenuItem setActionProvider(ActionProvider actionProvider) {
+        return this;
+    }
+
+    public MenuItem setActionProvider(GeckoActionProvider actionProvider) {
         mActionProvider = actionProvider;
-        if (mActionProvider != null && mActionProvider instanceof GeckoActionProvider) {
-            GeckoActionProvider provider = (GeckoActionProvider) mActionProvider;
-            provider.setOnTargetSelectedListener(new GeckoActionProvider.OnTargetSelectedListener() {
+        if (mActionProvider != null) {
+            actionProvider.setOnTargetSelectedListener(new GeckoActionProvider.OnTargetSelectedListener() {
                 @Override
                 public void onTargetSelected() {
                     mMenu.close();
+
+                    // Refresh the menu item to show the high frequency apps.
+                    mShowAsActionChangedListener.onShowAsActionChanged(GeckoMenuItem.this);
                 }
             });
         }
 
+        mShowAsActionChangedListener.onShowAsActionChanged(this);
         return this;
     }
 
@@ -293,27 +312,34 @@ public class GeckoMenuItem implements MenuItem {
         if (mShowAsActionChangedListener == null)
             return;
 
-        if (mActionItem == (actionEnum > 0))
+        if (mActionEnum == actionEnum)
             return;
 
         if (actionEnum > 0) {
             if (!mShowAsActionChangedListener.hasActionItemBar())
                 return;
 
-            // Change the type to just an icon
-            MenuItemActionBar actionView;
-            if (style != 0) {
-                actionView = new MenuItemActionBar(mMenu.getContext(), null, style);
-            } else {
-                actionView = new MenuItemActionBar(mMenu.getContext());
-            }
-            actionView.initialize(this);
-            mActionView = actionView;
+            if (!hasActionProvider()) {
+                // Change the type to just an icon
+                MenuItemActionBar actionView;
+                if (style != 0) {
+                    actionView = new MenuItemActionBar(mMenu.getContext(), null, style);
+                } else {
+                    if (actionEnum == SHOW_AS_ACTION_ALWAYS) {
+                        actionView = new MenuItemActionBar(mMenu.getContext());
+                    } else {
+                        actionView = new MenuItemActionBar(mMenu.getContext(), null, R.attr.menuItemSecondaryActionBarStyle);
+                    }
+                }
 
-            mActionItem = (actionEnum > 0);
+                actionView.initialize(this);
+                mActionView = actionView;
+            }
+
+            mActionEnum = actionEnum;
         }
 
-        mShowAsActionChangedListener.onShowAsActionChanged(this, mActionItem);
+        mShowAsActionChangedListener.onShowAsActionChanged(this);
     }
 
     @Override

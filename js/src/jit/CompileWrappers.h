@@ -7,8 +7,6 @@
 #ifndef jit_CompileWrappers_h
 #define jit_CompileWrappers_h
 
-#ifdef JS_ION
-
 #include "jscntxt.h"
 
 namespace js {
@@ -31,11 +29,13 @@ class CompileRuntime
 
     bool onMainThread();
 
-    // &mainThread.ionTop
-    const void *addressOfIonTop();
+    js::PerThreadData *mainThread();
 
-    // rt->mainThread.ionStackLimit;
-    const void *addressOfIonStackLimit();
+    // &mainThread.jitTop
+    const void *addressOfJitTop();
+
+    // rt->mainThread.jitStackLimit;
+    const void *addressOfJitStackLimit();
 
     // &mainThread.ionJSContext
     const void *addressOfJSContext();
@@ -51,22 +51,29 @@ class CompileRuntime
 #endif
 
     const void *addressOfInterrupt();
+    const void *addressOfInterruptPar();
+
+    const void *addressOfThreadPool();
 
     const JitRuntime *jitRuntime();
 
     // Compilation does not occur off thread when the SPS profiler is enabled.
     SPSProfiler &spsProfiler();
 
-    bool signalHandlersInstalled();
+    bool canUseSignalHandlers();
     bool jitSupportsFloatingPoint();
     bool hadOutOfMemory();
+    bool profilingScripts();
 
     const JSAtomState &names();
+    const PropertyName *emptyString();
     const StaticStrings &staticStrings();
     const Value &NaNValue();
     const Value &positiveInfinityValue();
 
+#ifdef DEBUG
     bool isInsideNursery(gc::Cell *cell);
+#endif
 
     // DOM callbacks must be threadsafe (and will hopefully be removed soon).
     const DOMCallbacks *DOMcallbacks();
@@ -85,7 +92,7 @@ class CompileZone
   public:
     static CompileZone *get(Zone *zone);
 
-    const void *addressOfNeedsBarrier();
+    const void *addressOfNeedsIncrementalBarrier();
 
     // allocator.arenas.getFreeList(allocKind)
     const void *addressOfFreeListFirst(gc::AllocKind allocKind);
@@ -109,11 +116,31 @@ class CompileCompartment
     const JitCompartment *jitCompartment();
 
     bool hasObjectMetadataCallback();
+
+    // Mirror CompartmentOptions.
+    void setSingletonsAsValues();
+};
+
+class JitCompileOptions
+{
+  public:
+    JitCompileOptions();
+    explicit JitCompileOptions(JSContext *cx);
+
+    bool cloneSingletons() const {
+        return cloneSingletons_;
+    }
+
+    bool spsSlowAssertionsEnabled() const {
+        return spsSlowAssertionsEnabled_;
+    }
+
+  private:
+    bool cloneSingletons_;
+    bool spsSlowAssertionsEnabled_;
 };
 
 } // namespace jit
 } // namespace js
-
-#endif // JS_ION
 
 #endif // jit_CompileWrappers_h

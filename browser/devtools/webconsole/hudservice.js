@@ -1,4 +1,4 @@
-/* -*- js2-basic-offset: 2; indent-tabs-mode: nil; -*- */
+/* -*- js-indent-level: 2; indent-tabs-mode: nil -*- */
 /* vim: set ft=javascript ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -11,9 +11,9 @@ const {Cc, Ci, Cu} = require("chrome");
 let WebConsoleUtils = require("devtools/toolkit/webconsole/utils").Utils;
 let Heritage = require("sdk/core/heritage");
 
-loader.lazyGetter(this, "promise", () => require("sdk/core/promise"));
 loader.lazyGetter(this, "Telemetry", () => require("devtools/shared/telemetry"));
 loader.lazyGetter(this, "WebConsoleFrame", () => require("devtools/webconsole/webconsole").WebConsoleFrame);
+loader.lazyImporter(this, "promise", "resource://gre/modules/Promise.jsm", "Promise");
 loader.lazyImporter(this, "gDevTools", "resource:///modules/devtools/gDevTools.jsm");
 loader.lazyImporter(this, "devtools", "resource://gre/modules/devtools/Loader.jsm");
 loader.lazyImporter(this, "Services", "resource://gre/modules/Services.jsm");
@@ -110,6 +110,7 @@ HUD_SERVICE.prototype =
   function HS_openBrowserConsole(aTarget, aIframeWindow, aChromeWindow)
   {
     let hud = new BrowserConsole(aTarget, aIframeWindow, aChromeWindow);
+    this._browserConsoleID = hud.hudId;
     this.consoles.set(hud.hudId, hud);
     return hud.init();
   },
@@ -140,24 +141,6 @@ HUD_SERVICE.prototype =
   getHudReferenceById: function HS_getHudReferenceById(aId)
   {
     return this.consoles.get(aId);
-  },
-
-  /**
-   * Toggle the Web Console for the current tab.
-   *
-   * @return object
-   *         A promise for either the opening of the toolbox that holds the Web
-   *         Console, or a Promise for the closing of the toolbox.
-   */
-  toggleWebConsole: function HS_toggleWebConsole()
-  {
-    let window = this.currentContext();
-    let target = devtools.TargetFactory.forTab(window.gBrowser.selectedTab);
-    let toolbox = gDevTools.getToolbox(target);
-
-    return toolbox && toolbox.currentToolId == "webconsole" ?
-        toolbox.destroy() :
-        gDevTools.showToolbox(target, "webconsole");
   },
 
   /**
@@ -208,7 +191,7 @@ HUD_SERVICE.prototype =
       client.connect(() =>
         client.listTabs((aResponse) => {
           // Add Global Process debugging...
-          let globals = JSON.parse(JSON.stringify(aResponse));
+          let globals = Cu.cloneInto(aResponse, {});
           delete globals.tabs;
           delete globals.selected;
           // ...only if there are appropriate actors (a 'from' property will
@@ -259,7 +242,6 @@ HUD_SERVICE.prototype =
     connect().then(getTarget).then(openWindow).then((aWindow) => {
       this.openBrowserConsole(target, aWindow, aWindow)
         .then((aBrowserConsole) => {
-          this._browserConsoleID = aBrowserConsole.hudId;
           this._browserConsoleDefer.resolve(aBrowserConsole);
           this._browserConsoleDefer = null;
         })
@@ -504,11 +486,14 @@ WebConsole.prototype = {
 
     let showSource = ({ DebuggerView }) => {
       if (DebuggerView.Sources.containsValue(aSourceURL)) {
-        DebuggerView.setEditorLocation(aSourceURL, aSourceLine, { noDebug: true });
+        DebuggerView.setEditorLocation(aSourceURL, aSourceLine,
+                                       { noDebug: true }).then(() => {
+          this.ui.emit("source-in-debugger-opened");
+        });
         return;
       }
-      toolbox.selectTool("webconsole");
-      this.viewSource(aSourceURL, aSourceLine);
+      toolbox.selectTool("webconsole")
+             .then(() => this.viewSource(aSourceURL, aSourceLine));
     }
 
     // If the Debugger was already open, switch to it and try to show the
@@ -593,6 +578,30 @@ WebConsole.prototype = {
       };
     }
     return null;
+  },
+
+  /**
+   * Retrieves the current selection from the Inspector, if such a selection
+   * exists. This is used to pass the ID of the selected actor to the Web
+   * Console server for the $0 helper.
+   *
+   * @return object|null
+   *         A Selection referring to the currently selected node in the
+   *         Inspector.
+   *         If the inspector was never opened, or no node was ever selected,
+   *         then |null| is returned.
+   */
+  getInspectorSelection: function WC_getInspectorSelection()
+  {
+    let toolbox = gDevTools.getToolbox(this.target);
+    if (!toolbox) {
+      return null;
+    }
+    let panel = toolbox.getPanel("inspector");
+    if (!panel || !panel.selection) {
+      return null;
+    }
+    return panel.selection;
   },
 
   /**
@@ -741,7 +750,7 @@ BrowserConsole.prototype = Heritage.extend(WebConsole.prototype,
 const HUDService = new HUD_SERVICE();
 
 (() => {
-  let methods = ["openWebConsole", "openBrowserConsole", "toggleWebConsole",
+  let methods = ["openWebConsole", "openBrowserConsole",
                  "toggleBrowserConsole", "getOpenWebConsole",
                  "getBrowserConsole", "getHudByWindow", "getHudReferenceById"];
   for (let method of methods) {

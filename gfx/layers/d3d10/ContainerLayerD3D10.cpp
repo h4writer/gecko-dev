@@ -5,8 +5,10 @@
 
 #include "ContainerLayerD3D10.h"
 
-#include "ThebesLayerD3D10.h"
+#include "PaintedLayerD3D10.h"
 #include "ReadbackProcessor.h"
+
+using namespace mozilla::gfx;
 
 namespace mozilla {
 namespace layers {
@@ -38,25 +40,6 @@ ContainerLayerD3D10::GetFirstChildD3D10()
     return nullptr;
   }
   return static_cast<LayerD3D10*>(mFirstChild->ImplData());
-}
-
-static inline LayerD3D10*
-GetNextSiblingD3D10(LayerD3D10* aLayer)
-{
-   Layer* layer = aLayer->GetLayer()->GetNextSibling();
-   return layer ? static_cast<LayerD3D10*>(layer->
-                                           ImplData())
-                : nullptr;
-}
-
-static bool
-HasOpaqueAncestorLayer(Layer* aLayer)
-{
-  for (Layer* l = aLayer->GetParent(); l; l = l->GetParent()) {
-    if (l->GetContentFlags() & Layer::CONTENT_OPAQUE)
-      return true;
-  }
-  return false;
 }
 
 void
@@ -106,8 +89,8 @@ ContainerLayerD3D10::RenderLayer()
     previousViewportSize = mD3DManager->GetViewport();
 
     if (mVisibleRegion.GetNumRects() != 1 || !(GetContentFlags() & CONTENT_OPAQUE)) {
-      const gfx3DMatrix& transform3D = GetEffectiveTransform();
-      gfxMatrix transform;
+      Matrix4x4 transform3D = GetEffectiveTransform();
+      Matrix transform;
       // If we have an opaque ancestor layer, then we can be sure that
       // all the pixels we draw into are either opaque already or will be
       // covered by something opaque. Otherwise copying up the background is
@@ -120,8 +103,8 @@ ContainerLayerD3D10::RenderLayer()
         // applied to use relative to our parent, and compensates for the offset
         // that was applied on our parent's rendering.
         D3D10_BOX srcBox;
-        srcBox.left = std::max<int32_t>(visibleRect.x + int32_t(transform.x0) - int32_t(previousRenderTargetOffset[0]), 0);
-        srcBox.top = std::max<int32_t>(visibleRect.y + int32_t(transform.y0) - int32_t(previousRenderTargetOffset[1]), 0);
+        srcBox.left = std::max<int32_t>(visibleRect.x + int32_t(transform._31) - int32_t(previousRenderTargetOffset[0]), 0);
+        srcBox.top = std::max<int32_t>(visibleRect.y + int32_t(transform._32) - int32_t(previousRenderTargetOffset[1]), 0);
         srcBox.right = std::min<int32_t>(srcBox.left + visibleRect.width, previousViewportSize.width);
         srcBox.bottom = std::min<int32_t>(srcBox.top + visibleRect.height, previousViewportSize.height);
         srcBox.back = 1;
@@ -173,9 +156,9 @@ ContainerLayerD3D10::RenderLayer()
     if (layerToRender->GetLayer()->GetEffectiveVisibleRegion().IsEmpty()) {
       continue;
     }
-    
+
     nsIntRect scissorRect =
-        layerToRender->GetLayer()->CalculateScissorRect(oldScissor, nullptr);
+        RenderTargetPixel::ToUntyped(layerToRender->GetLayer()->CalculateScissorRect(RenderTargetPixel::FromUntyped(oldScissor)));
     if (scissorRect.IsEmpty()) {
       continue;
     }
@@ -247,15 +230,15 @@ ContainerLayerD3D10::Validate()
   mSupportsComponentAlphaChildren = false;
 
   if (UseIntermediateSurface()) {
-    const gfx3DMatrix& transform3D = GetEffectiveTransform();
-    gfxMatrix transform;
+    Matrix4x4 transform3D = GetEffectiveTransform();
+    Matrix transform;
 
     if (mVisibleRegion.GetNumRects() == 1 && (GetContentFlags() & CONTENT_OPAQUE)) {
       // don't need a background, we're going to paint all opaque stuff
       mSupportsComponentAlphaChildren = true;
     } else {
       if (HasOpaqueAncestorLayer(this) &&
-          transform3D.Is2D(&transform) && !transform.HasNonIntegerTranslation() &&
+          transform3D.Is2D(&transform) && !ThebesMatrix(transform).HasNonIntegerTranslation() &&
           GetParent()->GetEffectiveVisibleRegion().GetBounds().Contains(visibleRect))
       {
         // In this case we can copy up the background. See RenderLayer.
@@ -272,8 +255,8 @@ ContainerLayerD3D10::Validate()
 
   Layer *layer = GetFirstChild();
   while (layer) {
-    if (layer->GetType() == TYPE_THEBES) {
-      static_cast<ThebesLayerD3D10*>(layer)->Validate(&readback);
+    if (layer->GetType() == TYPE_PAINTED) {
+      static_cast<PaintedLayerD3D10*>(layer)->Validate(&readback);
     } else {
       static_cast<LayerD3D10*>(layer->ImplData())->Validate();
     }

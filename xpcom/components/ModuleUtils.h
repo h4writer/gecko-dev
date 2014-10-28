@@ -83,7 +83,7 @@ _InstanceClass##Constructor(nsISupports *aOuter, REFNSIID aIID,               \
         return rv;                                                            \
     }                                                                         \
                                                                               \
-    inst = already_AddRefed<_InstanceClass>(_GetterProc()).get();             \
+    inst = already_AddRefed<_InstanceClass>(_GetterProc()).take();   \
     if (nullptr == inst) {                                                    \
         rv = NS_ERROR_OUT_OF_MEMORY;                                          \
         return rv;                                                            \
@@ -104,17 +104,16 @@ namespace mozilla {
 
 class GenericModule MOZ_FINAL : public nsIModule
 {
-public:
-    GenericModule(const mozilla::Module* aData)
-        : mData(aData)
-    {
-    }
+  ~GenericModule() {}
 
-    NS_DECL_THREADSAFE_ISUPPORTS
-    NS_DECL_NSIMODULE
+public:
+  explicit GenericModule(const mozilla::Module* aData) : mData(aData) {}
+
+  NS_DECL_THREADSAFE_ISUPPORTS
+  NS_DECL_NSIMODULE
 
 private:
-    const mozilla::Module* mData;
+  const mozilla::Module* mData;
 };
 
 } // namespace mozilla

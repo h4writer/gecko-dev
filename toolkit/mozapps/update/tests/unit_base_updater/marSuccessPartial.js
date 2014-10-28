@@ -5,238 +5,28 @@
 
 /* General Partial MAR File Patch Apply Test */
 
-// The files are listed in the same order as they are applied from the mar's
-// update.manifest. Complete updates have remove file and rmdir directory
-// operations located in the precomplete file performed first.
-const TEST_FILES = [
-{
-  description      : "Should never change",
-  fileName         : "channel-prefs.js",
-  relPathDir       : "a/b/defaults/pref/",
-  originalContents : "ShouldNotBeReplaced\n",
-  compareContents  : "ShouldNotBeReplaced\n",
-  originalFile     : null,
-  compareFile      : null,
-  originalPerms    : 0o644,
-  comparePerms     : null
-}, {
-  description      : "Added by update.manifest (add)",
-  fileName         : "precomplete",
-  relPathDir       : "",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : "complete_precomplete",
-  compareFile      : "partial_precomplete",
-  originalPerms    : 0o666,
-  comparePerms     : 0o644
-}, {
-  description      : "Added by update.manifest (add)",
-  fileName         : "searchpluginstext0",
-  relPathDir       : "a/b/searchplugins/",
-  originalContents : "ToBeReplacedWithFromPartial\n",
-  compareContents  : "FromPartial\n",
-  originalFile     : null,
-  compareFile      : null,
-  originalPerms    : 0o775,
-  comparePerms     : 0o644
-}, {
-  description      : "Patched by update.manifest if the file exists " +
-                     "(patch-if)",
-  fileName         : "searchpluginspng1.png",
-  relPathDir       : "a/b/searchplugins/",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : "complete.png",
-  compareFile      : "partial.png",
-  originalPerms    : 0o666,
-  comparePerms     : 0o666
-}, {
-  description      : "Patched by update.manifest if the file exists " +
-                     "(patch-if)",
-  fileName         : "searchpluginspng0.png",
-  relPathDir       : "a/b/searchplugins/",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : "complete.png",
-  compareFile      : "partial.png",
-  originalPerms    : 0o666,
-  comparePerms     : 0o666
-}, {
-  description      : "Added by update.manifest if the parent directory " +
-                     "exists (add-if)",
-  fileName         : "extensions1text0",
-  relPathDir       : "a/b/extensions/extensions1/",
-  originalContents : null,
-  compareContents  : "FromPartial\n",
-  originalFile     : null,
-  compareFile      : null,
-  originalPerms    : null,
-  comparePerms     : 0o644
-}, {
-  description      : "Patched by update.manifest if the parent directory " +
-                     "exists (patch-if)",
-  fileName         : "extensions1png1.png",
-  relPathDir       : "a/b/extensions/extensions1/",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : "complete.png",
-  compareFile      : "partial.png",
-  originalPerms    : 0o666,
-  comparePerms     : 0o666
-}, {
-  description      : "Patched by update.manifest if the parent directory " +
-                     "exists (patch-if)",
-  fileName         : "extensions1png0.png",
-  relPathDir       : "a/b/extensions/extensions1/",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : "complete.png",
-  compareFile      : "partial.png",
-  originalPerms    : 0o666,
-  comparePerms     : 0o666
-}, {
-  description      : "Added by update.manifest if the parent directory " +
-                     "exists (add-if)",
-  fileName         : "extensions0text0",
-  relPathDir       : "a/b/extensions/extensions0/",
-  originalContents : "ToBeReplacedWithFromPartial\n",
-  compareContents  : "FromPartial\n",
-  originalFile     : null,
-  compareFile      : null,
-  originalPerms    : 0o644,
-  comparePerms     : 0o644
-}, {
-  description      : "Patched by update.manifest if the parent directory " +
-                     "exists (patch-if)",
-  fileName         : "extensions0png1.png",
-  relPathDir       : "a/b/extensions/extensions0/",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : "complete.png",
-  compareFile      : "partial.png",
-  originalPerms    : 0o644,
-  comparePerms     : 0o644
-}, {
-  description      : "Patched by update.manifest if the parent directory " +
-                     "exists (patch-if)",
-  fileName         : "extensions0png0.png",
-  relPathDir       : "a/b/extensions/extensions0/",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : "complete.png",
-  compareFile      : "partial.png",
-  originalPerms    : 0o644,
-  comparePerms     : 0o644
-}, {
-  description      : "Patched by update.manifest (patch)",
-  fileName         : "exe0.exe",
-  relPathDir       : "a/b/",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : "complete.png",
-  compareFile      : "partial.png",
-  originalPerms    : 0o755,
-  comparePerms     : 0o755
-}, {
-  description      : "Patched by update.manifest (patch)",
-  fileName         : "0exe0.exe",
-  relPathDir       : "a/b/0/",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : "complete.png",
-  compareFile      : "partial.png",
-  originalPerms    : 0o755,
-  comparePerms     : 0o755
-}, {
-  description      : "Added by update.manifest (add)",
-  fileName         : "00text0",
-  relPathDir       : "a/b/0/00/",
-  originalContents : "ToBeReplacedWithFromPartial\n",
-  compareContents  : "FromPartial\n",
-  originalFile     : null,
-  compareFile      : null,
-  originalPerms    : 0o644,
-  comparePerms     : 0o644
-}, {
-  description      : "Patched by update.manifest (patch)",
-  fileName         : "00png0.png",
-  relPathDir       : "a/b/0/00/",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : "complete.png",
-  compareFile      : "partial.png",
-  originalPerms    : 0o666,
-  comparePerms     : 0o666
-}, {
-  description      : "Added by update.manifest (add)",
-  fileName         : "20text0",
-  relPathDir       : "a/b/2/20/",
-  originalContents : null,
-  compareContents  : "FromPartial\n",
-  originalFile     : null,
-  compareFile      : null,
-  originalPerms    : null,
-  comparePerms     : 0o644
-}, {
-  description      : "Added by update.manifest (add)",
-  fileName         : "20png0.png",
-  relPathDir       : "a/b/2/20/",
-  originalContents : null,
-  compareContents  : null,
-  originalFile     : null,
-  compareFile      : "partial.png",
-  originalPerms    : null,
-  comparePerms     : 0o644
-}, {
-  description      : "Added by update.manifest (add)",
-  fileName         : "00text2",
-  relPathDir       : "a/b/0/00/",
-  originalContents : null,
-  compareContents  : "FromPartial\n",
-  originalFile     : null,
-  compareFile      : null,
-  originalPerms    : null,
-  comparePerms     : 0o644
-}, {
-  description      : "Removed by update.manifest (remove)",
-  fileName         : "10text0",
-  relPathDir       : "a/b/1/10/",
-  originalContents : "ToBeDeleted\n",
-  compareContents  : null,
-  originalFile     : null,
-  compareFile      : null,
-  originalPerms    : null,
-  comparePerms     : null
-}, {
-  description      : "Removed by update.manifest (remove)",
-  fileName         : "00text1",
-  relPathDir       : "a/b/0/00/",
-  originalContents : "ToBeDeleted\n",
-  compareContents  : null,
-  originalFile     : null,
-  compareFile      : null,
-  originalPerms    : null,
-  comparePerms     : null
-}];
-
-ADDITIONAL_TEST_DIRS = [
-{
-  description  : "Removed by update.manifest (rmdir)",
-  relPathDir   : "a/b/1/10/",
-  dirRemoved   : true
-}, {
-  description  : "Removed by update.manifest (rmdir)",
-  relPathDir   : "a/b/1/",
-  dirRemoved   : true
-}];
-
 function run_test() {
-  setupTestCommon(true);
-
+  setupTestCommon();
+  gTestFiles = gTestFilesPartialSuccess;
+  gTestFiles[gTestFiles.length - 1].originalContents = null;
+  gTestFiles[gTestFiles.length - 1].compareContents = "FromPartial\n";
+  gTestFiles[gTestFiles.length - 1].comparePerms = 0o644;
+  gTestFiles[gTestFiles.length - 2].originalContents = null;
+  gTestFiles[gTestFiles.length - 2].compareContents = "FromPartial\n";
+  gTestFiles[gTestFiles.length - 2].comparePerms = 0o644;
+  gTestDirs = gTestDirsPartialSuccess;
   setupUpdaterTest(FILE_PARTIAL_MAR);
+  if (IS_MACOSX) {
+    // Create files in the old distribution directory location to verify that
+    // the directory and its contents are removed when there is a distribution
+    // directory in the new location.
+    let testFile = getApplyDirFile(DIR_MACOS + "distribution/testFile", true);
+    writeFile(testFile, "test\n");
+    testFile = getApplyDirFile(DIR_MACOS + "distribution/test/testFile", true);
+    writeFile(testFile, "test\n");
+  }
 
-  let updatesDir = do_get_file(gTestID + UPDATES_DIR_SUFFIX);
-  let applyToDir = getApplyDirFile();
+  createUpdaterINI(true);
 
   // For Mac OS X set the last modified time for the root directory to a date in
   // the past to test that the last modified time is updated on all updates since
@@ -244,41 +34,52 @@ function run_test() {
   if (IS_MACOSX) {
     let now = Date.now();
     let yesterday = now - (1000 * 60 * 60 * 24);
+    let applyToDir = getApplyDirFile();
     applyToDir.lastModifiedTime = yesterday;
   }
 
-  // apply the partial mar
-  let exitValue = runUpdate();
-  logTestInfo("testing updater binary process exitValue for success when " +
-              "applying a partial mar");
-  do_check_eq(exitValue, 0);
+  runUpdate(0, STATE_SUCCEEDED);
+}
 
-  logTestInfo("testing update.status should be " + STATE_SUCCEEDED);
-  do_check_eq(readStatusFile(updatesDir), STATE_SUCCEEDED);
+/**
+ * Checks if the post update binary was properly launched for the platforms that
+ * support launching post update process.
+ */
+function checkUpdateApplied() {
+  if (IS_WIN || IS_MACOSX) {
+    gCheckFunc = finishCheckUpdateApplied;
+    checkPostUpdateAppLog();
+  } else {
+    finishCheckUpdateApplied();
+  }
+}
 
-  // For Mac OS X check that the last modified time for a directory has been
-  // updated after a successful update (bug 600098).
+/**
+ * Checks if the update has finished and if it has finished performs checks for
+ * the test.
+ */
+function finishCheckUpdateApplied() {
   if (IS_MACOSX) {
     logTestInfo("testing last modified time on the apply to directory has " +
                 "changed after a successful update (bug 600098)");
     let now = Date.now();
+    let applyToDir = getApplyDirFile();
     let timeDiff = Math.abs(applyToDir.lastModifiedTime - now);
     do_check_true(timeDiff < MAC_MAX_TIME_DIFFERENCE);
   }
 
-  checkFilesAfterUpdateSuccess();
-  // Sorting on Linux is different so skip this check for now.
-  if (!IS_UNIX) {
-    checkUpdateLogContents(LOG_PARTIAL_SUCCESS);
+  if (IS_MACOSX) {
+    logTestInfo("testing that the distribution directory is removed from the " +
+                "old location when there is a distribution directory in the " +
+                "new location");
+    let distributionDir = getApplyDirFile(DIR_MACOS + "distribution", true);
+    logTestInfo("testing " + distributionDir.path + " shouldn't exist");
+    do_check_false(distributionDir.exists());
+
+    checkUpdateLogContains("removing old distribution directory");
   }
 
-  logTestInfo("testing tobedeleted directory doesn't exist");
-  let toBeDeletedDir = getApplyDirFile("tobedeleted", true);
-  do_check_false(toBeDeletedDir.exists());
-
+  checkFilesAfterUpdateSuccess(getApplyDirFile, false, false);
+  checkUpdateLogContents(LOG_PARTIAL_SUCCESS);
   checkCallbackAppLog();
-}
-
-function end_test() {
-  cleanupUpdaterTest();
 }

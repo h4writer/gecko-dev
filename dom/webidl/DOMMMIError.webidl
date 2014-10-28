@@ -4,13 +4,11 @@
  * You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-[JSImplementation="@mozilla.org/dom/mmi-error;1",
- Constructor(DOMString serviceCode,
-             DOMString name,
-             optional DOMString message = "",
-             optional DOMString additionalInformation = "")]
+[Pref="dom.mobileconnection.enabled"]
 interface DOMMMIError : DOMError {
+  [Constant]
   readonly attribute DOMString serviceCode;
 
-  readonly attribute any additionalInformation;
+  [Constant]
+  readonly attribute short? additionalInformation;
 };

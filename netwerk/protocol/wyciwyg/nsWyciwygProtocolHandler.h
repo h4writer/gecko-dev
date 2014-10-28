@@ -11,19 +11,13 @@
             
 class nsWyciwygProtocolHandler : public nsIProtocolHandler
 {
+    virtual ~nsWyciwygProtocolHandler();
+
 public:
     NS_DECL_ISUPPORTS
     NS_DECL_NSIPROTOCOLHANDLER
 
     nsWyciwygProtocolHandler();
-    virtual ~nsWyciwygProtocolHandler();
-
-    nsresult Init();
-
-    static void GetCacheSessionName(uint32_t aAppId,
-                                    bool aInBrowser,
-                                    bool aPrivateBrowsing,
-                                    nsACString& aSessionName);
 };
 
 #endif /* nsWyciwygProtocolHandler_h___ */

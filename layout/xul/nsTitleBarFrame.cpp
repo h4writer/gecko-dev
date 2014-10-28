@@ -14,7 +14,6 @@
 #include "nsPresContext.h"
 #include "nsIDocShell.h"
 #include "nsPIDOMWindow.h"
-#include "nsEventDispatcher.h"
 #include "nsDisplayList.h"
 #include "nsContentUtils.h"
 #include "mozilla/MouseEvents.h"
@@ -55,7 +54,7 @@ nsTitleBarFrame::BuildDisplayListForChildren(nsDisplayListBuilder*   aBuilder,
   nsBoxFrame::BuildDisplayListForChildren(aBuilder, aDirtyRect, aLists);
 }
 
-NS_IMETHODIMP
+nsresult
 nsTitleBarFrame::HandleEvent(nsPresContext* aPresContext,
                              WidgetGUIEvent* aEvent,
                              nsEventStatus* aEventStatus)
@@ -74,9 +73,7 @@ nsTitleBarFrame::HandleEvent(nsPresContext* aPresContext,
          // titlebar has no effect in non-chrome shells
          nsCOMPtr<nsIDocShellTreeItem> dsti = aPresContext->GetDocShell();
          if (dsti) {
-           int32_t type = -1;
-           if (NS_SUCCEEDED(dsti->GetItemType(&type)) &&
-               type == nsIDocShellTreeItem::typeChrome) {
+           if (dsti->ItemType() == nsIDocShellTreeItem::typeChrome) {
              // we're tracking.
              mTrackingMouseMove = true;
 
@@ -130,7 +127,10 @@ nsTitleBarFrame::HandleEvent(nsPresContext* aPresContext,
            nsCOMPtr<nsIWidget> widget = menuPopupFrame->GetWidget();
            nsIntRect bounds;
            widget->GetScreenBounds(bounds);
-           menuPopupFrame->MoveTo(bounds.x + nsMoveBy.x, bounds.y + nsMoveBy.y, false);
+
+           int32_t newx = aPresContext->DevPixelsToIntCSSPixels(bounds.x + nsMoveBy.x);
+           int32_t newy = aPresContext->DevPixelsToIntCSSPixels(bounds.y + nsMoveBy.y);
+           menuPopupFrame->MoveTo(newx, newy, false);
          }
          else {
            nsIPresShell* presShell = aPresContext->PresShell();

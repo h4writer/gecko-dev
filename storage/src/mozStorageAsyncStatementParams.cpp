@@ -7,6 +7,7 @@
 #include "nsMemory.h"
 #include "nsString.h"
 #include "nsCOMPtr.h"
+#include "nsJSUtils.h"
 
 #include "jsapi.h"
 
@@ -27,7 +28,7 @@ AsyncStatementParams::AsyncStatementParams(AsyncStatement *aStatement)
   NS_ASSERTION(mStatement != nullptr, "mStatement is null");
 }
 
-NS_IMPL_ISUPPORTS2(
+NS_IMPL_ISUPPORTS(
   AsyncStatementParams
 , mozIStorageStatementParams
 , nsIXPCScriptable
@@ -65,9 +66,12 @@ AsyncStatementParams::SetProperty(
   }
   else if (JSID_IS_STRING(aId)) {
     JSString *str = JSID_TO_STRING(aId);
-    size_t length;
-    const jschar *chars = JS_GetInternedStringCharsAndLength(str, &length);
-    NS_ConvertUTF16toUTF8 name(chars, length);
+    nsAutoJSString autoStr;
+    if (!autoStr.init(aCtx, str)) {
+      return NS_ERROR_FAILURE;
+    }
+
+    NS_ConvertUTF16toUTF8 name(autoStr);
 
     nsCOMPtr<nsIVariant> variant(convertJSValToVariant(aCtx, *_vp));
     NS_ENSURE_TRUE(variant, NS_ERROR_UNEXPECTED);
@@ -88,11 +92,12 @@ AsyncStatementParams::NewResolve(
   JSContext *aCtx,
   JSObject *aScopeObj,
   jsid aId,
-  uint32_t aFlags,
   JSObject **_objp,
   bool *_retval
 )
 {
+  JS::Rooted<JSObject*> scopeObj(aCtx, aScopeObj);
+
   NS_ENSURE_TRUE(mStatement, NS_ERROR_NOT_INITIALIZED);
   // We do not throw at any point after this because we want to allow the
   // prototype chain to be checked for the property.
@@ -103,21 +108,20 @@ AsyncStatementParams::NewResolve(
     uint32_t idx = JSID_TO_INT(aId);
     // All indexes are good because we don't know how many parameters there
     // really are.
-    ok = ::JS_DefineElement(aCtx, aScopeObj, idx, JSVAL_VOID, nullptr,
-                            nullptr, 0);
+    ok = ::JS_DefineElement(aCtx, scopeObj, idx, JS::UndefinedHandleValue, 0);
     resolved = true;
   }
   else if (JSID_IS_STRING(aId)) {
     // We are unable to tell if there's a parameter with this name and so
     // we must assume that there is.  This screws the rest of the prototype
     // chain, but people really shouldn't be depending on this anyways.
-    ok = ::JS_DefinePropertyById(aCtx, aScopeObj, aId, JSVAL_VOID, nullptr,
-                                 nullptr, 0);
+    JS::Rooted<jsid> id(aCtx, aId);
+    ok = ::JS_DefinePropertyById(aCtx, scopeObj, id, JS::UndefinedHandleValue, 0);
     resolved = true;
   }
 
   *_retval = ok;
-  *_objp = resolved && ok ? aScopeObj : nullptr;
+  *_objp = resolved && ok ? scopeObj.get() : nullptr;
   return NS_OK;
 }
 

@@ -5,9 +5,11 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "GonkMemoryPressureMonitoring.h"
+#include "mozilla/ArrayUtils.h"
 #include "mozilla/FileUtils.h"
 #include "mozilla/Monitor.h"
 #include "mozilla/Preferences.h"
+#include "mozilla/ProcessPriorityManager.h"
 #include "mozilla/Services.h"
 #include "nsIObserver.h"
 #include "nsIObserverService.h"
@@ -94,7 +96,7 @@ public:
   }
 
   NS_IMETHOD Observe(nsISupports* aSubject, const char* aTopic,
-                     const PRUnichar* aData)
+                     const char16_t* aData)
   {
     MOZ_ASSERT(strcmp(aTopic, NS_XPCOM_SHUTDOWN_OBSERVER_ID) == 0);
     LOG("Observed XPCOM shutdown.");
@@ -145,7 +147,7 @@ public:
 
       int pollRv;
       do {
-        pollRv = poll(pollfds, NS_ARRAY_LENGTH(pollfds), /* timeout */ -1);
+        pollRv = poll(pollfds, ArrayLength(pollfds), /* timeout */ -1);
       } while (pollRv == -1 && errno == EINTR);
 
       if (pollfds[1].revents) {
@@ -168,7 +170,7 @@ public:
 
       // We use low-memory-no-forward because each process has its own watcher
       // and thus there is no need for the main process to forward this event.
-      rv = NS_DispatchMemoryPressure(MemPressure_New);
+      rv = DispatchMemoryPressure(MemPressure_New);
       NS_ENSURE_SUCCESS(rv, rv);
 
       // Manually check lowMemFd until we observe that memory pressure is over.
@@ -201,7 +203,7 @@ public:
         NS_ENSURE_SUCCESS(rv, rv);
 
         if (memoryPressure) {
-          rv = NS_DispatchMemoryPressure(MemPressure_Ongoing);
+          rv = DispatchMemoryPressure(MemPressure_Ongoing);
           NS_ENSURE_SUCCESS(rv, rv);
           continue;
         }
@@ -244,6 +246,21 @@ private:
     return NS_OK;
   }
 
+  /**
+   * Dispatch the specified memory pressure event unless a high-priority
+   * process is present. If a high-priority process is present then it's likely
+   * responding to an urgent event (an incoming call or message for example) so
+   * avoid wasting CPU time responding to low-memory events.
+   */
+  nsresult DispatchMemoryPressure(MemoryPressureState state)
+  {
+    if (ProcessPriorityManager::AnyProcessHasHighPriority()) {
+      return NS_OK;
+    }
+
+    return NS_DispatchMemoryPressure(state);
+  }
+
   Monitor mMonitor;
   uint32_t mPollMS;
   bool mShuttingDown;
@@ -252,7 +269,7 @@ private:
   ScopedClose mShutdownPipeWrite;
 };
 
-NS_IMPL_ISUPPORTS2(MemoryPressureWatcher, nsIRunnable, nsIObserver);
+NS_IMPL_ISUPPORTS(MemoryPressureWatcher, nsIRunnable, nsIObserver);
 
 } // anonymous namespace
 
@@ -267,7 +284,8 @@ InitGonkMemoryPressureMonitoring()
   NS_ENSURE_SUCCESS_VOID(memoryPressureWatcher->Init());
 
   nsCOMPtr<nsIThread> thread;
-  NS_NewThread(getter_AddRefs(thread), memoryPressureWatcher);
+  NS_NewNamedThread("MemoryPressure", getter_AddRefs(thread),
+                    memoryPressureWatcher);
 }
 
 } // namespace mozilla

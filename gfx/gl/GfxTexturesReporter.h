@@ -7,18 +7,21 @@
 #ifndef GFXTEXTURESREPORTER_H_
 #define GFXTEXTURESREPORTER_H_
 
+#include "mozilla/Atomics.h"
 #include "nsIMemoryReporter.h"
 #include "GLTypes.h"
 
 namespace mozilla {
 namespace gl {
 
-class GfxTexturesReporter MOZ_FINAL : public MemoryUniReporter
+class GfxTexturesReporter MOZ_FINAL : public nsIMemoryReporter
 {
+    ~GfxTexturesReporter() {}
+
 public:
+    NS_DECL_ISUPPORTS
+
     GfxTexturesReporter()
-      : MemoryUniReporter("gfx-textures", KIND_OTHER, UNITS_BYTES,
-                          "Memory used for storing GL textures.")
     {
 #ifdef DEBUG
         // There must be only one instance of this class, due to |sAmount|
@@ -39,12 +42,51 @@ public:
     // When memory is used/freed for tile textures, call this method to update
     // the value reported by this memory reporter.
     static void UpdateAmount(MemoryUse action, GLenum format, GLenum type,
-                             uint16_t tileSize);
+                             int32_t tileWidth, int32_t tileHeight);
+
+    static void UpdateWasteAmount(int32_t delta) {
+      sTileWasteAmount += delta;
+    }
+
+    NS_IMETHOD CollectReports(nsIHandleReportCallback* aHandleReport,
+                              nsISupports* aData, bool aAnonymize)
+    {
+        MOZ_COLLECT_REPORT("gfx-tiles-waste", KIND_OTHER, UNITS_BYTES,
+            sTileWasteAmount,
+            "Memory lost due to tiles extending past content boundaries");
+        return MOZ_COLLECT_REPORT(
+            "gfx-textures", KIND_OTHER, UNITS_BYTES, sAmount,
+            "Memory used for storing GL textures.");
+    }
 
 private:
-    int64_t Amount() MOZ_OVERRIDE { return sAmount; }
+    static Atomic<int32_t> sAmount;
+    // Count the amount of memory lost to tile waste
+    static Atomic<int32_t> sTileWasteAmount;
+};
 
-    static int64_t sAmount;
+class GfxTextureWasteTracker {
+public:
+  GfxTextureWasteTracker()
+    : mBytes(0)
+  {
+    MOZ_COUNT_CTOR(GfxTextureWasteTracker);
+  }
+
+  void Update(int32_t aPixelArea, int32_t aBytesPerPixel) {
+    GfxTexturesReporter::UpdateWasteAmount(-mBytes);
+    mBytes = aPixelArea * aBytesPerPixel;
+    GfxTexturesReporter::UpdateWasteAmount(mBytes);
+  }
+
+  ~GfxTextureWasteTracker() {
+    GfxTexturesReporter::UpdateWasteAmount(-mBytes);
+    MOZ_COUNT_DTOR(GfxTextureWasteTracker);
+  }
+private:
+  GfxTextureWasteTracker(const GfxTextureWasteTracker& aRef);
+
+  int32_t mBytes;
 };
 
 }

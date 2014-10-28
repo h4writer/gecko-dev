@@ -2,6 +2,13 @@
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
+///////////////////
+//
+// Whitelisting this test.
+// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+//
+thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Connection closed");
+
 // Make sure that JS eval result are properly formatted as strings.
 
 const TEST_URI = "http://example.com/browser/browser/devtools/webconsole/test/test-result-format-as-string.html";
@@ -28,10 +35,10 @@ function performTest(hud)
     ok(!hud.outputNode.querySelector("#foobar"), "no #foobar element found");
 
     ok(msg, "eval output node found");
-    is(msg.textContent.indexOf("HTMLDivElement"), -1,
-       "HTMLDivElement string is not displayed");
-    isnot(msg.textContent.indexOf("HTMLParagraphElement"), -1,
-          "HTMLParagraphElement string is displayed");
+    is(msg.textContent.indexOf("<div>"), -1,
+       "<div> string is not displayed");
+    isnot(msg.textContent.indexOf("<p>"), -1,
+          "<p> string is displayed");
 
     EventUtils.synthesizeMouseAtCenter(msg, {type: "mousemove"});
     ok(!gBrowser._bug772506, "no content variable");

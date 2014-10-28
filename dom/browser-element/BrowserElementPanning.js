@@ -1,4 +1,4 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- tab-width: 2; indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim: set ts=2 sw=2 sts=2 et: */
 
 /* This Source Code Form is subject to the terms of the Mozilla Public
@@ -9,11 +9,16 @@
 dump("############################### browserElementPanning.js loaded\n");
 
 let { classes: Cc, interfaces: Ci, results: Cr, utils: Cu }  = Components;
-Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/Geometry.jsm");
 
 var global = this;
+
+const kObservedEvents = [
+  "BEC:ShownModalPrompt",
+  "Activity:Success",
+  "Activity:Error"
+];
 
 const ContentPanning = {
   // Are we listening to touch or mouse events?
@@ -24,9 +29,30 @@ const ContentPanning = {
   hybridEvents: false,
 
   init: function cp_init() {
-    var events;
-    try {
-      content.document.createEvent('TouchEvent');
+    // If APZ is enabled, we do active element handling in C++
+    // (see widget/xpwidgets/ActiveElementManager.h), and panning
+    // itself in APZ, so we don't need to handle any touch events here.
+    if (docShell.asyncPanZoomEnabled === false) {
+      this._setupListenersForPanning();
+    }
+
+    addEventListener("unload",
+		     this._unloadHandler.bind(this),
+		     /* useCapture = */ false,
+		     /* wantsUntrusted = */ false);
+
+    addMessageListener("Viewport:Change", this._recvViewportChange.bind(this));
+    addMessageListener("Gesture:DoubleTap", this._recvDoubleTap.bind(this));
+    addEventListener("visibilitychange", this._handleVisibilityChange.bind(this));
+    kObservedEvents.forEach((topic) => {
+      Services.obs.addObserver(this, topic, false);
+    });
+  },
+
+  _setupListenersForPanning: function cp_setupListenersForPanning() {
+    let events;
+
+    if (content.TouchEvent) {
       events = ['touchstart', 'touchend', 'touchmove'];
       this.watchedEventsType = 'touch';
 #ifdef MOZ_WIDGET_GONK
@@ -39,7 +65,7 @@ const ContentPanning = {
                            .processType == Ci.nsIXULRuntime.PROCESS_TYPE_DEFAULT;
       this.hybridEvents = isParentProcess;
 #endif
-    } catch(e) {
+    } else {
       // Touch events aren't supported, so fall back on mouse.
       events = ['mousedown', 'mouseup', 'mousemove'];
       this.watchedEventsType = 'mouse';
@@ -55,17 +81,32 @@ const ContentPanning = {
                                  this.handleEvent.bind(this),
                                  /* useCapture = */ false);
     }.bind(this));
-
-    addMessageListener("Viewport:Change", this._recvViewportChange.bind(this));
-    addMessageListener("Gesture:DoubleTap", this._recvDoubleTap.bind(this));
-    addEventListener("visibilitychange", this._handleVisibilityChange.bind(this));
-    Services.obs.addObserver(this, "BEC:ShownModalPrompt", false);
-    Services.obs.addObserver(this, "Activity:Success", false);
-    Services.obs.addObserver(this, "Activity:Error", false);
   },
 
   handleEvent: function cp_handleEvent(evt) {
-    this._tryDelayMouseEvents();
+    // Ignore events targeting an oop <iframe mozbrowser> since those will be
+    // handle by the BrowserElementPanning.js instance in the child process.
+    if (evt.target instanceof Ci.nsIMozBrowserFrame) {
+      return;
+    }
+
+    // For in-process <iframe mozbrowser> the events are not targetting
+    // directly the container iframe element, but some node of the document.
+    // So, the BrowserElementPanning instance of the system app will receive
+    // the sequence of touch events, as well as the BrowserElementPanning
+    // instance in the targetted app.
+    // As a result, multiple mozbrowser iframes will try to interpret the
+    // sequence of touch events, which may results into multiple clicks.
+    let targetWindow = evt.target.ownerDocument.defaultView;
+    let frameElement = targetWindow.frameElement;
+    while (frameElement) {
+      targetWindow = frameElement.ownerDocument.defaultView;
+      frameElement = targetWindow.frameElement;
+    }
+
+    if (content !== targetWindow) {
+      return;
+    }
 
     if (evt.defaultPrevented || evt.multipleActionsPrevented) {
       // clean up panning state even if touchend/mouseup has been preventDefault.
@@ -125,7 +166,8 @@ const ContentPanning = {
   onTouchStart: function cp_onTouchStart(evt) {
     let screenX, screenY;
     if (this.watchedEventsType == 'touch') {
-      if ('primaryPointerId' in this) {
+      if ('primaryPointerId' in this || evt.touches.length >= 2) {
+        this._resetActive();
         return;
       }
 
@@ -175,12 +217,12 @@ const ContentPanning = {
     }
 
     this.position.set(screenX, screenY);
+    KineticPanning.reset();
     KineticPanning.record(new Point(0, 0), evt.timeStamp);
 
     // We prevent start events to avoid sending a focus event at the end of this
     // touch series. See bug 889717.
-    if (docShell.asyncPanZoomEnabled === false &&
-        (this.panning || this.preventNextClick)) {
+    if ((this.panning || this.preventNextClick)) {
       evt.preventDefault();
     }
   },
@@ -219,15 +261,12 @@ const ContentPanning = {
         let view = target.ownerDocument ? target.ownerDocument.defaultView
                                         : target;
         view.addEventListener('click', this, true, true);
-      } else if (docShell.asyncPanZoomEnabled === false) {
+      } else {
         // We prevent end events to avoid sending a focus event. See bug 889717.
         evt.preventDefault();
       }
     } else if (this.target && click && !this.panning) {
       this.notify(this._activationTimer);
-
-      this._delayEvents = true;
-      this._tryDelayMouseEvents();
     }
 
     this._finishPanning();
@@ -258,24 +297,24 @@ const ContentPanning = {
 
     KineticPanning.record(delta, evt.timeStamp);
 
+    let isPan = KineticPanning.isPan();
+
+    // If we've detected a pan gesture, cancel the active state of the
+    // current target.
+    if (!this.panning && isPan) {
+      this._resetActive();
+    }
+
     // There's no possibility of us panning anything.
     if (!this.scrollCallback) {
       return;
     }
 
-    let isPan = KineticPanning.isPan();
+    // Scroll manually.
+    this.scrollCallback(delta.scale(-1));
 
-    // If the application is not managed by the AsyncPanZoomController, then
-    // scroll manually.
-    if (docShell.asyncPanZoomEnabled === false) {
-      this.scrollCallback(delta.scale(-1));
-    }
-
-    // If we've detected a pan gesture, cancel the active state of the
-    // current target.
     if (!this.panning && isPan) {
       this.panning = true;
-      this._resetActive();
       this._activationTimer.cancel();
     }
 
@@ -439,21 +478,6 @@ const ContentPanning = {
     return this._activationDelayMs = delay;
   },
 
-  get _activeDurationMs() {
-    let duration = Services.prefs.getIntPref('ui.touch_activation.duration_ms');
-    delete this._activeDurationMs;
-    return this._activeDurationMs = duration;
-  },
-
-  _tryDelayMouseEvents: function cp_tryDelayMouseEvents() {
-    let start = Date.now();
-    let thread = Services.tm.currentThread;
-    while (this._delayEvents && (Date.now() - start) < this._activeDurationMs) {
-      thread.processNextEvent(true);
-    }
-    this._delayEvents = false;
-  },
-
   _resetActive: function cp_resetActive() {
     let elt = this.pointerDownTarget || this.target;
     let root = elt.ownerDocument || elt.document;
@@ -488,7 +512,7 @@ const ContentPanning = {
   },
 
   _recvDoubleTap: function(data) {
-    let data = data.json;
+    data = data.json;
 
     // We haven't received a metrics update yet; don't do anything.
     if (this._viewport == null) {
@@ -544,8 +568,7 @@ const ContentPanning = {
         rect.y = cssTapY - (rect.h / 2);
       }
 
-      var os = Cc["@mozilla.org/observer-service;1"].getService(Ci.nsIObserverService);
-      os.notifyObservers(docShell, 'browser-zoom-to-rect', JSON.stringify(rect));
+      Services.obs.notifyObservers(docShell, 'browser-zoom-to-rect', JSON.stringify(rect));
     }
   },
 
@@ -569,8 +592,7 @@ const ContentPanning = {
 
   _zoomOut: function() {
     let rect = new Rect(0, 0, 0, 0);
-    var os = Cc["@mozilla.org/observer-service;1"].getService(Ci.nsIObserverService);
-    os.notifyObservers(docShell, 'browser-zoom-to-rect', JSON.stringify(rect));
+    Services.obs.notifyObservers(docShell, 'browser-zoom-to-rect', JSON.stringify(rect));
   },
 
   _isRectZoomedIn: function(aRect, aViewport) {
@@ -589,16 +611,20 @@ const ContentPanning = {
   },
 
   _finishPanning: function() {
-    this._resetActive();
     this.dragging = false;
     delete this.primaryPointerId;
     this._activationTimer.cancel();
 
-    // If there is a scroll action but the application is not managed by
-    // the AsyncPanZoom controller, let's do a manual kinetic panning action.
-    if (this.panning && docShell.asyncPanZoomEnabled === false) {
+    // If there is a scroll action, let's do a manual kinetic panning action.
+    if (this.panning) {
       KineticPanning.start(this);
     }
+  },
+
+  _unloadHandler: function() {
+    kObservedEvents.forEach((topic) => {
+      Services.obs.removeObserver(this, topic);
+    });
   }
 };
 
@@ -681,14 +707,18 @@ const KineticPanning = {
   },
 
   stop: function kp_stop() {
+    this.reset();
+
     if (!this.target)
       return;
 
-    this.momentums = [];
-    this.distance.set(0, 0);
-
     this.target.onKineticEnd();
     this.target = null;
+  },
+
+  reset: function kp_reset() {
+    this.momentums = [];
+    this.distance.set(0, 0);
   },
 
   momentums: [],

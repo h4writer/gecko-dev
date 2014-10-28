@@ -14,7 +14,6 @@
 #include "nsComboboxControlFrame.h"
 #include "nsIDOMHTMLOptGroupElement.h"
 #include "nsIPresShell.h"
-#include "nsEventStateManager.h"
 #include "nsIDOMMouseEvent.h"
 #include "nsIXULRuntime.h"
 #include "nsFontMetrics.h"
@@ -27,6 +26,8 @@
 #include "mozilla/Attributes.h"
 #include "mozilla/dom/HTMLOptionsCollection.h"
 #include "mozilla/dom/HTMLSelectElement.h"
+#include "mozilla/EventStateManager.h"
+#include "mozilla/EventStates.h"
 #include "mozilla/LookAndFeel.h"
 #include "mozilla/MouseEvents.h"
 #include "mozilla/Preferences.h"
@@ -61,7 +62,7 @@ DOMTimeStamp nsListControlFrame::gLastKeyTime = 0;
 class nsListEventListener MOZ_FINAL : public nsIDOMEventListener
 {
 public:
-  nsListEventListener(nsListControlFrame *aFrame)
+  explicit nsListEventListener(nsListControlFrame *aFrame)
     : mFrame(aFrame) { }
 
   void SetFrame(nsListControlFrame *aFrame) { mFrame = aFrame; }
@@ -70,11 +71,13 @@ public:
   NS_DECL_NSIDOMEVENTLISTENER
 
 private:
+  ~nsListEventListener() {}
+
   nsListControlFrame  *mFrame;
 };
 
 //---------------------------------------------------------
-nsIFrame*
+nsContainerFrame*
 NS_NewListControlFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
 {
   nsListControlFrame* it =
@@ -298,7 +301,7 @@ nsListControlFrame::CalcHeightOfARow()
 }
 
 nscoord
-nsListControlFrame::GetPrefWidth(nsRenderingContext *aRenderingContext)
+nsListControlFrame::GetPrefISize(nsRenderingContext *aRenderingContext)
 {
   nscoord result;
   DISPLAY_PREF_WIDTH(this, result);
@@ -306,7 +309,7 @@ nsListControlFrame::GetPrefWidth(nsRenderingContext *aRenderingContext)
   // Always add scrollbar widths to the pref-width of the scrolled
   // content. Combobox frames depend on this happening in the dropdown,
   // and standalone listboxes are overflow:scroll so they need it too.
-  result = GetScrolledFrame()->GetPrefWidth(aRenderingContext);
+  result = GetScrolledFrame()->GetPrefISize(aRenderingContext);
   result = NSCoordSaturatingAdd(result,
           GetDesiredScrollbarSizes(PresContext(), aRenderingContext).LeftRight());
 
@@ -314,7 +317,7 @@ nsListControlFrame::GetPrefWidth(nsRenderingContext *aRenderingContext)
 }
 
 nscoord
-nsListControlFrame::GetMinWidth(nsRenderingContext *aRenderingContext)
+nsListControlFrame::GetMinISize(nsRenderingContext *aRenderingContext)
 {
   nscoord result;
   DISPLAY_MIN_WIDTH(this, result);
@@ -322,13 +325,13 @@ nsListControlFrame::GetMinWidth(nsRenderingContext *aRenderingContext)
   // Always add scrollbar widths to the min-width of the scrolled
   // content. Combobox frames depend on this happening in the dropdown,
   // and standalone listboxes are overflow:scroll so they need it too.
-  result = GetScrolledFrame()->GetMinWidth(aRenderingContext);
+  result = GetScrolledFrame()->GetMinISize(aRenderingContext);
   result += GetDesiredScrollbarSizes(PresContext(), aRenderingContext).LeftRight();
 
   return result;
 }
 
-NS_IMETHODIMP 
+void
 nsListControlFrame::Reflow(nsPresContext*           aPresContext, 
                            nsHTMLReflowMetrics&     aDesiredSize,
                            const nsHTMLReflowState& aReflowState, 
@@ -357,7 +360,8 @@ nsListControlFrame::Reflow(nsPresContext*           aPresContext,
   }
 
   if (IsInDropDownMode()) {
-    return ReflowAsDropdown(aPresContext, aDesiredSize, aReflowState, aStatus);
+    ReflowAsDropdown(aPresContext, aDesiredSize, aReflowState, aStatus);
+    return;
   }
 
   /*
@@ -392,14 +396,12 @@ nsListControlFrame::Reflow(nsPresContext*           aPresContext,
   if (!(GetStateBits() & NS_FRAME_FIRST_REFLOW) && autoHeight) {
     // When not doing an initial reflow, and when the height is auto, start off
     // with our computed height set to what we'd expect our height to be.
-    nscoord computedHeight = CalcIntrinsicHeight(oldHeightOfARow, length);
+    nscoord computedHeight = CalcIntrinsicBSize(oldHeightOfARow, length);
     computedHeight = state.ApplyMinMaxHeight(computedHeight);
     state.SetComputedHeight(computedHeight);
   }
 
-  nsresult rv = nsHTMLScrollFrame::Reflow(aPresContext, aDesiredSize,
-                                          state, aStatus);
-  NS_ENSURE_SUCCESS(rv, rv);
+  nsHTMLScrollFrame::Reflow(aPresContext, aDesiredSize, state, aStatus);
 
   if (!mMightNeedSecondPass) {
     NS_ASSERTION(!autoHeight || HeightOfARow() == oldHeightOfARow,
@@ -413,7 +415,7 @@ nsListControlFrame::Reflow(nsPresContext*           aPresContext,
     if (!autoHeight) {
       // Update our mNumDisplayRows based on our new row height now that we
       // know it.  Note that if autoHeight and we landed in this code then we
-      // already set mNumDisplayRows in CalcIntrinsicHeight.  Also note that we
+      // already set mNumDisplayRows in CalcIntrinsicBSize.  Also note that we
       // can't use HeightOfARow() here because that just uses a cached value
       // that we didn't compute.
       nscoord rowHeight = CalcHeightOfARow();
@@ -425,7 +427,7 @@ nsListControlFrame::Reflow(nsPresContext*           aPresContext,
       }
     }
 
-    return rv;
+    return;
   }
 
   mMightNeedSecondPass = false;
@@ -437,7 +439,7 @@ nsListControlFrame::Reflow(nsPresContext*           aPresContext,
     NS_ASSERTION(!IsScrollbarUpdateSuppressed(),
                  "Shouldn't be suppressing if the height of a row has not "
                  "changed!");
-    return rv;
+    return;
   }
 
   SetSuppressScrollbarUpdate(false);
@@ -451,7 +453,7 @@ nsListControlFrame::Reflow(nsPresContext*           aPresContext,
                                nsDidReflowStatus::FINISHED);
 
   // Now compute the height we want to have
-  nscoord computedHeight = CalcIntrinsicHeight(HeightOfARow(), length); 
+  nscoord computedHeight = CalcIntrinsicBSize(HeightOfARow(), length); 
   computedHeight = state.ApplyMinMaxHeight(computedHeight);
   state.SetComputedHeight(computedHeight);
 
@@ -460,10 +462,10 @@ nsListControlFrame::Reflow(nsPresContext*           aPresContext,
   // XXXbz to make the ascent really correct, we should add our
   // mComputedPadding.top to it (and subtract it from descent).  Need that
   // because nsGfxScrollFrame just adds in the border....
-  return nsHTMLScrollFrame::Reflow(aPresContext, aDesiredSize, state, aStatus);
+  nsHTMLScrollFrame::Reflow(aPresContext, aDesiredSize, state, aStatus);
 }
 
-nsresult
+void
 nsListControlFrame::ReflowAsDropdown(nsPresContext*           aPresContext, 
                                      nsHTMLReflowMetrics&     aDesiredSize,
                                      const nsHTMLReflowState& aReflowState, 
@@ -492,9 +494,7 @@ nsListControlFrame::ReflowAsDropdown(nsPresContext*           aPresContext,
     state.SetComputedHeight(mLastDropdownComputedHeight);
   }
 
-  nsresult rv = nsHTMLScrollFrame::Reflow(aPresContext, aDesiredSize,
-                                          state, aStatus);
-  NS_ENSURE_SUCCESS(rv, rv);
+  nsHTMLScrollFrame::Reflow(aPresContext, aDesiredSize, state, aStatus);
 
   if (!mMightNeedSecondPass) {
     NS_ASSERTION(oldVisibleHeight == GetScrolledFrame()->GetSize().height,
@@ -505,7 +505,7 @@ nsListControlFrame::ReflowAsDropdown(nsPresContext*           aPresContext,
                  "Shouldn't be suppressing if we don't need a second pass!");
     NS_ASSERTION(!(GetStateBits() & NS_FRAME_FIRST_REFLOW),
                  "How can we avoid a second pass during first reflow?");
-    return rv;
+    return;
   }
 
   mMightNeedSecondPass = false;
@@ -516,7 +516,7 @@ nsListControlFrame::ReflowAsDropdown(nsPresContext*           aPresContext,
     // All done.  No need to do more reflow.
     NS_ASSERTION(!(GetStateBits() & NS_FRAME_FIRST_REFLOW),
                  "How can we avoid a second pass during first reflow?");
-    return rv;
+    return;
   }
 
   SetSuppressScrollbarUpdate(false);
@@ -551,7 +551,7 @@ nsListControlFrame::ReflowAsDropdown(nsPresContext*           aPresContext,
       mNumDisplayRows = 1;
       mDropdownCanGrow = GetNumberOfRows() > 1;
     } else {
-      nscoord bp = aReflowState.mComputedBorderPadding.TopBottom();
+      nscoord bp = aReflowState.ComputedPhysicalBorderPadding().TopBottom();
       nscoord availableHeight = std::max(above, below) - bp;
       nscoord newHeight;
       uint32_t rows;
@@ -578,7 +578,7 @@ nsListControlFrame::ReflowAsDropdown(nsPresContext*           aPresContext,
   mLastDropdownComputedHeight = state.ComputedHeight();
 
   nsHTMLScrollFrame::WillReflow(aPresContext);
-  return nsHTMLScrollFrame::Reflow(aPresContext, aDesiredSize, state, aStatus);
+  nsHTMLScrollFrame::Reflow(aPresContext, aDesiredSize, state, aStatus);
 }
 
 ScrollbarStyles
@@ -588,7 +588,8 @@ nsListControlFrame::GetScrollbarStyles() const
   // and GetScrollbarStyles can be devirtualized
   int32_t verticalStyle = IsInDropDownMode() ? NS_STYLE_OVERFLOW_AUTO
     : NS_STYLE_OVERFLOW_SCROLL;
-  return ScrollbarStyles(NS_STYLE_OVERFLOW_HIDDEN, verticalStyle);
+  return ScrollbarStyles(NS_STYLE_OVERFLOW_HIDDEN, verticalStyle,
+                         NS_STYLE_SCROLL_BEHAVIOR_AUTO);
 }
 
 bool
@@ -598,7 +599,7 @@ nsListControlFrame::ShouldPropagateComputedHeightToScrolledContent() const
 }
 
 //---------------------------------------------------------
-nsIFrame*
+nsContainerFrame*
 nsListControlFrame::GetContentInsertionFrame() {
   return GetOptionsContainer()->GetContentInsertionFrame();
 }
@@ -848,7 +849,7 @@ nsListControlFrame::CaptureMouseEvents(bool aGrabMouseEvents)
 }
 
 //---------------------------------------------------------
-NS_IMETHODIMP 
+nsresult 
 nsListControlFrame::HandleEvent(nsPresContext* aPresContext,
                                 WidgetGUIEvent* aEvent,
                                 nsEventStatus* aEventStatus)
@@ -888,7 +889,7 @@ nsListControlFrame::HandleEvent(nsPresContext* aPresContext,
   if (uiStyle->mUserInput == NS_STYLE_USER_INPUT_NONE || uiStyle->mUserInput == NS_STYLE_USER_INPUT_DISABLED)
     return nsFrame::HandleEvent(aPresContext, aEvent, aEventStatus);
 
-  nsEventStates eventStates = mContent->AsElement()->State();
+  EventStates eventStates = mContent->AsElement()->State();
   if (eventStates.HasState(NS_EVENT_STATE_DISABLED))
     return NS_OK;
 
@@ -897,7 +898,7 @@ nsListControlFrame::HandleEvent(nsPresContext* aPresContext,
 
 
 //---------------------------------------------------------
-NS_IMETHODIMP
+void
 nsListControlFrame::SetInitialChildList(ChildListID    aListID,
                                         nsFrameList&   aChildList)
 {
@@ -907,7 +908,7 @@ nsListControlFrame::SetInitialChildList(ChildListID    aListID,
     mIsAllFramesHere    = false;
     mHasBeenInitialized = false;
   }
-  nsresult rv = nsHTMLScrollFrame::SetInitialChildList(aListID, aChildList);
+  nsHTMLScrollFrame::SetInitialChildList(aListID, aChildList);
 
   // If all the content is here now check
   // to see if all the frames have been created
@@ -919,15 +920,13 @@ nsListControlFrame::SetInitialChildList(ChildListID    aListID,
       mHasBeenInitialized = true;
     }
   }*/
-
-  return rv;
 }
 
 //---------------------------------------------------------
 void
-nsListControlFrame::Init(nsIContent*     aContent,
-                         nsIFrame*       aParent,
-                         nsIFrame*       aPrevInFlow)
+nsListControlFrame::Init(nsIContent*       aContent,
+                         nsContainerFrame* aParent,
+                         nsIFrame*         aPrevInFlow)
 {
   nsHTMLScrollFrame::Init(aContent, aParent, aPrevInFlow);
 
@@ -1080,7 +1079,7 @@ nsListControlFrame::GetCurrentOption()
     GetSelectedIndex() : mEndSelectionIndex;
 
   if (focusedIndex != kNothingSelected) {
-    return GetOption(SafeCast<uint32_t>(focusedIndex));
+    return GetOption(AssertedCast<uint32_t>(focusedIndex));
   }
 
   // There is no selected item. Return the first non-disabled item.
@@ -1436,16 +1435,15 @@ nsListControlFrame::AboutToRollup()
   }
 }
 
-NS_IMETHODIMP
+void
 nsListControlFrame::DidReflow(nsPresContext*           aPresContext,
                               const nsHTMLReflowState* aReflowState,
                               nsDidReflowStatus        aStatus)
 {
-  nsresult rv;
   bool wasInterrupted = !mHasPendingInterruptAtStartOfReflow &&
                           aPresContext->HasPendingInterrupt();
 
-  rv = nsHTMLScrollFrame::DidReflow(aPresContext, aReflowState, aStatus);
+  nsHTMLScrollFrame::DidReflow(aPresContext, aReflowState, aStatus);
 
   if (mNeedToReset && !wasInterrupted) {
     mNeedToReset = false;
@@ -1462,7 +1460,6 @@ nsListControlFrame::DidReflow(nsPresContext*           aPresContext,
   }
 
   mHasPendingInterruptAtStartOfReflow = false;
-  return rv;
 }
 
 nsIAtom*
@@ -1471,8 +1468,8 @@ nsListControlFrame::GetType() const
   return nsGkAtoms::listControlFrame; 
 }
 
-#ifdef DEBUG
-NS_IMETHODIMP
+#ifdef DEBUG_FRAME_DUMP
+nsresult
 nsListControlFrame::GetFrameName(nsAString& aResult) const
 {
   return MakeFrameName(NS_LITERAL_STRING("ListControl"), aResult);
@@ -1506,7 +1503,7 @@ nsListControlFrame::IsLeftButton(nsIDOMEvent* aMouseEvent)
   // only allow selection with the left button
   nsCOMPtr<nsIDOMMouseEvent> mouseEvent = do_QueryInterface(aMouseEvent);
   if (mouseEvent) {
-    uint16_t whichButton;
+    int16_t whichButton;
     if (NS_SUCCEEDED(mouseEvent->GetButton(&whichButton))) {
       return whichButton != 0?false:true;
     }
@@ -1530,7 +1527,7 @@ nsListControlFrame::CalcFallbackRowHeight(float aFontSizeInflation)
 }
 
 nscoord
-nsListControlFrame::CalcIntrinsicHeight(nscoord aHeightOfARow,
+nsListControlFrame::CalcIntrinsicBSize(nscoord aHeightOfARow,
                                         int32_t aNumberOfOptions)
 {
   NS_PRECONDITION(!IsInDropDownMode(),
@@ -1566,7 +1563,7 @@ nsListControlFrame::MouseUp(nsIDOMEvent* aMouseEvent)
 
   mButtonDown = false;
 
-  nsEventStates eventStates = mContent->AsElement()->State();
+  EventStates eventStates = mContent->AsElement()->State();
   if (eventStates.HasState(NS_EVENT_STATE_DISABLED)) {
     return NS_OK;
   }
@@ -1770,7 +1767,7 @@ nsListControlFrame::MouseDown(nsIDOMEvent* aMouseEvent)
 
   UpdateInListState(aMouseEvent);
 
-  nsEventStates eventStates = mContent->AsElement()->State();
+  EventStates eventStates = mContent->AsElement()->State();
   if (eventStates.HasState(NS_EVENT_STATE_DISABLED)) {
     return NS_OK;
   }
@@ -1807,7 +1804,8 @@ nsListControlFrame::MouseDown(nsIDOMEvent* aMouseEvent)
   } else {
     // NOTE: the combo box is responsible for dropping it down
     if (mComboboxFrame) {
-      if (XRE_GetProcessType() == GeckoProcessType_Content && BrowserTabsRemote()) {
+      if (XRE_GetProcessType() == GeckoProcessType_Content &&
+          Preferences::GetBool("browser.tabs.remote.desktopbehavior", false)) {
         nsContentUtils::DispatchChromeEvent(mContent->OwnerDoc(), mContent,
                                             NS_LITERAL_STRING("mozshowdropdown"), true,
                                             false);
@@ -1910,7 +1908,7 @@ nsListControlFrame::ScrollToIndex(int32_t aIndex)
     ScrollTo(nsPoint(0, 0), nsIScrollableFrame::INSTANT);
   } else {
     nsRefPtr<dom::HTMLOptionElement> option =
-      GetOption(SafeCast<uint32_t>(aIndex));
+      GetOption(AssertedCast<uint32_t>(aIndex));
     if (option) {
       ScrollToFrame(*option);
     }
@@ -2070,10 +2068,12 @@ nsListControlFrame::KeyDown(nsIDOMEvent* aKeyEvent)
 {
   MOZ_ASSERT(aKeyEvent, "aKeyEvent is null.");
 
-  nsEventStates eventStates = mContent->AsElement()->State();
+  EventStates eventStates = mContent->AsElement()->State();
   if (eventStates.HasState(NS_EVENT_STATE_DISABLED)) {
     return NS_OK;
   }
+
+  AutoIncrementalSearchResetter incrementalSearchResetter;
 
   // Don't check defaultPrevented value because other browsers don't prevent
   // the key navigation of list control even if preventDefault() is called.
@@ -2100,11 +2100,19 @@ nsListControlFrame::KeyDown(nsIDOMEvent* aKeyEvent)
   int32_t newIndex = kNothingSelected;
 
   bool isControlOrMeta = (keyEvent->IsControl() || keyEvent->IsMeta());
+  // Don't try to handle multiple-select pgUp/pgDown in single-select lists.
+  if (isControlOrMeta && !GetMultiple() &&
+      (keyEvent->keyCode == NS_VK_PAGE_UP ||
+       keyEvent->keyCode == NS_VK_PAGE_DOWN)) {
+    return NS_OK;
+  }
   if (isControlOrMeta && (keyEvent->keyCode == NS_VK_UP ||
                           keyEvent->keyCode == NS_VK_LEFT ||
                           keyEvent->keyCode == NS_VK_DOWN ||
-                          keyEvent->keyCode == NS_VK_RIGHT)) {
-    // Don't go into multiple select mode unless this list can handle it
+                          keyEvent->keyCode == NS_VK_RIGHT ||
+                          keyEvent->keyCode == NS_VK_HOME ||
+                          keyEvent->keyCode == NS_VK_END)) {
+    // Don't go into multiple-select mode unless this list can handle it.
     isControlOrMeta = mControlSelectMode = GetMultiple();
   } else if (keyEvent->keyCode != NS_VK_SPACE) {
     mControlSelectMode = false;
@@ -2124,41 +2132,44 @@ nsListControlFrame::KeyDown(nsIDOMEvent* aKeyEvent)
                                 1, 1);
       break;
     case NS_VK_RETURN:
-      if (mComboboxFrame) {
-        nsWeakFrame weakFrame(this);
+      if (IsInDropDownMode()) {
         if (mComboboxFrame->IsDroppedDown()) {
-          // At closing dropdown, users may not expect there is additional
-          // behavior for this key event.  Therefore, let's consume the event.
+          // If the select element is a dropdown style, Enter key should be
+          // consumed while the dropdown is open for security.
           aKeyEvent->PreventDefault();
+
+          nsWeakFrame weakFrame(this);
           ComboboxFinish(mEndSelectionIndex);
           if (!weakFrame.IsAlive()) {
             return NS_OK;
           }
         }
+        // XXX This is strange. On other browsers, "change" event is fired
+        //     immediately after the selected item is changed rather than
+        //     Enter key is pressed.
         FireOnChange();
-        if (!weakFrame.IsAlive()) {
-          // If the keydown event causes destroying this, fired keypress on
-          // another element may cause another action which may not be
-          // expected by the user.
-          aKeyEvent->PreventDefault();
-        }
         return NS_OK;
       }
+
+      // If this is single select listbox, Enter key doesn't cause anything.
+      if (!GetMultiple()) {
+        return NS_OK;
+      }
+
       newIndex = mEndSelectionIndex;
       break;
     case NS_VK_ESCAPE: {
-      nsWeakFrame weakFrame(this);
-      // XXX When the Escape keydown causes closing dropdown, it shouldn't
-      //     cause any additonal actions. We should call preventDefault() here.
-      AboutToRollup();
-      if (!weakFrame.IsAlive()) {
-        // If the keydown event causes destroying this, fired keypress on
-        // another element may cause another action which may not be
-        // expected by the user.
-        aKeyEvent->PreventDefault();
+      // If the select element is a listbox style, Escape key causes nothing.
+      if (!IsInDropDownMode()) {
         return NS_OK;
       }
-      break;
+
+      AboutToRollup();
+      // If the select element is a dropdown style, Enter key should be
+      // consumed everytime since Escape key may be pressed accidentally after
+      // the dropdown is closed by Escepe key.
+      aKeyEvent->PreventDefault();
+      return NS_OK;
     }
     case NS_VK_PAGE_UP: {
       int32_t itemsPerPage =
@@ -2187,20 +2198,20 @@ nsListControlFrame::KeyDown(nsIDOMEvent* aKeyEvent)
                                 0, -1);
       break;
 
-#if defined(XP_WIN) || defined(XP_OS2)
+#if defined(XP_WIN)
     case NS_VK_F4:
-      DropDownToggleKey(aKeyEvent);
+      if (!isControlOrMeta) {
+        DropDownToggleKey(aKeyEvent);
+      }
       return NS_OK;
 #endif
 
     default: // printable key will be handled by keypress event.
+      incrementalSearchResetter.Cancel();
       return NS_OK;
   }
 
   aKeyEvent->PreventDefault();
-
-  // Cancel incremental search if it's being performed.
-  GetIncrementalString().Truncate();
 
   // Actually process the new index and let the selection code
   // do the scrolling for us
@@ -2213,10 +2224,12 @@ nsListControlFrame::KeyPress(nsIDOMEvent* aKeyEvent)
 {
   MOZ_ASSERT(aKeyEvent, "aKeyEvent is null.");
 
-  nsEventStates eventStates = mContent->AsElement()->State();
+  EventStates eventStates = mContent->AsElement()->State();
   if (eventStates.HasState(NS_EVENT_STATE_DISABLED)) {
     return NS_OK;
   }
+
+  AutoIncrementalSearchResetter incrementalSearchResetter;
 
   const WidgetKeyboardEvent* keyEvent =
     aKeyEvent->GetInternalNSEvent()->AsKeyboardEvent();
@@ -2250,16 +2263,24 @@ nsListControlFrame::KeyPress(nsIDOMEvent* aKeyEvent)
   // NOTE: If keyCode of keypress event is not 0, charCode is always 0.
   //       Therefore, all non-printable keys are not handled after this block.
   if (!keyEvent->charCode) {
-    // Backspace key will delete the last char in the string
-    // XXX Backspace key causes "go back the history" on Windows.  Shouldn't we
-    //     prevent its default action if incremental search is used since
-    //     getting focus?  When I tested this, it worked accidentally.
-    if (keyEvent->keyCode == NS_VK_BACK && !GetIncrementalString().IsEmpty()) {
-      GetIncrementalString().Truncate(GetIncrementalString().Length() - 1);
+    // Backspace key will delete the last char in the string.  Otherwise,
+    // non-printable keypress should reset incremental search.
+    if (keyEvent->keyCode == NS_VK_BACK) {
+      incrementalSearchResetter.Cancel();
+      if (!GetIncrementalString().IsEmpty()) {
+        GetIncrementalString().Truncate(GetIncrementalString().Length() - 1);
+      }
       aKeyEvent->PreventDefault();
+    } else {
+      // XXX When a select element has focus, even if the key causes nothing,
+      //     it might be better to call preventDefault() here because nobody
+      //     should expect one of other elements including chrome handles the
+      //     key event.
     }
     return NS_OK;
   }
+
+  incrementalSearchResetter.Cancel();
 
   // We ate the key if we got this far.
   aKeyEvent->PreventDefault();
@@ -2289,7 +2310,7 @@ nsListControlFrame::KeyPress(nsIDOMEvent* aKeyEvent)
   gLastKeyTime = keyEvent->time;
 
   // Append this keystroke to the search string. 
-  PRUnichar uniChar = ToLowerCase(static_cast<PRUnichar>(keyEvent->charCode));
+  char16_t uniChar = ToLowerCase(static_cast<char16_t>(keyEvent->charCode));
   GetIncrementalString().Append(uniChar);
 
   // See bug 188199, if all letters in incremental string are same, just try to
@@ -2403,7 +2424,7 @@ nsListControlFrame::PostHandleKeyEvent(int32_t aNewIndex,
  * nsListEventListener
  *****************************************************************************/
 
-NS_IMPL_ISUPPORTS1(nsListEventListener, nsIDOMEventListener)
+NS_IMPL_ISUPPORTS(nsListEventListener, nsIDOMEventListener)
 
 NS_IMETHODIMP
 nsListEventListener::HandleEvent(nsIDOMEvent* aEvent)

@@ -31,7 +31,7 @@
 #include "prprf.h"
 #include "nsCSSRendering.h"
 #include "nsIDOMHTMLImageElement.h"
-#include "nsINameSpaceManager.h"
+#include "nsNameSpaceManager.h"
 #include "nsTextFragment.h"
 #include "nsIDOMHTMLMapElement.h"
 #include "nsTransform2D.h"
@@ -41,18 +41,20 @@
 #include "nsIURI.h"
 #include "nsNetUtil.h"
 #include "nsThreadUtils.h"
-#include "nsEventDispatcher.h"
 #include "nsDisplayList.h"
 #include "ImageLayers.h"
 #include "ImageContainer.h"
+#include "nsIContent.h"
 
 #include "nsContentUtils.h"
 
 #include "mozilla/BasicEvents.h"
+#include "mozilla/EventDispatcher.h"
 
 #define ONLOAD_CALLED_TOO_EARLY 1
 
 using namespace mozilla;
+using namespace mozilla::gfx;
 using namespace mozilla::layers;
 
 class nsImageBoxFrameEvent : public nsRunnable
@@ -61,7 +63,7 @@ public:
   nsImageBoxFrameEvent(nsIContent *content, uint32_t message)
     : mContent(content), mMessage(message) {}
 
-  NS_IMETHOD Run();
+  NS_IMETHOD Run() MOZ_OVERRIDE;
 
 private:
   nsCOMPtr<nsIContent> mContent;
@@ -85,7 +87,7 @@ nsImageBoxFrameEvent::Run()
   WidgetEvent event(true, mMessage);
 
   event.mFlags.mBubbles = false;
-  nsEventDispatcher::Dispatch(mContent, pres_context, &event, nullptr, &status);
+  EventDispatcher::Dispatch(mContent, pres_context, &event, nullptr, &status);
   return NS_OK;
 }
 
@@ -121,7 +123,7 @@ NS_NewImageBoxFrame (nsIPresShell* aPresShell, nsStyleContext* aContext)
 
 NS_IMPL_FRAMEARENA_HELPERS(nsImageBoxFrame)
 
-NS_IMETHODIMP
+nsresult
 nsImageBoxFrame::AttributeChanged(int32_t aNameSpaceID,
                                   nsIAtom* aAttribute,
                                   int32_t aModType)
@@ -149,7 +151,7 @@ nsImageBoxFrame::nsImageBoxFrame(nsIPresShell* aShell, nsStyleContext* aContext)
   mSuppressStyleCheck(false),
   mFireEventOnDecode(false)
 {
-  MarkIntrinsicWidthsDirty();
+  MarkIntrinsicISizesDirty();
 }
 
 nsImageBoxFrame::~nsImageBoxFrame()
@@ -158,10 +160,10 @@ nsImageBoxFrame::~nsImageBoxFrame()
 
 
 /* virtual */ void
-nsImageBoxFrame::MarkIntrinsicWidthsDirty()
+nsImageBoxFrame::MarkIntrinsicISizesDirty()
 {
   SizeNeedsRecalc(mImageSize);
-  nsLeafBoxFrame::MarkIntrinsicWidthsDirty();
+  nsLeafBoxFrame::MarkIntrinsicISizesDirty();
 }
 
 void
@@ -183,9 +185,9 @@ nsImageBoxFrame::DestroyFrom(nsIFrame* aDestructRoot)
 
 
 void
-nsImageBoxFrame::Init(nsIContent*      aContent,
-                      nsIFrame*        aParent,
-                      nsIFrame*        aPrevInFlow)
+nsImageBoxFrame::Init(nsIContent*       aContent,
+                      nsContainerFrame* aParent,
+                      nsIFrame*         aPrevInFlow)
 {
   if (!mListener) {
     nsImageBoxListener *listener = new nsImageBoxListener();
@@ -220,7 +222,7 @@ nsImageBoxFrame::UpdateImage()
   mContent->GetAttr(kNameSpaceID_None, nsGkAtoms::src, src);
   mUseSrcAttr = !src.IsEmpty();
   if (mUseSrcAttr) {
-    nsIDocument* doc = mContent->GetDocument();
+    nsIDocument* doc = mContent->GetComposedDoc();
     if (!doc) {
       // No need to do anything here...
       return;
@@ -236,7 +238,7 @@ nsImageBoxFrame::UpdateImage()
                                             mContent->NodePrincipal())) {
       nsContentUtils::LoadImage(uri, doc, mContent->NodePrincipal(),
                                 doc->GetDocumentURI(), mListener, mLoadFlags,
-                                getter_AddRefs(mImageRequest));
+                                EmptyString(), getter_AddRefs(mImageRequest));
 
       if (mImageRequest) {
         nsLayoutUtils::RegisterImageRequestIfAnimated(presContext,
@@ -336,7 +338,7 @@ nsImageBoxFrame::PaintImage(nsRenderingContext& aRenderingContext,
 
   if (imgCon) {
     bool hasSubRect = !mUseSrcAttr && (mSubRect.width > 0 || mSubRect.height > 0);
-    nsLayoutUtils::DrawSingleImage(&aRenderingContext, imgCon,
+    nsLayoutUtils::DrawSingleImage(&aRenderingContext, PresContext(), imgCon,
         nsLayoutUtils::GetGraphicsFilterForFrame(this),
         rect, dirty, nullptr, aFlags, hasSubRect ? &mSubRect : nullptr);
   }
@@ -400,13 +402,11 @@ nsDisplayXULImage::ConfigureLayer(ImageLayer* aLayer, const nsIntPoint& aOffset)
 
   NS_ASSERTION(imageWidth != 0 && imageHeight != 0, "Invalid image size!");
 
-  gfxMatrix transform;
-  transform.Translate(destRect.TopLeft() + aOffset);
-  transform.Scale(destRect.Width()/imageWidth,
-                  destRect.Height()/imageHeight);
-  aLayer->SetBaseTransform(gfx3DMatrix::From2D(transform));
-
-  aLayer->SetVisibleRegion(nsIntRect(0, 0, imageWidth, imageHeight));
+  gfxPoint p = destRect.TopLeft() + aOffset;
+  Matrix transform = Matrix::Translation(p.x, p.y);
+  transform.PreScale(destRect.Width() / imageWidth,
+                     destRect.Height() / imageHeight);
+  aLayer->SetBaseTransform(gfx::Matrix4x4::From2D(transform));
 }
 
 already_AddRefed<ImageContainer>
@@ -591,8 +591,8 @@ nsImageBoxFrame::GetType() const
   return nsGkAtoms::imageBoxFrame;
 }
 
-#ifdef DEBUG
-NS_IMETHODIMP
+#ifdef DEBUG_FRAME_DUMP
+nsresult
 nsImageBoxFrame::GetFrameName(nsAString& aResult) const
 {
   return MakeFrameName(NS_LITERAL_STRING("ImageBox"), aResult);
@@ -728,7 +728,7 @@ nsresult nsImageBoxFrame::FrameChanged(imgIRequest *aRequest)
   return NS_OK;
 }
 
-NS_IMPL_ISUPPORTS2(nsImageBoxListener, imgINotificationObserver, imgIOnloadBlocker)
+NS_IMPL_ISUPPORTS(nsImageBoxListener, imgINotificationObserver, imgIOnloadBlocker)
 
 nsImageBoxListener::nsImageBoxListener()
 {

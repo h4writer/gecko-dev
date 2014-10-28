@@ -181,15 +181,20 @@ nsJPEGDecoder::FinishInternal()
    * XXXbholley - It seems wrong that this should be necessary, but at the
    * moment I'm just folding the contents of Flush() into Close() so that
    * we can get rid of it.
+   *
+   * XXX(seth): It'd be great to get rid of this. For now, we treat this as a
+   * write to a synchronous decoder, which means that this must be called only
+   * on the main thread. (That's asserted in Decoder::Finish and
+   * Decoder::FinishSharedDecoder.)
    */
   if ((mState != JPEG_DONE && mState != JPEG_SINK_NON_JPEG_TRAILER) &&
       (mState != JPEG_ERROR) &&
       !IsSizeDecode())
-    this->Write(nullptr, 0);
+    this->Write(nullptr, 0, DECODE_SYNC);
 }
 
 void
-nsJPEGDecoder::WriteInternal(const char *aBuffer, uint32_t aCount)
+nsJPEGDecoder::WriteInternal(const char *aBuffer, uint32_t aCount, DecodeStrategy)
 {
   mSegment = (const JOCTET *)aBuffer;
   mSegmentLen = aCount;
@@ -236,8 +241,17 @@ nsJPEGDecoder::WriteInternal(const char *aBuffer, uint32_t aCount)
       return; /* I/O suspension */
     }
 
+    int sampleSize = mImage.GetRequestedSampleSize();
+    if (sampleSize > 0) {
+      mInfo.scale_num = 1;
+      mInfo.scale_denom = sampleSize;
+    }
+
+    /* Used to set up image size so arrays can be allocated */
+    jpeg_calc_output_dimensions(&mInfo);
+
     // Post our size to the superclass
-    PostSize(mInfo.image_width, mInfo.image_height, ReadOrientationFromEXIF());
+    PostSize(mInfo.output_width, mInfo.output_height, ReadOrientationFromEXIF());
     if (HasError()) {
       // Setting the size led to an error.
       mState = JPEG_ERROR;
@@ -370,9 +384,6 @@ nsJPEGDecoder::WriteInternal(const char *aBuffer, uint32_t aCount)
      */
     mInfo.buffered_image = mDecodeStyle == PROGRESSIVE && jpeg_has_multiple_scans(&mInfo);
 
-    /* Used to set up image size so arrays can be allocated */
-    jpeg_calc_output_dimensions(&mInfo);
-
     if (!mImageData) {
       mState = JPEG_ERROR;
       PostDecoderError(NS_ERROR_OUT_OF_MEMORY);
@@ -383,7 +394,7 @@ nsJPEGDecoder::WriteInternal(const char *aBuffer, uint32_t aCount)
 
     PR_LOG(GetJPEGDecoderAccountingLog(), PR_LOG_DEBUG,
            ("        JPEGDecoderAccounting: nsJPEGDecoder::Write -- created image frame with %ux%u pixels",
-            mInfo.image_width, mInfo.image_height));
+            mInfo.output_width, mInfo.output_height));
 
     mState = JPEG_START_DECOMPRESS;
   }

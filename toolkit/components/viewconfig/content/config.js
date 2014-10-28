@@ -1,4 +1,4 @@
-// -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+// -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -195,9 +195,6 @@ var gPrefListener =
     if (topic != "nsPref:changed")
       return;
 
-    if (/^capability\./.test(prefName)) // avoid displaying "private" preferences
-      return;
-
     var arrayIndex = gPrefArray.length;
     var viewIndex = arrayIndex;
     var selectedIndex = view.selection.currentIndex;
@@ -348,14 +345,7 @@ function onConfigLoad()
 // Unhide the warning message
 function ShowPrefs()
 {
-  var prefArray = gPrefBranch.getChildList("");
-
-  prefArray.forEach(function (prefName) {
-    if (/^capability\./.test(prefName)) // avoid displaying "private" preferences
-      return;
-
-    fetchPref(prefName, gPrefArray.length);
-  });
+  gPrefBranch.getChildList("").forEach(fetchPref);
 
   var descending = document.getElementsByAttribute("sortDirection", "descending");
   if (descending.item(0)) {

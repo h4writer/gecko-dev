@@ -12,8 +12,12 @@ const {classes: Cc, interfaces: Ci, utils: Cu, results: Cr} = Components;
 Cu.import("resource://gre/modules/Log.jsm");
 Cu.import("resource://services-sync/constants.js");
 Cu.import("resource://services-sync/engines.js");
-Cu.import("resource://services-sync/status.js");
 Cu.import("resource://services-sync/util.js");
+Cu.import("resource://gre/modules/FileUtils.jsm");
+Cu.import("resource://gre/modules/NetUtil.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "Status",
+                                  "resource://services-sync/status.js");
 
 this.SyncScheduler = function SyncScheduler(service) {
   this.service = service;
@@ -36,7 +40,14 @@ SyncScheduler.prototype = {
   setDefaults: function setDefaults() {
     this._log.trace("Setting SyncScheduler policy values to defaults.");
 
-    this.singleDeviceInterval = Svc.Prefs.get("scheduler.singleDeviceInterval") * 1000;
+    let service = Cc["@mozilla.org/weave/service;1"]
+                    .getService(Ci.nsISupports)
+                    .wrappedJSObject;
+
+    let part = service.fxAccountsEnabled ? "fxa" : "sync11";
+    let prefSDInterval = "scheduler." + part + ".singleDeviceInterval";
+    this.singleDeviceInterval = Svc.Prefs.get(prefSDInterval) * 1000;
+
     this.idleInterval         = Svc.Prefs.get("scheduler.idleInterval")         * 1000;
     this.activeInterval       = Svc.Prefs.get("scheduler.activeInterval")       * 1000;
     this.immediateInterval    = Svc.Prefs.get("scheduler.immediateInterval")    * 1000;
@@ -83,8 +94,10 @@ SyncScheduler.prototype = {
     Svc.Obs.add("weave:engine:sync:applied", this);
     Svc.Obs.add("weave:service:setup-complete", this);
     Svc.Obs.add("weave:service:start-over", this);
+    Svc.Obs.add("FxA:hawk:backoff:interval", this);
 
     if (Status.checkSetup() == STATUS_OK) {
+      Svc.Obs.add("wake_notification", this);
       Svc.Idle.addIdleObserver(this, Svc.Prefs.get("scheduler.idleTime"));
     }
   },
@@ -172,6 +185,7 @@ SyncScheduler.prototype = {
         this.nextSync = 0;
         this.handleSyncError();
         break;
+      case "FxA:hawk:backoff:interval":
       case "weave:service:backoff:interval":
         let requested_interval = subject * 1000;
         this._log.debug("Got backoff notification: " + requested_interval + "ms");
@@ -200,6 +214,7 @@ SyncScheduler.prototype = {
       case "weave:service:setup-complete":
          Services.prefs.savePrefFile(null);
          Svc.Idle.addIdleObserver(this, Svc.Prefs.get("scheduler.idleTime"));
+         Svc.Obs.add("wake_notification", this);
          break;
       case "weave:service:start-over":
          this.setDefaults();
@@ -218,7 +233,7 @@ SyncScheduler.prototype = {
         // were just active.)
         this.adjustSyncInterval();
         break;
-      case "back":
+      case "active":
         this._log.trace("Received notification that we're back from idle.");
         this.idle = false;
         Utils.namedTimer(function onBack() {
@@ -234,6 +249,16 @@ SyncScheduler.prototype = {
             this.scheduleNextSync(0);
           }
         }, IDLE_OBSERVER_BACK_DELAY, this, "idleDebouncerTimer");
+        break;
+      case "wake_notification":
+        this._log.debug("Woke from sleep.");
+        Utils.nextTick(() => {
+          // Trigger a sync if we have multiple clients.
+          if (this.numClients > 1) {
+            this._log.debug("More than 1 client. Syncing.");
+            this.scheduleNextSync(0);
+          }
+        });
         break;
     }
   },
@@ -489,6 +514,13 @@ ErrorHandler.prototype = {
    */
   dontIgnoreErrors: false,
 
+  /**
+   * Flag that indicates if we have already reported a prolonged failure.
+   * Once set, we don't report it again, meaning this error is only reported
+   * one per run.
+   */
+  didReportProlongedError: false,
+
   init: function init() {
     Svc.Obs.add("weave:engine:sync:applied", this);
     Svc.Obs.add("weave:engine:sync:error", this);
@@ -519,6 +551,9 @@ ErrorHandler.prototype = {
     let fapp = this._logAppender = new Log.StorageStreamAppender(formatter);
     fapp.level = Log.Level[Svc.Prefs.get("log.appender.file.level")];
     root.addAppender(fapp);
+
+    // Arrange for the FxA logs to also go to our file.
+    Log.repository.getLogger("FirefoxAccounts").addAppender(fapp);
   },
 
   observe: function observe(subject, topic, data) {
@@ -759,7 +794,13 @@ ErrorHandler.prototype = {
     if (lastSync && ((Date.now() - Date.parse(lastSync)) >
         Svc.Prefs.get("errorhandler.networkFailureReportTimeout") * 1000)) {
       Status.sync = PROLONGED_SYNC_FAILURE;
-      this._log.trace("shouldReportError: true (prolonged sync failure).");
+      if (this.didReportProlongedError) {
+        this._log.trace("shouldReportError: false (prolonged sync failure, but" +
+                        " we've already reported it).");
+        return false;
+      }
+      this._log.trace("shouldReportError: true (first prolonged sync failure).");
+      this.didReportProlongedError = true;
       return true;
     }
 

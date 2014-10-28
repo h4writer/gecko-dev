@@ -30,7 +30,7 @@ function checkResult(msg, desc) {
       category: CATEGORY_OUTPUT,
     }],
   }).then(([result]) => {
-    let node = [...result.matched][0].querySelector(".body");
+    let node = [...result.matched][0].querySelector(".message-body");
     if (typeof msg == "string") {
       is(node.textContent.trim(), msg,
         "correct message shown for " + desc);
@@ -118,7 +118,7 @@ function testJSTerm(hud)
 
   jsterm.clearOutput();
   jsterm.execute("pprint({b:2, a:1})");
-  checkResult('"  b: 2\n  a: 1"', "pprint()");
+  checkResult("\"  b: 2\n  a: 1\"", "pprint()");
   yield undefined;
 
   // check instanceof correctness, bug 599940
@@ -154,14 +154,14 @@ function testJSTerm(hud)
   // bug 614561
   jsterm.clearOutput();
   jsterm.execute("pprint('hi')");
-  checkResult('"  0: "h"\n  1: "i""', "pprint('hi')");
+  checkResult("\"  0: \"h\"\n  1: \"i\"\"", "pprint('hi')");
   yield undefined;
 
   // check that pprint(function) shows function source, bug 618344
   jsterm.clearOutput();
-  jsterm.execute("pprint(print)");
+  jsterm.execute("pprint(function() { var someCanaryValue = 42; })");
   checkResult(function(node) {
-    return node.textContent.indexOf("aOwner.helperResult") > -1;
+    return node.textContent.indexOf("someCanaryValue") > -1;
   }, "pprint(function) shows source");
   yield undefined;
 

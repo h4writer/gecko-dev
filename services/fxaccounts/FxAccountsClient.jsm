@@ -6,45 +6,56 @@ this.EXPORTED_SYMBOLS = ["FxAccountsClient"];
 
 const {classes: Cc, interfaces: Ci, utils: Cu} = Components;
 
+Cu.import("resource://gre/modules/Log.jsm");
 Cu.import("resource://gre/modules/Promise.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://services-common/utils.js");
+Cu.import("resource://services-common/hawkclient.js");
+Cu.import("resource://services-common/hawkrequest.js");
 Cu.import("resource://services-crypto/utils.js");
+Cu.import("resource://gre/modules/FxAccountsCommon.js");
+Cu.import("resource://gre/modules/Credentials.jsm");
 
-// Default can be changed by the preference 'identity.fxaccounts.auth.uri'
-let _host = "https://api-accounts.dev.lcip.org/v1";
-try {
-  _host = Services.prefs.getCharPref("identity.fxaccounts.auth.uri");
-} catch(keepDefault) {}
-
-const HOST = _host;
-const PREFIX_NAME = "identity.mozilla.com/picl/v1/";
-
-const XMLHttpRequest =
-  Components.Constructor("@mozilla.org/xmlextras/xmlhttprequest;1");
-
-
-function stringToHex(str) {
-  let encoder = new TextEncoder("utf-8");
-  let bytes = encoder.encode(str);
-  return bytesToHex(bytes);
-}
-
-// XXX Sadly, CommonUtils.bytesAsHex doesn't handle typed arrays.
-function bytesToHex(bytes) {
-  let hex = [];
-  for (let i = 0; i < bytes.length; i++) {
-    hex.push((bytes[i] >>> 4).toString(16));
-    hex.push((bytes[i] & 0xF).toString(16));
-  }
-  return hex.join("");
-}
+const HOST = Services.prefs.getCharPref("identity.fxaccounts.auth.uri");
 
 this.FxAccountsClient = function(host = HOST) {
   this.host = host;
+
+  // The FxA auth server expects requests to certain endpoints to be authorized
+  // using Hawk.
+  this.hawk = new HawkClient(host);
+  this.hawk.observerPrefix = "FxA:hawk";
+
+  // Manage server backoff state. C.f.
+  // https://github.com/mozilla/fxa-auth-server/blob/master/docs/api.md#backoff-protocol
+  this.backoffError = null;
 };
 
 this.FxAccountsClient.prototype = {
+
+  /**
+   * Return client clock offset, in milliseconds, as determined by hawk client.
+   * Provided because callers should not have to know about hawk
+   * implementation.
+   *
+   * The offset is the number of milliseconds that must be added to the client
+   * clock to make it equal to the server clock.  For example, if the client is
+   * five minutes ahead of the server, the localtimeOffsetMsec will be -300000.
+   */
+  get localtimeOffsetMsec() {
+    return this.hawk.localtimeOffsetMsec;
+  },
+
+  /*
+   * Return current time in milliseconds
+   *
+   * Not used by this module, but made available to the FxAccounts.jsm
+   * that uses this client.
+   */
+  now: function() {
+    return this.hawk.now();
+  },
+
   /**
    * Create a new Firefox Account and authenticate
    *
@@ -55,23 +66,18 @@ this.FxAccountsClient.prototype = {
    * @return Promise
    *        Returns a promise that resolves to an object:
    *        {
-   *          uid: the user's unique ID
-   *          sessionToken: a session token
+   *          uid: the user's unique ID (hex)
+   *          sessionToken: a session token (hex)
+   *          keyFetchToken: a key fetch token (hex)
    *        }
    */
-  signUp: function (email, password) {
-    let uid;
-    let hexEmail = stringToHex(email);
-    let uidPromise = this._request("/raw_password/account/create", "POST", null,
-                          {email: hexEmail, password: password});
-
-    return uidPromise.then((result) => {
-      uid = result.uid;
-      return this.signIn(email, password)
-        .then(function(result) {
-          result.uid = uid;
-          return result;
-        });
+  signUp: function(email, password) {
+    return Credentials.setup(email, password).then((creds) => {
+      let data = {
+        email: creds.emailUTF8,
+        authPW: CommonUtils.bytesAsHex(creds.authPW),
+      };
+      return this._request("/account/create", "POST", null, data);
     });
   },
 
@@ -82,42 +88,101 @@ this.FxAccountsClient.prototype = {
    *        The email address for the account (utf8)
    * @param password
    *        The user's password
+   * @param [getKeys=false]
+   *        If set to true the keyFetchToken will be retrieved
+   * @param [retryOK=true]
+   *        If capitalization of the email is wrong and retryOK is set to true,
+   *        we will retry with the suggested capitalization from the server
    * @return Promise
    *        Returns a promise that resolves to an object:
    *        {
-   *          uid: the user's unique ID
-   *          sessionToken: a session token
-   *          isVerified: flag indicating verification status of the email
+   *          authAt: authentication time for the session (seconds since epoch)
+   *          email: the primary email for this account
+   *          keyFetchToken: a key fetch token (hex)
+   *          sessionToken: a session token (hex)
+   *          uid: the user's unique ID (hex)
+   *          unwrapBKey: used to unwrap kB, derived locally from the
+   *                      password (not revealed to the FxA server)
+   *          verified: flag indicating verification status of the email
    *        }
    */
-  signIn: function signIn(email, password) {
-    let hexEmail = stringToHex(email);
-    return this._request("/raw_password/session/create", "POST", null,
-                         {email: hexEmail, password: password});
+  signIn: function signIn(email, password, getKeys=false, retryOK=true) {
+    return Credentials.setup(email, password).then((creds) => {
+      let data = {
+        authPW: CommonUtils.bytesAsHex(creds.authPW),
+        email: creds.emailUTF8,
+      };
+      let keys = getKeys ? "?keys=true" : "";
+
+      return this._request("/account/login" + keys, "POST", null, data).then(
+        // Include the canonical capitalization of the email in the response so
+        // the caller can set its signed-in user state accordingly.
+        result => {
+          result.email = data.email;
+          result.unwrapBKey = CommonUtils.bytesAsHex(creds.unwrapBKey);
+
+          return result;
+        },
+        error => {
+          log.debug("signIn error: " + JSON.stringify(error));
+          // If the user entered an email with different capitalization from
+          // what's stored in the database (e.g., Greta.Garbo@gmail.COM as
+          // opposed to greta.garbo@gmail.com), the server will respond with a
+          // errno 120 (code 400) and the expected capitalization of the email.
+          // We retry with this email exactly once.  If successful, we use the
+          // server's version of the email as the signed-in-user's email. This
+          // is necessary because the email also serves as salt; so we must be
+          // in agreement with the server on capitalization.
+          //
+          // API reference:
+          // https://github.com/mozilla/fxa-auth-server/blob/master/docs/api.md
+          if (ERRNO_INCORRECT_EMAIL_CASE === error.errno && retryOK) {
+            if (!error.email) {
+              log.error("Server returned errno 120 but did not provide email");
+              throw error;
+            }
+            return this.signIn(error.email, password, getKeys, false);
+          }
+          throw error;
+        }
+      );
+    });
   },
 
   /**
    * Destroy the current session with the Firefox Account API server
    *
    * @param sessionTokenHex
-   *        The session token endcoded in hex
+   *        The session token encoded in hex
    * @return Promise
    */
   signOut: function (sessionTokenHex) {
     return this._request("/session/destroy", "POST",
-      this._deriveHawkCredentials(sessionTokenHex, "sessionToken"));
+      deriveHawkCredentials(sessionTokenHex, "sessionToken"));
   },
 
   /**
    * Check the verification status of the user's FxA email address
    *
    * @param sessionTokenHex
-   *        The current session token endcoded in hex
+   *        The current session token encoded in hex
    * @return Promise
    */
   recoveryEmailStatus: function (sessionTokenHex) {
     return this._request("/recovery_email/status", "GET",
-      this._deriveHawkCredentials(sessionTokenHex, "sessionToken"));
+      deriveHawkCredentials(sessionTokenHex, "sessionToken"));
+  },
+
+  /**
+   * Resend the verification email for the user
+   *
+   * @param sessionTokenHex
+   *        The current token encoded in hex
+   * @return Promise
+   */
+  resendVerificationEmail: function(sessionTokenHex) {
+    return this._request("/recovery_email/resend_code", "POST",
+      deriveHawkCredentials(sessionTokenHex, "sessionToken"));
   },
 
   /**
@@ -128,15 +193,16 @@ this.FxAccountsClient.prototype = {
    * @return Promise
    *        Returns a promise that resolves to an object:
    *        {
-   *          kA: an encryption key for recevorable data
-   *          wrapKB: an encryption key that requires knowledge of the user's password
+   *          kA: an encryption key for recevorable data (bytes)
+   *          wrapKB: an encryption key that requires knowledge of the
+   *                  user's password (bytes)
    *        }
    */
   accountKeys: function (keyFetchTokenHex) {
-    let creds = this._deriveHawkCredentials(keyFetchTokenHex, "keyFetchToken");
+    let creds = deriveHawkCredentials(keyFetchTokenHex, "keyFetchToken");
     let keyRequestKey = creds.extra.slice(0, 32);
     let morecreds = CryptoUtils.hkdf(keyRequestKey, undefined,
-                                     PREFIX_NAME + "account/keys", 3 * 32);
+                                     Credentials.keyWord("account/keys"), 3 * 32);
     let respHMACKey = morecreds.slice(0, 32);
     let respXORKey = morecreds.slice(32, 96);
 
@@ -169,25 +235,30 @@ this.FxAccountsClient.prototype = {
    * Sends a public key to the FxA API server and returns a signed certificate
    *
    * @param sessionTokenHex
-   *        The current session token endcoded in hex
+   *        The current session token encoded in hex
    * @param serializedPublicKey
    *        A public key (usually generated by jwcrypto)
    * @param lifetime
    *        The lifetime of the certificate
    * @return Promise
-   *        Returns a promise that resolves to the signed certificate. The certificate
-   *        can be used to generate a Persona assertion.
+   *        Returns a promise that resolves to the signed certificate.
+   *        The certificate can be used to generate a Persona assertion.
+   * @throws a new Error
+   *         wrapping any of these HTTP code/errno pairs:
+   *           https://github.com/mozilla/fxa-auth-server/blob/master/docs/api.md#response-12
    */
   signCertificate: function (sessionTokenHex, serializedPublicKey, lifetime) {
-    let creds = this._deriveHawkCredentials(sessionTokenHex, "sessionToken");
+    let creds = deriveHawkCredentials(sessionTokenHex, "sessionToken");
 
     let body = { publicKey: serializedPublicKey,
                  duration: lifetime };
     return Promise.resolve()
       .then(_ => this._request("/certificate/sign", "POST", creds, body))
       .then(resp => resp.cert,
-            err => {dump("HAWK.signCertificate error: " + err + "\n");
-                    throw err;});
+            err => {
+              log.error("HAWK.signCertificate error: " + JSON.stringify(err));
+              throw err;
+            });
   },
 
   /**
@@ -200,52 +271,47 @@ this.FxAccountsClient.prototype = {
    *        if it doesn't. The promise is rejected on other errors.
    */
   accountExists: function (email) {
-    let hexEmail = stringToHex(email);
-    return this._request("/auth/start", "POST", null, { email: hexEmail })
-      .then(
-        // the account exists
-        (result) => true,
-        (err) => {
-          // the account doesn't exist
-          if (err.errno === 102) {
+    return this.signIn(email, "").then(
+      (cantHappen) => {
+        throw new Error("How did I sign in with an empty password?");
+      },
+      (expectedError) => {
+        switch (expectedError.errno) {
+          case ERRNO_ACCOUNT_DOES_NOT_EXIST:
             return false;
-          }
-          // propogate other request errors
-          throw err;
+            break;
+          case ERRNO_INCORRECT_PASSWORD:
+            return true;
+            break;
+          default:
+            // not so expected, any more ...
+            throw expectedError;
+            break;
         }
-      );
+      }
+    );
   },
 
   /**
-   * The FxA auth server expects requests to certain endpoints to be authorized using Hawk.
-   * Hawk credentials are derived using shared secrets, which depend on the context
-   * (e.g. sessionToken vs. keyFetchToken).
+   * Given the uid of an existing account (not an arbitrary email), ask
+   * the server if it still exists via /account/status.
    *
-   * @param tokenHex
-   *        The current session token endcoded in hex
-   * @param context
-   *        A context for the credentials
-   * @param size
-   *        The size in bytes of the expected derived buffer
-   * @return credentials
-   *        Returns an object:
-   *        {
-   *          algorithm: sha256
-   *          id: the Hawk id (from the first 32 bytes derived)
-   *          key: the Hawk key (from bytes 32 to 64)
-   *          extra: size - 64 extra bytes
-   *        }
+   * Used for differentiating between password change and account deletion.
    */
-  _deriveHawkCredentials: function (tokenHex, context, size) {
-    let token = CommonUtils.hexToBytes(tokenHex);
-    let out = CryptoUtils.hkdf(token, undefined, PREFIX_NAME + context, size || 3 * 32);
+  accountStatus: function(uid) {
+    return this._request("/account/status?uid="+uid, "GET").then(
+      (result) => {
+        return result.exists;
+      },
+      (error) => {
+        log.error("accountStatus failed with: " + error);
+        return Promise.reject(error);
+      }
+    );
+  },
 
-    return {
-      algorithm: "sha256",
-      key: out.slice(32, 64),
-      extra: out.slice(64),
-      id: CommonUtils.bytesAsHex(out.slice(0, 32))
-    };
+  _clearBackoff: function() {
+      this.backoffError = null;
   },
 
   /**
@@ -273,56 +339,41 @@ this.FxAccountsClient.prototype = {
    */
   _request: function hawkRequest(path, method, credentials, jsonPayload) {
     let deferred = Promise.defer();
-    let xhr = new XMLHttpRequest({mozSystem: true});
-    let URI = this.host + path;
-    let payload;
 
-    xhr.mozBackgroundRequest = true;
-
-    if (jsonPayload) {
-      payload = JSON.stringify(jsonPayload);
+    // We were asked to back off.
+    if (this.backoffError) {
+      log.debug("Received new request during backoff, re-rejecting.");
+      deferred.reject(this.backoffError);
+      return deferred.promise;
     }
 
-    xhr.open(method, URI);
-    xhr.channel.loadFlags = Ci.nsIChannel.LOAD_BYPASS_CACHE |
-                            Ci.nsIChannel.INHIBIT_CACHING;
-
-    // When things really blow up, reconstruct an error object that follows the general format
-    // of the server on error responses.
-    function constructError(err) {
-      return { error: err, message: xhr.statusText, code: xhr.status, errno: xhr.status };
-    }
-
-    xhr.onerror = function() {
-      deferred.reject(constructError('Request failed'));
-    };
-
-    xhr.onload = function onload() {
-      try {
-        let response = JSON.parse(xhr.responseText);
-        if (xhr.status !== 200 || response.error) {
-          // In this case, the response is an object with error information.
-          return deferred.reject(response);
+    this.hawk.request(path, method, credentials, jsonPayload).then(
+      (response) => {
+        try {
+          let responseObj = JSON.parse(response.body);
+          deferred.resolve(responseObj);
+        } catch (err) {
+          log.error("json parse error on response: " + response.body);
+          deferred.reject({error: err});
         }
-        deferred.resolve(response);
-      } catch (e) {
-        deferred.reject(constructError(e));
+      },
+
+      (error) => {
+        log.error("error " + method + "ing " + path + ": " + JSON.stringify(error));
+        if (error.retryAfter) {
+          log.debug("Received backoff response; caching error as flag.");
+          this.backoffError = error;
+          // Schedule clearing of cached-error-as-flag.
+          CommonUtils.namedTimer(
+            this._clearBackoff,
+            error.retryAfter * 1000,
+            this,
+            "fxaBackoffTimer"
+           );
+	}
+        deferred.reject(error);
       }
-    };
-
-    let uri = Services.io.newURI(URI, null, null);
-
-    if (credentials) {
-      let header = CryptoUtils.computeHAWK(uri, method, {
-                          credentials: credentials,
-                          payload: payload,
-                          contentType: "application/json"
-                        });
-      xhr.setRequestHeader("authorization", header.field);
-    }
-
-    xhr.setRequestHeader("Content-Type", "application/json");
-    xhr.send(payload);
+    );
 
     return deferred.promise;
   },

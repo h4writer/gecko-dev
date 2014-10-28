@@ -4,47 +4,75 @@
 
 package org.mozilla.gecko.tests.components;
 
-import static org.mozilla.gecko.tests.helpers.AssertionHelper.*;
+import static org.mozilla.gecko.tests.helpers.AssertionHelper.fAssertEquals;
+import static org.mozilla.gecko.tests.helpers.AssertionHelper.fAssertFalse;
+import static org.mozilla.gecko.tests.helpers.AssertionHelper.fAssertNotNull;
+import static org.mozilla.gecko.tests.helpers.AssertionHelper.fAssertTrue;
 
-import org.mozilla.gecko.InputMethods;
-import org.mozilla.gecko.tests.helpers.*;
-import org.mozilla.gecko.tests.UITestContext;
+import org.mozilla.gecko.NewTabletUI;
 import org.mozilla.gecko.R;
-
-import com.jayway.android.robotium.solo.Condition;
-import com.jayway.android.robotium.solo.Solo;
+import org.mozilla.gecko.tests.StringHelper;
+import org.mozilla.gecko.tests.UITestContext;
+import org.mozilla.gecko.tests.helpers.DeviceHelper;
+import org.mozilla.gecko.tests.helpers.NavigationHelper;
+import org.mozilla.gecko.tests.helpers.WaitHelper;
 
 import android.view.View;
 import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.TextView;
 
+import com.jayway.android.robotium.solo.Condition;
+import com.jayway.android.robotium.solo.Solo;
+
 /**
  * A class representing any interactions that take place on the Toolbar.
  */
 public class ToolbarComponent extends BaseComponent {
+
+    private static final String URL_HTTP_PREFIX = "http://";
+
     public ToolbarComponent(final UITestContext testContext) {
         super(testContext);
     }
 
     public ToolbarComponent assertIsEditing() {
-        assertTrue("The toolbar is in the editing state", isEditing());
+        fAssertTrue("The toolbar is in the editing state", isEditing());
         return this;
     }
 
     public ToolbarComponent assertIsNotEditing() {
-        assertFalse("The toolbar is not in the editing state", isEditing());
+        fAssertFalse("The toolbar is not in the editing state", isEditing());
         return this;
     }
 
-    public ToolbarComponent assertTitle(final String expected) {
-        assertEquals("The Toolbar title is " + expected, expected, getTitle());
+    public ToolbarComponent assertTitle(final String title, final String url) {
+        // We are asserting visible state - we shouldn't know if the title is null.
+        fAssertNotNull("The title argument is not null", title);
+        fAssertNotNull("The url argument is not null", url);
+
+        // TODO: We should also check the title bar preference.
+        final String expected;
+        if (!NewTabletUI.isEnabled(mActivity)) {
+            expected = title;
+        } else {
+            final String absoluteURL = NavigationHelper.adjustUrl(url);
+            if (StringHelper.ABOUT_HOME_URL.equals(absoluteURL)) {
+                expected = StringHelper.ABOUT_HOME_TITLE;
+            } else if (absoluteURL.startsWith(URL_HTTP_PREFIX)) {
+                expected = absoluteURL.substring(URL_HTTP_PREFIX.length());
+            } else {
+                expected = absoluteURL;
+            }
+        }
+
+        fAssertEquals("The Toolbar title is " + expected, expected, getTitle());
         return this;
     }
 
     public ToolbarComponent assertUrl(final String expected) {
         assertIsEditing();
-        assertEquals("The Toolbar url is " + expected, expected, getUrlEditText().getText());
+        fAssertEquals("The Toolbar url is " + expected, expected, getUrlEditText().getText());
         return this;
     }
 
@@ -59,19 +87,12 @@ public class ToolbarComponent extends BaseComponent {
         return (EditText) getToolbarView().findViewById(R.id.url_edit_text);
     }
 
-    private View getUrlDisplayContainer() {
-        return getToolbarView().findViewById(R.id.url_display_container);
+    private View getUrlDisplayLayout() {
+        return getToolbarView().findViewById(R.id.display_layout);
     }
 
     private TextView getUrlTitleText() {
         return (TextView) getToolbarView().findViewById(R.id.url_bar_title);
-    }
-
-    /**
-     * Returns the View for the go button in the browser toolbar.
-     */
-    private ImageButton getGoButton() {
-        return (ImageButton) getToolbarView().findViewById(R.id.go);
     }
 
     private ImageButton getBackButton() {
@@ -84,7 +105,18 @@ public class ToolbarComponent extends BaseComponent {
         return (ImageButton) getToolbarView().findViewById(R.id.forward);
     }
 
-    private CharSequence getTitle() {
+    private ImageButton getReloadButton() {
+        DeviceHelper.assertIsTablet();
+        return (ImageButton) getToolbarView().findViewById(R.id.reload);
+    }
+    /**
+     * Returns the View for the edit cancel button in the browser toolbar.
+     */
+    private ImageButton getEditCancelButton() {
+        return (ImageButton) getToolbarView().findViewById(R.id.edit_cancel);
+    }
+
+    private String getTitle() {
         return getTitleHelper(true);
     }
 
@@ -93,20 +125,20 @@ public class ToolbarComponent extends BaseComponent {
      * may return a value that may never be visible to the user. Callers likely want to use
      * {@link assertTitle} instead.
      */
-    public CharSequence getPotentiallyInconsistentTitle() {
+    public String getPotentiallyInconsistentTitle() {
         return getTitleHelper(false);
     }
 
-    private CharSequence getTitleHelper(final boolean shouldAssertNotEditing) {
+    private String getTitleHelper(final boolean shouldAssertNotEditing) {
         if (shouldAssertNotEditing) {
             assertIsNotEditing();
         }
 
-        return getUrlTitleText().getText();
+        return getUrlTitleText().getText().toString();
     }
 
     private boolean isEditing() {
-        return getUrlDisplayContainer().getVisibility() != View.VISIBLE &&
+        return getUrlDisplayLayout().getVisibility() != View.VISIBLE &&
                 getUrlEditText().getVisibility() == View.VISIBLE;
     }
 
@@ -132,13 +164,7 @@ public class ToolbarComponent extends BaseComponent {
         WaitHelper.waitForPageLoad(new Runnable() {
             @Override
             public void run() {
-                if (InputMethods.shouldDisableUrlBarUpdate(mActivity)) {
-                    // Bug 945521 workaround: Some IMEs do not allow the go button
-                    // to be displayed in the toolbar so we hit enter instead.
-                    mSolo.sendKey(Solo.ENTER);
-                } else {
-                    mSolo.clickOnView(getGoButton());
-                }
+                mSolo.sendKey(Solo.ENTER);
             }
         });
         waitForNotEditing();
@@ -149,14 +175,7 @@ public class ToolbarComponent extends BaseComponent {
     public ToolbarComponent dismissEditingMode() {
         assertIsEditing();
 
-        if (getUrlEditText().isInputMethodTarget()) {
-            // Drop the soft keyboard.
-            // TODO: Solo.hideSoftKeyboard() does not clear focus, causing unexpected
-            // behavior, but we may want to use it over goBack().
-            mSolo.goBack();
-        }
-
-        mSolo.goBack();
+        mSolo.clickOnView(getEditCancelButton());
 
         waitForNotEditing();
 
@@ -164,12 +183,12 @@ public class ToolbarComponent extends BaseComponent {
     }
 
     public ToolbarComponent enterUrl(final String url) {
-        assertNotNull("url is not null", url);
+        fAssertNotNull("url is not null", url);
 
         assertIsEditing();
 
         final EditText urlEditText = getUrlEditText();
-        assertTrue("The UrlEditText is the input method target",
+        fAssertTrue("The UrlEditText is the input method target",
                 urlEditText.isInputMethodTarget());
 
         mSolo.clearEditText(urlEditText);
@@ -188,10 +207,15 @@ public class ToolbarComponent extends BaseComponent {
         return pressButton(forwardButton, "forward");
     }
 
+    public ToolbarComponent pressReloadButton() {
+        final ImageButton reloadButton = getReloadButton();
+        return pressButton(reloadButton, "reload");
+    }
+
     private ToolbarComponent pressButton(final View view, final String buttonName) {
-        assertNotNull("The " + buttonName + " button View is not null", view);
-        assertTrue("The " + buttonName + " button is enabled", view.isEnabled());
-        assertEquals("The " + buttonName + " button is visible",
+        fAssertNotNull("The " + buttonName + " button View is not null", view);
+        fAssertTrue("The " + buttonName + " button is enabled", view.isEnabled());
+        fAssertEquals("The " + buttonName + " button is visible",
                 View.VISIBLE, view.getVisibility());
         assertIsNotEditing();
 

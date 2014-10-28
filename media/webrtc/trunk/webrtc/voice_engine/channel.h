@@ -59,6 +59,7 @@ struct SenderInfo;
 namespace voe {
 
 class Statistics;
+class StatisticsProxy;
 class TransmitMixer;
 class OutputMixer;
 
@@ -201,13 +202,16 @@ public:
 
     // VoENetEqStats
     int GetNetworkStatistics(NetworkStatistics& stats);
+    void GetDecodingCallStatistics(AudioDecodingCallStats* stats) const;
 
     // VoEVideoSync
     bool GetDelayEstimate(int* jitter_buffer_delay_ms,
-                          int* playout_buffer_delay_ms) const;
+                          int* playout_buffer_delay_ms,
+                          int* avsync_offset_ms) const;
     int least_required_delay_ms() const { return least_required_delay_ms_; }
     int SetInitialPlayoutDelay(int delay_ms);
     int SetMinimumPlayoutDelay(int delayMs);
+    void SetCurrentSyncOffset(int offsetMs) { _current_sync_offset = offsetMs; }
     int GetPlayoutTimestamp(unsigned int& timestamp);
     void UpdatePlayoutTimestamp(bool rtcp);
     int SetInitTimestamp(unsigned int timestamp);
@@ -262,16 +266,20 @@ public:
     int SetRTCP_CNAME(const char cName[256]);
     int GetRTCP_CNAME(char cName[256]);
     int GetRemoteRTCP_CNAME(char cName[256]);
-    int GetRemoteRTCPData(unsigned int& NTPHigh, unsigned int& NTPLow,
-                          unsigned int& timestamp,
-                          unsigned int& playoutTimestamp, unsigned int* jitter,
-                          unsigned short* fractionLost);
+    int GetRemoteRTCPReceiverInfo(uint32_t& NTPHigh, uint32_t& NTPLow,
+                                  uint32_t& receivedPacketCount,
+                                  uint64_t& receivedOctetCount,
+                                  uint32_t& jitter,
+                                  uint16_t& fractionLost,
+                                  uint32_t& cumulativeLost,
+                                  int32_t& rttMs);
     int SendApplicationDefinedRTCPPacket(unsigned char subType,
                                          unsigned int name, const char* data,
                                          unsigned short dataLengthInBytes);
     int GetRTPStatistics(unsigned int& averageJitterMs,
                          unsigned int& maxJitterMs,
-                         unsigned int& discardedPackets);
+                         unsigned int& discardedPackets,
+                         unsigned int& cumulativeLost);
     int GetRemoteRTCPSenderInfo(SenderInfo* sender_info);
     int GetRemoteRTCPReportBlocks(std::vector<ReportBlock>* report_blocks);
     int GetRTPStatistics(CallStatistics& stats);
@@ -431,7 +439,7 @@ private:
                              int packet_length,
                              const RTPHeader& header);
     bool IsPacketInOrder(const RTPHeader& header) const;
-    bool IsPacketRetransmitted(const RTPHeader& header) const;
+    bool IsPacketRetransmitted(const RTPHeader& header, bool in_order) const;
     int ResendPackets(const uint16_t* sequence_numbers, int length);
     int InsertInbandDtmfTone();
     int32_t MixOrReplaceAudioWithFile(int mixingFrequency);
@@ -441,18 +449,19 @@ private:
     void UpdatePacketDelay(uint32_t timestamp,
                            uint16_t sequenceNumber);
     void RegisterReceiveCodecsToRTPModule();
-    int ApmProcessRx(AudioFrame& audioFrame);
 
     int SetRedPayloadType(int red_payload_type);
 
     CriticalSectionWrapper& _fileCritSect;
     CriticalSectionWrapper& _callbackCritSect;
+    CriticalSectionWrapper& volume_settings_critsect_;
     uint32_t _instanceId;
     int32_t _channelId;
 
     scoped_ptr<RtpHeaderParser> rtp_header_parser_;
     scoped_ptr<RTPPayloadRegistry> rtp_payload_registry_;
     scoped_ptr<ReceiveStatistics> rtp_receive_statistics_;
+    scoped_ptr<StatisticsProxy> statistics_proxy_;
     scoped_ptr<RtpReceiver> rtp_receiver_;
     TelephoneEventHandler* telephone_event_handler_;
     scoped_ptr<RtpRtcp> _rtpRtcpModule;
@@ -487,6 +496,9 @@ private:
     uint8_t* _decryptionRTCPBufferPtr;
     uint32_t _timeStamp;
     uint8_t _sendTelephoneEventPayloadType;
+
+    // Timestamp of the audio pulled from NetEq.
+    uint32_t jitter_buffer_playout_timestamp_;
     uint32_t playout_timestamp_rtp_;
     uint32_t playout_timestamp_rtcp_;
     uint32_t playout_delay_ms_;
@@ -555,6 +567,7 @@ private:
     int least_required_delay_ms_;
     uint32_t _previousTimestamp;
     uint16_t _recPacketDelayMs;
+    int _current_sync_offset;
     // VoEAudioProcessing
     bool _RxVadDetection;
     bool _rxApmIsEnabled;

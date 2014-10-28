@@ -10,10 +10,22 @@
  * liability, trademark and document use rules apply.
  */
 
-interface MediaStream {
+// These dictionaries need to be in a separate file from their
+// MediaTrackConstraints* counterparts due to a webidl compiler limitation.
+
+dictionary MediaStreamConstraints {
+    (boolean or MediaTrackConstraints) audio = false;
+    (boolean or MediaTrackConstraints) video = false;
+    boolean picture = false; // Mozilla legacy
+    boolean fake = false;    // for testing
+    DOMString? peerIdentity = null;
+};
+
+interface MediaStream : EventTarget {
     // readonly attribute DOMString    id;
-    sequence<AudioStreamTrack> getAudioTracks ();
-    sequence<VideoStreamTrack> getVideoTracks ();
+    sequence<AudioStreamTrack> getAudioTracks();
+    sequence<VideoStreamTrack> getVideoTracks();
+    sequence<MediaStreamTrack> getTracks();
     // MediaStreamTrack           getTrackById (DOMString trackId);
     // void                       addTrack (MediaStreamTrack track);
     // void                       removeTrack (MediaStreamTrack track);

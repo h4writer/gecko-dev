@@ -7,6 +7,9 @@ const Cu = Components.utils;
 
 const { DebuggerServer } = Cu.import("resource://gre/modules/devtools/dbg-server.jsm");
 const { DebuggerClient } = Cu.import("resource://gre/modules/devtools/dbg-client.jsm");
+const {devtools} = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+const {require} = devtools;
+
 
 const { FileUtils } = Cu.import("resource://gre/modules/FileUtils.jsm");
 const { Services } = Cu.import("resource://gre/modules/Services.jsm");
@@ -14,20 +17,36 @@ const { Services } = Cu.import("resource://gre/modules/Services.jsm");
 let gClient, gActor;
 
 function connect(onDone) {
-  // Initialize a loopback remote protocol connection
-  DebuggerServer.init(function () { return true; });
-  // We need to register browser actors to have `listTabs` working
-  // and also have a root actor
 
   if (Services.appinfo.name == "B2G") {
-    DebuggerServer.addActors("resource://gre/modules/devtools/server/actors/webbrowser.js");
-    DebuggerServer.addActors('chrome://browser/content/dbg-browser-actors.js');
-    DebuggerServer.addActors("resource://gre/modules/devtools/server/actors/webapps.js");
-   } else {
+    // On b2g, we try to exercice the code that launches the production debugger server
+    let settingsService = Cc["@mozilla.org/settingsService;1"].getService(Ci.nsISettingsService);
+    settingsService.createLock().set("devtools.debugger.remote-enabled", true, null);
+    // We can't use `set` callback as it is fired before shell.js code listening for this setting
+    // is actually called. Same thing applies to mozsettings-changed obs notification.
+    // So listen to a custom event until bug 942756 lands
+    let observer = {
+      observe: function (subject, topic, data) {
+        Services.obs.removeObserver(observer, "debugger-server-started");
+        let transport = debuggerSocketConnect("127.0.0.1", 6000);
+        startClient(transport, onDone);
+      }
+    };
+    Services.obs.addObserver(observer, "debugger-server-started", false);
+  } else {
+    // Initialize a loopback remote protocol connection
+    DebuggerServer.init(function () { return true; });
+    // We need to register browser actors to have `listTabs` working
+    // and also have a root actor
     DebuggerServer.addBrowserActors();
-   }
+    let transport = DebuggerServer.connectPipe();
+    startClient(transport, onDone);
+  }
+}
+
+function startClient(transport, onDone) {
   // Setup client and actor used in all tests
-  gClient = new DebuggerClient(DebuggerServer.connectPipe());
+  gClient = new DebuggerClient(transport);
   gClient.connect(function onConnect() {
     gClient.listTabs(function onListTabs(aResponse) {
       gActor = aResponse.webappsActor;
@@ -42,6 +61,12 @@ function connect(onDone) {
 
   gClient.addListener("appUninstall", function (aState, aType, aPacket) {
     sendAsyncMessage("uninstalled-event", { manifestURL: aType.manifestURL });
+  });
+
+  addMessageListener("appActorRequest", request => {
+    webappActorRequest(request, response => {
+      sendAsyncMessage("appActorResponse", response);
+    });
   });
 }
 
@@ -92,9 +117,58 @@ addMessageListener("install", function (aMessage) {
   }
 });
 
+addMessageListener("getAppActor", function (aMessage) {
+  let { manifestURL } = aMessage;
+  let request = {type: "getAppActor", manifestURL: manifestURL};
+  webappActorRequest(request, function (aResponse) {
+    sendAsyncMessage("appActor", aResponse);
+  });
+});
+
+let Frames = [];
+addMessageListener("addFrame", function (aMessage) {
+  let win = Services.wm.getMostRecentWindow("navigator:browser");
+  let doc = win.document;
+  let frame = doc.createElementNS("http://www.w3.org/1999/xhtml", "iframe");
+  frame.setAttribute("mozbrowser", "true");
+  if (aMessage.mozapp) {
+    frame.setAttribute("mozapp", aMessage.mozapp);
+  }
+  if (aMessage.remote) {
+    frame.setAttribute("remote", aMessage.remote);
+  }
+  if (aMessage.src) {
+    frame.setAttribute("src", aMessage.src);
+  }
+  doc.documentElement.appendChild(frame);
+  Frames.push(frame);
+  sendAsyncMessage("frameAdded");
+});
+
+addMessageListener("tweak-app-object", function (aMessage) {
+  let appId = aMessage.appId;
+  Cu.import('resource://gre/modules/Webapps.jsm');
+  let reg = DOMApplicationRegistry;
+  if ("removable" in aMessage) {
+    reg.webapps[appId].removable = aMessage.removable;
+  }
+  if ("sideloaded" in aMessage) {
+    reg.webapps[appId].sideloaded = aMessage.sideloaded;
+  }
+});
+
 addMessageListener("cleanup", function () {
   webappActorRequest({type: "unwatchApps"}, function () {
     gClient.close();
   });
 });
 
+let FramesMock = {
+  list: function () {
+    return Frames;
+  },
+  addObserver: function () {},
+  removeObserver: function () {}
+};
+
+require("devtools/server/actors/webapps").setFramesMock(FramesMock);

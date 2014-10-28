@@ -14,9 +14,7 @@ function ensureProvider(workerFunction, cb) {
                + encodeURI("let run=" + workerFunction.toSource()) + ";run();"
   };
 
-  ensureSocialEnabled();
   SocialService.addProvider(manifest, function (p) {
-    p.enabled = true;
     cb(p);
   });
 }
@@ -25,7 +23,7 @@ function test() {
   waitForExplicitFinish();
 
   let cbPostTest = function(cb) {
-    SocialService.removeProvider(TEST_PROVIDER_ORIGIN, function() {cb()});
+    SocialService.disableProvider(TEST_PROVIDER_ORIGIN, function() {cb()});
   };
   replaceAlertsService();
   registerCleanupFunction(restoreAlertsService);

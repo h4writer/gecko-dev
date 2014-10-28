@@ -5,10 +5,13 @@
 
 #include "BasicCanvasLayer.h"
 #include "basic/BasicLayers.h"          // for BasicLayerManager
+#include "basic/BasicLayersImpl.h"      // for GetEffectiveOperator
 #include "mozilla/mozalloc.h"           // for operator new
 #include "nsAutoPtr.h"                  // for nsRefPtr
 #include "nsCOMPtr.h"                   // for already_AddRefed
 #include "nsISupportsImpl.h"            // for Layer::AddRef, etc
+#include "gfx2DGlue.h"
+
 class gfxContext;
 
 using namespace mozilla::gfx;
@@ -18,17 +21,42 @@ namespace mozilla {
 namespace layers {
 
 void
-BasicCanvasLayer::Paint(gfxContext* aContext, Layer* aMaskLayer)
+BasicCanvasLayer::Paint(DrawTarget* aDT,
+                        const Point& aDeviceOffset,
+                        Layer* aMaskLayer)
 {
   if (IsHidden())
     return;
 
-  FirePreTransactionCallback();
-  UpdateSurface();
-  FireDidTransactionCallback();
+  if (IsDirty()) {
+    Painted();
 
-  gfxContext::GraphicsOperator mixBlendMode = GetEffectiveMixBlendMode();
-  PaintWithOpacity(aContext, GetEffectiveOpacity(), aMaskLayer, mixBlendMode != gfxContext::OPERATOR_OVER ? mixBlendMode : GetOperator());
+    FirePreTransactionCallback();
+    UpdateTarget();
+    FireDidTransactionCallback();
+  }
+
+  if (!mSurface) {
+    return;
+  }
+
+  Matrix oldTM;
+  if (mNeedsYFlip) {
+    oldTM = aDT->GetTransform();
+    aDT->SetTransform(Matrix(oldTM).
+                        PreTranslate(0.0f, mBounds.height).
+                        PreScale(1.0f, -1.0f));
+  }
+
+  FillRectWithMask(aDT, aDeviceOffset,
+                   Rect(0, 0, mBounds.width, mBounds.height),
+                   mSurface, ToFilter(mFilter),
+                   DrawOptions(GetEffectiveOpacity(), GetEffectiveOperator(this)),
+                   aMaskLayer);
+
+  if (mNeedsYFlip) {
+    aDT->SetTransform(oldTM);
+  }
 }
 
 already_AddRefed<CanvasLayer>

@@ -14,9 +14,11 @@
 class nsIInputStream;
 class nsIOutputStream;
 
-class nsHttpPipeline : public nsAHttpConnection
-                     , public nsAHttpTransaction
-                     , public nsAHttpSegmentReader
+namespace mozilla { namespace net {
+
+class nsHttpPipeline MOZ_FINAL : public nsAHttpConnection
+                               , public nsAHttpTransaction
+                               , public nsAHttpSegmentReader
 {
 public:
     NS_DECL_THREADSAFE_ISUPPORTS
@@ -25,9 +27,14 @@ public:
     NS_DECL_NSAHTTPSEGMENTREADER
 
     nsHttpPipeline();
-    virtual ~nsHttpPipeline();
+
+  bool ResponseTimeoutEnabled() const MOZ_OVERRIDE MOZ_FINAL {
+    return true;
+  }
 
 private:
+    virtual ~nsHttpPipeline();
+
     nsresult FillSendBuf();
 
     static NS_METHOD ReadFromPipe(nsIInputStream *, void *, const char *,
@@ -52,7 +59,7 @@ private:
     // overload of nsAHttpTransaction::QueryPipeline()
     nsHttpPipeline *QueryPipeline();
 
-    nsAHttpConnection            *mConnection;
+    nsRefPtr<nsAHttpConnection>   mConnection;
     nsTArray<nsAHttpTransaction*> mRequestQ;  // array of transactions
     nsTArray<nsAHttpTransaction*> mResponseQ; // array of transactions
     nsresult                      mStatus;
@@ -91,5 +98,7 @@ private:
     uint64_t  mSendingToProgress;
     bool      mSuppressSendEvents;
 };
+
+}} // namespace mozilla::net
 
 #endif // nsHttpPipeline_h__

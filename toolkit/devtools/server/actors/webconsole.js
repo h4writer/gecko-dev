@@ -1,4 +1,4 @@
-/* -*- js2-basic-offset: 2; indent-tabs-mode: nil; -*- */
+/* -*- js-indent-level: 2; indent-tabs-mode: nil -*- */
 /* vim: set ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -6,36 +6,45 @@
 
 "use strict";
 
-let Cc = Components.classes;
-let Ci = Components.interfaces;
-let Cu = Components.utils;
+const { Cc, Ci, Cu } = require("chrome");
+const { DebuggerServer, ActorPool } = require("devtools/server/main");
+const { EnvironmentActor, LongStringActor, ObjectActor, ThreadActor } = require("devtools/server/actors/script");
+const { update } = require("devtools/toolkit/DevToolsUtils");
 
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 
-let devtools = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools;
-
 XPCOMUtils.defineLazyModuleGetter(this, "Services",
                                   "resource://gre/modules/Services.jsm");
-
-XPCOMUtils.defineLazyModuleGetter(this, "ConsoleAPIStorage",
-                                  "resource://gre/modules/ConsoleAPIStorage.jsm");
+XPCOMUtils.defineLazyGetter(this, "NetworkMonitor", () => {
+  return require("devtools/toolkit/webconsole/network-monitor")
+         .NetworkMonitor;
+});
+XPCOMUtils.defineLazyGetter(this, "NetworkMonitorChild", () => {
+  return require("devtools/toolkit/webconsole/network-monitor")
+         .NetworkMonitorChild;
+});
+XPCOMUtils.defineLazyGetter(this, "ConsoleProgressListener", () => {
+  return require("devtools/toolkit/webconsole/network-monitor")
+         .ConsoleProgressListener;
+});
+XPCOMUtils.defineLazyGetter(this, "events", () => {
+  return require("sdk/event/core");
+});
 
 for (let name of ["WebConsoleUtils", "ConsoleServiceListener",
-                  "ConsoleAPIListener", "ConsoleProgressListener",
-                  "JSTermHelpers", "JSPropertyProvider", "NetworkMonitor",
+                  "ConsoleAPIListener", "JSTermHelpers", "JSPropertyProvider",
                   "ConsoleReflowListener"]) {
   Object.defineProperty(this, name, {
     get: function(prop) {
       if (prop == "WebConsoleUtils") {
         prop = "Utils";
       }
-      return devtools.require("devtools/toolkit/webconsole/utils")[prop];
+      return require("devtools/toolkit/webconsole/utils")[prop];
     }.bind(null, name),
     configurable: true,
     enumerable: true
   });
 }
-
 
 /**
  * The WebConsoleActor implements capabilities needed for the Web Console
@@ -57,16 +66,24 @@ function WebConsoleActor(aConnection, aParentActor)
 
   this._prefs = {};
 
-  this.dbg = new Debugger();
+  this.dbg = this.parentActor.makeDebugger();
 
-  this._protoChains = new Map();
   this._netEvents = new Map();
+  this._gripDepth = 0;
+  this._listeners = new Set();
 
+  this._onWillNavigate = this._onWillNavigate.bind(this);
+  this._onChangedToplevelDocument = this._onChangedToplevelDocument.bind(this);
+  events.on(this.parentActor, "changed-toplevel-document", this._onChangedToplevelDocument);
   this._onObserverNotification = this._onObserverNotification.bind(this);
   if (this.parentActor.isRootActor) {
     Services.obs.addObserver(this._onObserverNotification,
                              "last-pb-context-exited", false);
   }
+
+  this.traits = {
+    customNetworkRequest: !this._parentIsContentActor,
+  };
 }
 
 WebConsoleActor.l10n = new WebConsoleUtils.l10n("chrome://global/locale/console.properties");
@@ -79,6 +96,13 @@ WebConsoleActor.prototype =
    * @see jsdebugger.jsm
    */
   dbg: null,
+
+  /**
+   * This is used by the ObjectActor to keep track of the depth of grip() calls.
+   * @private
+   * @type number
+   */
+  _gripDepth: null,
 
   /**
    * Actor pool for all of the actors we send to the client.
@@ -105,20 +129,35 @@ WebConsoleActor.prototype =
   _netEvents: null,
 
   /**
-   * A cache of prototype chains for objects that have received a
-   * prototypeAndProperties request.
+   * Holds a set of all currently registered listeners.
    *
    * @private
-   * @type Map
-   * @see dbg-script-actors.js, ThreadActor._protoChains
+   * @type Set
    */
-  _protoChains: null,
+  _listeners: null,
 
   /**
    * The debugger server connection instance.
    * @type object
    */
   conn: null,
+
+  /**
+   * List of supported features by the console actor.
+   * @type object
+   */
+  traits: null,
+
+  /**
+   * Boolean getter that tells if the parent actor is a ContentActor.
+   *
+   * @private
+   * @type boolean
+   */
+  get _parentIsContentActor() {
+    return "ContentActor" in DebuggerServer &&
+            this.parentActor instanceof DebuggerServer.ContentActor;
+  },
 
   /**
    * The window we work with.
@@ -201,6 +240,31 @@ WebConsoleActor.prototype =
    */
   _lastChromeWindow: null,
 
+  // The evalWindow is used at the scope for JS evaluation.
+  _evalWindow: null,
+  get evalWindow() {
+    return this._evalWindow || this.window;
+  },
+
+  set evalWindow(aWindow) {
+    this._evalWindow = aWindow;
+
+    if (!this._progressListenerActive) {
+      events.on(this.parentActor, "will-navigate", this._onWillNavigate);
+      this._progressListenerActive = true;
+    }
+  },
+
+  /**
+   * Flag used to track if we are listening for events from the progress
+   * listener of the tab actor. We use the progress listener to clear
+   * this.evalWindow on page navigation.
+   *
+   * @private
+   * @type boolean
+   */
+  _progressListenerActive: false,
+
   /**
    * The ConsoleServiceListener instance.
    * @type object
@@ -234,13 +298,6 @@ WebConsoleActor.prototype =
    */
   _jstermHelpersCache: null,
 
-  /**
-   * Getter for the NetworkMonitor.saveRequestAndResponseBodies preference.
-   * @type boolean
-   */
-  get saveRequestAndResponseBodies()
-    this._prefs["NetworkMonitor.saveRequestAndResponseBodies"],
-
   actorPrefix: "console",
 
   grip: function WCA_grip()
@@ -248,7 +305,17 @@ WebConsoleActor.prototype =
     return { actor: this.actorID };
   },
 
-  hasNativeConsoleAPI: BrowserTabActor.prototype.hasNativeConsoleAPI,
+  hasNativeConsoleAPI: function WCA_hasNativeConsoleAPI(aWindow) {
+    let isNative = false;
+    try {
+      // We are very explicitly examining the "console" property of
+      // the non-Xrayed object here.
+      let console = aWindow.wrappedJSObject.console;
+      isNative = console instanceof aWindow.Console;
+    }
+    catch (ex) { }
+    return isNative;
+  },
 
   _createValueGrip: ThreadActor.prototype.createValueGrip,
   _stringIsLong: ThreadActor.prototype._stringIsLong,
@@ -280,6 +347,7 @@ WebConsoleActor.prototype =
       this.consoleReflowListener.destroy();
       this.consoleReflowListener = null;
     }
+    events.off(this.parentActor, "changed-toplevel-document", this._onChangedToplevelDocument);
     this.conn.removeActorPool(this._actorPool);
     if (this.parentActor.isRootActor) {
       Services.obs.removeObserver(this._onObserverNotification,
@@ -287,8 +355,9 @@ WebConsoleActor.prototype =
     }
     this._actorPool = null;
 
+    this._jstermHelpersCache = null;
+    this._evalWindow = null;
     this._netEvents.clear();
-    this._protoChains.clear();
     this.dbg.enabled = false;
     this.dbg = null;
     this.conn = null;
@@ -448,6 +517,13 @@ WebConsoleActor.prototype =
   {
     let startedListeners = [];
     let window = !this.parentActor.isRootActor ? this.window : null;
+    let appId = null;
+    let messageManager = null;
+
+    if (this._parentIsContentActor) {
+      appId = this.parentActor.docShell.appId;
+      messageManager = this.parentActor.messageManager;
+    }
 
     while (aRequest.listeners.length > 0) {
       let listener = aRequest.listeners.shift();
@@ -470,8 +546,14 @@ WebConsoleActor.prototype =
           break;
         case "NetworkActivity":
           if (!this.networkMonitor) {
-            this.networkMonitor =
-              new NetworkMonitor(window, this);
+            if (appId || messageManager) {
+              this.networkMonitor =
+                new NetworkMonitorChild(appId, messageManager,
+                                        this.parentActor.actorID, this);
+            }
+            else {
+              this.networkMonitor = new NetworkMonitor({ window: window }, this);
+            }
             this.networkMonitor.init();
           }
           startedListeners.push(listener);
@@ -494,9 +576,14 @@ WebConsoleActor.prototype =
           break;
       }
     }
+
+    // Update the live list of running listeners
+    startedListeners.forEach(this._listeners.add, this._listeners);
+
     return {
       startedListeners: startedListeners,
       nativeConsoleAPI: this.hasNativeConsoleAPI(this.window),
+      traits: this.traits,
     };
   },
 
@@ -560,6 +647,9 @@ WebConsoleActor.prototype =
           break;
       }
     }
+
+    // Update the live list of running listeners
+    stoppedListeners.forEach(this._listeners.delete, this._listeners);
 
     return { stoppedListeners: stoppedListeners };
   },
@@ -654,7 +744,9 @@ WebConsoleActor.prototype =
       bindObjectActor: aRequest.bindObjectActor,
       frameActor: aRequest.frameActor,
       url: aRequest.url,
+      selectedNodeActor: aRequest.selectedNodeActor,
     };
+
     let evalInfo = this.evalWithDebugger(input, evalOptions);
     let evalResult = evalInfo.result;
     let helperResult = evalInfo.helperResult;
@@ -678,10 +770,19 @@ WebConsoleActor.prototype =
       }
     }
 
+    // If a value is encountered that the debugger server doesn't support yet,
+    // the console should remain functional.
+    let resultGrip;
+    try {
+      resultGrip = this.createValueGrip(result);
+    } catch (e) {
+      errorMessage = e;
+    }
+
     return {
       from: this.actorID,
       input: input,
-      result: this.createValueGrip(result),
+      result: resultGrip,
       timestamp: timestamp,
       exception: errorGrip,
       exceptionMessage: errorMessage,
@@ -717,7 +818,7 @@ WebConsoleActor.prototype =
     }
     // This is the general case (non-paused debugger)
     else {
-      dbgObject = this.dbg.makeGlobalObjectReference(this.window);
+      dbgObject = this.dbg.makeGlobalObjectReference(this.evalWindow);
     }
 
     let result = JSPropertyProvider(dbgObject, environment, aRequest.text,
@@ -754,7 +855,10 @@ WebConsoleActor.prototype =
     // TODO: Bug 717611 - Web Console clear button does not clear cached errors
     let windowId = !this.parentActor.isRootActor ?
                    WebConsoleUtils.getInnerWindowId(this.window) : null;
+    let ConsoleAPIStorage = Cc["@mozilla.org/consoleAPI-storage;1"]
+                              .getService(Ci.nsIConsoleAPIStorage);
     ConsoleAPIStorage.clearEvents(windowId);
+
     if (this.parentActor.isRootActor) {
       Services.console.logStringMessage(null); // for the Error Console
       Services.console.reset();
@@ -789,6 +893,11 @@ WebConsoleActor.prototype =
   {
     for (let key in aRequest.preferences) {
       this._prefs[key] = aRequest.preferences[key];
+
+      if (key == "NetworkMonitor.saveRequestAndResponseBodies" &&
+          this.networkMonitor) {
+        this.networkMonitor.saveRequestAndResponseBodies = this._prefs[key];
+      }
     }
     return { updated: Object.keys(aRequest.preferences) };
   },
@@ -814,22 +923,41 @@ WebConsoleActor.prototype =
   _getJSTermHelpers: function WCA__getJSTermHelpers(aDebuggerGlobal)
   {
     let helpers = {
-      window: this.window,
+      window: this.evalWindow,
       chromeWindow: this.chromeWindow.bind(this),
       makeDebuggeeValue: aDebuggerGlobal.makeDebuggeeValue.bind(aDebuggerGlobal),
       createValueGrip: this.createValueGrip.bind(this),
       sandbox: Object.create(null),
       helperResult: null,
+      consoleActor: this,
     };
     JSTermHelpers(helpers);
 
-    // Make sure the helpers can be used during eval.
+    let evalWindow = this.evalWindow;
+    function maybeExport(obj, name) {
+      if (typeof obj[name] != "function") {
+        return;
+      }
+
+      // By default, chrome-implemented functions that are exposed to content
+      // refuse to accept arguments that are cross-origin for the caller. This
+      // is generally the safe thing, but causes problems for certain console
+      // helpers like cd(), where we users sometimes want to pass a cross-origin
+      // window. To circumvent this restriction, we use exportFunction along
+      // with a special option designed for this purpose. See bug 1051224.
+      obj[name] =
+        Cu.exportFunction(obj[name], evalWindow, { allowCrossOriginArguments: true });
+    }
     for (let name in helpers.sandbox) {
       let desc = Object.getOwnPropertyDescriptor(helpers.sandbox, name);
-      if (desc.get || desc.set) {
-        continue;
+      maybeExport(desc, 'get');
+      maybeExport(desc, 'set');
+      maybeExport(desc, 'value');
+      if (desc.value) {
+        // Make sure the helpers can be used during eval.
+        desc.value = aDebuggerGlobal.makeDebuggeeValue(desc.value);
       }
-      helpers.sandbox[name] = aDebuggerGlobal.makeDebuggeeValue(desc.value);
+      Object.defineProperty(helpers.sandbox, name, desc);
     }
     return helpers;
   },
@@ -878,6 +1006,10 @@ WebConsoleActor.prototype =
    *          ObjectActor.
    *        - frameActor: the FrameActor ID to use for evaluation. The given
    *        debugger frame is used for evaluation, instead of the global window.
+   *        - selectedNodeActor: the NodeActor ID of the currently selected node
+   *        in the Inspector (or null, if there is no selection). This is used
+   *        for helper functions that make reference to the currently selected
+   *        node, like $0.
    * @return object
    *         An object that holds the following properties:
    *         - dbg: the debugger where the string was evaluated.
@@ -916,12 +1048,11 @@ WebConsoleActor.prototype =
     // as ordinary objects, not as references to be followed, so mixing
     // debuggers causes strange behaviors.)
     let dbg = frame ? frameActor.threadActor.dbg : this.dbg;
-    let dbgWindow = dbg.makeGlobalObjectReference(this.window);
+    let dbgWindow = dbg.makeGlobalObjectReference(this.evalWindow);
 
     // If we have an object to bind to |_self|, create a Debugger.Object
     // referring to that object, belonging to dbg.
     let bindSelf = null;
-    let dbgWindow = dbg.makeGlobalObjectReference(this.window);
     if (aOptions.bindObjectActor) {
       let objActor = this.getActorByID(aOptions.bindObjectActor);
       if (objActor) {
@@ -941,6 +1072,13 @@ WebConsoleActor.prototype =
     let bindings = helpers.sandbox;
     if (bindSelf) {
       bindings._self = bindSelf;
+    }
+
+    if (aOptions.selectedNodeActor) {
+      let actor = this.conn.getActor(aOptions.selectedNodeActor);
+      if (actor) {
+        helpers.selectedNode = actor.rawNode;
+      }
     }
 
     // Check if the Debugger.Frame or Debugger.Object for the global include
@@ -987,6 +1125,7 @@ WebConsoleActor.prototype =
     let helperResult = helpers.helperResult;
     delete helpers.evalInput;
     delete helpers.helperResult;
+    delete helpers.selectedNode;
 
     if ($) {
       bindings.$ = $;
@@ -1098,6 +1237,8 @@ WebConsoleActor.prototype =
    *
    * @param object aEvent
    *        The initial network request event information.
+   * @param nsIHttpChannel aChannel
+   *        The network request nsIHttpChannel object.
    * @return object
    *         A new NetworkEventActor is returned. This is used for tracking the
    *         network request and response.
@@ -1122,8 +1263,10 @@ WebConsoleActor.prototype =
    * Get the NetworkEventActor for a nsIChannel, if it exists,
    * otherwise create a new one.
    *
-   * @param object aChannel
+   * @param nsIHttpChannel aChannel
    *        The channel for the network event.
+   * @return object
+   *         The NetworkEventActor for the given channel.
    */
   getNetworkEventActor: function WCA_getNetworkEventActor(aChannel) {
     let actor = this._netEvents.get(aChannel);
@@ -1230,10 +1373,15 @@ WebConsoleActor.prototype =
     delete result.wrappedJSObject;
     delete result.ID;
     delete result.innerID;
+    delete result.consoleID;
 
     result.arguments = Array.map(aMessage.arguments || [], (aObj) => {
       let dbgObj = this.makeDebuggeeValue(aObj, true);
       return this.createValueGrip(dbgObj);
+    });
+
+    result.styles = Array.map(aMessage.styles || [], (aString) => {
+      return this.createValueGrip(aString);
     });
 
     return result;
@@ -1281,7 +1429,38 @@ WebConsoleActor.prototype =
         });
         break;
     }
-  }
+  },
+
+  /**
+   * The "will-navigate" progress listener. This is used to clear the current
+   * eval scope.
+   */
+  _onWillNavigate: function WCA__onWillNavigate({ window, isTopLevel })
+  {
+    if (isTopLevel) {
+      this._evalWindow = null;
+      events.off(this.parentActor, "will-navigate", this._onWillNavigate);
+      this._progressListenerActive = false;
+    }
+  },
+
+  /**
+   * This listener is called when we switch to another frame,
+   * mostly to unregister previous listeners and start listening on the new document.
+   */
+  _onChangedToplevelDocument: function WCA__onChangedToplevelDocument()
+  {
+    // Convert the Set to an Array
+    let listeners = [...this._listeners];
+
+    // Unregister existing listener on the previous document
+    // (pass a copy of the array as it will shift from it)
+    this.onStopListeners({listeners: listeners.slice()});
+
+    // This method is called after this.window is changed,
+    // so we register new listener on this new window
+    this.onStartListeners({listeners: listeners});
+  },
 };
 
 WebConsoleActor.prototype.requestTypes =
@@ -1296,6 +1475,93 @@ WebConsoleActor.prototype.requestTypes =
   setPreferences: WebConsoleActor.prototype.onSetPreferences,
   sendHTTPRequest: WebConsoleActor.prototype.onSendHTTPRequest
 };
+
+exports.WebConsoleActor = WebConsoleActor;
+
+
+/**
+ * The AddonConsoleActor implements capabilities needed for the add-on web
+ * console feature.
+ *
+ * @constructor
+ * @param object aAddon
+ *        The add-on that this console watches.
+ * @param object aConnection
+ *        The connection to the client, DebuggerServerConnection.
+ * @param object aParentActor
+ *        The parent BrowserAddonActor actor.
+ */
+function AddonConsoleActor(aAddon, aConnection, aParentActor)
+{
+  this.addon = aAddon;
+  WebConsoleActor.call(this, aConnection, aParentActor);
+}
+
+AddonConsoleActor.prototype = Object.create(WebConsoleActor.prototype);
+
+update(AddonConsoleActor.prototype, {
+  constructor: AddonConsoleActor,
+
+  actorPrefix: "addonConsole",
+
+  /**
+   * The add-on that this console watches.
+   */
+  addon: null,
+
+  /**
+   * The main add-on JS global
+   */
+  get window() {
+    return this.parentActor.global;
+  },
+
+  /**
+   * Destroy the current AddonConsoleActor instance.
+   */
+  disconnect: function ACA_disconnect()
+  {
+    WebConsoleActor.prototype.disconnect.call(this);
+    this.addon = null;
+  },
+
+  /**
+   * Handler for the "startListeners" request.
+   *
+   * @param object aRequest
+   *        The JSON request object received from the Web Console client.
+   * @return object
+   *         The response object which holds the startedListeners array.
+   */
+  onStartListeners: function ACA_onStartListeners(aRequest)
+  {
+    let startedListeners = [];
+
+    while (aRequest.listeners.length > 0) {
+      let listener = aRequest.listeners.shift();
+      switch (listener) {
+        case "ConsoleAPI":
+          if (!this.consoleAPIListener) {
+            this.consoleAPIListener =
+              new ConsoleAPIListener(null, this, "addon/" + this.addon.id);
+            this.consoleAPIListener.init();
+          }
+          startedListeners.push(listener);
+          break;
+      }
+    }
+    return {
+      startedListeners: startedListeners,
+      nativeConsoleAPI: true,
+      traits: this.traits,
+    };
+  },
+});
+
+AddonConsoleActor.prototype.requestTypes = Object.create(WebConsoleActor.prototype.requestTypes);
+AddonConsoleActor.prototype.requestTypes.startListeners = AddonConsoleActor.prototype.onStartListeners;
+
+exports.AddonConsoleActor = AddonConsoleActor;
 
 /**
  * Creates an actor for a network event.
@@ -1730,7 +1996,3 @@ NetworkEventActor.prototype.requestTypes =
   "getResponseContent": NetworkEventActor.prototype.onGetResponseContent,
   "getEventTimings": NetworkEventActor.prototype.onGetEventTimings,
 };
-
-DebuggerServer.addTabActor(WebConsoleActor, "consoleActor");
-DebuggerServer.addGlobalActor(WebConsoleActor, "consoleActor");
-

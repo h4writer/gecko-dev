@@ -9,12 +9,16 @@
 
 class nsPIDOMWindow;
 class nsIDOMEventListener;
-class nsEventListenerManager;
 class nsIDOMEvent;
-class nsEventChainPreVisitor;
-class nsEventChainPostVisitor;
+class nsIGlobalObject;
+
+namespace mozilla {
+class EventChainPostVisitor;
+class EventChainPreVisitor;
+} // namespace mozilla
 
 #include "mozilla/Attributes.h"
+#include "mozilla/EventListenerManager.h"
 #include "nsIDOMEventTarget.h"
 #include "nsPIWindowRoot.h"
 #include "nsCycleCollectionParticipant.h"
@@ -23,16 +27,15 @@ class nsEventChainPostVisitor;
 class nsWindowRoot : public nsPIWindowRoot
 {
 public:
-  nsWindowRoot(nsPIDOMWindow* aWindow);
-  virtual ~nsWindowRoot();
+  explicit nsWindowRoot(nsPIDOMWindow* aWindow);
 
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
   NS_DECL_NSIDOMEVENTTARGET
 
-  virtual nsEventListenerManager*
-  GetExistingListenerManager() const MOZ_OVERRIDE;
-  virtual nsEventListenerManager*
-  GetOrCreateListenerManager() MOZ_OVERRIDE;
+  virtual mozilla::EventListenerManager*
+    GetExistingListenerManager() const MOZ_OVERRIDE;
+  virtual mozilla::EventListenerManager*
+    GetOrCreateListenerManager() MOZ_OVERRIDE;
 
   using mozilla::dom::EventTarget::RemoveEventListener;
   virtual void AddEventListener(const nsAString& aType,
@@ -59,15 +62,20 @@ public:
   virtual mozilla::dom::EventTarget* GetParentTarget() MOZ_OVERRIDE { return mParent; }
   virtual nsIDOMWindow* GetOwnerGlobal() MOZ_OVERRIDE;
 
+  nsIGlobalObject* GetParentObject();
+
+  virtual JSObject* WrapObject(JSContext* aCx) MOZ_OVERRIDE;
+
   NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS_AMBIGUOUS(nsWindowRoot,
                                                          nsIDOMEventTarget)
 
 protected:
+  virtual ~nsWindowRoot();
+
   // Members
   nsCOMPtr<nsPIDOMWindow> mWindow;
-  nsRefPtr<nsEventListenerManager> mListenerManager; // [Strong]. We own the manager, which owns event listeners attached
-                                                      // to us.
-
+  // We own the manager, which owns event listeners attached to us.
+  nsRefPtr<mozilla::EventListenerManager> mListenerManager; // [Strong]
   nsCOMPtr<nsIDOMNode> mPopupNode; // [OWNER]
 
   nsCOMPtr<mozilla::dom::EventTarget> mParent;

@@ -4,6 +4,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "mozilla/Hal.h"
+#include "mozilla/dom/Event.h" // for nsIDOMEvent::InternalDOMEvent()
+#include "mozilla/dom/ScreenBinding.h"
 #include "nsScreen.h"
 #include "nsIDocument.h"
 #include "nsIDocShell.h"
@@ -12,29 +14,11 @@
 #include "nsCOMPtr.h"
 #include "nsIDocShellTreeItem.h"
 #include "nsLayoutUtils.h"
-#include "nsDOMEvent.h"
 #include "nsJSUtils.h"
-#include "mozilla/dom/ScreenBinding.h"
 #include "nsDeviceContext.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
-
-namespace {
-
-bool
-IsChromeType(nsIDocShell *aDocShell)
-{
-  if (!aDocShell) {
-    return false;
-  }
-
-  int32_t itemType;
-  aDocShell->GetItemType(&itemType);
-  return itemType == nsIDocShellTreeItem::typeChrome;
-}
-
-} // anonymous namespace
 
 /* static */ already_AddRefed<nsScreen>
 nsScreen::Create(nsPIDOMWindow* aWindow)
@@ -49,8 +33,7 @@ nsScreen::Create(nsPIDOMWindow* aWindow)
     do_QueryInterface(static_cast<nsPIDOMWindow*>(aWindow));
   NS_ENSURE_TRUE(sgo, nullptr);
 
-  nsRefPtr<nsScreen> screen = new nsScreen();
-  screen->BindToOwner(aWindow);
+  nsRefPtr<nsScreen> screen = new nsScreen(aWindow);
 
   hal::RegisterScreenConfigurationObserver(screen);
   hal::ScreenConfiguration config;
@@ -60,10 +43,10 @@ nsScreen::Create(nsPIDOMWindow* aWindow)
   return screen.forget();
 }
 
-nsScreen::nsScreen()
-  : mEventListener(nullptr)
+nsScreen::nsScreen(nsPIDOMWindow* aWindow)
+  : DOMEventTargetHelper(aWindow)
+  , mEventListener(nullptr)
 {
-  SetIsDOMBinding();
 }
 
 nsScreen::~nsScreen()
@@ -76,10 +59,10 @@ nsScreen::~nsScreen()
 // QueryInterface implementation for nsScreen
 NS_INTERFACE_MAP_BEGIN(nsScreen)
   NS_INTERFACE_MAP_ENTRY(nsIDOMScreen)
-NS_INTERFACE_MAP_END_INHERITING(nsDOMEventTargetHelper)
+NS_INTERFACE_MAP_END_INHERITING(DOMEventTargetHelper)
 
-NS_IMPL_ADDREF_INHERITED(nsScreen, nsDOMEventTargetHelper)
-NS_IMPL_RELEASE_INHERITED(nsScreen, nsDOMEventTargetHelper)
+NS_IMPL_ADDREF_INHERITED(nsScreen, DOMEventTargetHelper)
+NS_IMPL_RELEASE_INHERITED(nsScreen, DOMEventTargetHelper)
 
 int32_t
 nsScreen::GetPixelDepth(ErrorResult& aRv)
@@ -219,7 +202,8 @@ nsScreen::GetLockOrientationPermission() const
   }
 
   // Chrome can always lock the screen orientation.
-  if (IsChromeType(owner->GetDocShell())) {
+  nsIDocShell* docShell = owner->GetDocShell();
+  if (docShell && docShell->ItemType() == nsIDocShellTreeItem::typeChrome) {
     return LOCK_ALLOWED;
   }
 
@@ -236,66 +220,6 @@ nsScreen::GetLockOrientationPermission() const
 
   // Other content must be full-screen in order to lock orientation.
   return doc->MozFullScreen() ? FULLSCREEN_LOCK_ALLOWED : LOCK_DENIED;
-}
-
-NS_IMETHODIMP
-nsScreen::MozLockOrientation(const JS::Value& aOrientation_, JSContext* aCx,
-                             bool* aReturn)
-{
-  JS::Rooted<JS::Value> aOrientation(aCx, aOrientation_);
-
-  if (aOrientation.isObject()) {
-    JS::Rooted<JSObject*> seq(aCx, &aOrientation.toObject());
-    if (IsArrayLike(aCx, seq)) {
-      uint32_t length;
-      // JS_GetArrayLength actually works on all objects
-      if (!JS_GetArrayLength(aCx, seq, &length)) {
-        return NS_ERROR_FAILURE;
-      }
-
-      Sequence<nsString> orientations;
-      if (!orientations.SetCapacity(length)) {
-        return NS_ERROR_OUT_OF_MEMORY;
-      }
-
-      for (uint32_t i = 0; i < length; ++i) {
-        JS::Rooted<JS::Value> temp(aCx);
-        if (!JS_GetElement(aCx, seq, i, &temp)) {
-          return NS_ERROR_FAILURE;
-        }
-
-        JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, temp));
-        if (!jsString) {
-          return NS_ERROR_FAILURE;
-        }
-
-        nsDependentJSString str;
-        if (!str.init(aCx, jsString)) {
-          return NS_ERROR_FAILURE;
-        }
-
-        *orientations.AppendElement() = str;
-      }
-
-      ErrorResult rv;
-      *aReturn = MozLockOrientation(orientations, rv);
-      return rv.ErrorCode();
-    }
-  }
-
-  JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, aOrientation));
-  if (!jsString) {
-    return NS_ERROR_FAILURE;
-  }
-
-  nsDependentJSString orientation;
-  if (!orientation.init(aCx, jsString)) {
-    return NS_ERROR_FAILURE;
-  }
-
-  ErrorResult rv;
-  *aReturn = MozLockOrientation(orientation, rv);
-  return rv.ErrorCode();
 }
 
 bool
@@ -381,13 +305,19 @@ void
 nsScreen::MozUnlockOrientation()
 {
   hal::UnlockScreenOrientation();
-}
 
-NS_IMETHODIMP
-nsScreen::SlowMozUnlockOrientation()
-{
-  MozUnlockOrientation();
-  return NS_OK;
+  if (!mEventListener) {
+    return;
+  }
+
+  // Remove event listener in case of fullscreen lock.
+  nsCOMPtr<EventTarget> target = do_QueryInterface(GetOwner()->GetDoc());
+  if (target) {
+    target->RemoveSystemEventListener(NS_LITERAL_STRING("mozfullscreenchange"),
+                                      mEventListener, /* useCapture */ true);
+  }
+
+  mEventListener = nullptr;
 }
 
 bool
@@ -405,12 +335,12 @@ nsScreen::IsDeviceSizePageSize()
 
 /* virtual */
 JSObject*
-nsScreen::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope)
+nsScreen::WrapObject(JSContext* aCx)
 {
-  return ScreenBinding::Wrap(aCx, aScope, this);
+  return ScreenBinding::Wrap(aCx, this);
 }
 
-NS_IMPL_ISUPPORTS1(nsScreen::FullScreenEventListener, nsIDOMEventListener)
+NS_IMPL_ISUPPORTS(nsScreen::FullScreenEventListener, nsIDOMEventListener)
 
 NS_IMETHODIMP
 nsScreen::FullScreenEventListener::HandleEvent(nsIDOMEvent* aEvent)

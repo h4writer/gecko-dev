@@ -187,7 +187,7 @@ gImageView.onPageMediaSort = function(columnname) {
   var treecol = tree.columns.getNamedColumn(columnname);
 
   var comparator;
-  if (treecol.index == COL_IMAGE_SIZE) {
+  if (treecol.index == COL_IMAGE_SIZE || treecol.index == COL_IMAGE_COUNT) {
     comparator = function numComparator(a, b) { return a - b; };
   } else {
     comparator = function textComparator(a, b) { return a.toLowerCase().localeCompare(b.toLowerCase()); };
@@ -323,7 +323,7 @@ function onLoadPageInfo()
              window.arguments[0];
 
   if (!args || !args.doc) {
-    gWindow = window.opener.content;
+    gWindow = window.opener.gBrowser.selectedBrowser.contentWindowAsCPOW;
     gDocument = gWindow.document;
   }
 
@@ -442,14 +442,6 @@ function loadTab(args)
   radioGroup.focus();
 }
 
-function onClickMore()
-{
-  var radioGrp = document.getElementById("viewGroup");
-  var radioElt = document.getElementById("securityTab");
-  radioGrp.selectedItem = radioElt;
-  showTab('security');
-}
-
 function toggleGroupbox(id)
 {
   var elt = document.getElementById(id);
@@ -516,7 +508,7 @@ function makeGeneralTab()
     else
       metaTagsCaption.label = gBundle.getFormattedString("generalMetaTags", [length]);
     var metaTree = document.getElementById("metatree");
-    metaTree.treeBoxObject.view = gMetaView;
+    metaTree.view = gMetaView;
 
     for (var i = 0; i < length; i++)
       gMetaView.addRow([metaNodes[i].name || metaNodes[i].httpEquiv, metaNodes[i].content]);

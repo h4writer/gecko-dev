@@ -10,6 +10,9 @@ const Cu = Components.utils;
 
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 
+XPCOMUtils.defineLazyModuleGetter(this, "BrowserUtils",
+                                  "resource://gre/modules/BrowserUtils.jsm");
+
 this.EXPORTED_SYMBOLS = [
   "SelectContentHelper"
 ];
@@ -47,24 +50,7 @@ this.SelectContentHelper.prototype = {
   },
 
   _getBoundingContentRect: function() {
-    let { top, left, width, height } = this.element.getBoundingClientRect();
-    // We need to copy the info because the properties returned by getBoundingClientRect
-    // are not writable.
-    let rect = { left: left, top: top, width: width, height: height };
-
-    // step out of iframes and frames, offsetting scroll values
-    let view = this.element.ownerDocument.defaultView;
-    for (let frame = view; frame != this.global.content; frame = frame.parent) {
-      // adjust client coordinates' origin to be top left of iframe viewport
-      let r = frame.frameElement.getBoundingClientRect();
-      let left = frame.getComputedStyle(frame.frameElement, "").borderLeftWidth;
-      let top = frame.getComputedStyle(frame.frameElement, "").borderTopWidth;
-
-      rect.left += r.left + parseInt(left, 10);
-      rect.top += r.top + parseInt(top, 10);
-    }
-
-    return rect;
+    return BrowserUtils.getElementBoundingScreenRect(this.element);
   },
 
   _buildOptionList: function() {
@@ -106,8 +92,8 @@ function buildOptionListForChildren(node) {
     if (child.tagName == 'OPTION' || child.tagName == 'OPTGROUP') {
       let info = {
         tagName: child.tagName,
-        textContent: child.tagName == 'OPTGROUP' ? child.getAttribute("label")
-                                                 : child.textContent,
+        textContent: child.tagName == 'OPTGROUP' ? child.getAttribute("label").trim()
+                                                 : child.textContent.trim(),
         // XXX this uses a highlight color when this is the selected element.
         // We need to suppress such highlighting in the content process to get
         // the option's correct unhighlighted color here.

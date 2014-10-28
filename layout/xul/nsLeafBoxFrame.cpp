@@ -17,13 +17,15 @@
 #include "nsPresContext.h"
 #include "nsStyleContext.h"
 #include "nsIContent.h"
-#include "nsINameSpaceManager.h"
+#include "nsNameSpaceManager.h"
 #include "nsBoxLayoutState.h"
 #include "nsWidgetsCID.h"
 #include "nsViewManager.h"
 #include "nsContainerFrame.h"
 #include "nsDisplayList.h"
 #include <algorithm>
+
+using namespace mozilla;
 
 //
 // NS_NewLeafBoxFrame
@@ -56,10 +58,9 @@ nsLeafBoxFrame::GetBoxName(nsAutoString& aName)
  * Initialize us. This is a good time to get the alignment of the box
  */
 void
-nsLeafBoxFrame::Init(
-              nsIContent*      aContent,
-              nsIFrame*        aParent,
-              nsIFrame*        aPrevInFlow)
+nsLeafBoxFrame::Init(nsIContent*       aContent,
+                     nsContainerFrame* aParent,
+                     nsIFrame*         aPrevInFlow)
 {
   nsLeafFrame::Init(aContent, aParent, aPrevInFlow);
 
@@ -70,7 +71,7 @@ nsLeafBoxFrame::Init(
   UpdateMouseThrough();
 }
 
-NS_IMETHODIMP
+nsresult
 nsLeafBoxFrame::AttributeChanged(int32_t aNameSpaceID,
                                  nsIAtom* aAttribute,
                                  int32_t aModType)
@@ -123,7 +124,7 @@ nsLeafBoxFrame::BuildDisplayList(nsDisplayListBuilder*   aBuilder,
 }
 
 /* virtual */ nscoord
-nsLeafBoxFrame::GetMinWidth(nsRenderingContext *aRenderingContext)
+nsLeafBoxFrame::GetMinISize(nsRenderingContext *aRenderingContext)
 {
   nscoord result;
   DISPLAY_MIN_WIDTH(this, result);
@@ -143,7 +144,7 @@ nsLeafBoxFrame::GetMinWidth(nsRenderingContext *aRenderingContext)
 }
 
 /* virtual */ nscoord
-nsLeafBoxFrame::GetPrefWidth(nsRenderingContext *aRenderingContext)
+nsLeafBoxFrame::GetPrefISize(nsRenderingContext *aRenderingContext)
 {
   nscoord result;
   DISPLAY_PREF_WIDTH(this, result);
@@ -163,24 +164,29 @@ nsLeafBoxFrame::GetPrefWidth(nsRenderingContext *aRenderingContext)
 }
 
 nscoord
-nsLeafBoxFrame::GetIntrinsicWidth()
+nsLeafBoxFrame::GetIntrinsicISize()
 {
   // No intrinsic width
   return 0;
 }
 
-nsSize
+LogicalSize
 nsLeafBoxFrame::ComputeAutoSize(nsRenderingContext *aRenderingContext,
-                                nsSize aCBSize, nscoord aAvailableWidth,
-                                nsSize aMargin, nsSize aBorder,
-                                nsSize aPadding, bool aShrinkWrap)
+                                WritingMode aWM,
+                                const LogicalSize& aCBSize,
+                                nscoord aAvailableISize,
+                                const LogicalSize& aMargin,
+                                const LogicalSize& aBorder,
+                                const LogicalSize& aPadding,
+                                bool aShrinkWrap)
 {
   // Important: NOT calling our direct superclass here!
-  return nsFrame::ComputeAutoSize(aRenderingContext, aCBSize, aAvailableWidth,
+  return nsFrame::ComputeAutoSize(aRenderingContext, aWM,
+                                  aCBSize, aAvailableISize,
                                   aMargin, aBorder, aPadding, aShrinkWrap);
 }
 
-NS_IMETHODIMP
+void
 nsLeafBoxFrame::Reflow(nsPresContext*   aPresContext,
                      nsHTMLReflowMetrics&     aDesiredSize,
                      const nsHTMLReflowState& aReflowState,
@@ -215,8 +221,8 @@ nsLeafBoxFrame::Reflow(nsPresContext*   aPresContext,
     default:printf("<unknown>%d", aReflowState.reason);break;
   }
   
-  printSize("AW", aReflowState.availableWidth);
-  printSize("AH", aReflowState.availableHeight);
+  printSize("AW", aReflowState.AvailableWidth());
+  printSize("AH", aReflowState.AvailableHeight());
   printSize("CW", aReflowState.ComputedWidth());
   printSize("CH", aReflowState.ComputedHeight());
 
@@ -232,7 +238,7 @@ nsLeafBoxFrame::Reflow(nsPresContext*   aPresContext,
   nsSize computedSize(aReflowState.ComputedWidth(),aReflowState.ComputedHeight());
 
   nsMargin m;
-  m = aReflowState.mComputedBorderPadding;
+  m = aReflowState.ComputedPhysicalBorderPadding();
 
   //GetBorderAndPadding(m);
 
@@ -269,11 +275,11 @@ nsLeafBoxFrame::Reflow(nsPresContext*   aPresContext,
   // XXXbz the width handling here seems to be wrong, since
   // mComputedMin/MaxWidth is a content-box size, whole
   // computedSize.width is a border-box size...
-  if (computedSize.width > aReflowState.mComputedMaxWidth)
-    computedSize.width = aReflowState.mComputedMaxWidth;
+  if (computedSize.width > aReflowState.ComputedMaxWidth())
+    computedSize.width = aReflowState.ComputedMaxWidth();
 
-  if (computedSize.width < aReflowState.mComputedMinWidth)
-    computedSize.width = aReflowState.mComputedMinWidth;
+  if (computedSize.width < aReflowState.ComputedMinWidth())
+    computedSize.width = aReflowState.ComputedMinWidth();
 
   // Now adjust computedSize.height for our min and max computed
   // height.  The only problem is that those are content-box sizes,
@@ -281,8 +287,8 @@ nsLeafBoxFrame::Reflow(nsPresContext*   aPresContext,
   // m.TopBottom() before adjusting, then readd it.
   computedSize.height = std::max(0, computedSize.height - m.TopBottom());
   computedSize.height = NS_CSS_MINMAX(computedSize.height,
-                                      aReflowState.mComputedMinHeight,
-                                      aReflowState.mComputedMaxHeight);
+                                      aReflowState.ComputedMinHeight(),
+                                      aReflowState.ComputedMaxHeight());
   computedSize.height += m.TopBottom();
 
   nsRect r(mRect.x, mRect.y, computedSize.width, computedSize.height);
@@ -293,16 +299,16 @@ nsLeafBoxFrame::Reflow(nsPresContext*   aPresContext,
   Layout(state);
   
   // ok our child could have gotten bigger. So lets get its bounds
-  aDesiredSize.width  = mRect.width;
-  aDesiredSize.height = mRect.height;
-  aDesiredSize.ascent = GetBoxAscent(state);
+  aDesiredSize.Width() = mRect.width;
+  aDesiredSize.Height() = mRect.height;
+  aDesiredSize.SetBlockStartAscent(GetBoxAscent(state));
 
   // the overflow rect is set in SetBounds() above
   aDesiredSize.mOverflowAreas = GetOverflowAreas();
 
 #ifdef DO_NOISY_REFLOW
   {
-    printf("%p ** nsLBF(done) W:%d H:%d  ", this, aDesiredSize.width, aDesiredSize.height);
+    printf("%p ** nsLBF(done) W:%d H:%d  ", this, aDesiredSize.Width(), aDesiredSize.Height());
 
     if (maxElementWidth) {
       printf("MW:%d\n", *maxElementWidth); 
@@ -312,12 +318,10 @@ nsLeafBoxFrame::Reflow(nsPresContext*   aPresContext,
 
   }
 #endif
-
-  return NS_OK;
 }
 
-#ifdef DEBUG
-NS_IMETHODIMP
+#ifdef DEBUG_FRAME_DUMP
+nsresult
 nsLeafBoxFrame::GetFrameName(nsAString& aResult) const
 {
   return MakeFrameName(NS_LITERAL_STRING("LeafBox"), aResult);
@@ -330,10 +334,10 @@ nsLeafBoxFrame::GetType() const
   return nsGkAtoms::leafBoxFrame;
 }
 
-NS_IMETHODIMP
+nsresult
 nsLeafBoxFrame::CharacterDataChanged(CharacterDataChangeInfo* aInfo)
 {
-  MarkIntrinsicWidthsDirty();
+  MarkIntrinsicISizesDirty();
   return nsLeafFrame::CharacterDataChanged(aInfo);
 }
 
@@ -368,7 +372,7 @@ nsLeafBoxFrame::GetBoxAscent(nsBoxLayoutState& aState)
 }
 
 /* virtual */ void
-nsLeafBoxFrame::MarkIntrinsicWidthsDirty()
+nsLeafBoxFrame::MarkIntrinsicISizesDirty()
 {
   // Don't call base class method, since everything it does is within an
   // IsBoxWrapped check.

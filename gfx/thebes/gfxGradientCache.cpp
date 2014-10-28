@@ -29,7 +29,7 @@ struct GradientCacheKey : public PLDHashEntryHdr {
     : mStops(aStops), mExtend(aExtend), mBackendType(aBackendType)
   { }
 
-  GradientCacheKey(const GradientCacheKey* aOther)
+  explicit GradientCacheKey(const GradientCacheKey* aOther)
     : mStops(aOther->mStops), mExtend(aOther->mExtend), mBackendType(aOther->mBackendType)
   { }
 
@@ -44,8 +44,8 @@ struct GradientCacheKey : public PLDHashEntryHdr {
   {
     PLDHashNumber hash = 0;
     FloatUint32 convert;
-    hash = AddToHash(hash, aKey->mBackendType);
-    hash = AddToHash(hash, aKey->mExtend);
+    hash = AddToHash(hash, int(aKey->mBackendType));
+    hash = AddToHash(hash, int(aKey->mExtend));
     for (uint32_t i = 0; i < aKey->mStops.Length(); i++) {
       hash = AddToHash(hash, aKey->mStops[i].color.ToABGR());
       // Use the float bits as hash, except for the cases of 0.0 and -0.0 which both map to 0
@@ -178,17 +178,18 @@ class GradientCache MOZ_FINAL : public nsExpirationTracker<GradientCacheData,4>
 static GradientCache* gGradientCache = nullptr;
 
 GradientStops *
-gfxGradientCache::GetGradientStops(DrawTarget *aDT, nsTArray<GradientStop>& aStops, ExtendMode aExtend)
+gfxGradientCache::GetGradientStops(const DrawTarget *aDT, nsTArray<GradientStop>& aStops, ExtendMode aExtend)
 {
   if (!gGradientCache) {
     gGradientCache = new GradientCache();
   }
-  GradientCacheData* cached = gGradientCache->Lookup(aStops, aExtend, aDT->GetType());
+  GradientCacheData* cached =
+    gGradientCache->Lookup(aStops, aExtend, aDT->GetBackendType());
   return cached ? cached->mStops : nullptr;
 }
 
 GradientStops *
-gfxGradientCache::GetOrCreateGradientStops(DrawTarget *aDT, nsTArray<GradientStop>& aStops, ExtendMode aExtend)
+gfxGradientCache::GetOrCreateGradientStops(const DrawTarget *aDT, nsTArray<GradientStop>& aStops, ExtendMode aExtend)
 {
   RefPtr<GradientStops> gs = GetGradientStops(aDT, aStops, aExtend);
   if (!gs) {
@@ -196,12 +197,22 @@ gfxGradientCache::GetOrCreateGradientStops(DrawTarget *aDT, nsTArray<GradientSto
     if (!gs) {
       return nullptr;
     }
-    GradientCacheData *cached = new GradientCacheData(gs, GradientCacheKey(aStops, aExtend, aDT->GetType()));
+    GradientCacheData *cached =
+      new GradientCacheData(gs, GradientCacheKey(aStops, aExtend,
+                                                 aDT->GetBackendType()));
     if (!gGradientCache->RegisterEntry(cached)) {
       delete cached;
     }
   }
   return gs;
+}
+
+void
+gfxGradientCache::PurgeAllCaches()
+{
+  if (gGradientCache) {
+    gGradientCache->AgeAllGenerations();
+  }
 }
 
 void

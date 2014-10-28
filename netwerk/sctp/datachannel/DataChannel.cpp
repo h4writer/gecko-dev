@@ -35,6 +35,8 @@
 #include "nsIObserverService.h"
 #include "nsIObserver.h"
 #include "mozilla/Services.h"
+#include "nsProxyRelease.h"
+#include "nsThread.h"
 #include "nsThreadUtils.h"
 #include "nsAutoPtr.h"
 #include "nsNetUtil.h"
@@ -108,6 +110,7 @@ public:
       (void) rv;
     }
 
+private:
   virtual ~DataChannelShutdown()
     {
       nsCOMPtr<nsIObserverService> observerService =
@@ -116,8 +119,9 @@ public:
         observerService->RemoveObserver(this, "profile-change-net-teardown");
     }
 
+public:
   NS_IMETHODIMP Observe(nsISupports* aSubject, const char* aTopic,
-                        const PRUnichar* aData) {
+                        const char16_t* aData) {
     if (strcmp(aTopic, "profile-change-net-teardown") == 0) {
       LOG(("Shutting down SCTP"));
       if (sctp_initialized) {
@@ -141,7 +145,7 @@ public:
   }
 };
 
-NS_IMPL_ISUPPORTS1(DataChannelShutdown, nsIObserver);
+NS_IMPL_ISUPPORTS(DataChannelShutdown, nsIObserver);
 
 
 BufferedMsg::BufferedMsg(struct sctp_sendv_spa &spa, const char *data,
@@ -196,12 +200,13 @@ DataChannelConnection::DataChannelConnection(DataConnectionListener *listener) :
   mState = CLOSED;
   mSocket = nullptr;
   mMasterSocket = nullptr;
-  mListener = listener->asWeakPtr();
+  mListener = listener;
   mLocalPort = 0;
   mRemotePort = 0;
   mDeferTimeout = 10;
   mTimerRunning = false;
   LOG(("Constructor DataChannelConnection=%p, listener=%p", this, mListener.get()));
+  mInternalIOThread = nullptr;
 }
 
 DataChannelConnection::~DataChannelConnection()
@@ -214,10 +219,25 @@ DataChannelConnection::~DataChannelConnection()
 
   // Already disconnected from sigslot/mTransportFlow
   // TransportFlows must be released from the STS thread
-  if (mTransportFlow && !IsSTSThread()) {
-    ASSERT_WEBRTC(mSTS);
-    RUN_ON_THREAD(mSTS, WrapRunnableNM(ReleaseTransportFlow, mTransportFlow.forget()),
-                  NS_DISPATCH_NORMAL);
+  if (!IsSTSThread()) {
+    ASSERT_WEBRTC(NS_IsMainThread());
+    if (mTransportFlow) {
+      ASSERT_WEBRTC(mSTS);
+      NS_ProxyRelease(mSTS, mTransportFlow);
+    }
+
+    if (mInternalIOThread) {
+      // Avoid spinning the event thread from here (which if we're mainthread
+      // is in the event loop already)
+      NS_DispatchToMainThread(WrapRunnable(nsCOMPtr<nsIThread>(mInternalIOThread),
+                                           &nsIThread::Shutdown),
+                              NS_DISPATCH_NORMAL);
+    }
+  } else {
+    // on STS, safe to call shutdown
+    if (mInternalIOThread) {
+      mInternalIOThread->Shutdown();
+    }
   }
 }
 
@@ -274,8 +294,8 @@ void DataChannelConnection::DestroyOnSTS(struct socket *aMasterSocket,
   disconnect_all();
 }
 
-NS_IMPL_ISUPPORTS1(DataChannelConnection,
-                   nsITimerCallback)
+NS_IMPL_ISUPPORTS(DataChannelConnection,
+                  nsITimerCallback)
 
 bool
 DataChannelConnection::Init(unsigned short aPort, uint16_t aNumStreams, bool aUsingDtls)
@@ -383,6 +403,10 @@ DataChannelConnection::Init(unsigned short aPort, uint16_t aNumStreams, bool aUs
     if (usrsctp_setsockopt(mMasterSocket, IPPROTO_SCTP, SCTP_REUSE_PORT,
                            (const void *)&on, (socklen_t)sizeof(on)) < 0) {
       LOG(("Couldn't set SCTP_REUSE_PORT on SCTP socket"));
+    }
+    if (usrsctp_setsockopt(mMasterSocket, IPPROTO_SCTP, SCTP_NODELAY,
+                           (const void *)&on, (socklen_t)sizeof(on)) < 0) {
+      LOG(("Couldn't set SCTP_NODELAY on SCTP socket"));
     }
   }
 
@@ -603,7 +627,7 @@ DataChannelConnection::CompleteConnect(TransportFlow *flow, TransportLayer::Stat
   // Note: currently this doesn't actually notify the application
   NS_DispatchToMainThread(new DataChannelOnMessageAvailable(
                             DataChannelOnMessageAvailable::ON_CONNECTION,
-                            this, false));
+                            this));
   return;
 }
 
@@ -656,12 +680,12 @@ DataChannelConnection::SctpDtlsInput(TransportFlow *flow,
 }
 
 int
-DataChannelConnection::SendPacket(const unsigned char *data, size_t len, bool release)
+DataChannelConnection::SendPacket(unsigned char data[], size_t len, bool release)
 {
   //LOG(("%p: SCTP/DTLS sent %ld bytes", this, len));
   int res = mTransportFlow->SendPacket(data, len) < 0 ? 1 : 0;
   if (release)
-    delete data;
+    delete [] data;
   return res;
 }
 
@@ -693,7 +717,9 @@ DataChannelConnection::SctpDtlsOutput(void *addr, void *buffer, size_t length,
   } else {
     unsigned char *data = new unsigned char[length];
     memcpy(data, buffer, length);
-    res = -1;
+    // Commented out since we have to Dispatch SendPacket to avoid deadlock"
+    // res = -1;
+
     // XXX It might be worthwhile to add an assertion against the thread
     // somehow getting into the DataChannel/SCTP code again, as
     // DISPATCH_SYNC is not fully blocking.  This may be tricky, as it
@@ -1294,6 +1320,7 @@ DataChannelConnection::HandleDataMessage(uint32_t ppid,
     // Since this is rare and non-performance, keep a single list of queued
     // data messages to deliver once the channel opens.
     LOG(("Queuing data for stream %u, length %u", stream, length));
+    // Copies data
     mQueuedData.AppendElement(new QueuedDataMessage(stream, ppid, data, length));
     return;
   }
@@ -1302,7 +1329,7 @@ DataChannelConnection::HandleDataMessage(uint32_t ppid,
   NS_ENSURE_TRUE_VOID(channel->mState != CLOSED);
 
   {
-    nsAutoCString recvData(buffer, length);
+    nsAutoCString recvData(buffer, length); // copies (<64) or allocates
     bool is_binary = true;
 
     if (ppid == DATA_CHANNEL_PPID_DOMSTRING ||
@@ -1431,7 +1458,7 @@ DataChannelConnection::HandleAssociationChangeEvent(const struct sctp_assoc_chan
 
       NS_DispatchToMainThread(new DataChannelOnMessageAvailable(
                                 DataChannelOnMessageAvailable::ON_CONNECTION,
-                                this, true));
+                                this));
       LOG(("DTLS connect() succeeded!  Entering connected mode"));
 
       // Open any streams pending...
@@ -1512,36 +1539,26 @@ DataChannelConnection::HandleAssociationChangeEvent(const struct sctp_assoc_chan
 void
 DataChannelConnection::HandlePeerAddressChangeEvent(const struct sctp_paddr_change *spc)
 {
-  char addr_buf[INET6_ADDRSTRLEN];
   const char *addr = "";
+#if !defined(__Userspace_os_Windows)
+  char addr_buf[INET6_ADDRSTRLEN];
   struct sockaddr_in *sin;
   struct sockaddr_in6 *sin6;
-#if defined(__Userspace_os_Windows)
-  DWORD addr_len = INET6_ADDRSTRLEN;
 #endif
 
   switch (spc->spc_aaddr.ss_family) {
   case AF_INET:
-    sin = (struct sockaddr_in *)&spc->spc_aaddr;
 #if !defined(__Userspace_os_Windows)
+    sin = (struct sockaddr_in *)&spc->spc_aaddr;
     addr = inet_ntop(AF_INET, &sin->sin_addr, addr_buf, INET6_ADDRSTRLEN);
-#else
-    if (WSAAddressToStringA((LPSOCKADDR)sin, sizeof(sin->sin_addr), nullptr,
-                            addr_buf, &addr_len)) {
-      return;
-    }
 #endif
     break;
   case AF_INET6:
-    sin6 = (struct sockaddr_in6 *)&spc->spc_aaddr;
 #if !defined(__Userspace_os_Windows)
+    sin6 = (struct sockaddr_in6 *)&spc->spc_aaddr;
     addr = inet_ntop(AF_INET6, &sin6->sin6_addr, addr_buf, INET6_ADDRSTRLEN);
-#else
-    if (WSAAddressToStringA((LPSOCKADDR)sin6, sizeof(sin6), nullptr,
-                            addr_buf, &addr_len)) {
-      return;
-    }
 #endif
+    break;
   case AF_CONN:
     addr = "DTLS connection";
     break;
@@ -1909,6 +1926,11 @@ DataChannelConnection::ReceiveCallback(struct socket* sock, void *data, size_t d
       HandleMessage(data, datalen, ntohl(rcv.rcv_ppid), rcv.rcv_sid);
     }
   }
+  // sctp allocates 'data' with malloc(), and expects the receiver to free
+  // it (presumably with free).
+  // XXX future optimization: try to deliver messages without an internal
+  // alloc/copy, and if so delay the free until later.
+  free(data);
   // usrsctp defines the callback as returning an int, but doesn't use it
   return 1;
 }
@@ -1969,7 +1991,7 @@ DataChannelConnection::Open(const nsACString& label, const nsACString& protocol,
 
 // Separate routine so we can also call it to finish up from pending opens
 already_AddRefed<DataChannel>
-DataChannelConnection::OpenFinish(already_AddRefed<DataChannel> aChannel)
+DataChannelConnection::OpenFinish(already_AddRefed<DataChannel>&& aChannel)
 {
   nsRefPtr<DataChannel> channel(aChannel); // takes the reference passed in
   // Normally 1 reference if called from ::Open(), or 2 if called from
@@ -2252,14 +2274,59 @@ DataChannelConnection::SendBinary(DataChannel *channel, const char *data,
   return SendMsgInternal(channel, data, len, ppid_final);
 }
 
+class ReadBlobRunnable : public nsRunnable {
+public:
+  ReadBlobRunnable(DataChannelConnection* aConnection, uint16_t aStream,
+    nsIInputStream* aBlob) :
+    mConnection(aConnection),
+    mStream(aStream),
+    mBlob(aBlob)
+  { }
+
+  NS_IMETHODIMP Run() {
+    // ReadBlob() is responsible to releasing the reference
+    DataChannelConnection *self = mConnection;
+    self->ReadBlob(mConnection.forget(), mStream, mBlob);
+    return NS_OK;
+  }
+
+private:
+  // Make sure the Connection doesn't die while there are jobs outstanding.
+  // Let it die (if released by PeerConnectionImpl while we're running)
+  // when we send our runnable back to MainThread.  Then ~DataChannelConnection
+  // can send the IOThread to MainThread to die in a runnable, avoiding
+  // unsafe event loop recursion.  Evil.
+  nsRefPtr<DataChannelConnection> mConnection;
+  uint16_t mStream;
+  // Use RefCount for preventing the object is deleted when SendBlob returns.
+  nsRefPtr<nsIInputStream> mBlob;
+};
+
 int32_t
 DataChannelConnection::SendBlob(uint16_t stream, nsIInputStream *aBlob)
 {
   DataChannel *channel = mStreams[stream];
   NS_ENSURE_TRUE(channel, 0);
   // Spawn a thread to send the data
+  if (!mInternalIOThread) {
+    nsresult res = NS_NewThread(getter_AddRefs(mInternalIOThread));
+    if (NS_FAILED(res)) {
+      return -1;
+    }
+  }
 
-  LOG(("Sending blob to stream %u", stream));
+  nsCOMPtr<nsIRunnable> runnable = new ReadBlobRunnable(this, stream, aBlob);
+  mInternalIOThread->Dispatch(runnable, NS_DISPATCH_NORMAL);
+  return 0;
+}
+
+void
+DataChannelConnection::ReadBlob(already_AddRefed<DataChannelConnection> aThis,
+                                uint16_t aStream, nsIInputStream* aBlob)
+{
+  // NOTE: 'aThis' has been forgotten by the caller to avoid releasing
+  // it off mainthread; if PeerConnectionImpl has released then we want
+  // ~DataChannelConnection() to run on MainThread
 
   // XXX to do this safely, we must enqueue these atomically onto the
   // output socket.  We need a sender thread(s?) to enque data into the
@@ -2269,29 +2336,34 @@ DataChannelConnection::SendBlob(uint16_t stream, nsIInputStream *aBlob)
 
   // For now as a hack, send as a single blast of queued packets which may
   // be deferred until buffer space is available.
-  nsAutoPtr<nsCString> temp(new nsCString());
+  nsCString temp;
   uint64_t len;
-  aBlob->Available(&len);
-  nsresult rv = NS_ReadInputStreamToString(aBlob, *temp, len);
+  nsCOMPtr<nsIThread> mainThread;
+  NS_GetMainThread(getter_AddRefs(mainThread));
 
-  NS_ENSURE_SUCCESS(rv, 0);
-
+  if (NS_FAILED(aBlob->Available(&len)) ||
+      NS_FAILED(NS_ReadInputStreamToString(aBlob, temp, len))) {
+    // Bug 966602:  Doesn't return an error to the caller via onerror.
+    // We must release DataChannelConnection on MainThread to avoid issues (bug 876167)
+    NS_ProxyRelease(mainThread, aThis.take());
+    return;
+  }
   aBlob->Close();
-  //aBlob->Release(); We didn't AddRef() the way WebSocket does in OutboundMessage (yet)
+  RUN_ON_THREAD(mainThread, WrapRunnable(nsRefPtr<DataChannelConnection>(aThis),
+                               &DataChannelConnection::SendBinaryMsg,
+                               aStream, temp),
+                NS_DISPATCH_NORMAL);
+}
 
-  // Consider if it makes sense to split the message ourselves for
-  // transmission, at least on RELIABLE channels.  Sending large blobs via
-  // unreliable channels requires some level of application involvement, OR
-  // sending them at big, single messages, which if large will probably not
-  // get through.
-
-  // XXX For now, send as one large binary message.  We should also signal
-  // (via PPID) that it's a blob.
-  const char *data = temp.get()->BeginReading();
-  len              = temp.get()->Length();
-
-  return SendBinary(channel, data, len,
-                    DATA_CHANNEL_PPID_BINARY, DATA_CHANNEL_PPID_BINARY_LAST);
+void
+DataChannelConnection::GetStreamIds(std::vector<uint16_t>* aStreamList)
+{
+  ASSERT_WEBRTC(NS_IsMainThread());
+  for (uint32_t i = 0; i < mStreams.Length(); ++i) {
+    if (mStreams[i]) {
+      aStreamList->push_back(mStreams[i]->mStream);
+    }
+  }
 }
 
 int32_t

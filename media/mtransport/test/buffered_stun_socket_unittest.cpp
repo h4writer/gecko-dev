@@ -42,6 +42,18 @@ static uint8_t kStunMessage[] = {
 };
 static size_t kStunMessageLen = sizeof(kStunMessage);
 
+class DummySocket;
+
+// Temporary whitelist for refcounted class dangerously exposing its destructor.
+// Filed bug 1028140 to address this class.
+namespace mozilla {
+template<>
+struct HasDangerousPublicDestructor<DummySocket>
+{
+  static const bool value = true;
+};
+}
+
 class DummySocket : public NrSocketBase {
  public:
   DummySocket()
@@ -271,6 +283,39 @@ TEST_F(BufferedStunSocketTest, TestSendToBuffered) {
 
   dummy_->SetWritable(kStunMessageLen);
   dummy_->FireWritableCb();
+  dummy_->CheckWriteBuffer(kStunMessage, kStunMessageLen);
+}
+
+TEST_F(BufferedStunSocketTest, TestSendFullThenDrain) {
+  dummy_->SetWritable(0);
+
+  for (;;) {
+    int r = nr_socket_sendto(test_socket_,
+                             kStunMessage,
+                             kStunMessageLen,
+                             0, &remote_addr_);
+    if (r == R_WOULDBLOCK)
+      break;
+
+    ASSERT_EQ(0, r);
+  }
+
+  // Nothing was written.
+  dummy_->CheckWriteBuffer(nullptr, 0);
+
+  // Now flush.
+  dummy_->SetWritable(kStunMessageLen);
+  dummy_->FireWritableCb();
+  dummy_->ClearWriteBuffer();
+
+  // Verify we can write something.
+  int r = nr_socket_sendto(test_socket_,
+                             kStunMessage,
+                             kStunMessageLen,
+                             0, &remote_addr_);
+  ASSERT_EQ(0, r);
+
+  // And that it appears.
   dummy_->CheckWriteBuffer(kStunMessage, kStunMessageLen);
 }
 

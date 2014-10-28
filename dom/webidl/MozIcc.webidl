@@ -2,7 +2,52 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-interface MozIccInfo;
+enum IccCardState {
+  "unknown", // ICC card state is either not yet reported from modem or in an
+             // unknown state.
+  "ready",
+  "pinRequired",
+  "pukRequired",
+  "permanentBlocked",
+
+  /**
+   * Personalization States
+   */
+  "personalizationInProgress",
+  "personalizationReady",
+
+  // SIM Personalization States.
+  "networkLocked",
+  "networkSubsetLocked",
+  "corporateLocked",
+  "serviceProviderLocked",
+  "simPersonalizationLocked",
+  "networkPukRequired",
+  "networkSubsetPukRequired",
+  "corporatePukRequired",
+  "serviceProviderPukRequired",
+  "simPersonalizationPukRequired",
+
+  // RUIM Personalization States.
+  "network1Locked",
+  "network2Locked",
+  "hrpdNetworkLocked",
+  "ruimCorporateLocked",
+  "ruimServiceProviderLocked",
+  "ruimPersonalizationLocked",
+  "network1PukRequired",
+  "network2PukRequired",
+  "hrpdNetworkPukRequired",
+  "ruimCorporatePukRequired",
+  "ruimServiceProviderPukRequired",
+  "ruimPersonalizationPukRequired",
+
+  /**
+   * Additional States.
+   */
+  "illegal" // See Bug 916000. An owed pay card will be rejected by the network
+            // and fall in this state.
+};
 
 [Pref="dom.icc.enabled"]
 interface MozIcc : EventTarget
@@ -16,7 +61,7 @@ interface MozIcc : EventTarget
    * Also, the attribute is set to null and this MozIcc object becomes invalid.
    * Calling asynchronous functions raises exception then.
    */
-  readonly attribute MozIccInfo? iccInfo;
+  readonly attribute (MozIccInfo or MozGsmIccInfo or MozCdmaIccInfo)? iccInfo;
 
   /**
    * The 'iccinfochange' event is notified whenever the icc info object
@@ -29,17 +74,11 @@ interface MozIcc : EventTarget
   /**
    * Indicates the state of the device's ICC.
    *
-   * Possible values: 'illegal', 'unknown', 'pinRequired',
-   * 'pukRequired', 'personalizationInProgress', 'networkLocked',
-   * 'corporateLocked', 'serviceProviderLocked', 'networkPukRequired',
-   * 'corporatePukRequired', 'serviceProviderPukRequired',
-   * 'personalizationReady', 'ready', 'permanentBlocked'.
-   *
    * Once the ICC becomes undetectable, cardstatechange event will be notified.
    * Also, the attribute is set to null and this MozIcc object becomes invalid.
    * Calling asynchronous functions raises exception then.
    */
-  readonly attribute DOMString? cardState;
+  readonly attribute IccCardState? cardState;
 
   /**
    * The 'cardstatechange' event is notified when the 'cardState' attribute
@@ -129,7 +168,7 @@ interface MozIcc : EventTarget
    *         e.g. {lockType: "pin", enabled: true}.
    */
   [Throws]
-  nsISupports getCardLock(DOMString lockType);
+  DOMRequest getCardLock(DOMString lockType);
 
   /**
    * Unlock a card lock.
@@ -159,32 +198,92 @@ interface MozIcc : EventTarget
    *   unlockCardLock({lockType: "nck",
    *                   pin: "..."});
    *
-   * (4) Corporate depersonalization. Unlocking the corporate control key (CCK).
+   * (4) Network type 1 depersonalization. Unlocking the network type 1 control
+   *     key (NCK1).
+   *
+   *   unlockCardLock({lockType: "nck1",
+   *                   pin: "..."});
+   *
+   * (5) Network type 2 depersonalization. Unlocking the network type 2 control
+   *     key (NCK2).
+   *
+   *   unlockCardLock({lockType: "nck2",
+   *                   pin: "..."});
+   *
+   * (6) HRPD network depersonalization. Unlocking the HRPD network control key
+   *     (HNCK).
+   *
+   *   unlockCardLock({lockType: "hnck",
+   *                   pin: "..."});
+   *
+   * (7) Corporate depersonalization. Unlocking the corporate control key (CCK).
    *
    *   unlockCardLock({lockType: "cck",
    *                   pin: "..."});
    *
-   * (5) Service Provider depersonalization. Unlocking the service provider
+   * (8) Service provider depersonalization. Unlocking the service provider
    *     control key (SPCK).
    *
    *   unlockCardLock({lockType: "spck",
    *                   pin: "..."});
    *
-   * (6) Network PUK depersonalization. Unlocking the network control key (NCK).
+   * (9) RUIM corporate depersonalization. Unlocking the RUIM corporate control
+   *     key (RCCK).
+   *
+   *   unlockCardLock({lockType: "rcck",
+   *                   pin: "..."});
+   *
+   * (10) RUIM service provider depersonalization. Unlocking the RUIM service
+   *      provider control key (RSPCK).
+   *
+   *   unlockCardLock({lockType: "rspck",
+   *                   pin: "..."});
+   *
+   * (11) Network PUK depersonalization. Unlocking the network control key (NCK).
    *
    *   unlockCardLock({lockType: "nckPuk",
    *                   puk: "..."});
    *
-   * (7) Corporate PUK depersonalization. Unlocking the corporate control key
-   *     (CCK).
+   * (12) Network type 1 PUK depersonalization. Unlocking the network type 1
+   *      control key (NCK1).
+   *
+   *   unlockCardLock({lockType: "nck1Puk",
+   *                   pin: "..."});
+   *
+   * (13) Network type 2 PUK depersonalization. Unlocking the Network type 2
+   *      control key (NCK2).
+   *
+   *   unlockCardLock({lockType: "nck2Puk",
+   *                   pin: "..."});
+   *
+   * (14) HRPD network PUK depersonalization. Unlocking the HRPD network control
+   *      key (HNCK).
+   *
+   *   unlockCardLock({lockType: "hnckPuk",
+   *                   pin: "..."});
+   *
+   * (15) Corporate PUK depersonalization. Unlocking the corporate control key
+   *      (CCK).
    *
    *   unlockCardLock({lockType: "cckPuk",
    *                   puk: "..."});
    *
-   * (8) Service Provider PUK depersonalization. Unlocking the service provider
-   *     control key (SPCK).
+   * (16) Service provider PUK depersonalization. Unlocking the service provider
+   *      control key (SPCK).
    *
    *   unlockCardLock({lockType: "spckPuk",
+   *                   puk: "..."});
+   *
+   * (17) RUIM corporate PUK depersonalization. Unlocking the RUIM corporate
+   *      control key (RCCK).
+   *
+   *   unlockCardLock({lockType: "rcckPuk",
+   *                   puk: "..."});
+   *
+   * (18) RUIM service provider PUK depersonalization. Unlocking the service
+   *      provider control key (SPCK).
+   *
+   *   unlockCardLock({lockType: "rspckPuk",
    *                   puk: "..."});
    *
    * @return a DOMRequest.
@@ -209,7 +308,7 @@ interface MozIcc : EventTarget
    *     }
    */
   [Throws]
-  nsISupports unlockCardLock(any info);
+  DOMRequest unlockCardLock(any info);
 
   /**
    * Modify the state of a card lock.
@@ -263,7 +362,7 @@ interface MozIcc : EventTarget
    *     }
    */
   [Throws]
-  nsISupports setCardLock(any info);
+  DOMRequest setCardLock(any info);
 
   /**
    * Retrieve the number of remaining tries for unlocking the card.
@@ -278,7 +377,7 @@ interface MozIcc : EventTarget
    *         lock. For any other lock type, the result is undefined.
    */
   [Throws]
-  nsISupports getCardLockRetryCount(DOMString lockType);
+  DOMRequest getCardLockRetryCount(DOMString lockType);
 
   // Integrated Circuit Card Phonebook Interfaces.
 
@@ -289,11 +388,12 @@ interface MozIcc : EventTarget
    *        One of type as below,
    *        - 'adn': Abbreviated Dialling Number.
    *        - 'fdn': Fixed Dialling Number.
+   *        - 'sdn': Service Dialling Number.
    *
    * @return a DOMRequest.
    */
   [Throws]
-  nsISupports readContacts(DOMString contactType);
+  DOMRequest readContacts(DOMString contactType);
 
   /**
    * Update ICC Phonebook contact.
@@ -310,7 +410,7 @@ interface MozIcc : EventTarget
    * @return a DOMRequest.
    */
   [Throws]
-  nsISupports updateContact(DOMString contactType,
+  DOMRequest updateContact(DOMString contactType,
                            any contact,
                            optional DOMString? pin2 = null);
 
@@ -336,7 +436,7 @@ interface MozIcc : EventTarget
    *         if available or null.
    */
   [Throws]
-  nsISupports iccOpenChannel(DOMString aid);
+  DOMRequest iccOpenChannel(DOMString aid);
 
   /**
    * Interface, used to communicate with an applet through the
@@ -352,7 +452,7 @@ interface MozIcc : EventTarget
    *         The request's result will be response APDU.
    */
   [Throws]
-  nsISupports iccExchangeAPDU(long channel, any apdu);
+  DOMRequest iccExchangeAPDU(long channel, any apdu);
 
   /**
    * Send request to close the selected logical channel identified by its
@@ -364,5 +464,27 @@ interface MozIcc : EventTarget
    * @return a DOMRequest.
    */
   [Throws]
-  nsISupports iccCloseChannel(long channel);
+  DOMRequest iccCloseChannel(long channel);
+
+  // Integrated Circuit Card Helpers.
+
+  /**
+   * Verify whether the passed data (matchData) matches with some ICC's field
+   * according to the mvno type (mvnoType).
+   *
+   * @param mvnoType
+   *        Mvno type to use to compare the match data.
+   *        Currently, we only support 'imsi'.
+   * @param matchData
+   *        Data to be compared with ICC's field.
+   *
+   * @return a DOMRequest.
+   *         The request's result will be a boolean indicating the matching
+   *         result.
+   *
+   * TODO: change param mvnoType to WebIDL enum after Bug 864489 -
+   *       B2G RIL: use ipdl as IPC in MozIccManager
+   */
+  [Throws]
+  DOMRequest matchMvno(DOMString mvnoType, DOMString matchData);
 };

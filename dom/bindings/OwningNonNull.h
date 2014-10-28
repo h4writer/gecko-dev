@@ -10,6 +10,7 @@
 #define mozilla_dom_OwningNonNull_h
 
 #include "nsAutoPtr.h"
+#include "nsCycleCollectionNoteChild.h"
 
 namespace mozilla {
 namespace dom {
@@ -24,16 +25,29 @@ public:
 #endif
   {}
 
-  operator T&()
+  // This is no worse than get() in terms of const handling.
+  operator T&() const
   {
     MOZ_ASSERT(mInited);
     MOZ_ASSERT(mPtr, "OwningNonNull<T> was set to null");
     return *mPtr;
   }
 
+  operator T*() const
+  {
+    MOZ_ASSERT(mInited);
+    MOZ_ASSERT(mPtr, "OwningNonNull<T> was set to null");
+    return mPtr;
+  }
+
   void operator=(T* aValue)
   {
     init(aValue);
+  }
+
+  void operator=(T& aValue)
+  {
+    init(&aValue);
   }
 
   void operator=(const already_AddRefed<T>& aValue)
@@ -73,6 +87,16 @@ protected:
   bool mInited;
 #endif
 };
+
+template <typename T>
+inline void
+ImplCycleCollectionTraverse(nsCycleCollectionTraversalCallback& aCallback,
+                            OwningNonNull<T>& aField,
+                            const char* aName,
+                            uint32_t aFlags = 0)
+{
+  CycleCollectionNoteChild(aCallback, aField.get(), aName, aFlags);
+}
 
 } // namespace dom
 } // namespace mozilla

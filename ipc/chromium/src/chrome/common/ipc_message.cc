@@ -10,6 +10,13 @@
 #if defined(OS_POSIX)
 #include "chrome/common/file_descriptor_set_posix.h"
 #endif
+#ifdef MOZ_TASK_TRACER
+#include "GeckoTaskTracer.h"
+#endif
+
+#ifdef MOZ_TASK_TRACER
+using namespace mozilla::tasktracer;
+#endif
 
 namespace IPC {
 
@@ -23,6 +30,11 @@ Message::Message()
   header()->routing = header()->type = header()->flags = 0;
 #if defined(OS_POSIX)
   header()->num_fds = 0;
+#endif
+#ifdef MOZ_TASK_TRACER
+  header()->source_event_id = 0;
+  header()->parent_task_id = 0;
+  header()->source_event_type = SourceEventType::UNKNOWN;
 #endif
   InitLoggingVariables();
 }
@@ -44,6 +56,11 @@ Message::Message(int32_t routing_id, msgid_t type, PriorityValue priority,
 #if defined(OS_MACOSX)
   header()->cookie = 0;
 #endif
+#ifdef MOZ_TASK_TRACER
+  header()->source_event_id = 0;
+  header()->parent_task_id = 0;
+  header()->source_event_type = SourceEventType::UNKNOWN;
+#endif
   InitLoggingVariables(name);
 }
 
@@ -55,6 +72,11 @@ Message::Message(const Message& other) : Pickle(other) {
   InitLoggingVariables(other.name_);
 #if defined(OS_POSIX)
   file_descriptor_set_ = other.file_descriptor_set_;
+#endif
+#ifdef MOZ_TASK_TRACER
+  header()->source_event_id = other.header()->source_event_id;
+  header()->parent_task_id = other.header()->parent_task_id;
+  header()->source_event_type = other.header()->source_event_type;
 #endif
 }
 
@@ -72,6 +94,11 @@ Message& Message::operator=(const Message& other) {
   InitLoggingVariables(other.name_);
 #if defined(OS_POSIX)
   file_descriptor_set_ = other.file_descriptor_set_;
+#endif
+#ifdef MOZ_TASK_TRACER
+  header()->source_event_id = other.header()->source_event_id;
+  header()->parent_task_id = other.header()->parent_task_id;
+  header()->source_event_type = other.header()->source_event_type;
 #endif
   return *this;
 }
@@ -101,6 +128,8 @@ void Message::set_received_time(int64_t time) const {
 bool Message::WriteFileDescriptor(const base::FileDescriptor& descriptor) {
   // We write the index of the descriptor so that we don't have to
   // keep the current descriptor as extra decoding state when deserialising.
+  // Also, we rely on each file descriptor being accompanied by sizeof(int)
+  // bytes of data in the message. See the comment for input_cmsg_buf_.
   WriteInt(file_descriptor_set()->size());
   if (descriptor.auto_close) {
     return file_descriptor_set()->AddAndAutoClose(descriptor.fd);
@@ -128,6 +157,10 @@ bool Message::ReadFileDescriptor(void** iter,
 void Message::EnsureFileDescriptorSet() {
   if (file_descriptor_set_.get() == NULL)
     file_descriptor_set_ = new FileDescriptorSet;
+}
+
+uint32_t Message::num_fds() const {
+  return file_descriptor_set() ? file_descriptor_set()->size() : 0;
 }
 
 #endif

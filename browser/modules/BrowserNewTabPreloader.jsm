@@ -18,14 +18,13 @@ const HTML_NS = "http://www.w3.org/1999/xhtml";
 const XUL_NS = "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul";
 const XUL_PAGE = "data:application/vnd.mozilla.xul+xml;charset=utf-8,<window%20id='win'/>";
 const NEWTAB_URL = "about:newtab";
-const PREF_BRANCH = "browser.newtab.";
+
+const PREF_NEWTAB_URL = "browser.newtab.url";
+const PREF_NEWTAB_PRELOAD = "browser.newtab.preload";
 
 // The interval between swapping in a preload docShell and kicking off the
 // next preload in the background.
 const PRELOADER_INTERVAL_MS = 600;
-// The initial delay before we start preloading our first new tab page. The
-// timer is started after the first 'browser-delayed-startup' has been sent.
-const PRELOADER_INIT_DELAY_MS = 5000;
 // The number of miliseconds we'll wait after we received a notification that
 // causes us to update our list of browsers and tabbrowser sizes. This acts as
 // kind of a damper when too many events are occuring in quick succession.
@@ -35,7 +34,12 @@ const TOPIC_TIMER_CALLBACK = "timer-callback";
 const TOPIC_DELAYED_STARTUP = "browser-delayed-startup-finished";
 const TOPIC_XUL_WINDOW_CLOSED = "xul-window-destroyed";
 
-const FRAME_SCRIPT_URL = "chrome://browser/content/newtab/preloaderContent.js";
+const BROWSER_CONTENT_SCRIPT = "chrome://browser/content/content.js";
+
+function isPreloadingEnabled() {
+  return Services.prefs.getBoolPref(PREF_NEWTAB_PRELOAD) &&
+         !Services.prefs.prefHasUserValue(PREF_NEWTAB_URL);
+}
 
 function createTimer(obj, delay) {
   let timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
@@ -51,19 +55,16 @@ function clearTimer(timer) {
 }
 
 this.BrowserNewTabPreloader = {
-  init: function Preloader_init() {
-    Initializer.start();
-  },
-
   uninit: function Preloader_uninit() {
-    Initializer.stop();
     HostFrame.destroy();
-    Preferences.uninit();
     HiddenBrowsers.uninit();
   },
 
   newTab: function Preloader_newTab(aTab) {
-    let swapped = false;
+    if (!isPreloadingEnabled()) {
+      return false;
+    }
+
     let win = aTab.ownerDocument.defaultView;
     if (win.gBrowser) {
       let utils = win.QueryInterface(Ci.nsIInterfaceRequestor)
@@ -72,99 +73,15 @@ this.BrowserNewTabPreloader = {
       let {width, height} = utils.getBoundsWithoutFlushing(win.gBrowser);
       let hiddenBrowser = HiddenBrowsers.get(width, height)
       if (hiddenBrowser) {
-        swapped = hiddenBrowser.swapWithNewTab(aTab);
+        return hiddenBrowser.swapWithNewTab(aTab);
       }
-
-      // aTab's browser is now visible and is therefore allowed to make
-      // background captures.
-      let msgMan = aTab.linkedBrowser.messageManager;
-      msgMan.loadFrameScript(FRAME_SCRIPT_URL, false);
-      msgMan.sendAsyncMessage("BrowserNewTabPreloader:allowBackgroundCaptures");
     }
 
-    return swapped;
+    return false;
   }
 };
 
 Object.freeze(BrowserNewTabPreloader);
-
-let Initializer = {
-  _timer: null,
-  _observing: false,
-
-  start: function Initializer_start() {
-    Services.obs.addObserver(this, TOPIC_DELAYED_STARTUP, false);
-    this._observing = true;
-  },
-
-  stop: function Initializer_stop() {
-    this._timer = clearTimer(this._timer);
-
-    if (this._observing) {
-      Services.obs.removeObserver(this, TOPIC_DELAYED_STARTUP);
-      this._observing = false;
-    }
-  },
-
-  observe: function Initializer_observe(aSubject, aTopic, aData) {
-    if (aTopic == TOPIC_DELAYED_STARTUP) {
-      Services.obs.removeObserver(this, TOPIC_DELAYED_STARTUP);
-      this._observing = false;
-      this._startTimer();
-    } else if (aTopic == TOPIC_TIMER_CALLBACK) {
-      this._timer = null;
-      this._startPreloader();
-    }
-  },
-
-  _startTimer: function Initializer_startTimer() {
-    this._timer = createTimer(this, PRELOADER_INIT_DELAY_MS);
-  },
-
-  _startPreloader: function Initializer_startPreloader() {
-    Preferences.init();
-    if (Preferences.enabled) {
-      HiddenBrowsers.init();
-    }
-  }
-};
-
-let Preferences = {
-  _enabled: null,
-  _branch: null,
-
-  get enabled() {
-    if (this._enabled === null) {
-      this._enabled = this._branch.getBoolPref("preload") &&
-                      !this._branch.prefHasUserValue("url");
-    }
-
-    return this._enabled;
-  },
-
-  init: function Preferences_init() {
-    this._branch = Services.prefs.getBranch(PREF_BRANCH);
-    this._branch.addObserver("", this, false);
-  },
-
-  uninit: function Preferences_uninit() {
-    if (this._branch) {
-      this._branch.removeObserver("", this);
-      this._branch = null;
-    }
-  },
-
-  observe: function Preferences_observe() {
-    let prevEnabled = this._enabled;
-    this._enabled = null;
-
-    if (prevEnabled && !this.enabled) {
-      HiddenBrowsers.uninit();
-    } else if (!prevEnabled && this.enabled) {
-      HiddenBrowsers.init();
-    }
-  },
-};
 
 let HiddenBrowsers = {
   _browsers: null,
@@ -175,7 +92,7 @@ let HiddenBrowsers = {
     TOPIC_XUL_WINDOW_CLOSED
   ],
 
-  init: function () {
+  _init: function () {
     this._browsers = new Map();
     this._updateBrowserSizes();
     this._topics.forEach(t => Services.obs.addObserver(this, t, false));
@@ -194,9 +111,9 @@ let HiddenBrowsers = {
   },
 
   get: function (width, height) {
-    // We haven't been initialized, yet.
+    // Initialize if this is the first call.
     if (!this._browsers) {
-      return null;
+      this._init();
     }
 
     let key = width + "x" + height;
@@ -329,10 +246,15 @@ HiddenBrowser.prototype = {
     // Swap docShells.
     tabbrowser.swapNewTabWithBrowser(aTab, this._browser);
 
-    // Load all default frame scripts attached to the target window.
+    // Load all delayed frame scripts attached to the "browers" message manager.
+    // The browser content script was already loaded, so don't load it again.
     let mm = aTab.linkedBrowser.messageManager;
-    let scripts = win.messageManager.getDelayedFrameScripts();
-    Array.forEach(scripts, script => mm.loadFrameScript(script, true));
+    let scripts = win.getGroupMessageManager("browsers").getDelayedFrameScripts();
+    Array.forEach(scripts, ([script, runGlobal]) => {
+      if (script != BROWSER_CONTENT_SCRIPT) {
+        mm.loadFrameScript(script, true, runGlobal);
+      }
+    });
 
     // Remove the browser, it will be recreated by a timer.
     this._removeBrowser();
@@ -377,6 +299,12 @@ HiddenBrowser.prototype = {
       this._browser.setAttribute("src", NEWTAB_URL);
       this._applySize();
       doc.getElementById("win").appendChild(this._browser);
+
+      // Let the docShell be inactive so that document.hidden=true.
+      this._browser.docShell.isActive = false;
+
+      this._browser.messageManager.loadFrameScript(BROWSER_CONTENT_SCRIPT,
+                                                   true);
     });
   },
 

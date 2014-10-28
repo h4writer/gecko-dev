@@ -10,7 +10,8 @@
  * liability, trademark and document use rules apply.
  */
 
-[Constructor(DOMString type, optional EventInit eventInitDict)]
+[Constructor(DOMString type, optional EventInit eventInitDict),
+ Exposed=(Window,Worker,System)]
 interface Event {
   [Pure]
   readonly attribute DOMString type;
@@ -40,7 +41,7 @@ interface Event {
   [Unforgeable, Pure]
   readonly attribute boolean isTrusted;
   [Pure]
-  readonly attribute DOMTimeStamp timeStamp;
+  readonly attribute DOMHighResTimeStamp timeStamp;
 
   [Throws]
   void initEvent(DOMString type, boolean bubbles, boolean cancelable);
@@ -56,6 +57,7 @@ partial interface Event {
   readonly attribute EventTarget? originalTarget;
   readonly attribute EventTarget? explicitOriginalTarget;
   [ChromeOnly] readonly attribute boolean multipleActionsPrevented;
+  [ChromeOnly] readonly attribute boolean isSynthesized;
 
   boolean getPreventDefault();
 };
@@ -64,4 +66,3 @@ dictionary EventInit {
   boolean bubbles = false;
   boolean cancelable = false;
 };
-

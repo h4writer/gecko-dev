@@ -7,8 +7,6 @@
 #include "CompositableHost.h"           // for CompositableHost
 #include "Layers.h"                     // for WriteSnapshotToDumpFile, etc
 #include "gfx2DGlue.h"                  // for ToFilter, ToMatrix4x4
-#include "gfx3DMatrix.h"                // for gfx3DMatrix
-#include "gfxPoint.h"                   // for gfxIntSize
 #include "gfxRect.h"                    // for gfxRect
 #include "gfxUtils.h"                   // for gfxUtils, etc
 #include "mozilla/Assertions.h"         // for MOZ_ASSERT, etc
@@ -17,20 +15,20 @@
 #include "mozilla/gfx/Rect.h"           // for Rect
 #include "mozilla/layers/Compositor.h"  // for Compositor
 #include "mozilla/layers/Effects.h"     // for EffectChain
-#include "mozilla/layers/TextureHost.h"  // for DeprecatedTextureHost, etc
+#include "mozilla/layers/TextureHost.h"  // for TextureHost, etc
 #include "mozilla/mozalloc.h"           // for operator delete
 #include "nsAString.h"
 #include "nsAutoPtr.h"                  // for nsRefPtr
 #include "nsDebug.h"                    // for NS_ASSERTION
+#include "nsISupportsImpl.h"            // for MOZ_COUNT_CTOR, etc
 #include "nsPoint.h"                    // for nsIntPoint
 #include "nsRect.h"                     // for nsIntRect
 #include "nsString.h"                   // for nsAutoCString
-#include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
-
-using namespace mozilla::gfx;
 
 namespace mozilla {
 namespace layers {
+
+using namespace mozilla::gfx;
 
 ImageLayerComposite::ImageLayerComposite(LayerManagerComposite* aManager)
   : ImageLayer(aManager, nullptr)
@@ -49,10 +47,19 @@ ImageLayerComposite::~ImageLayerComposite()
   CleanupResources();
 }
 
-void
+bool
 ImageLayerComposite::SetCompositableHost(CompositableHost* aHost)
 {
-  mImageHost = aHost;
+  switch (aHost->GetType()) {
+    case CompositableType::BUFFER_IMAGE_SINGLE:
+    case CompositableType::BUFFER_IMAGE_BUFFERED:
+    case CompositableType::IMAGE:
+    case CompositableType::IMAGE_OVERLAY:
+      mImageHost = aHost;
+      return true;
+    default:
+      return false;
+  }
 }
 
 void
@@ -85,59 +92,51 @@ ImageLayerComposite::RenderLayer(const nsIntRect& aClipRect)
 
 #ifdef MOZ_DUMP_PAINTING
   if (gfxUtils::sDumpPainting) {
-    RefPtr<gfx::DataSourceSurface> dSurf = mImageHost->GetAsSurface();
-    gfxPlatform *platform = gfxPlatform::GetPlatform();
-    RefPtr<gfx::DrawTarget> dt = platform->CreateDrawTargetForData(dSurf->GetData(),
-                                                                   dSurf->GetSize(),
-                                                                   dSurf->Stride(),
-                                                                   dSurf->GetFormat());
-    nsRefPtr<gfxASurface> surf = platform->GetThebesSurfaceForDrawTarget(dt);
+    RefPtr<gfx::DataSourceSurface> surf = mImageHost->GetAsSurface();
     WriteSnapshotToDumpFile(this, surf);
   }
 #endif
 
   mCompositor->MakeCurrent();
 
-  EffectChain effectChain;
+  EffectChain effectChain(this);
   LayerManagerComposite::AutoAddMaskEffect autoMaskEffect(mMaskLayer, effectChain);
+  AddBlendModeEffect(effectChain);
 
-  gfx::Matrix4x4 transform;
-  ToMatrix4x4(GetEffectiveTransform(), transform);
   gfx::Rect clipRect(aClipRect.x, aClipRect.y, aClipRect.width, aClipRect.height);
   mImageHost->SetCompositor(mCompositor);
   mImageHost->Composite(effectChain,
                         GetEffectiveOpacity(),
-                        transform,
-                        gfx::ToFilter(mFilter),
+                        GetEffectiveTransform(),
+                        GetEffectFilter(),
                         clipRect);
+  mImageHost->BumpFlashCounter();
 }
 
-void 
-ImageLayerComposite::ComputeEffectiveTransforms(const gfx3DMatrix& aTransformToSurface)
+void
+ImageLayerComposite::ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface)
 {
-  gfx3DMatrix local = GetLocalTransform();
+  gfx::Matrix4x4 local = GetLocalTransform();
 
   // Snap image edges to pixel boundaries
   gfxRect sourceRect(0, 0, 0, 0);
   if (mImageHost &&
       mImageHost->IsAttached() &&
-      (mImageHost->GetDeprecatedTextureHost() || mImageHost->GetAsTextureHost())) {
-    IntSize size =
-      mImageHost->GetAsTextureHost() ? mImageHost->GetAsTextureHost()->GetSize()
-                                     : mImageHost->GetDeprecatedTextureHost()->GetSize();
+      mImageHost->GetAsTextureHost()) {
+    IntSize size = mImageHost->GetAsTextureHost()->GetSize();
     sourceRect.SizeTo(size.width, size.height);
-    if (mScaleMode != SCALE_NONE &&
+    if (mScaleMode != ScaleMode::SCALE_NONE &&
         sourceRect.width != 0.0 && sourceRect.height != 0.0) {
-      NS_ASSERTION(mScaleMode == SCALE_STRETCH,
+      NS_ASSERTION(mScaleMode == ScaleMode::STRETCH,
                    "No other scalemodes than stretch and none supported yet.");
-      local.Scale(mScaleToSize.width / sourceRect.width,
-                  mScaleToSize.height / sourceRect.height, 1.0);
+      local.PreScale(mScaleToSize.width / sourceRect.width,
+                     mScaleToSize.height / sourceRect.height, 1.0);
     }
   }
   // Snap our local transform first, and snap the inherited transform as well.
   // This makes our snapping equivalent to what would happen if our content
-  // was drawn into a ThebesLayer (gfxContext would snap using the local
-  // transform, then we'd snap again when compositing the ThebesLayer).
+  // was drawn into a PaintedLayer (gfxContext would snap using the local
+  // transform, then we'd snap again when compositing the PaintedLayer).
   mEffectiveTransform =
       SnapTransform(local, sourceRect, nullptr) *
       SnapTransformTranslation(aTransformToSurface, nullptr);
@@ -163,17 +162,29 @@ ImageLayerComposite::CleanupResources()
   mImageHost = nullptr;
 }
 
-nsACString&
-ImageLayerComposite::PrintInfo(nsACString& aTo, const char* aPrefix)
+gfx::Filter
+ImageLayerComposite::GetEffectFilter()
 {
-  ImageLayer::PrintInfo(aTo, aPrefix);
-  aTo += "\n";
+  return gfx::ToFilter(mFilter);
+}
+
+void
+ImageLayerComposite::GenEffectChain(EffectChain& aEffect)
+{
+  aEffect.mLayerRef = this;
+  aEffect.mPrimaryEffect = mImageHost->GenEffect(GetEffectFilter());
+}
+
+void
+ImageLayerComposite::PrintInfo(std::stringstream& aStream, const char* aPrefix)
+{
+  ImageLayer::PrintInfo(aStream, aPrefix);
   if (mImageHost && mImageHost->IsAttached()) {
+    aStream << "\n";
     nsAutoCString pfx(aPrefix);
     pfx += "  ";
-    mImageHost->PrintInfo(aTo, pfx.get());
+    mImageHost->PrintInfo(aStream, pfx.get());
   }
-  return aTo;
 }
 
 } /* layers */

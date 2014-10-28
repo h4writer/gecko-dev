@@ -23,7 +23,11 @@
 #define bookmarks_addons Firefox: Customize with add-ons
 
 # LOCALIZATION NOTE (bookmarks_support):
-# link title for https://support.mozilla.org/mobile
+# link title for https://support.mozilla.org/
 #define bookmarks_support Firefox: Support
+
+# LOCALIZATION NOTE (bookmarks_marketplace):
+# link title for https://marketplace.firefox.com
+#define bookmarks_marketplace Firefox Marketplace
 
 #unfilter emptyLines

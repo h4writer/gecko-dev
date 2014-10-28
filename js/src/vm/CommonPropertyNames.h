@@ -17,7 +17,9 @@
     macro(apply, apply, "apply") \
     macro(arguments, arguments, "arguments") \
     macro(as, as, "as") \
+    macro(ArrayIteratorNext, ArrayIteratorNext, "ArrayIteratorNext") \
     macro(ArrayType, ArrayType, "ArrayType") \
+    macro(ArrayValues, ArrayValues, "ArrayValues") \
     macro(buffer, buffer, "buffer") \
     macro(builder, builder, "builder") \
     macro(byteLength, byteLength, "byteLength") \
@@ -30,6 +32,8 @@
     macro(caller, caller, "caller") \
     macro(callFunction, callFunction, "callFunction") \
     macro(caseFirst, caseFirst, "caseFirst") \
+    macro(class_, class_, "class") \
+    macro(close, close, "close") \
     macro(Collator, Collator, "Collator") \
     macro(CollatorCompareGet, CollatorCompareGet, "Intl_Collator_compare_get") \
     macro(columnNumber, columnNumber, "columnNumber") \
@@ -39,6 +43,7 @@
     macro(construct, construct, "construct") \
     macro(constructor, constructor, "constructor") \
     macro(ConvertAndCopyTo, ConvertAndCopyTo, "ConvertAndCopyTo") \
+    macro(count, count, "count") \
     macro(currency, currency, "currency") \
     macro(currencyDisplay, currencyDisplay, "currencyDisplay") \
     macro(std_iterator, std_iterator, "@@iterator") \
@@ -52,7 +57,9 @@
     macro(defineSetter, defineSetter, "__defineSetter__") \
     macro(delete, delete_, "delete") \
     macro(deleteProperty, deleteProperty, "deleteProperty") \
+    macro(displayURL, displayURL, "displayURL") \
     macro(done, done, "done") \
+    macro(dotGenerator, dotGenerator, ".generator") \
     macro(each, each, "each") \
     macro(elementType, elementType, "elementType") \
     macro(empty, empty, "") \
@@ -63,16 +70,15 @@
     macro(escape, escape, "escape") \
     macro(eval, eval, "eval") \
     macro(false, false_, "false") \
-    macro(fieldNames, fieldNames, "fieldNames") \
     macro(fieldOffsets, fieldOffsets, "fieldOffsets") \
     macro(fieldTypes, fieldTypes, "fieldTypes") \
     macro(fileName, fileName, "fileName") \
-    macro(FillTypedArrayWithValue, FillTypedArrayWithValue, "FillTypedArrayWithValue") \
     macro(fix, fix, "fix") \
     macro(float32, float32, "float32") \
     macro(float32x4, float32x4, "float32x4") \
     macro(float64, float64, "float64") \
     macro(format, format, "format") \
+    macro(frame, frame, "frame") \
     macro(from, from, "from") \
     macro(get, get, "get") \
     macro(getInternals, getInternals, "getInternals") \
@@ -101,12 +107,14 @@
     macro(int8, int8, "int8") \
     macro(int16, int16, "int16") \
     macro(int32, int32, "int32") \
-    macro(iterator, iterator, "iterator") \
+    macro(isExtensible, isExtensible, "isExtensible") \
     macro(iteratorIntrinsic, iteratorIntrinsic, "__iterator__") \
     macro(join, join, "join") \
     macro(keys, keys, "keys") \
     macro(lastIndex, lastIndex, "lastIndex") \
+    macro(LegacyGeneratorCloseInternal, LegacyGeneratorCloseInternal, "LegacyGeneratorCloseInternal") \
     macro(length, length, "length") \
+    macro(let, let, "let") \
     macro(line, line, "line") \
     macro(lineNumber, lineNumber, "lineNumber") \
     macro(loc, loc, "loc") \
@@ -119,20 +127,35 @@
     macro(minimumFractionDigits, minimumFractionDigits, "minimumFractionDigits") \
     macro(minimumIntegerDigits, minimumIntegerDigits, "minimumIntegerDigits") \
     macro(minimumSignificantDigits, minimumSignificantDigits, "minimumSignificantDigits") \
+    macro(missingArguments, missingArguments, "missingArguments") \
     macro(module, module, "module") \
     macro(multiline, multiline, "multiline") \
     macro(name, name, "name") \
     macro(NaN, NaN, "NaN") \
     macro(next, next, "next") \
+    macro(NFC, NFC, "NFC") \
+    macro(NFD, NFD, "NFD") \
+    macro(NFKC, NFKC, "NFKC") \
+    macro(NFKD, NFKD, "NFKD") \
     macro(noSuchMethod, noSuchMethod, "__noSuchMethod__") \
     macro(NumberFormat, NumberFormat, "NumberFormat") \
     macro(NumberFormatFormatGet, NumberFormatFormatGet, "Intl_NumberFormat_format_get") \
     macro(numeric, numeric, "numeric") \
+    macro(objectArray, objectArray, "[object Array]") \
+    macro(objectFunction, objectFunction, "[object Function]") \
     macro(objectNull, objectNull, "[object Null]") \
+    macro(objectNumber, objectNumber, "[object Number]") \
+    macro(objectObject, objectObject, "[object Object]") \
+    macro(objects, objects, "objects") \
+    macro(objectString, objectString, "[object String]") \
     macro(objectUndefined, objectUndefined, "[object Undefined]") \
+    macro(objectWindow, objectWindow, "[object Window]") \
     macro(of, of, "of") \
     macro(offset, offset, "offset") \
+    macro(optimizedOut, optimizedOut, "optimizedOut") \
+    macro(other, other, "other") \
     macro(outOfMemory, outOfMemory, "out of memory") \
+    macro(ownKeys, ownKeys, "ownKeys") \
     macro(parseFloat, parseFloat, "parseFloat") \
     macro(parseInt, parseInt, "parseInt") \
     macro(pattern, pattern, "pattern") \
@@ -140,18 +163,25 @@
     macro(propertyIsEnumerable, propertyIsEnumerable, "propertyIsEnumerable") \
     macro(proto, proto, "__proto__") \
     macro(prototype, prototype, "prototype") \
+    macro(proxy, proxy, "proxy") \
     macro(Reify, Reify, "Reify") \
+    macro(resumeGenerator, resumeGenerator, "resumeGenerator") \
     macro(return, return_, "return") \
+    macro(revoke, revoke, "revoke") \
+    macro(scripts, scripts, "scripts") \
     macro(sensitivity, sensitivity, "sensitivity") \
     macro(set, set, "set") \
     macro(shape, shape, "shape") \
+    macro(signMask, signMask, "signMask") \
     macro(source, source, "source") \
     macro(stack, stack, "stack") \
     macro(sticky, sticky, "sticky") \
+    macro(strings, strings, "strings") \
     macro(StructType, StructType, "StructType") \
     macro(style, style, "style") \
     macro(test, test, "test") \
     macro(throw, throw_, "throw") \
+    macro(timestamp, timestamp, "timestamp") \
     macro(timeZone, timeZone, "timeZone") \
     macro(toGMTString, toGMTString, "toGMTString") \
     macro(toISOString, toISOString, "toISOString") \
@@ -163,6 +193,7 @@
     macro(true, true_, "true") \
     macro(unescape, unescape, "unescape") \
     macro(uneval, uneval, "uneval") \
+    macro(uninitialized, uninitialized, "uninitialized") \
     macro(uint8, uint8, "uint8") \
     macro(uint8Clamped, uint8Clamped, "uint8Clamped") \
     macro(uint16, uint16, "uint16") \
@@ -186,6 +217,7 @@
     macro(y, y, "y") \
     macro(yield, yield, "yield") \
     macro(z, z, "z") \
+    macro(raw, raw, "raw") \
     /* Type names must be contiguous and ordered; see js::TypeName. */ \
     macro(undefined, undefined, "undefined") \
     macro(object, object, "object") \
@@ -193,6 +225,19 @@
     macro(string, string, "string") \
     macro(number, number, "number") \
     macro(boolean, boolean, "boolean") \
-    macro(null, null, "null")
+    macro(null, null, "null") \
+    macro(symbol, symbol, "symbol") \
+    /* Well-known atom names must be continuous and ordered, matching \
+     * enum JS::SymbolCode in jsapi.h. */ \
+    macro(iterator, iterator, "iterator") \
+    /* Same goes for the descriptions of the well-known symbols. */ \
+    macro(Symbol_create, Symbol_create, "Symbol.create") \
+    macro(Symbol_hasInstance, Symbol_hasInstance, "Symbol.hasInstance") \
+    macro(Symbol_isConcatSpreadable, Symbol_isConcatSpreadable, "Symbol.isConcatSpreadable") \
+    macro(Symbol_isRegExp, Symbol_isRegExp, "Symbol.isRegExp") \
+    macro(Symbol_iterator, Symbol_iterator, "Symbol.iterator") \
+    macro(Symbol_toPrimitive, Symbol_toPrimitive, "Symbol.toPrimitive") \
+    macro(Symbol_toStringTag, Symbol_toStringTag, "Symbol.toStringTag") \
+    macro(Symbol_unscopables, Symbol_unscopables, "Symbol.unscopables") \
 
 #endif /* vm_CommonPropertyNames_h */

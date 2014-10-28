@@ -6,7 +6,7 @@
 #include "nsMathMLmactionFrame.h"
 #include "nsCOMPtr.h"
 #include "nsPresContext.h"
-#include "nsINameSpaceManager.h"
+#include "nsNameSpaceManager.h"
 #include "prprf.h"         // For PR_snprintf()
 #include "nsIDocShell.h"
 #include "nsIDocShellTreeOwner.h"
@@ -80,9 +80,9 @@ nsMathMLmactionFrame::~nsMathMLmactionFrame()
 }
 
 void
-nsMathMLmactionFrame::Init(nsIContent*      aContent,
-                           nsIFrame*        aParent,
-                           nsIFrame*        aPrevInFlow)
+nsMathMLmactionFrame::Init(nsIContent*       aContent,
+                           nsContainerFrame* aParent,
+                           nsIFrame*         aPrevInFlow)
 {
   // Init our local attributes
 
@@ -131,8 +131,7 @@ nsMathMLmactionFrame::GetSelectedFrame()
     return mSelectedFrame;
   }
 
-  GetAttribute(mContent, mPresentationData.mstyle, nsGkAtoms::selection_,
-               value);
+  mContent->GetAttr(kNameSpaceID_None, nsGkAtoms::selection_, value);
   if (!value.IsEmpty()) {
     nsresult errorCode;
     selection = value.ToInteger(&errorCode);
@@ -173,11 +172,11 @@ nsMathMLmactionFrame::GetSelectedFrame()
   return mSelectedFrame;
 }
 
-NS_IMETHODIMP
+void
 nsMathMLmactionFrame::SetInitialChildList(ChildListID     aListID,
                                           nsFrameList&    aChildList)
 {
-  nsresult rv = nsMathMLSelectedFrame::SetInitialChildList(aListID, aChildList);
+  nsMathMLSelectedFrame::SetInitialChildList(aListID, aChildList);
 
   if (!mSelectedFrame) {
     mActionType = NS_MATHML_ACTION_TYPE_NONE;
@@ -193,10 +192,9 @@ nsMathMLmactionFrame::SetInitialChildList(ChildListID     aListID,
     mContent->AddSystemEventListener(NS_LITERAL_STRING("mouseout"), mListener,
                                      false, false);
   }
-  return rv;
 }
 
-NS_IMETHODIMP
+nsresult
 nsMathMLmactionFrame::AttributeChanged(int32_t  aNameSpaceID,
                                        nsIAtom* aAttribute,
                                        int32_t  aModType)
@@ -237,12 +235,12 @@ nsMathMLmactionFrame::AttributeChanged(int32_t  aNameSpaceID,
 // Event handlers 
 // ################################################################
 
-NS_IMPL_ISUPPORTS1(nsMathMLmactionFrame::MouseListener,
-                   nsIDOMEventListener)
+NS_IMPL_ISUPPORTS(nsMathMLmactionFrame::MouseListener,
+                  nsIDOMEventListener)
 
 
 // helper to show a msg on the status bar
-// curled from nsObjectFrame.cpp ...
+// curled from nsPluginFrame.cpp ...
 void
 ShowStatus(nsPresContext* aPresContext, nsString& aStatusMsg)
 {

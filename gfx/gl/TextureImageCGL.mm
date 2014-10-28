@@ -5,11 +5,15 @@
 
 #include "TextureImageCGL.h"
 #include "GLContext.h"
+#include "gfx2DGlue.h"
 #include "gfxQuartzSurface.h"
 #include "gfxPlatform.h"
 #include "gfxFailure.h"
 
 namespace mozilla {
+
+using namespace gfx;
+
 namespace gl {
 
 TextureImageCGL::TextureImageCGL(GLuint aTexture,
@@ -22,7 +26,6 @@ TextureImageCGL::TextureImageCGL(GLuint aTexture,
     : BasicTextureImage(aTexture, aSize, aWrapMode, aContentType,
                         aContext, aFlags, aImageFormat)
     , mPixelBuffer(0)
-    , mPixelBufferSize(0)
     , mBoundPixelBuffer(false)
 {}
 
@@ -32,56 +35,6 @@ TextureImageCGL::~TextureImageCGL()
         mGLContext->MakeCurrent();
         mGLContext->fDeleteBuffers(1, &mPixelBuffer);
     }
-}
-
-already_AddRefed<gfxASurface>
-TextureImageCGL::GetSurfaceForUpdate(const gfxIntSize& aSize, ImageFormat aFmt)
-{
-    gfxIntSize size(aSize.width + 1, aSize.height + 1);
-    mGLContext->MakeCurrent();
-    if (!mGLContext->
-        IsExtensionSupported(GLContext::ARB_pixel_buffer_object))
-    {
-        return gfxPlatform::GetPlatform()->
-            CreateOffscreenSurface(size,
-                                    gfxASurface::ContentFromFormat(aFmt));
-    }
-
-    if (!mPixelBuffer) {
-        mGLContext->fGenBuffers(1, &mPixelBuffer);
-    }
-    mGLContext->fBindBuffer(LOCAL_GL_PIXEL_UNPACK_BUFFER, mPixelBuffer);
-    int32_t length = size.width * 4 * size.height;
-
-    if (length > mPixelBufferSize) {
-        mGLContext->fBufferData(LOCAL_GL_PIXEL_UNPACK_BUFFER, length,
-                                NULL, LOCAL_GL_STREAM_DRAW);
-        mPixelBufferSize = length;
-    }
-    unsigned char* data =
-        (unsigned char*)mGLContext->
-            fMapBuffer(LOCAL_GL_PIXEL_UNPACK_BUFFER,
-                        LOCAL_GL_WRITE_ONLY);
-
-    mGLContext->fBindBuffer(LOCAL_GL_PIXEL_UNPACK_BUFFER, 0);
-
-    if (!data) {
-        nsAutoCString failure;
-        failure += "Pixel buffer binding failed: ";
-        failure.AppendPrintf("%dx%d\n", size.width, size.height);
-        gfx::LogFailure(failure);
-
-        mGLContext->fBindBuffer(LOCAL_GL_PIXEL_UNPACK_BUFFER, 0);
-        return gfxPlatform::GetPlatform()->
-            CreateOffscreenSurface(size,
-                                    gfxASurface::ContentFromFormat(aFmt));
-    }
-
-    nsRefPtr<gfxQuartzSurface> surf =
-        new gfxQuartzSurface(data, size, size.width * 4, aFmt);
-
-    mBoundPixelBuffer = true;
-    return surf.forget();
 }
 
 bool
@@ -108,13 +61,13 @@ TextureImageCGL::FinishedSurfaceUpload()
 
 already_AddRefed<TextureImage>
 CreateTextureImageCGL(GLContext* gl,
-                      const nsIntSize& aSize,
+                      const gfx::IntSize& aSize,
                       TextureImage::ContentType aContentType,
                       GLenum aWrapMode,
                       TextureImage::Flags aFlags,
                       TextureImage::ImageFormat aImageFormat)
 {
-    if (!gl->IsOffscreenSizeAllowed(gfxIntSize(aSize.width, aSize.height)) &&
+    if (!gl->IsOffscreenSizeAllowed(aSize) &&
         gfxPlatform::OffMainThreadCompositingEnabled()) {
       NS_ASSERTION(aWrapMode == LOCAL_GL_CLAMP_TO_EDGE, "Can't support wrapping with tiles!");
       nsRefPtr<TextureImage> t = new gl::TiledTextureImage(gl, aSize, aContentType,

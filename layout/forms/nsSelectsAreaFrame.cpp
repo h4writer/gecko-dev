@@ -7,8 +7,8 @@
 #include "nsListControlFrame.h"
 #include "nsDisplayList.h"
 
-nsIFrame*
-NS_NewSelectsAreaFrame(nsIPresShell* aShell, nsStyleContext* aContext, uint32_t aFlags)
+nsContainerFrame*
+NS_NewSelectsAreaFrame(nsIPresShell* aShell, nsStyleContext* aContext, nsFrameState aFlags)
 {
   nsSelectsAreaFrame* it = new (aShell) nsSelectsAreaFrame(aContext);
 
@@ -37,6 +37,9 @@ public:
     : nsDisplayWrapList(aBuilder, aFrame, aList) {}
   virtual void HitTest(nsDisplayListBuilder* aBuilder, const nsRect& aRect,
                        HitTestState* aState, nsTArray<nsIFrame*> *aOutFrames);
+  virtual bool ShouldFlattenAway(nsDisplayListBuilder* aBuilder) MOZ_OVERRIDE {
+    return false;
+  }
   NS_DISPLAY_DECL_NAME("OptionEventGrabber", TYPE_OPTION_EVENT_GRABBER)
 };
 
@@ -151,7 +154,7 @@ nsSelectsAreaFrame::BuildDisplayListInternal(nsDisplayListBuilder*   aBuilder,
   }
 }
 
-NS_IMETHODIMP 
+void
 nsSelectsAreaFrame::Reflow(nsPresContext*           aPresContext, 
                            nsHTMLReflowMetrics&     aDesiredSize,
                            const nsHTMLReflowState& aReflowState, 
@@ -177,9 +180,7 @@ nsSelectsAreaFrame::Reflow(nsPresContext*           aPresContext,
     }
   }
   
-  nsresult rv = nsBlockFrame::Reflow(aPresContext, aDesiredSize,
-                                    aReflowState, aStatus);
-  NS_ENSURE_SUCCESS(rv, rv);
+  nsBlockFrame::Reflow(aPresContext, aDesiredSize, aReflowState, aStatus);
 
   // Check whether we need to suppress scrollbar updates.  We want to do that if
   // we're in a possible first pass and our height of a row has changed.
@@ -189,12 +190,10 @@ nsSelectsAreaFrame::Reflow(nsPresContext*           aPresContext,
     // comboboxes, we'll also need it if our height changed.  If we're going
     // to do a second pass, suppress scrollbar updates for this pass.
     if (newHeightOfARow != mHeightOfARow ||
-        (isInDropdownMode && (oldHeight != aDesiredSize.height ||
+        (isInDropdownMode && (oldHeight != aDesiredSize.Height() ||
                               oldHeight != GetSize().height))) {
       mHeightOfARow = newHeightOfARow;
       list->SetSuppressScrollbarUpdate(true);
     }
   }
-
-  return rv;
 }

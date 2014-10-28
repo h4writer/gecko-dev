@@ -13,6 +13,8 @@ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/BrowserElementPromptService.jsm");
 
+let kLongestReturnedString = 128;
+
 // Event whitelisted for bubbling.
 let whitelistedEvents = [
   Ci.nsIDOMKeyEvent.DOM_VK_ESCAPE,   // Back button.
@@ -57,49 +59,20 @@ function sendSyncMsg(msg, data) {
 
 let CERTIFICATE_ERROR_PAGE_PREF = 'security.alternate_certificate_error_page';
 
-let NS_ERROR_MODULE_BASE_OFFSET = 0x45;
-let NS_ERROR_MODULE_SECURITY= 21;
-function NS_ERROR_GET_MODULE(err) {
-  return ((((err) >> 16) - NS_ERROR_MODULE_BASE_OFFSET) & 0x1fff) 
-}
+const OBSERVED_EVENTS = [
+  'fullscreen-origin-change',
+  'ask-parent-to-exit-fullscreen',
+  'ask-parent-to-rollback-fullscreen',
+  'xpcom-shutdown',
+  'activity-done'
+];
 
-function NS_ERROR_GET_CODE(err) {
-  return ((err) & 0xffff);
-}
-
-let SEC_ERROR_BASE = Ci.nsINSSErrorsService.NSS_SEC_ERROR_BASE;
-let SEC_ERROR_UNKNOWN_ISSUER = (SEC_ERROR_BASE + 13);
-let SEC_ERROR_CA_CERT_INVALID =   (SEC_ERROR_BASE + 36);
-let SEC_ERROR_UNTRUSTED_ISSUER = (SEC_ERROR_BASE + 20);
-let SEC_ERROR_EXPIRED_ISSUER_CERTIFICATE = (SEC_ERROR_BASE + 30);
-let SEC_ERROR_UNTRUSTED_CERT = (SEC_ERROR_BASE + 21);
-let SEC_ERROR_INADEQUATE_KEY_USAGE = (SEC_ERROR_BASE + 90);
-let SEC_ERROR_EXPIRED_CERTIFICATE = (SEC_ERROR_BASE + 11);
-let SEC_ERROR_CERT_SIGNATURE_ALGORITHM_DISABLED = (SEC_ERROR_BASE + 176);
-
-let SSL_ERROR_BASE = Ci.nsINSSErrorsService.NSS_SSL_ERROR_BASE;
-let SSL_ERROR_BAD_CERT_DOMAIN = (SSL_ERROR_BASE + 12);
-
-function getErrorClass(errorCode) {
-  let NSPRCode = -1 * NS_ERROR_GET_CODE(errorCode);
- 
-  switch (NSPRCode) {
-    case SEC_ERROR_UNKNOWN_ISSUER:
-    case SEC_ERROR_CA_CERT_INVALID:
-    case SEC_ERROR_UNTRUSTED_ISSUER:
-    case SEC_ERROR_EXPIRED_ISSUER_CERTIFICATE:
-    case SEC_ERROR_UNTRUSTED_CERT:
-    case SEC_ERROR_INADEQUATE_KEY_USAGE:
-    case SSL_ERROR_BAD_CERT_DOMAIN:
-    case SEC_ERROR_EXPIRED_CERTIFICATE:
-    case SEC_ERROR_CERT_SIGNATURE_ALGORITHM_DISABLED:
-      return Ci.nsINSSErrorsService.ERROR_CLASS_BAD_CERT;
-    default:
-      return Ci.nsINSSErrorsService.ERROR_CLASS_SSL_PROTOCOL;
-  }
-
-  return null;
-}
+const COMMAND_MAP = {
+  'cut': 'cmd_cut',
+  'copy': 'cmd_copy',
+  'paste': 'cmd_paste',
+  'selectall': 'cmd_selectAll'
+};
 
 /**
  * The BrowserElementChild implements one half of <iframe mozbrowser>.
@@ -128,6 +101,9 @@ function BrowserElementChild() {
   this._ownerVisible = true;
 
   this._nextPaintHandler = null;
+
+  this._isContentWindowCreated = false;
+  this._pendingSetInputMethodActive = [];
 
   this._init();
 };
@@ -175,6 +151,42 @@ BrowserElementChild.prototype = {
                      /* useCapture = */ true,
                      /* wantsUntrusted = */ false);
 
+    addEventListener('MozScrolledAreaChanged',
+                     this._mozScrollAreaChanged.bind(this),
+                     /* useCapture = */ true,
+                     /* wantsUntrusted = */ false);
+
+    addEventListener('DOMMetaAdded',
+                     this._metaChangedHandler.bind(this),
+                     /* useCapture = */ true,
+                     /* wantsUntrusted = */ false);
+
+    addEventListener('DOMMetaChanged',
+                     this._metaChangedHandler.bind(this),
+                     /* useCapture = */ true,
+                     /* wantsUntrusted = */ false);
+
+    addEventListener('DOMMetaRemoved',
+                     this._metaChangedHandler.bind(this),
+                     /* useCapture = */ true,
+                     /* wantsUntrusted = */ false);
+
+    addEventListener('mozselectionchange',
+                     this._selectionChangeHandler.bind(this),
+                     /* useCapture = */ false,
+                     /* wantsUntrusted = */ false);
+
+    addEventListener('scrollviewchange',
+                     this._ScrollViewChangeHandler.bind(this),
+                     /* useCapture = */ false,
+                     /* wantsUntrusted = */ false);
+
+    addEventListener('touchcarettap',
+                     this._touchCaretTapHandler.bind(this),
+                     /* useCapture = */ false,
+                     /* wantsUntrusted = */ false);
+
+
     // This listens to unload events from our message manager, but /not/ from
     // the |content| window.  That's because the window's unload event doesn't
     // bubble, and we're not using a capturing listener.  If we'd used
@@ -195,6 +207,7 @@ BrowserElementChild.prototype = {
     let mmCalls = {
       "purge-history": this._recvPurgeHistory,
       "get-screenshot": this._recvGetScreenshot,
+      "get-contentdimensions": this._recvGetContentDimensions,
       "set-visible": this._recvSetVisible,
       "get-visible": this._recvVisible,
       "send-mouse-event": this._recvSendMouseEvent,
@@ -205,13 +218,15 @@ BrowserElementChild.prototype = {
       "go-forward": this._recvGoForward,
       "reload": this._recvReload,
       "stop": this._recvStop,
+      "zoom": this._recvZoom,
       "unblock-modal-prompt": this._recvStopWaiting,
       "fire-ctx-callback": this._recvFireCtxCallback,
       "owner-visibility-change": this._recvOwnerVisibilityChange,
       "exit-fullscreen": this._recvExitFullscreen.bind(this),
       "activate-next-paint-listener": this._activateNextPaintListener.bind(this),
       "set-input-method-active": this._recvSetInputMethodActive.bind(this),
-      "deactivate-next-paint-listener": this._deactivateNextPaintListener.bind(this)
+      "deactivate-next-paint-listener": this._deactivateNextPaintListener.bind(this),
+      "do-command": this._recvDoCommand
     }
 
     addMessageListener("browser-element-api:call", function(aMessage) {
@@ -250,25 +265,9 @@ BrowserElementChild.prototype = {
                                this._scrollEventHandler.bind(this),
                                /* useCapture = */ false);
 
-    Services.obs.addObserver(this,
-                             "fullscreen-origin-change",
-                             /* ownsWeak = */ true);
-
-    Services.obs.addObserver(this,
-                             'ask-parent-to-exit-fullscreen',
-                             /* ownsWeak = */ true);
-
-    Services.obs.addObserver(this,
-                             'ask-parent-to-rollback-fullscreen',
-                             /* ownsWeak = */ true);
-
-    Services.obs.addObserver(this,
-                             'xpcom-shutdown',
-                             /* ownsWeak = */ true);
-
-    Services.obs.addObserver(this,
-                             'activity-done',
-                             /* ownsWeak = */ true);
+    OBSERVED_EVENTS.forEach((aTopic) => {
+      Services.obs.addObserver(this, aTopic, false);
+    });
   },
 
   observe: function(subject, topic, data) {
@@ -303,6 +302,9 @@ BrowserElementChild.prototype = {
    */
   _unloadHandler: function() {
     this._shuttingDown = true;
+    OBSERVED_EVENTS.forEach((aTopic) => {
+      Services.obs.removeObserver(this, aTopic);
+    });
   },
 
   _tryGetInnerWindowID: function(win) {
@@ -336,6 +338,15 @@ BrowserElementChild.prototype = {
         args.promptType == 'custom-prompt') {
       return returnValue;
     }
+  },
+
+  _isCommandEnabled: function(cmd) {
+    let command = COMMAND_MAP[cmd];
+    if (!command) {
+      return false;
+    }
+
+    return docShell.isCommandEnabled(command);
   },
 
   /**
@@ -457,13 +468,17 @@ BrowserElementChild.prototype = {
     }
   },
 
+  _maybeCopyAttribute: function(src, target, attribute) {
+    if (src.getAttribute(attribute)) {
+      target[attribute] = src.getAttribute(attribute);
+    }
+  },
+
   _iconChangedHandler: function(e) {
     debug('Got iconchanged: (' + e.target.href + ')');
     let icon = { href: e.target.href };
-    if (e.target.getAttribute('sizes')) {
-      icon.sizes = e.target.getAttribute('sizes');
-    }
-
+    this._maybeCopyAttribute(e.target, icon, 'sizes');
+    this._maybeCopyAttribute(e.target, icon, 'rel');
     sendAsyncMsg('iconchange', icon);
   },
 
@@ -479,6 +494,13 @@ BrowserElementChild.prototype = {
 
   },
 
+  _manifestChangedHandler: function(e) {
+    debug('Got manifestchanged: (' + e.target.href + ')');
+    let manifest = { href: e.target.href };
+    sendAsyncMsg('manifestchange', manifest);
+
+  },
+
   // Processes the "rel" field in <link> tags and forward to specific handlers.
   _linkAddedHandler: function(e) {
     let win = e.target.ownerDocument.defaultView;
@@ -490,8 +512,10 @@ BrowserElementChild.prototype = {
     }
 
     let handlers = {
-      'icon': this._iconChangedHandler,
-      'search': this._openSearchHandler
+      'icon': this._iconChangedHandler.bind(this),
+      'apple-touch-icon': this._iconChangedHandler.bind(this),
+      'search': this._openSearchHandler,
+      'manifest': this._manifestChangedHandler
     };
 
     debug('Got linkAdded: (' + e.target.href + ') ' + e.target.rel);
@@ -501,6 +525,138 @@ BrowserElementChild.prototype = {
         handlers[token](e);
       }
     }, this);
+  },
+
+  _metaChangedHandler: function(e) {
+    let win = e.target.ownerDocument.defaultView;
+    // Ignore metas which don't come from the top-level
+    // <iframe mozbrowser> window.
+    if (win != content) {
+      debug('Not top level!');
+      return;
+    }
+
+    if (!e.target.name) {
+      return;
+    }
+
+    debug('Got metaChanged: (' + e.target.name + ') ' + e.target.content);
+
+    let handlers = {
+      'theme-color': this._themeColorChangedHandler,
+      'application-name': this._applicationNameChangedHandler
+    };
+
+    let handler = handlers[e.target.name];
+    if (handler) {
+      handler(e.type, e.target);
+    }
+  },
+
+  _applicationNameChangedHandler: function(eventType, target) {
+    if (eventType !== 'DOMMetaAdded') {
+      // Bug 1037448 - Decide what to do when <meta name="application-name">
+      // changes
+      return;
+    }
+
+    let meta = { name: 'application-name',
+                 content: target.content };
+
+    let lang;
+    let elm;
+
+    for (elm = target;
+         !lang && elm && elm.nodeType == target.ELEMENT_NODE;
+         elm = elm.parentNode) {
+      if (elm.hasAttribute('lang')) {
+        lang = elm.getAttribute('lang');
+        continue;
+      }
+
+      if (elm.hasAttributeNS('http://www.w3.org/XML/1998/namespace', 'lang')) {
+        lang = elm.getAttributeNS('http://www.w3.org/XML/1998/namespace', 'lang');
+        continue;
+      }
+    }
+
+    // No lang has been detected.
+    if (!lang && elm.nodeType == target.DOCUMENT_NODE) {
+      lang = elm.contentLanguage;
+    }
+
+    if (lang) {
+      meta.lang = lang;
+    }
+
+    sendAsyncMsg('metachange', meta);
+  },
+
+  _touchCaretTapHandler: function(e) {
+    e.stopPropagation();
+    sendAsyncMsg('touchcarettap');
+  },
+
+  _ScrollViewChangeHandler: function(e) {
+    e.stopPropagation();
+    let detail = {
+      state: e.state,
+      scrollX: e.scrollX,
+      scrollY: e.scrollY,
+    };
+    sendAsyncMsg('scrollviewchange', detail);
+  },
+
+  _selectionChangeHandler: function(e) {
+    e.stopPropagation();
+    let boundingClientRect = e.boundingClientRect;
+    if (!boundingClientRect) {
+      return;
+    }
+
+    let zoomFactor = content.screen.width / content.innerWidth;
+
+    let detail = {
+      rect: {
+        width: boundingClientRect.width,
+        height: boundingClientRect.height,
+        top: boundingClientRect.top,
+        bottom: boundingClientRect.bottom,
+        left: boundingClientRect.left,
+        right: boundingClientRect.right,
+      },
+      commands: {
+        canSelectAll: this._isCommandEnabled("selectall"),
+        canCut: this._isCommandEnabled("cut"),
+        canCopy: this._isCommandEnabled("copy"),
+        canPaste: this._isCommandEnabled("paste"),
+      },
+      zoomFactor: zoomFactor,
+      reasons: e.reasons,
+      isCollapsed: (e.selectedText.length == 0),
+    };
+
+    // Get correct geometry information if we have nested iframe.
+    let currentWindow = e.target.defaultView;
+    while (currentWindow.top != currentWindow) {
+      let currentRect = currentWindow.frameElement.getBoundingClientRect();
+      detail.rect.top += currentRect.top;
+      detail.rect.bottom += currentRect.top;
+      detail.rect.left += currentRect.left;
+      detail.rect.right += currentRect.left;
+      currentWindow = currentWindow.parent;
+    }
+
+    sendAsyncMsg('selectionchange', detail);
+  },
+
+  _themeColorChangedHandler: function(eventType, target) {
+    let meta = {
+      name: 'theme-color',
+      content: target.content,
+      type: eventType.replace('DOMMeta', '').toLowerCase()
+    };
+    sendAsyncMsg('metachange', meta);
   },
 
   _addMozAfterPaintHandler: function(callback) {
@@ -566,6 +722,11 @@ BrowserElementChild.prototype = {
       this._addMozAfterPaintHandler(function () {
         sendAsyncMsg('documentfirstpaint');
       });
+      this._isContentWindowCreated = true;
+      // Handle pending SetInputMethodActive request.
+      while (this._pendingSetInputMethodActive.length > 0) {
+        this._recvSetInputMethodActive(this._pendingSetInputMethodActive.shift());
+      }
     }
   },
 
@@ -634,7 +795,8 @@ BrowserElementChild.prototype = {
   _getSystemCtxMenuData: function(elem) {
     if ((elem instanceof Ci.nsIDOMHTMLAnchorElement && elem.href) ||
         (elem instanceof Ci.nsIDOMHTMLAreaElement && elem.href)) {
-      return {uri: elem.href};
+      return {uri: elem.href,
+              text: elem.textContent.substring(0, kLongestReturnedString)};
     }
     if (elem instanceof Ci.nsIImageLoadingContent && elem.currentURI) {
       return {uri: elem.currentURI.spec};
@@ -680,10 +842,11 @@ BrowserElementChild.prototype = {
     let self = this;
     let maxWidth = data.json.args.width;
     let maxHeight = data.json.args.height;
+    let mimeType = data.json.args.mimeType;
     let domRequestID = data.json.id;
 
     let takeScreenshotClosure = function() {
-      self._takeScreenshot(maxWidth, maxHeight, domRequestID);
+      self._takeScreenshot(maxWidth, maxHeight, mimeType, domRequestID);
     };
 
     let maxDelayMS = 2000;
@@ -699,19 +862,46 @@ BrowserElementChild.prototype = {
       takeScreenshotClosure, maxDelayMS);
   },
 
+  _recvGetContentDimensions: function(data) {
+    debug("Received getContentDimensions message: (" + data.json.id + ")");
+    sendAsyncMsg('got-contentdimensions', {
+      id: data.json.id,
+      successRv: this._getContentDimensions()
+    });
+  },
+
+  _mozScrollAreaChanged: function(e) {
+    let dimensions = this._getContentDimensions();
+    sendAsyncMsg('scrollareachanged', {
+      width: dimensions.width,
+      height: dimensions.height
+    });
+  },
+
+  _getContentDimensions: function() {
+    return {
+      width: content.document.body.scrollWidth,
+      height: content.document.body.scrollHeight
+    }
+  },
+
   /**
    * Actually take a screenshot and foward the result up to our parent, given
-   * the desired maxWidth and maxHeight, and given the DOMRequest ID associated
-   * with the request from the parent.
+   * the desired maxWidth and maxHeight (in CSS pixels), and given the
+   * DOMRequest ID associated with the request from the parent.
    */
-  _takeScreenshot: function(maxWidth, maxHeight, domRequestID) {
+  _takeScreenshot: function(maxWidth, maxHeight, mimeType, domRequestID) {
     // You can think of the screenshotting algorithm as carrying out the
     // following steps:
     //
+    // - Calculate maxWidth, maxHeight, and viewport's width and height in the
+    //   dimension of device pixels by multiply the numbers with
+    //   window.devicePixelRatio.
+    //
     // - Let scaleWidth be the factor by which we'd need to downscale the
-    //   viewport so it would fit within maxWidth.  (If the viewport's width
-    //   is less than maxWidth, let scaleWidth be 1.) Compute scaleHeight
-    //   the same way.
+    //   viewport pixel width so it would fit within maxPixelWidth.
+    //   (If the viewport's pixel width is less than maxPixelWidth, let
+    //   scaleWidth be 1.) Compute scaleHeight the same way.
     //
     // - Scale the viewport by max(scaleWidth, scaleHeight).  Now either the
     //   viewport's width is no larger than maxWidth, the viewport's height is
@@ -720,10 +910,14 @@ BrowserElementChild.prototype = {
     // - Crop the viewport so its width is no larger than maxWidth and its
     //   height is no larger than maxHeight.
     //
+    // - Set mozOpaque to true and background color to solid white
+    //   if we are taking a JPEG screenshot, keep transparent if otherwise.
+    //
     // - Return a screenshot of the page's viewport scaled and cropped per
     //   above.
     debug("Taking a screenshot: maxWidth=" + maxWidth +
           ", maxHeight=" + maxHeight +
+          ", mimeType=" + mimeType +
           ", domRequestID=" + domRequestID + ".");
 
     if (!content) {
@@ -733,27 +927,46 @@ BrowserElementChild.prototype = {
       return;
     }
 
-    let scaleWidth = Math.min(1, maxWidth / content.innerWidth);
-    let scaleHeight = Math.min(1, maxHeight / content.innerHeight);
+    let devicePixelRatio = content.devicePixelRatio;
+
+    let maxPixelWidth = Math.round(maxWidth * devicePixelRatio);
+    let maxPixelHeight = Math.round(maxHeight * devicePixelRatio);
+
+    let contentPixelWidth = content.innerWidth * devicePixelRatio;
+    let contentPixelHeight = content.innerHeight * devicePixelRatio;
+
+    let scaleWidth = Math.min(1, maxPixelWidth / contentPixelWidth);
+    let scaleHeight = Math.min(1, maxPixelHeight / contentPixelHeight);
 
     let scale = Math.max(scaleWidth, scaleHeight);
 
-    let canvasWidth = Math.min(maxWidth, Math.round(content.innerWidth * scale));
-    let canvasHeight = Math.min(maxHeight, Math.round(content.innerHeight * scale));
+    let canvasWidth =
+      Math.min(maxPixelWidth, Math.round(contentPixelWidth * scale));
+    let canvasHeight =
+      Math.min(maxPixelHeight, Math.round(contentPixelHeight * scale));
+
+    let transparent = (mimeType !== 'image/jpeg');
 
     var canvas = content.document
       .createElementNS("http://www.w3.org/1999/xhtml", "canvas");
-    canvas.mozOpaque = true;
+    if (!transparent)
+      canvas.mozOpaque = true;
     canvas.width = canvasWidth;
     canvas.height = canvasHeight;
 
-    var ctx = canvas.getContext("2d");
-    ctx.scale(scale, scale);
-    ctx.drawWindow(content, 0, 0, content.innerWidth, content.innerHeight,
-                   "rgb(255,255,255)");
+    let ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.scale(scale * devicePixelRatio, scale * devicePixelRatio);
 
-    // Take a JPEG screenshot to hack around the fact that we can't specify
-    // opaque PNG.  This requires us to unpremultiply the alpha channel, which
+    let flags = ctx.DRAWWINDOW_DRAW_VIEW |
+                ctx.DRAWWINDOW_USE_WIDGET_LAYERS |
+                ctx.DRAWWINDOW_DO_NOT_FLUSH |
+                ctx.DRAWWINDOW_ASYNC_DECODE_IMAGES;
+    ctx.drawWindow(content, 0, 0, content.innerWidth, content.innerHeight,
+                   transparent ? "rgba(255,255,255,0)" : "rgb(255,255,255)",
+                   flags);
+
+    // Take a JPEG screenshot by default instead of PNG with alpha channel.
+    // This requires us to unpremultiply the alpha channel, which
     // is expensive on ARM processors because they lack a hardware integer
     // division instruction.
     canvas.toBlob(function(blob) {
@@ -761,7 +974,7 @@ BrowserElementChild.prototype = {
         id: domRequestID,
         successRv: blob
       });
-    }, 'image/jpeg');
+    }, mimeType);
   },
 
   _recvFireCtxCallback: function(data) {
@@ -776,14 +989,8 @@ BrowserElementChild.prototype = {
   },
 
   _buildMenuObj: function(menu, idPrefix) {
-    function maybeCopyAttribute(src, target, attribute) {
-      if (src.getAttribute(attribute)) {
-        target[attribute] = src.getAttribute(attribute);
-      }
-    }
-
     var menuObj = {type: 'menu', items: []};
-    maybeCopyAttribute(menu, menuObj, 'label');
+    this._maybeCopyAttribute(menu, menuObj, 'label');
 
     for (var i = 0, child; child = menu.children[i++];) {
       if (child.nodeName === 'MENU') {
@@ -791,8 +998,8 @@ BrowserElementChild.prototype = {
       } else if (child.nodeName === 'MENUITEM') {
         var id = this._ctxCounter + '_' + idPrefix + i;
         var menuitem = {id: id, type: 'menuitem'};
-        maybeCopyAttribute(child, menuitem, 'label');
-        maybeCopyAttribute(child, menuitem, 'icon');
+        this._maybeCopyAttribute(child, menuitem, 'label');
+        this._maybeCopyAttribute(child, menuitem, 'icon');
         this._ctxHandlers[id] = child;
         menuObj.items.push(menuitem);
       }
@@ -902,8 +1109,29 @@ BrowserElementChild.prototype = {
     webNav.stop(webNav.STOP_NETWORK);
   },
 
+  _recvZoom: function(data) {
+    docShell.contentViewer.fullZoom = data.json.zoom;
+  },
+
+  _recvDoCommand: function(data) {
+    if (this._isCommandEnabled(data.json.command)) {
+      docShell.doCommand(COMMAND_MAP[data.json.command]);
+    }
+  },
+
   _recvSetInputMethodActive: function(data) {
     let msgData = { id: data.json.id };
+    if (!this._isContentWindowCreated) {
+      if (data.json.args.isActive) {
+        // To activate the input method, we should wait before the content
+        // window is ready.
+        this._pendingSetInputMethodActive.push(data);
+        return;
+      }
+      msgData.successRv = null;
+      sendAsyncMsg('got-set-input-method-active', msgData);
+      return;
+    }
     // Unwrap to access webpage content.
     let nav = XPCNativeWrapper.unwrap(content.document.defaultView.navigator);
     if (nav.mozInputMethod) {
@@ -977,23 +1205,28 @@ BrowserElementChild.prototype = {
           return;
         }
 
-        if (NS_ERROR_GET_MODULE(status) == NS_ERROR_MODULE_SECURITY && 
-            getErrorClass(status) == Ci.nsINSSErrorsService.ERROR_CLASS_BAD_CERT) {
+        // getErrorClass() will throw if the error code passed in is not a NSS
+        // error code.
+        try {
+          let nssErrorsService = Cc['@mozilla.org/nss_errors_service;1']
+                                   .getService(Ci.nsINSSErrorsService);
+          if (nssErrorsService.getErrorClass(status)
+                == Ci.nsINSSErrorsService.ERROR_CLASS_BAD_CERT) {
+            // XXX Is there a point firing the event if the error page is not
+            // certerror? If yes, maybe we should add a property to the
+            // event to to indicate whether there is a custom page. That would
+            // let the embedder have more control over the desired behavior.
+            let errorPage = null;
+            try {
+              errorPage = Services.prefs.getCharPref(CERTIFICATE_ERROR_PAGE_PREF);
+            } catch (e) {}
 
-          // XXX Is there a point firing the event if the error page is not
-          // certerror? If yes, maybe we should add a property to the
-          // event to to indicate whether there is a custom page. That would
-          // let the embedder have more control over the desired behavior.
-          var errorPage = null;
-          try {
-            errorPage = Services.prefs.getCharPref(CERTIFICATE_ERROR_PAGE_PREF);
-          } catch(e) {}
-
-          if (errorPage == 'certerror') {
-            sendAsyncMsg('error', { type: 'certerror' });
-            return;
+            if (errorPage == 'certerror') {
+              sendAsyncMsg('error', { type: 'certerror' });
+              return;
+            }
           }
-        }
+        } catch (e) {}
 
         // TODO See nsDocShell::DisplayLoadError for a list of all the error
         // codes (the status param) we should eventually handle here.

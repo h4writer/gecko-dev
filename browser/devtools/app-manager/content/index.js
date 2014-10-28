@@ -2,14 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-const Cu = Components.utils;
+const {utils: Cu, interfaces: Ci} = Components;
 Cu.import("resource:///modules/devtools/gDevTools.jsm");
 const {devtools} = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
 const {require} = devtools;
 const {ConnectionManager, Connection} = require("devtools/client/connection-manager");
-const promise = require("sdk/core/promise");
-const prefs = require('sdk/preferences/service');
-
+const promise = require("devtools/toolkit/deprecated-sync-thenables");
+const prefs = require("sdk/preferences/service");
+const Services = require("Services");
+const Strings = Services.strings.createBundle("chrome://browser/locale/devtools/app-manager.properties");
 
 let UI = {
   _toolboxTabCursor: 0,
@@ -34,9 +35,14 @@ let UI = {
     let defaultPanel = prefs.get("devtools.appmanager.lastTab");
     let panelExists = !!document.querySelector("." + defaultPanel  + "-panel");
     this.selectTab(panelExists ? defaultPanel : "projects");
+    this.showDeprecationNotice();
   },
 
   onUnload: function() {
+    for (let [target, toolbox] of this._handledTargets) {
+      toolbox.destroy();
+    }
+
     window.removeEventListener("unload", this.onUnload);
     window.removeEventListener("message", this.onMessage);
     if (this.connection) {
@@ -62,6 +68,7 @@ let UI = {
           this.selectTab("projects");
           break;
         case "toolbox-raise":
+          window.top.focus();
           this.selectTab(json.uid);
           break;
         case "toolbox-close":
@@ -95,7 +102,6 @@ let UI = {
       let newSelection = document.querySelector("." + panel + "-" + type);
       if (oldSelection) oldSelection.removeAttribute("selected");
       if (newSelection) {
-        newSelection.scrollIntoView(false);
         newSelection.setAttribute("selected", "true");
         if (newSelection.classList.contains("toolbox")) {
           isToolboxTab = true;
@@ -159,7 +165,8 @@ let UI = {
 
   openAndShowToolboxForTarget: function(target, name, icon) {
     let host = devtools.Toolbox.HostType.CUSTOM;
-    if (!this._handledTargets.has(target)) {
+    let toolbox = gDevTools.getToolbox(target);
+    if (!toolbox) {
       let uid = "uid" + this._toolboxTabCursor++;
       let iframe = this.createToolboxTab(name, icon, uid);
       let options = { customIframe: iframe , uid: uid };
@@ -171,15 +178,35 @@ let UI = {
         });
       });
     } else {
-      let toolbox = this._handledTargets.get(target);
-      if (!toolbox) {
-        // Target is handled, but toolbox is still being
-        // created.
-        return promise.resolve(null);
-      }
       return gDevTools.showToolbox(target, null, host);
     }
+  },
+
+  showDeprecationNotice: function() {
+    let message = Strings.GetStringFromName("index.deprecationNotice");
+
+    let buttons = [
+      {
+        label: Strings.GetStringFromName("index.launchWebIDE"),
+        callback: gDevToolsBrowser.openWebIDE
+      },
+      {
+        label: Strings.GetStringFromName("index.readMoreAboutWebIDE"),
+        callback: () => {
+          window.open("https://developer.mozilla.org/docs/Tools/WebIDE");
+        }
+      }
+    ];
+
+    let docShell = window.QueryInterface(Ci.nsIInterfaceRequestor)
+                   .getInterface(Ci.nsIWebNavigation)
+                   .QueryInterface(Ci.nsIDocShell);
+    let browser = docShell.chromeEventHandler;
+    let nbox = browser.ownerDocument.defaultView.gBrowser
+               .getNotificationBox(browser);
+    nbox.appendNotification(message, "app-manager-deprecation", null,
+                            nbox.PRIORITY_WARNING_LOW, buttons);
   }
-}
+};
 
 UI.init();

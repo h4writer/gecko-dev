@@ -7,8 +7,10 @@
 #include "nsAboutRedirector.h"
 #include "nsNetUtil.h"
 #include "nsAboutProtocolUtils.h"
+#include "mozilla/ArrayUtils.h"
+#include "nsDOMString.h"
 
-NS_IMPL_ISUPPORTS1(nsAboutRedirector, nsIAboutModule)
+NS_IMPL_ISUPPORTS(nsAboutRedirector, nsIAboutModule)
 
 struct RedirEntry {
     const char* id;
@@ -65,16 +67,20 @@ static RedirEntry kRedirMap[] = {
       nsIAboutModule::ALLOW_SCRIPT },
     { "networking", "chrome://global/content/aboutNetworking.xhtml",
        nsIAboutModule::ALLOW_SCRIPT },
+    { "webrtc", "chrome://global/content/aboutwebrtc/aboutWebrtc.xhtml",
+       nsIAboutModule::ALLOW_SCRIPT },
     // about:srcdoc is unresolvable by specification.  It is included here
     // because the security manager would disallow srcdoc iframes otherwise.
     { "srcdoc", "about:blank",
       nsIAboutModule::URI_SAFE_FOR_UNTRUSTED_CONTENT |
       nsIAboutModule::HIDE_FROM_ABOUTABOUT }
 };
-static const int kRedirTotal = NS_ARRAY_LENGTH(kRedirMap);
+static const int kRedirTotal = mozilla::ArrayLength(kRedirMap);
 
 NS_IMETHODIMP
-nsAboutRedirector::NewChannel(nsIURI *aURI, nsIChannel **result)
+nsAboutRedirector::NewChannel(nsIURI* aURI,
+                              nsILoadInfo* aLoadInfo,
+                              nsIChannel** result)
 {
     NS_ENSURE_ARG_POINTER(aURI);
     NS_ASSERTION(result, "must not be null");
@@ -131,6 +137,13 @@ nsAboutRedirector::GetURIFlags(nsIURI *aURI, uint32_t *result)
 
     NS_ERROR("nsAboutRedirector called for unknown case");
     return NS_ERROR_ILLEGAL_VALUE;
+}
+
+NS_IMETHODIMP
+nsAboutRedirector::GetIndexedDBOriginPostfix(nsIURI *aURI, nsAString &result)
+{
+    SetDOMStringToNull(result);
+    return NS_ERROR_NOT_IMPLEMENTED;
 }
 
 nsresult

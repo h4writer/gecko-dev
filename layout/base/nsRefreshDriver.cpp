@@ -48,6 +48,8 @@
 #include "imgIContainer.h"
 #include "nsIFrameRequestCallback.h"
 #include "mozilla/dom/ScriptSettings.h"
+#include "nsDocShell.h"
+#include "nsISimpleEnumerator.h"
 
 using namespace mozilla;
 using namespace mozilla::widget;
@@ -81,7 +83,7 @@ public:
   /*
    * aRate -- the delay, in milliseconds, requested between timer firings
    */
-  RefreshDriverTimer(double aRate)
+  explicit RefreshDriverTimer(double aRate)
   {
     SetRate(aRate);
   }
@@ -151,6 +153,8 @@ protected:
 
     LOG("[%p] ticking drivers...", this);
     nsTArray<nsRefPtr<nsRefreshDriver> > drivers(mRefreshDrivers);
+    // RD is short for RefreshDriver
+    profiler_tracing("Paint", "RD", TRACING_INTERVAL_START);
     for (size_t i = 0; i < drivers.Length(); ++i) {
       // don't poke this driver if it's in test mode
       if (drivers[i]->IsTestControllingRefreshesEnabled()) {
@@ -159,6 +163,7 @@ protected:
 
       TickDriver(drivers[i], jsnow, now);
     }
+    profiler_tracing("Paint", "RD", TRACING_INTERVAL_END);
     LOG("[%p] done.", this);
   }
 
@@ -197,7 +202,7 @@ class SimpleTimerBasedRefreshDriverTimer :
     public RefreshDriverTimer
 {
 public:
-  SimpleTimerBasedRefreshDriverTimer(double aRate)
+  explicit SimpleTimerBasedRefreshDriverTimer(double aRate)
     : RefreshDriverTimer(aRate)
   {
     mTimer = do_CreateInstance(NS_TIMER_CONTRACTID);
@@ -243,7 +248,7 @@ class PreciseRefreshDriverTimer :
     public SimpleTimerBasedRefreshDriverTimer
 {
 public:
-  PreciseRefreshDriverTimer(double aRate)
+  explicit PreciseRefreshDriverTimer(double aRate)
     : SimpleTimerBasedRefreshDriverTimer(aRate)
   {
   }
@@ -428,11 +433,11 @@ protected:
  * add that complexity.  All we want is for inactive drivers to tick
  * at some point, but we don't care too much about how often.
  */
-class InactiveRefreshDriverTimer :
+class InactiveRefreshDriverTimer MOZ_FINAL :
     public RefreshDriverTimer
 {
 public:
-  InactiveRefreshDriverTimer(double aRate)
+  explicit InactiveRefreshDriverTimer(double aRate)
     : RefreshDriverTimer(aRate),
       mNextTickDuration(aRate),
       mDisableAfterMilliseconds(-1.0),
@@ -680,16 +685,24 @@ nsRefreshDriver::ChooseTimer() const
 
 nsRefreshDriver::nsRefreshDriver(nsPresContext* aPresContext)
   : mActiveTimer(nullptr),
+    mReflowCause(nullptr),
+    mStyleCause(nullptr),
     mPresContext(aPresContext),
-    mFrozen(false),
+    mRootRefresh(nullptr),
+    mPendingTransaction(0),
+    mCompletedTransaction(0),
+    mFreezeCount(0),
     mThrottled(false),
     mTestControllingRefreshes(false),
     mViewManagerFlushIsPending(false),
     mRequestedHighPrecision(false),
-    mInRefresh(false)
+    mInRefresh(false),
+    mWaitingForTransaction(false),
+    mSkippedPaints(false)
 {
   mMostRecentRefreshEpochTime = JS_Now();
   mMostRecentRefresh = TimeStamp::Now();
+  mMostRecentTick = mMostRecentRefresh;
 }
 
 nsRefreshDriver::~nsRefreshDriver()
@@ -698,10 +711,17 @@ nsRefreshDriver::~nsRefreshDriver()
                     "observers should have unregistered");
   NS_ABORT_IF_FALSE(!mActiveTimer, "timer should be gone");
   
+  if (mRootRefresh) {
+    mRootRefresh->RemoveRefreshObserver(this, Flush_Style);
+    mRootRefresh = nullptr;
+  }
   for (uint32_t i = 0; i < mPresShellsToInvalidateIfHidden.Length(); i++) {
     mPresShellsToInvalidateIfHidden[i]->InvalidatePresShellIfHidden();
   }
   mPresShellsToInvalidateIfHidden.Clear();
+
+  profiler_free_backtrace(mStyleCause);
+  profiler_free_backtrace(mReflowCause);
 }
 
 // Method for testing.  See nsIDOMWindowUtils.advanceTimeAndRefresh
@@ -717,12 +737,17 @@ nsRefreshDriver::AdvanceTimeAndRefresh(int64_t aMilliseconds)
     mMostRecentRefresh = TimeStamp::Now();
 
     mTestControllingRefreshes = true;
+    if (mWaitingForTransaction) {
+      // Disable any refresh driver throttling when entering test mode
+      mWaitingForTransaction = false;
+      mSkippedPaints = false;
+    }
   }
 
   mMostRecentRefreshEpochTime += aMilliseconds * 1000;
   mMostRecentRefresh += TimeDuration::FromMilliseconds((double) aMilliseconds);
 
-  mozilla::dom::AutoSystemCaller asc;
+  mozilla::dom::AutoNoJSAPI nojsapi;
   DoTick();
 }
 
@@ -731,6 +756,7 @@ nsRefreshDriver::RestoreNormalRefresh()
 {
   mTestControllingRefreshes = false;
   EnsureTimerStarted(false);
+  mCompletedTransaction = mPendingTransaction;
 }
 
 TimeStamp
@@ -826,7 +852,7 @@ nsRefreshDriver::EnsureTimerStarted(bool aAdjustingTimer)
   if (mActiveTimer && !aAdjustingTimer)
     return;
 
-  if (mFrozen || !mPresContext) {
+  if (IsFrozen() || !mPresContext) {
     // If we don't want to start it now, or we've been disconnected.
     StopTimer();
     return;
@@ -843,8 +869,15 @@ nsRefreshDriver::EnsureTimerStarted(bool aAdjustingTimer)
     mActiveTimer->AddRefreshDriver(this);
   }
 
-  mMostRecentRefresh = mActiveTimer->MostRecentRefresh();
-  mMostRecentRefreshEpochTime = mActiveTimer->MostRecentRefreshEpochTime();
+  // Since the different timers are sampled at different rates, when switching
+  // timers, the most recent refresh of the new timer may be *before* the
+  // most recent refresh of the old timer. However, the refresh driver time
+  // should not go backwards so we clamp the most recent refresh time.
+  mMostRecentRefresh =
+    std::max(mActiveTimer->MostRecentRefresh(), mMostRecentRefresh);
+  mMostRecentRefreshEpochTime =
+    std::max(mActiveTimer->MostRecentRefreshEpochTime(),
+             mMostRecentRefreshEpochTime);
 }
 
 void
@@ -987,19 +1020,13 @@ nsRefreshDriver::ArrayFor(mozFlushType aFlushType)
 }
 
 /*
- * nsISupports implementation
- */
-
-NS_IMPL_ISUPPORTS1(nsRefreshDriver, nsISupports)
-
-/*
  * nsITimerCallback implementation
  */
 
 void
 nsRefreshDriver::DoTick()
 {
-  NS_PRECONDITION(!mFrozen, "Why are we notified while frozen?");
+  NS_PRECONDITION(!IsFrozen(), "Why are we notified while frozen?");
   NS_PRECONDITION(mPresContext, "Why are we notified after disconnection?");
   NS_PRECONDITION(!nsContentUtils::GetCurrentJSContext(),
                   "Shouldn't have a JSContext on the stack");
@@ -1012,13 +1039,59 @@ nsRefreshDriver::DoTick()
 }
 
 struct DocumentFrameCallbacks {
-  DocumentFrameCallbacks(nsIDocument* aDocument) :
+  explicit DocumentFrameCallbacks(nsIDocument* aDocument) :
     mDocument(aDocument)
   {}
 
   nsCOMPtr<nsIDocument> mDocument;
   nsIDocument::FrameRequestCallbackList mCallbacks;
 };
+
+static nsDocShell* GetDocShell(nsPresContext* aPresContext)
+{
+  return static_cast<nsDocShell*>(aPresContext->GetDocShell());
+}
+
+/**
+ * Return a list of all the child docShells in a given root docShell that are
+ * visible and are recording markers for the profilingTimeline
+ */
+static void GetProfileTimelineSubDocShells(nsDocShell* aRootDocShell,
+                                           nsTArray<nsDocShell*>& aShells)
+{
+  if (!aRootDocShell || nsDocShell::gProfileTimelineRecordingsCount == 0) {
+    return;
+  }
+
+  nsCOMPtr<nsISimpleEnumerator> enumerator;
+  nsresult rv = aRootDocShell->GetDocShellEnumerator(nsIDocShellTreeItem::typeAll,
+    nsIDocShell::ENUMERATE_BACKWARDS, getter_AddRefs(enumerator));
+
+  if (NS_FAILED(rv)) {
+    return;
+  }
+
+  nsCOMPtr<nsIDocShell> curItem;
+  bool hasMore = false;
+  while (NS_SUCCEEDED(enumerator->HasMoreElements(&hasMore)) && hasMore) {
+    nsCOMPtr<nsISupports> curSupports;
+    enumerator->GetNext(getter_AddRefs(curSupports));
+    curItem = do_QueryInterface(curSupports);
+
+    if (!curItem || !curItem->GetRecordProfileTimelineMarkers()) {
+      continue;
+    }
+
+    nsDocShell* shell = static_cast<nsDocShell*>(curItem.get());
+    bool isVisible = false;
+    shell->GetVisibility(&isVisible);
+    if (!isVisible) {
+      continue;
+    }
+
+    aShells.AppendElement(shell);
+  };
+}
 
 void
 nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
@@ -1032,12 +1105,13 @@ nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
     return;
   }
 
-  PROFILER_LABEL("nsRefreshDriver", "Tick");
+  PROFILER_LABEL("nsRefreshDriver", "Tick",
+    js::ProfileEntry::Category::GRAPHICS);
 
   // We're either frozen or we were disconnected (likely in the middle
   // of a tick iteration).  Just do nothing here, since our
   // prescontext went away.
-  if (mFrozen || !mPresContext) {
+  if (IsFrozen() || !mPresContext) {
     return;
   }
 
@@ -1045,6 +1119,19 @@ nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
 
   mMostRecentRefresh = aNowTime;
   mMostRecentRefreshEpochTime = aNowEpoch;
+
+  if (IsWaitingForPaint(aNowTime)) {
+    // We're currently suspended waiting for earlier Tick's to
+    // be completed (on the Compositor). Mark that we missed the paint
+    // and keep waiting.
+    return;
+  }
+  mMostRecentTick = aNowTime;
+  if (mRootRefresh) {
+    mRootRefresh->RemoveRefreshObserver(this, Flush_Style);
+    mRootRefresh = nullptr;
+  }
+  mSkippedPaints = false;
 
   nsCOMPtr<nsIPresShell> presShell = mPresContext->GetPresShell();
   if (!presShell || (ObserverCount() == 0 && ImageRequestCount() == 0)) {
@@ -1059,10 +1146,11 @@ nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
     return;
   }
 
-  profiler_tracing("Paint", "RD", TRACING_INTERVAL_START);
-
   AutoRestore<bool> restoreInRefresh(mInRefresh);
   mInRefresh = true;
+
+  AutoRestore<TimeStamp> restoreTickStart(mTickStart);
+  mTickStart = TimeStamp::Now();
 
   /*
    * The timer holds a reference to |this| while calling |Notify|.
@@ -1078,12 +1166,13 @@ nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
       
       if (!mPresContext || !mPresContext->GetPresShell()) {
         StopTimer();
-        profiler_tracing("Paint", "RD", TRACING_INTERVAL_END);
         return;
       }
     }
 
     if (i == 0) {
+      // This is the Flush_Style case.
+
       // Grab all of our frame request callbacks up front.
       nsTArray<DocumentFrameCallbacks>
         frameRequestCallbacks(mFrameRequestCallbackDocs.Length());
@@ -1125,8 +1214,8 @@ nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
       }
       profiler_tracing("Paint", "Scripts", TRACING_INTERVAL_END);
 
-      // This is the Flush_Style case.
       if (mPresContext && mPresContext->GetPresShell()) {
+        bool tracingStyleFlush = false;
         nsAutoTArray<nsIPresShell*, 16> observers;
         observers.AppendElements(mStyleFlushObservers);
         for (uint32_t j = observers.Length();
@@ -1136,16 +1225,48 @@ nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
           nsIPresShell* shell = observers[j - 1];
           if (!mStyleFlushObservers.Contains(shell))
             continue;
+
+          nsRefPtr<nsDocShell> docShell = GetDocShell(shell->GetPresContext());
+          if (docShell) {
+            docShell->AddProfileTimelineMarker("Styles", TRACING_INTERVAL_START);
+          }
+
+          if (!tracingStyleFlush) {
+            tracingStyleFlush = true;
+            profiler_tracing("Paint", "Styles", mStyleCause, TRACING_INTERVAL_START);
+            mStyleCause = nullptr;
+          }
+
           NS_ADDREF(shell);
           mStyleFlushObservers.RemoveElement(shell);
           shell->GetPresContext()->RestyleManager()->mObservingRefreshDriver = false;
           shell->FlushPendingNotifications(ChangesToFlush(Flush_Style, false));
+          // Inform the FontFaceSet that we ticked, so that it can resolve its
+          // ready promise if it needs to (though it might still be waiting on
+          // a layout flush).
+          nsPresContext* presContext = shell->GetPresContext();
+          if (presContext) {
+            presContext->NotifyFontFaceSetOnRefresh();
+          }
           NS_RELEASE(shell);
+
+          if (docShell) {
+            docShell->AddProfileTimelineMarker("Styles", TRACING_INTERVAL_END);
+          }
         }
+
+        if (tracingStyleFlush) {
+          profiler_tracing("Paint", "Styles", TRACING_INTERVAL_END);
+        }
+      }
+
+      if (!nsLayoutUtils::AreAsyncAnimationsEnabled()) {
+        mPresContext->TickLastStyleUpdateForAllAnimations();
       }
     } else if  (i == 1) {
       // This is the Flush_Layout case.
       if (mPresContext && mPresContext->GetPresShell()) {
+        bool tracingLayoutFlush = false;
         nsAutoTArray<nsIPresShell*, 16> observers;
         observers.AppendElements(mLayoutFlushObservers);
         for (uint32_t j = observers.Length();
@@ -1155,13 +1276,30 @@ nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
           nsIPresShell* shell = observers[j - 1];
           if (!mLayoutFlushObservers.Contains(shell))
             continue;
+
+          if (!tracingLayoutFlush) {
+            tracingLayoutFlush = true;
+            profiler_tracing("Paint", "Reflow", mReflowCause, TRACING_INTERVAL_START);
+            mReflowCause = nullptr;
+          }
+
           NS_ADDREF(shell);
           mLayoutFlushObservers.RemoveElement(shell);
           shell->mReflowScheduled = false;
           shell->mSuppressInterruptibleReflows = false;
           shell->FlushPendingNotifications(ChangesToFlush(Flush_InterruptibleLayout,
                                                           false));
+          // Inform the FontFaceSet that we ticked, so that it can resolve its
+          // ready promise if it needs to.
+          nsPresContext* presContext = shell->GetPresContext();
+          if (presContext) {
+            presContext->NotifyFontFaceSetOnRefresh();
+          }
           NS_RELEASE(shell);
+        }
+
+        if (tracingLayoutFlush) {
+          profiler_tracing("Paint", "Reflow", TRACING_INTERVAL_END);
         }
       }
     }
@@ -1196,6 +1334,15 @@ nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
   mPresShellsToInvalidateIfHidden.Clear();
 
   if (mViewManagerFlushIsPending) {
+    nsTArray<nsDocShell*> profilingDocShells;
+    GetProfileTimelineSubDocShells(GetDocShell(mPresContext), profilingDocShells);
+    for (uint32_t i = 0; i < profilingDocShells.Length(); i ++) {
+      // For the sake of the profile timeline's simplicity, this is flagged as
+      // paint even if it includes creating display lists
+      profilingDocShells[i]->AddProfileTimelineMarker("Paint",
+                                                      TRACING_INTERVAL_START);
+    }
+    profiler_tracing("Paint", "DisplayList", TRACING_INTERVAL_START);
 #ifdef MOZ_DUMP_PAINTING
     if (nsLayoutUtils::InvalidationDebuggingIsEnabled()) {
       printf_stderr("Starting ProcessPendingUpdates\n");
@@ -1210,12 +1357,16 @@ nsRefreshDriver::Tick(int64_t aNowEpoch, TimeStamp aNowTime)
       printf_stderr("Ending ProcessPendingUpdates\n");
     }
 #endif
+    for (uint32_t i = 0; i < profilingDocShells.Length(); i ++) {
+      profilingDocShells[i]->AddProfileTimelineMarker("Paint",
+                                                      TRACING_INTERVAL_END);
+    }
+    profiler_tracing("Paint", "DisplayList", TRACING_INTERVAL_END);
   }
 
   for (uint32_t i = 0; i < mPostRefreshObservers.Length(); ++i) {
     mPostRefreshObservers[i]->DidRefresh();
   }
-  profiler_tracing("Paint", "RD", TRACING_INTERVAL_END);
 
   NS_ASSERTION(mInRefresh, "Still in refresh");
 }
@@ -1264,8 +1415,8 @@ nsRefreshDriver::StartTableRefresh(const uint32_t& aDelay,
   ImageRequestParameters* parms =
     static_cast<ImageRequestParameters*> (aUserArg);
 
-  if (!aData->mStartTime.empty()) {
-    TimeStamp& start = aData->mStartTime.ref();
+  if (aData->mStartTime) {
+    TimeStamp& start = *aData->mStartTime;
     TimeDuration prev = parms->mPrevious - start;
     TimeDuration curr = parms->mCurrent - start;
     uint32_t prevMultiple = static_cast<uint32_t>(prev.ToMilliseconds()) / aDelay;
@@ -1284,7 +1435,7 @@ nsRefreshDriver::StartTableRefresh(const uint32_t& aDelay,
     // table to the main requests table.
     parms->mDesired = parms->mCurrent;
     aData->mEntries.EnumerateEntries(nsRefreshDriver::BeginRefreshingImages, parms);
-    aData->mStartTime.construct(parms->mCurrent);
+    aData->mStartTime.emplace(parms->mCurrent);
   }
 
   return PL_DHASH_NEXT;
@@ -1293,24 +1444,144 @@ nsRefreshDriver::StartTableRefresh(const uint32_t& aDelay,
 void
 nsRefreshDriver::Freeze()
 {
-  NS_ASSERTION(!mFrozen, "Freeze called on already-frozen refresh driver");
   StopTimer();
-  mFrozen = true;
+  mFreezeCount++;
 }
 
 void
 nsRefreshDriver::Thaw()
 {
-  NS_ASSERTION(mFrozen, "Thaw called on an unfrozen refresh driver");
-  mFrozen = false;
-  if (ObserverCount() || ImageRequestCount()) {
-    // FIXME: This isn't quite right, since our EnsureTimerStarted call
-    // updates our mMostRecentRefresh, but the DoRefresh call won't run
-    // and notify our observers until we get back to the event loop.
-    // Thus MostRecentRefresh() will lie between now and the DoRefresh.
-    NS_DispatchToCurrentThread(NS_NewRunnableMethod(this, &nsRefreshDriver::DoRefresh));
-    EnsureTimerStarted(false);
+  NS_ASSERTION(mFreezeCount > 0, "Thaw() called on an unfrozen refresh driver");
+
+  if (mFreezeCount > 0) {
+    mFreezeCount--;
   }
+
+  if (mFreezeCount == 0) {
+    if (ObserverCount() || ImageRequestCount()) {
+      // FIXME: This isn't quite right, since our EnsureTimerStarted call
+      // updates our mMostRecentRefresh, but the DoRefresh call won't run
+      // and notify our observers until we get back to the event loop.
+      // Thus MostRecentRefresh() will lie between now and the DoRefresh.
+      NS_DispatchToCurrentThread(NS_NewRunnableMethod(this, &nsRefreshDriver::DoRefresh));
+      EnsureTimerStarted(false);
+    }
+  }
+}
+
+void
+nsRefreshDriver::FinishedWaitingForTransaction()
+{
+  mWaitingForTransaction = false;
+  if (mSkippedPaints &&
+      !IsInRefresh() &&
+      (ObserverCount() || ImageRequestCount())) {
+    profiler_tracing("Paint", "RD", TRACING_INTERVAL_START);
+    DoRefresh();
+    profiler_tracing("Paint", "RD", TRACING_INTERVAL_END);
+  }
+  mSkippedPaints = false;
+}
+
+uint64_t
+nsRefreshDriver::GetTransactionId()
+{
+  ++mPendingTransaction;
+
+  if (mPendingTransaction >= mCompletedTransaction + 2 &&
+      !mWaitingForTransaction &&
+      !mTestControllingRefreshes) {
+    mWaitingForTransaction = true;
+    mSkippedPaints = false;
+  }
+
+  return mPendingTransaction;
+}
+
+void
+nsRefreshDriver::RevokeTransactionId(uint64_t aTransactionId)
+{
+  MOZ_ASSERT(aTransactionId == mPendingTransaction);
+  if (mPendingTransaction == mCompletedTransaction + 2 &&
+      mWaitingForTransaction) {
+    MOZ_ASSERT(!mSkippedPaints, "How did we skip a paint when we're in the middle of one?");
+    FinishedWaitingForTransaction();
+  }
+  mPendingTransaction--;
+}
+
+mozilla::TimeStamp
+nsRefreshDriver::GetTransactionStart()
+{
+  return mTickStart;
+}
+
+void
+nsRefreshDriver::NotifyTransactionCompleted(uint64_t aTransactionId)
+{
+  if (aTransactionId > mCompletedTransaction) {
+    if (mPendingTransaction > mCompletedTransaction + 1 &&
+        mWaitingForTransaction) {
+      mCompletedTransaction = aTransactionId;
+      FinishedWaitingForTransaction();
+    } else {
+      mCompletedTransaction = aTransactionId;
+    }
+  }
+}
+
+void
+nsRefreshDriver::WillRefresh(mozilla::TimeStamp aTime)
+{
+  mRootRefresh->RemoveRefreshObserver(this, Flush_Style);
+  mRootRefresh = nullptr;
+  if (mSkippedPaints) {
+    DoRefresh();
+  }
+}
+
+bool
+nsRefreshDriver::IsWaitingForPaint(mozilla::TimeStamp aTime)
+{
+  if (mTestControllingRefreshes) {
+    return false;
+  }
+  // If we've skipped too many ticks then it's possible
+  // that something went wrong and we're waiting on
+  // a notification that will never arrive.
+  if (aTime > (mMostRecentTick + TimeDuration::FromMilliseconds(200))) {
+    mSkippedPaints = false;
+    mWaitingForTransaction = false;
+    if (mRootRefresh) {
+      mRootRefresh->RemoveRefreshObserver(this, Flush_Style);
+    }
+    return false;
+  }
+  if (mWaitingForTransaction) {
+    mSkippedPaints = true;
+    return true;
+  }
+
+  // Try find the 'root' refresh driver for the current window and check
+  // if that is waiting for a paint.
+  nsPresContext *displayRoot = PresContext()->GetDisplayRootPresContext();
+  if (displayRoot) {
+    nsRefreshDriver *rootRefresh = displayRoot->GetRootPresContext()->RefreshDriver();
+    if (rootRefresh && rootRefresh != this) {
+      if (rootRefresh->IsWaitingForPaint(aTime)) {
+        if (mRootRefresh != rootRefresh) {
+          if (mRootRefresh) {
+            mRootRefresh->RemoveRefreshObserver(this, Flush_Style);
+          }
+          rootRefresh->AddRefreshObserver(this, Flush_Style);
+          mRootRefresh = rootRefresh;
+        }
+        mSkippedPaints = true;
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 void
@@ -1330,7 +1601,7 @@ void
 nsRefreshDriver::DoRefresh()
 {
   // Don't do a refresh unless we're in a state where we should be refreshing.
-  if (!mFrozen && mPresContext && mActiveTimer) {
+  if (!IsFrozen() && mPresContext && mActiveTimer) {
     DoTick();
   }
 }

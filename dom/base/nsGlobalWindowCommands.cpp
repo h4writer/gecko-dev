@@ -92,14 +92,13 @@ const char * const sSelectBottomString = "cmd_selectBottom";
 class nsSelectionCommandsBase : public nsIControllerCommand
 {
 public:
-  virtual ~nsSelectionCommandsBase() {}
-
   NS_DECL_ISUPPORTS
   NS_IMETHOD IsCommandEnabled(const char * aCommandName, nsISupports *aCommandContext, bool *_retval);
   NS_IMETHOD GetCommandStateParams(const char * aCommandName, nsICommandParams *aParams, nsISupports *aCommandContext);
   NS_IMETHOD DoCommandParams(const char * aCommandName, nsICommandParams *aParams, nsISupports *aCommandContext);
 
 protected:
+  virtual ~nsSelectionCommandsBase() {}
 
   static nsresult  GetPresShellFromWindow(nsPIDOMWindow *aWindow, nsIPresShell **aPresShell);
   static nsresult  GetSelectionControllerFromWindow(nsPIDOMWindow *aWindow, nsISelectionController **aSelCon);
@@ -132,7 +131,7 @@ public:
 #endif
 
 
-NS_IMPL_ISUPPORTS1(nsSelectionCommandsBase, nsIControllerCommand)
+NS_IMPL_ISUPPORTS(nsSelectionCommandsBase, nsIControllerCommand)
 
 /* boolean isCommandEnabled (in string aCommandName, in nsISupports aCommandContext); */
 NS_IMETHODIMP
@@ -245,12 +244,8 @@ nsSelectMoveScrollCommand::DoCommand(const char *aCommandName, nsISupports *aCom
     caretOn = Preferences::GetBool("accessibility.browsewithcaret");
     if (caretOn) {
       nsCOMPtr<nsIDocShell> docShell = piWindow->GetDocShell();
-      if (docShell) {
-        int32_t itemType;
-        docShell->GetItemType(&itemType);
-        if (itemType == nsIDocShellTreeItem::typeChrome) {
-          caretOn = false;
-        }
+      if (docShell && docShell->ItemType() == nsIDocShellTreeItem::typeChrome) {
+        caretOn = false;
       }
     }
   }
@@ -327,13 +322,15 @@ nsSelectCommand::DoCommand(const char *aCommandName, nsISupports *aCommandContex
 
 class nsClipboardCommand MOZ_FINAL : public nsIControllerCommand
 {
+  ~nsClipboardCommand() {}
+
 public:
 
   NS_DECL_ISUPPORTS
   NS_DECL_NSICONTROLLERCOMMAND
 };
 
-NS_IMPL_ISUPPORTS1(nsClipboardCommand, nsIControllerCommand)
+NS_IMPL_ISUPPORTS(nsClipboardCommand, nsIControllerCommand)
 
 nsresult
 nsClipboardCommand::IsCommandEnabled(const char* aCommandName, nsISupports *aContext, bool *outCmdEnabled)
@@ -391,12 +388,11 @@ nsClipboardCommand::DoCommandParams(const char *aCommandName, nsICommandParams* 
 class nsSelectionCommand : public nsIControllerCommand
 {
 public:
-  virtual ~nsSelectionCommand() {}
-
   NS_DECL_ISUPPORTS
   NS_DECL_NSICONTROLLERCOMMAND
 
 protected:
+  virtual ~nsSelectionCommand() {}
 
   virtual nsresult    IsClipboardCommandEnabled(const char * aCommandName, nsIContentViewerEdit* aEdit, bool *outCmdEnabled) = 0;
   virtual nsresult    DoClipboardCommand(const char *aCommandName, nsIContentViewerEdit* aEdit, nsICommandParams* aParams) = 0;
@@ -407,7 +403,7 @@ protected:
 };
 
 
-NS_IMPL_ISUPPORTS1(nsSelectionCommand, nsIControllerCommand)
+NS_IMPL_ISUPPORTS(nsSelectionCommand, nsIControllerCommand)
 
 
 /*---------------------------------------------------------------------------
@@ -638,7 +634,7 @@ protected:
      no params
 ----------------------------------------------------------------------------*/
 
-NS_IMPL_ISUPPORTS1(nsWebNavigationBaseCommand, nsIControllerCommand)
+NS_IMPL_ISUPPORTS(nsWebNavigationBaseCommand, nsIControllerCommand)
 
 NS_IMETHODIMP
 nsWebNavigationBaseCommand::IsCommandEnabled(const char * aCommandName,
@@ -726,6 +722,8 @@ nsGoBackCommand::DoWebNavCommand(const char *aCommandName, nsIWebNavigation* aWe
 
 class nsClipboardDragDropHookCommand MOZ_FINAL : public nsIControllerCommand
 {
+  ~nsClipboardDragDropHookCommand() {}
+
 public:
 
   NS_DECL_ISUPPORTS
@@ -736,7 +734,7 @@ protected:
 };
 
 
-NS_IMPL_ISUPPORTS1(nsClipboardDragDropHookCommand, nsIControllerCommand)
+NS_IMPL_ISUPPORTS(nsClipboardDragDropHookCommand, nsIControllerCommand)
 
 NS_IMETHODIMP
 nsClipboardDragDropHookCommand::IsCommandEnabled(const char * aCommandName,

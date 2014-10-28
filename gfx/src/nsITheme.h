@@ -16,6 +16,7 @@
 struct nsRect;
 struct nsIntRect;
 struct nsIntSize;
+class nsIntRegion;
 struct nsFont;
 struct nsIntMargin;
 class nsPresContext;
@@ -27,14 +28,14 @@ class nsIAtom;
 class nsIWidget;
 
 // IID for the nsITheme interface
-// {b0f3efe9-0bd4-4f6b-8daa-0ec7f6006822}
+// {cc3a6c72-50c2-414d-b9f2-b778a5e0f136}
  #define NS_ITHEME_IID     \
-{ 0x3ca584e6, 0xdcd6, 0x485b, \
-  { 0x88, 0x8c, 0xe3, 0x47, 0x3d, 0xe4, 0xd9, 0x58 } }
-// {D930E29B-6909-44e5-AB4B-AF10D6923705}
+{ 0xcc3a6c72, 0x50c2, 0x414d, \
+  { 0xb9, 0xf2, 0xb7, 0x78, 0xa5, 0xe0, 0xf1, 0x36 } }
+// {0ae05515-cf7a-45a8-9e02-6556de7685b1}
 #define NS_THEMERENDERER_CID \
-{ 0x9020805b, 0x14a3, 0x4125, \
-  { 0xa5, 0x63, 0x4a, 0x8c, 0x5d, 0xe0, 0xa9, 0xa3 } }
+{ 0x0ae05515, 0xcf7a, 0x45a8, \
+  { 0x9e, 0x02, 0x65, 0x56, 0xde, 0x76, 0x85, 0xb1 } }
 
 /**
  * nsITheme is a service that provides platform-specific native
@@ -112,7 +113,7 @@ public:
    * minimum size; if false, this size is the only valid size for the
    * widget.
    */
-  NS_IMETHOD GetMinimumWidgetSize(nsRenderingContext* aContext,
+  NS_IMETHOD GetMinimumWidgetSize(nsPresContext* aPresContext,
                                   nsIFrame* aFrame,
                                   uint8_t aWidgetType,
                                   nsIntSize* aResult,
@@ -137,6 +138,13 @@ public:
   NS_IMETHOD ThemeChanged()=0;
 
   virtual bool WidgetAppearanceDependsOnWindowFocus(uint8_t aWidgetType)
+  { return false; }
+
+  virtual bool NeedToClearBackgroundBehindWidget(uint8_t aWidgetType)
+  { return false; }
+
+  virtual bool WidgetProvidesFontSmoothingBackgroundColor(nsIFrame* aFrame,
+                                      uint8_t aWidgetType, nscolor* aColor)
   { return false; }
 
   /**

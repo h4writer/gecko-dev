@@ -68,12 +68,20 @@ void
 PathBuilderCG::Arc(const Point &aOrigin, Float aRadius, Float aStartAngle,
                  Float aEndAngle, bool aAntiClockwise)
 {
+  // Core Graphic's initial coordinate system is y-axis up, whereas Moz2D's is
+  // y-axis down. Core Graphics therefore considers "clockwise" to mean "sweep
+  // in the direction of decreasing angle" whereas Moz2D considers it to mean
+  // "sweep in the direction of increasing angle". In other words if this
+  // Moz2D method is instructed to sweep anti-clockwise we need to tell
+  // CGPathAddArc to sweep clockwise, and vice versa. Hence why we pass the
+  // value of aAntiClockwise directly to CGPathAddArc's "clockwise" bool
+  // parameter.
   CGPathAddArc(mCGPath, nullptr,
                aOrigin.x, aOrigin.y,
                aRadius,
                aStartAngle,
                aEndAngle,
-               !aAntiClockwise);
+               aAntiClockwise);
 }
 
 Point
@@ -92,16 +100,14 @@ PathBuilderCG::EnsureActive(const Point &aPoint)
 TemporaryRef<Path>
 PathBuilderCG::Finish()
 {
-  RefPtr<PathCG> path = new PathCG(mCGPath, mFillRule);
-  return path;
+  return new PathCG(mCGPath, mFillRule);
 }
 
 TemporaryRef<PathBuilder>
 PathCG::CopyToBuilder(FillRule aFillRule) const
 {
   CGMutablePathRef path = CGPathCreateMutableCopy(mPath);
-  RefPtr<PathBuilderCG> builder = new PathBuilderCG(path, aFillRule);
-  return builder;
+  return new PathBuilderCG(path, aFillRule);
 }
 
 
@@ -161,8 +167,7 @@ PathCG::TransformedCopyToBuilder(const Matrix &aTransform, FillRule aFillRule) c
   ta.transform = GfxMatrixToCGAffineTransform(aTransform);
 
   CGPathApply(mPath, &ta, TransformApplier::TranformCGPathApplierFunc);
-  RefPtr<PathBuilderCG> builder = new PathBuilderCG(ta.path, aFillRule);
-  return builder;
+  return new PathBuilderCG(ta.path, aFillRule);
 }
 
 static void
@@ -225,7 +230,7 @@ PathCG::ContainsPoint(const Point &aPoint, const Matrix &aTransform) const
 
   // The transform parameter of CGPathContainsPoint doesn't seem to work properly on OS X 10.5
   // so we transform aPoint ourselves.
-  return CGPathContainsPoint(mPath, nullptr, point, mFillRule == FILL_EVEN_ODD);
+  return CGPathContainsPoint(mPath, nullptr, point, mFillRule == FillRule::FILL_EVEN_ODD);
 }
 
 static size_t
@@ -289,10 +294,8 @@ PathCG::GetBounds(const Matrix &aTransform) const
 {
   //XXX: are these bounds tight enough
   Rect bounds = CGRectToRect(CGPathGetBoundingBox(mPath));
-  if (!bounds.IsFinite()) {
-    return Rect();
-  }
-  //XXX: curretnly this returns the bounds of the transformed bounds
+
+  //XXX: currently this returns the bounds of the transformed bounds
   // this is strictly looser than the bounds of the transformed path
   return aTransform.TransformBounds(bounds);
 }

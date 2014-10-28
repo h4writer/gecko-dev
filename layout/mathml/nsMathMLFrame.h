@@ -92,6 +92,18 @@ public:
     return NS_OK;
   }
 
+  uint8_t
+  ScriptIncrement(nsIFrame* aFrame) MOZ_OVERRIDE
+  {
+    return 0;
+  }
+
+  bool
+  IsMrowLike() MOZ_OVERRIDE
+  {
+    return false;
+  }
+
   // helper to give a style context suitable for doing the stretching to the
   // MathMLChar. Frame classes that use this should make the extra style contexts
   // accessible to the Style System via Get/Set AdditionalStyleContext.
@@ -99,8 +111,7 @@ public:
   ResolveMathMLCharStyle(nsPresContext*  aPresContext,
                          nsIContent*      aContent,
                          nsStyleContext*  aParenStyleContext,
-                         nsMathMLChar*    aMathMLChar,
-                         bool             aIsMutableChar);
+                         nsMathMLChar*    aMathMLChar);
 
   // helper to get the mEmbellishData of a frame
   // The MathML REC precisely defines an "embellished operator" as:
@@ -127,21 +138,6 @@ public:
   GetPresentationDataFrom(nsIFrame*           aFrame,
                           nsPresentationData& aPresentationData,
                           bool                aClimbTree = true);
-
-  // helper used by <mstyle> and <mtable> to see if they have a displaystyle attribute 
-  static void
-  FindAttrDisplaystyle(nsIContent*         aContent,
-                       nsPresentationData& aPresentationData);
-
-  // helper to check if a content has an attribute. If content is nullptr or if
-  // the attribute is not there, check if the attribute is on the mstyle hierarchy
-  // @return true     --if attribute exists
-  //         false --if attribute doesn't exist
-  static bool
-  GetAttribute(nsIContent* aContent,
-               nsIFrame*   aMathMLmstyleFrame,          
-               nsIAtom*    aAttributeAtom,
-               nsString&   aValue);
 
   // utilities to parse and retrieve numeric values in CSS units
   // All values are stored in twips.
@@ -342,6 +338,13 @@ public:
   GetAxisHeight(nsRenderingContext& aRenderingContext, 
                 nsFontMetrics*      aFontMetrics,
                 nscoord&             aAxisHeight);
+
+  static void
+  GetRadicalParameters(nsFontMetrics* aFontMetrics,
+                       bool aDisplayStyle,
+                       nscoord& aRadicalRuleThickness,
+                       nscoord& aRadicalExtraAscender,
+                       nscoord& aRadicalVerticalGap);
 
 protected:
 #if defined(DEBUG) && defined(SHOW_BOUNDING_BOX)

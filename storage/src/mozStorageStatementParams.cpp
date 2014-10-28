@@ -4,6 +4,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "nsJSUtils.h"
 #include "nsMemory.h"
 #include "nsString.h"
 
@@ -26,7 +27,7 @@ StatementParams::StatementParams(mozIStorageStatement *aStatement) :
   (void)mStatement->GetParameterCount(&mParamCount);
 }
 
-NS_IMPL_ISUPPORTS2(
+NS_IMPL_ISUPPORTS(
   StatementParams,
   mozIStorageStatementParams,
   nsIXPCScriptable
@@ -63,10 +64,12 @@ StatementParams::SetProperty(nsIXPConnectWrappedNative *aWrapper,
   }
   else if (JSID_IS_STRING(aId)) {
     JSString *str = JSID_TO_STRING(aId);
-    size_t length;
-    const jschar *chars = JS_GetStringCharsAndLength(aCtx, str, &length);
-    NS_ENSURE_TRUE(chars, NS_ERROR_UNEXPECTED);
-    NS_ConvertUTF16toUTF8 name(chars, length);
+    nsAutoJSString autoStr;
+    if (!autoStr.init(aCtx, str)) {
+      return NS_ERROR_FAILURE;
+    }
+
+    NS_ConvertUTF16toUTF8 name(autoStr);
 
     // check to see if there's a parameter with this name
     nsCOMPtr<nsIVariant> variant(convertJSValToVariant(aCtx, *_vp));
@@ -111,7 +114,7 @@ StatementParams::NewEnumerate(nsIXPConnectWrappedNative *aWrapper,
       NS_ASSERTION(*_statep != JSVAL_NULL, "Internal state is null!");
 
       // Make sure we are in range first.
-      uint32_t index = static_cast<uint32_t>(JSVAL_TO_INT(*_statep));
+      uint32_t index = static_cast<uint32_t>(_statep->toInt32());
       if (index >= mParamCount) {
         *_statep = JSVAL_NULL;
         return NS_OK;
@@ -123,15 +126,17 @@ StatementParams::NewEnumerate(nsIXPConnectWrappedNative *aWrapper,
       NS_ENSURE_SUCCESS(rv, rv);
 
       // But drop the first character, which is going to be a ':'.
-      JSString *jsname = ::JS_NewStringCopyN(aCtx, &(name.get()[1]),
-                                             name.Length() - 1);
+      JS::RootedString jsname(aCtx, ::JS_NewStringCopyN(aCtx, &(name.get()[1]),
+                                                        name.Length() - 1));
       NS_ENSURE_TRUE(jsname, NS_ERROR_OUT_OF_MEMORY);
 
       // Set our name.
-      if (!::JS_ValueToId(aCtx, STRING_TO_JSVAL(jsname), _idp)) {
+      JS::Rooted<jsid> id(aCtx);
+      if (!::JS_StringToId(aCtx, jsname, &id)) {
         *_retval = false;
         return NS_OK;
       }
+      *_idp = id;
 
       // And increment our index.
       *_statep = INT_TO_JSVAL(++index);
@@ -155,7 +160,6 @@ StatementParams::NewResolve(nsIXPConnectWrappedNative *aWrapper,
                             JSContext *aCtx,
                             JSObject *aScopeObj,
                             jsid aId,
-                            uint32_t aFlags,
                             JSObject **_objp,
                             bool *_retval)
 {
@@ -176,24 +180,23 @@ StatementParams::NewResolve(nsIXPConnectWrappedNative *aWrapper,
     if (idx >= mParamCount)
       return NS_ERROR_INVALID_ARG;
 
-    ok = ::JS_DefineElement(aCtx, scope, idx, JSVAL_VOID, nullptr,
-                            nullptr, JSPROP_ENUMERATE);
+    ok = ::JS_DefineElement(aCtx, scope, idx, JS::UndefinedHandleValue, JSPROP_ENUMERATE);
     resolved = true;
   }
   else if (JSID_IS_STRING(id)) {
     JSString *str = JSID_TO_STRING(id);
-    size_t nameLength;
-    const jschar *nameChars = JS_GetStringCharsAndLength(aCtx, str, &nameLength);
-    NS_ENSURE_TRUE(nameChars, NS_ERROR_UNEXPECTED);
+    nsAutoJSString autoStr;
+    if (!autoStr.init(aCtx, str)) {
+      return NS_ERROR_FAILURE;
+    }
 
     // Check to see if there's a parameter with this name, and if not, let
     // the rest of the prototype chain be checked.
-    NS_ConvertUTF16toUTF8 name(nameChars, nameLength);
+    NS_ConvertUTF16toUTF8 name(autoStr);
     uint32_t idx;
     nsresult rv = mStatement->GetParameterIndex(name, &idx);
     if (NS_SUCCEEDED(rv)) {
-      ok = ::JS_DefinePropertyById(aCtx, scope, id, JSVAL_VOID, nullptr,
-                                   nullptr, JSPROP_ENUMERATE);
+      ok = ::JS_DefinePropertyById(aCtx, scope, id, JS::UndefinedHandleValue, JSPROP_ENUMERATE);
       resolved = true;
     }
   }

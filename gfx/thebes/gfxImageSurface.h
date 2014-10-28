@@ -7,6 +7,7 @@
 #define GFX_IMAGESURFACE_H
 
 #include "mozilla/MemoryReporting.h"
+#include "mozilla/RefPtr.h"
 #include "gfxASurface.h"
 #include "nsAutoPtr.h"
 #include "nsSize.h"
@@ -17,6 +18,7 @@ class gfxSubimageSurface;
 
 namespace mozilla {
 namespace gfx {
+class DataSourceSurface;
 class SourceSurface;
 }
 }
@@ -67,7 +69,7 @@ public:
     gfxImageSurface(const gfxIntSize& aSize, gfxImageFormat aFormat,
                     long aStride, int32_t aMinimalAllocation, bool aClear);
 
-    gfxImageSurface(cairo_surface_t *csurf);
+    explicit gfxImageSurface(cairo_surface_t *csurf);
 
     virtual ~gfxImageSurface();
 
@@ -108,6 +110,12 @@ public:
      */
     bool CopyTo (mozilla::gfx::SourceSurface *aSurface);
 
+    /**
+     * Copy to a Moz2D DataSourceSurface.
+     * Marked as virtual so that browsercomps can access this method.
+     */
+    virtual mozilla::TemporaryRef<mozilla::gfx::DataSourceSurface> CopyToB8G8R8A8DataSourceSurface();
+
     /* return new Subimage with pointing to original image starting from aRect.pos
      * and size of aRect.size. New subimage keeping current image reference
      */
@@ -116,9 +124,6 @@ public:
     virtual already_AddRefed<gfxImageSurface> GetAsImageSurface();
 
     /** See gfxASurface.h. */
-    virtual void MovePixels(const nsIntRect& aSourceRect,
-                            const nsIntPoint& aDestTopLeft) MOZ_OVERRIDE;
-
     static long ComputeStride(const gfxIntSize&, gfxImageFormat);
 
     virtual size_t SizeOfExcludingThis(mozilla::MallocSizeOf aMallocSizeOf) const

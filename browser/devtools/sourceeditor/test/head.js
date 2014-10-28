@@ -4,8 +4,15 @@
 
 "use strict";
 
-const require = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools.require;
+const { devtools } = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+const { require } = devtools;
 const Editor  = require("devtools/sourceeditor/editor");
+const {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
+
+gDevTools.testing = true;
+SimpleTest.registerCleanupFunction(() => {
+  gDevTools.testing = false;
+});
 
 function setup(cb) {
   const opt = "chrome,titlebar,toolbar,centerscreen,resizable,dialog=no";
@@ -24,7 +31,8 @@ function setup(cb) {
       let editor = new Editor({
         value: "Hello.",
         lineNumbers: true,
-        gutters: [ "breakpoints" ]
+        foldGutter: true,
+        gutters: [ "CodeMirror-linenumbers", "breakpoints", "CodeMirror-foldgutter" ]
       });
 
       editor.appendTo(box)
@@ -43,4 +51,77 @@ function teardown(ed, win) {
   ed.destroy();
   win.close();
   finish();
+}
+
+/**
+ * Some tests may need to import one or more of the test helper scripts.
+ * A test helper script is simply a js file that contains common test code that
+ * is either not common-enough to be in head.js, or that is located in a separate
+ * directory.
+ * The script will be loaded synchronously and in the test's scope.
+ * @param {String} filePath The file path, relative to the current directory.
+ *                 Examples:
+ *                 - "helper_attributes_test_runner.js"
+ *                 - "../../../commandline/test/helpers.js"
+ */
+function loadHelperScript(filePath) {
+  let testDir = gTestPath.substr(0, gTestPath.lastIndexOf("/"));
+  Services.scriptloader.loadSubScript(testDir + "/" + filePath, this);
+}
+
+/**
+ * This method returns the portion of the input string `source` up to the
+ * [line, ch] location.
+ */
+function limit(source, [line, ch]) {
+  line++;
+  let list = source.split("\n");
+  if (list.length < line)
+    return source;
+  if (line == 1)
+    return list[0].slice(0, ch);
+  return [...list.slice(0, line - 1), list[line - 1].slice(0, ch)].join("\n");
+}
+
+function read(url) {
+  let scriptableStream = Cc["@mozilla.org/scriptableinputstream;1"]
+    .getService(Ci.nsIScriptableInputStream);
+
+  let channel = Services.io.newChannel(url, null, null);
+  let input = channel.open();
+  scriptableStream.init(input);
+
+  let data = "";
+  while (input.available()) {
+    data = data.concat(scriptableStream.read(input.available()));
+  }
+  scriptableStream.close();
+  input.close();
+
+  return data;
+}
+
+/**
+ * This function is called by the CodeMirror test runner to report status
+ * messages from the CM tests.
+ * @see codemirror.html
+ */
+function codeMirror_setStatus(statusMsg, type, customMsg) {
+  switch (type) {
+    case "expected":
+    case "ok":
+      ok(1, statusMsg);
+      break;
+    case "error":
+    case "fail":
+      ok(0, statusMsg);
+      break;
+    default:
+      info(statusMsg);
+      break;
+  }
+
+  if (customMsg && typeof customMsg == "string" && customMsg != statusMsg) {
+    info(customMsg);
+  }
 }

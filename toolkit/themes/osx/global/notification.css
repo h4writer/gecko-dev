@@ -68,10 +68,6 @@ notification[type="critical"] {
   border: none;
 }
 
-.messageCloseButton > .toolbarbutton-text {
-  display: none;
-}
-
 .messageCloseButton:-moz-focusring > .toolbarbutton-icon {
   border-radius: 10000px;
   box-shadow: 0 0 2px 1px -moz-mac-focusring,
@@ -88,6 +84,15 @@ notification[type="critical"] {
 
 .popup-notification-description {
   max-width: 24em;
+}
+
+.popup-notification-learnmore-link {
+  margin-top: 1em !important;
+  -moz-margin-start: 0 !important; /* override default label margin to match description margin */
+}
+
+.popup-notification-learnmore-link:not([href]) {
+  display: none;
 }
 
 .popup-notification-button-container {

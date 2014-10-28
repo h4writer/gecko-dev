@@ -14,6 +14,7 @@
 #include "nsIAppsService.h"
 #include "nsIPrincipal.h"
 #include "nsIScriptSecurityManager.h"
+#include "nsPrintfCString.h"
 #include "nsIURI.h"
 #include "nsNetUtil.h"
 #include "nsServiceManagerUtils.h"
@@ -75,12 +76,6 @@ AssertAppProcess(PBrowserParent* aActor,
         break;
     }
   }
-
-  if (!aValid) {
-    printf_stderr("Security problem: Content process does not have `%s'.  It will be killed.\n", aCapability);
-    ContentParent* process = tab->Manager();
-    process->KillHard();
-  }
   return aValid;
 }
 
@@ -105,12 +100,6 @@ AssertAppStatus(PBrowserParent* aActor,
     }
   }
 
-  if (!valid) {
-    printf_stderr("Security problem: Content process does not have `%d' status.  It will be killed.\n", aStatus);
-    ContentParent* process = tab->Manager();
-    process->KillHard();
-  }
-
   return valid;
 }
 
@@ -126,6 +115,14 @@ AssertAppProcess(PContentParent* aActor,
       return true;
     }
   }
+
+  NS_ERROR(
+    nsPrintfCString(
+      "Security problem: Content process does not have `%s'.  It will be killed.\n",
+      aCapability).get());
+
+  static_cast<ContentParent*>(aActor)->KillHard();
+
   return false;
 }
 
@@ -140,6 +137,14 @@ AssertAppStatus(PContentParent* aActor,
       return true;
     }
   }
+
+  NS_ERROR(
+    nsPrintfCString(
+      "Security problem: Content process does not have `%d' status.  It will be killed.",
+      aStatus).get());
+
+  static_cast<ContentParent*>(aActor)->KillHard();
+
   return false;
 }
 
@@ -189,12 +194,16 @@ GetAppPrincipal(uint32_t aAppId)
 {
   nsCOMPtr<nsIAppsService> appsService = do_GetService(APPS_SERVICE_CONTRACTID);
 
-  nsString manifestURL;
-  nsresult rv = appsService->GetManifestURLByLocalId(aAppId, manifestURL);
+  nsCOMPtr<mozIApplication> app;
+  nsresult rv = appsService->GetAppByLocalId(aAppId, getter_AddRefs(app));
+  NS_ENSURE_SUCCESS(rv, nullptr);
+
+  nsString origin;
+  rv = app->GetOrigin(origin);
   NS_ENSURE_SUCCESS(rv, nullptr);
 
   nsCOMPtr<nsIURI> uri;
-  NS_NewURI(getter_AddRefs(uri), manifestURL);
+  NS_NewURI(getter_AddRefs(uri), origin);
 
   nsCOMPtr<nsIScriptSecurityManager> secMan =
     do_GetService(NS_SCRIPTSECURITYMANAGER_CONTRACTID);
@@ -216,7 +225,7 @@ CheckPermission(PContentParent* aActor,
   }
 
   nsCOMPtr<nsIPermissionManager> pm =
-    do_GetService(NS_PERMISSIONMANAGER_CONTRACTID);
+    services::GetPermissionManager();
   NS_ENSURE_TRUE(pm, nsIPermissionManager::DENY_ACTION);
 
   // Make sure that `aPermission' is an app permission before checking the origin.
@@ -224,6 +233,7 @@ CheckPermission(PContentParent* aActor,
   uint32_t appPerm = nsIPermissionManager::UNKNOWN_ACTION;
   nsresult rv = pm->TestExactPermissionFromPrincipal(appPrincipal, aPermission, &appPerm);
   NS_ENSURE_SUCCESS(rv, nsIPermissionManager::UNKNOWN_ACTION);
+  // Setting to "deny" in the settings UI should deny everywhere.
   if (appPerm == nsIPermissionManager::UNKNOWN_ACTION ||
       appPerm == nsIPermissionManager::DENY_ACTION) {
     return appPerm;
@@ -237,6 +247,15 @@ CheckPermission(PContentParent* aActor,
     return permission;
   }
 
+  // For browser content (and if the app hasn't explicitly denied this),
+  // consider the requesting origin, not the app.
+  if (appPerm == nsIPermissionManager::PROMPT_ACTION &&
+      aPrincipal->GetIsInBrowserElement()) {
+    return permission;
+  }
+
+  // Setting to "prompt" in the settings UI should prompt everywhere in
+  // non-browser content.
   if (appPerm == nsIPermissionManager::PROMPT_ACTION ||
       permission == nsIPermissionManager::PROMPT_ACTION) {
     return nsIPermissionManager::PROMPT_ACTION;

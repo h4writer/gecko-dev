@@ -7,7 +7,12 @@ const { classes: Cc, interfaces: Ci, utils: Cu, results: Cr } = Components;
 
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
-Cu.import("resource://gre/modules/Prompt.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "Prompt",
+                                  "resource://gre/modules/Prompt.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "Messaging",
+                                  "resource://gre/modules/Messaging.jsm");
 
 XPCOMUtils.defineLazyGetter(this, "ContentAreaUtils", function() {
   let ContentAreaUtils = {};
@@ -26,16 +31,43 @@ function App(data) {
 }
 
 App.prototype = {
-  launch: function(uri) {
-    HelperApps._launchApp(this, uri);
+  // callback will be null if a result is not requested
+  launch: function(uri, callback) {
+    HelperApps._launchApp(this, uri, callback);
     return false;
   }
 }
 
 var HelperApps =  {
-  get defaultHttpHandlers() {
-    delete this.defaultHttpHandlers;
-    return this.defaultHttpHandlers = this.getAppsForProtocol("http");
+  get defaultBrowsers() {
+    delete this.defaultBrowsers;
+    this.defaultBrowsers = this._getHandlers("http://www.example.com", {
+      filterBrowsers: false,
+      filterHtml: false
+    });
+    return this.defaultBrowsers;
+  },
+
+  // Finds handlers that have registered for text/html pages or urls ending in html. Some apps, like
+  // the Samsung Video player will only appear for these urls, while some Browsers (like Link Bubble)
+  // won't register here because of the text/html mime type.
+  get defaultHtmlHandlers() {
+    delete this.defaultHtmlHandlers;
+    return this.defaultHtmlHandlers = this._getHandlers("http://www.example.com/index.html", {
+      filterBrowsers: false,
+      filterHtml: false
+    });
+  },
+
+  _getHandlers: function(url, options) {
+    let values = {};
+
+    let handlers = this.getAppsForUri(Services.io.newURI(url, null, null), options);
+    handlers.forEach(function(app) {
+      values[app.name] = app;
+    }, this);
+
+    return values;
   },
 
   get protoSvc() {
@@ -70,29 +102,57 @@ var HelperApps =  {
     return results;
   },
 
-  getAppsForUri: function getAppsForUri(uri, flags = { filterHttp: true }) {
-    flags.filterHttp = "filterHttp" in flags ? flags.filterHttp : true;
+  getAppsForUri: function getAppsForUri(uri, flags = { }, callback) {
+    flags.filterBrowsers = "filterBrowsers" in flags ? flags.filterBrowsers : true;
+    flags.filterHtml = "filterHtml" in flags ? flags.filterHtml : true;
 
     // Query for apps that can/can't handle the mimetype
     let msg = this._getMessage("Intent:GetHandlers", uri, flags);
-    let data = this._sendMessage(msg);
-    if (!data)
-      return [];
+    let parseData = (d) => {
+      let apps = []
 
-    let apps = this._parseApps(data.apps);
+      if (!d)
+        return apps;
 
-    if (flags.filterHttp) {
-      apps = apps.filter(function(app) {
-        return app.name && !this.defaultHttpHandlers[app.name];
-      }, this);
+      apps = this._parseApps(d.apps);
+
+      if (flags.filterBrowsers) {
+        apps = apps.filter((app) => {
+          return app.name && !this.defaultBrowsers[app.name];
+        });
+      }
+
+      // Some apps will register for html files (the Samsung Video player) but should be shown
+      // for non-HTML files (like videos). This filters them only if the page has an htm of html
+      // file extension.
+      if (flags.filterHtml) {
+        // Matches from the first '.' to the end of the string, '?', or '#'
+        let ext = /\.([^\?#]*)/.exec(uri.path);
+        if (ext && (ext[1] === "html" || ext[1] === "htm")) {
+          apps = apps.filter(function(app) {
+            return app.name && !this.defaultHtmlHandlers[app.name];
+          }, this);
+        }
+      }
+
+      return apps;
+    };
+
+    if (!callback) {
+      let data = this._sendMessageSync(msg);
+      if (!data)
+        return [];
+      return parseData(data);
+    } else {
+      Messaging.sendRequestForResult(msg).then(function(data) {
+        callback(parseData(data));
+      });
     }
-
-    return apps;
   },
 
   launchUri: function launchUri(uri) {
     let msg = this._getMessage("Intent:Open", uri);
-    this._sendMessage(msg);
+    Messaging.sendRequest(msg);
   },
 
   _parseApps: function _parseApps(appInfo) {
@@ -126,17 +186,34 @@ var HelperApps =  {
     };
   },
 
-  _launchApp: function launchApp(app, uri) {
-    let msg = this._getMessage("Intent:Open", uri, {
-      packageName: app.packageName,
-      className: app.activityName
-    });
+  _launchApp: function launchApp(app, uri, callback) {
+    if (callback) {
+        let msg = this._getMessage("Intent:OpenForResult", uri, {
+            packageName: app.packageName,
+            className: app.activityName
+        });
 
-    this._sendMessage(msg);
+        Messaging.sendRequestForResult(msg).then(callback);
+    } else {
+        let msg = this._getMessage("Intent:Open", uri, {
+            packageName: app.packageName,
+            className: app.activityName
+        });
+
+        Messaging.sendRequest(msg);
+    }
   },
 
-  _sendMessage: function(msg) {
-    let res = Services.androidBridge.handleGeckoMessage(JSON.stringify(msg));
-    return JSON.parse(res);
+  _sendMessageSync: function(msg) {
+    let res = null;
+    Messaging.sendRequestForResult(msg).then(function(data) {
+      res = data;
+    });
+
+    let thread = Services.tm.currentThread;
+    while (res == null)
+      thread.processNextEvent(true);
+
+    return res;
   },
 };

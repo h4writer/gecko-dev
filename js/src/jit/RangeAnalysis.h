@@ -32,20 +32,29 @@ struct LoopIterationBound : public TempObject
     // Loop for which this bound applies.
     MBasicBlock *header;
 
-    // Test from which this bound was derived. Code in the loop body which this
+    // Test from which this bound was derived; after executing exactly 'bound'
+    // times this test will exit the loop. Code in the loop body which this
     // test dominates (will include the backedge) will execute at most 'bound'
     // times. Other code in the loop will execute at most '1 + Max(bound, 0)'
     // times.
     MTest *test;
 
-    // Symbolic bound computed for the number of backedge executions.
-    LinearSum sum;
+    // Symbolic bound computed for the number of backedge executions. The terms
+    // in this bound are all loop invariant.
+    LinearSum boundSum;
 
-    LoopIterationBound(MBasicBlock *header, MTest *test, LinearSum sum)
-      : header(header), test(test), sum(sum)
+    // Linear sum for the number of iterations already executed, at the start
+    // of the loop header. This will use loop invariant terms and header phis.
+    LinearSum currentSum;
+
+    LoopIterationBound(MBasicBlock *header, MTest *test, LinearSum boundSum, LinearSum currentSum)
+      : header(header), test(test),
+        boundSum(boundSum), currentSum(currentSum)
     {
     }
 };
+
+typedef Vector<LoopIterationBound *, 0, SystemAllocPolicy> LoopIterationBoundVector;
 
 // A symbolic upper or lower bound computed for a term.
 struct SymbolicBound : public TempObject
@@ -90,7 +99,7 @@ class RangeAnalysis
     TempAllocator &alloc() const;
 
   public:
-    MOZ_CONSTEXPR RangeAnalysis(MIRGenerator *mir, MIRGraph &graph) :
+    RangeAnalysis(MIRGenerator *mir, MIRGraph &graph) :
         mir(mir), graph_(graph) {}
     bool addBetaNodes();
     bool analyze();
@@ -99,13 +108,15 @@ class RangeAnalysis
     bool prepareForUCE(bool *shouldRemoveDeadCode);
     bool truncate();
 
+    // Any iteration bounds discovered for loops in the graph.
+    LoopIterationBoundVector loopIterationBounds;
+
   private:
     bool analyzeLoop(MBasicBlock *header);
     LoopIterationBound *analyzeLoopIterationCount(MBasicBlock *header,
                                                   MTest *test, BranchDirection direction);
     void analyzeLoopPhi(MBasicBlock *header, LoopIterationBound *loopBound, MPhi *phi);
     bool tryHoistBoundsCheck(MBasicBlock *header, MBoundsCheck *ins);
-    bool markBlocksInLoopBody(MBasicBlock *header, MBasicBlock *current);
 };
 
 class Range : public TempObject {
@@ -121,10 +132,10 @@ class Range : public TempObject {
     // Maximal exponenent under which we have no precission loss on double
     // operations. Double has 52 bits of mantissa, so 2^52+1 cannot be
     // represented without loss.
-    static const uint16_t MaxTruncatableExponent = mozilla::DoubleExponentShift;
+    static const uint16_t MaxTruncatableExponent = mozilla::FloatingPoint<double>::kExponentShift;
 
     // Maximum exponent for finite values.
-    static const uint16_t MaxFiniteExponent = mozilla::DoubleExponentBias;
+    static const uint16_t MaxFiniteExponent = mozilla::FloatingPoint<double>::kExponentBias;
 
     // An special exponent value representing all non-NaN values. This
     // includes finite values and the infinities.
@@ -187,22 +198,22 @@ class Range : public TempObject {
     const SymbolicBound *symbolicLower_;
     const SymbolicBound *symbolicUpper_;
 
-    // This function simply makes several JS_ASSERTs to verify the internal
+    // This function simply makes several MOZ_ASSERTs to verify the internal
     // consistency of this range.
     void assertInvariants() const {
         // Basic sanity :).
-        JS_ASSERT(lower_ <= upper_);
+        MOZ_ASSERT(lower_ <= upper_);
 
         // When hasInt32LowerBound_ or hasInt32UpperBound_ are false, we set
         // lower_ and upper_ to these specific values as it simplifies the
         // implementation in some places.
-        JS_ASSERT_IF(!hasInt32LowerBound_, lower_ == JSVAL_INT_MIN);
-        JS_ASSERT_IF(!hasInt32UpperBound_, upper_ == JSVAL_INT_MAX);
+        MOZ_ASSERT_IF(!hasInt32LowerBound_, lower_ == JSVAL_INT_MIN);
+        MOZ_ASSERT_IF(!hasInt32UpperBound_, upper_ == JSVAL_INT_MAX);
 
         // max_exponent_ must be one of three possible things.
-        JS_ASSERT(max_exponent_ <= MaxFiniteExponent ||
-                  max_exponent_ == IncludesInfinity ||
-                  max_exponent_ == IncludesInfinityAndNaN);
+        MOZ_ASSERT(max_exponent_ <= MaxFiniteExponent ||
+                   max_exponent_ == IncludesInfinity ||
+                   max_exponent_ == IncludesInfinityAndNaN);
 
         // Forbid the max_exponent_ field from implying better bounds for
         // lower_/upper_ fields. We have to add 1 to the max_exponent_ when
@@ -212,19 +223,19 @@ class Range : public TempObject {
         // false, however that value also has exponent 30, which is strictly
         // less than MaxInt32Exponent. For another example, 1.9 has an exponent
         // of 0 but requires upper_ to be at least 2, which has exponent 1.
-        JS_ASSERT_IF(!hasInt32LowerBound_ || !hasInt32UpperBound_,
-                     max_exponent_ + canHaveFractionalPart_ >= MaxInt32Exponent);
-        JS_ASSERT(max_exponent_ + canHaveFractionalPart_ >=
-                  mozilla::FloorLog2(mozilla::Abs(upper_)));
-        JS_ASSERT(max_exponent_ + canHaveFractionalPart_ >=
-                  mozilla::FloorLog2(mozilla::Abs(lower_)));
+        MOZ_ASSERT_IF(!hasInt32LowerBound_ || !hasInt32UpperBound_,
+                      max_exponent_ + canHaveFractionalPart_ >= MaxInt32Exponent);
+        MOZ_ASSERT(max_exponent_ + canHaveFractionalPart_ >=
+                   mozilla::FloorLog2(mozilla::Abs(upper_)));
+        MOZ_ASSERT(max_exponent_ + canHaveFractionalPart_ >=
+                   mozilla::FloorLog2(mozilla::Abs(lower_)));
 
         // The following are essentially static assertions, but FloorLog2 isn't
         // trivially suitable for constexpr :(.
-        JS_ASSERT(mozilla::FloorLog2(JSVAL_INT_MIN) == MaxInt32Exponent);
-        JS_ASSERT(mozilla::FloorLog2(JSVAL_INT_MAX) == 30);
-        JS_ASSERT(mozilla::FloorLog2(UINT32_MAX) == MaxUInt32Exponent);
-        JS_ASSERT(mozilla::FloorLog2(0) == 0);
+        MOZ_ASSERT(mozilla::FloorLog2(JSVAL_INT_MIN) == MaxInt32Exponent);
+        MOZ_ASSERT(mozilla::FloorLog2(JSVAL_INT_MAX) == 30);
+        MOZ_ASSERT(mozilla::FloorLog2(UINT32_MAX) == MaxUInt32Exponent);
+        MOZ_ASSERT(mozilla::FloorLog2(0) == 0);
     }
 
     // Set the lower_ and hasInt32LowerBound_ values.
@@ -264,7 +275,7 @@ class Range : public TempObject {
          // The number of bits needed to encode |max| is the power of 2 plus one.
          uint32_t max = Max(mozilla::Abs(lower()), mozilla::Abs(upper()));
          uint16_t result = mozilla::FloorLog2(max);
-         JS_ASSERT(result == (max == 0 ? 0 : mozilla::ExponentComponent(double(max))));
+         MOZ_ASSERT(result == (max == 0 ? 0 : mozilla::ExponentComponent(double(max))));
          return result;
     }
 
@@ -277,12 +288,17 @@ class Range : public TempObject {
     // Given an exponent value and pointers to the lower and upper bound values,
     // this function refines the lower and upper bound values to the tighest
     // bound for integer values implied by the exponent.
-    static void refineInt32BoundsByExponent(uint16_t e, int32_t *l, int32_t *h) {
+    static void refineInt32BoundsByExponent(uint16_t e,
+                                            int32_t *l, bool *lb,
+                                            int32_t *h, bool *hb)
+    {
        if (e < MaxInt32Exponent) {
            // pow(2, max_exponent_+1)-1 to compute a maximum absolute value.
            int32_t limit = (uint32_t(1) << (e + 1)) - 1;
            *h = Min(*h, limit);
            *l = Max(*l, -limit);
+           *hb = true;
+           *lb = true;
        }
     }
 
@@ -361,7 +377,7 @@ class Range : public TempObject {
     // Construct a range from the given MDefinition. This differs from the
     // MDefinition's range() method in that it describes the range of values
     // *after* any bailout checks.
-    Range(const MDefinition *def);
+    explicit Range(const MDefinition *def);
 
     static Range *NewInt32Range(TempAllocator &alloc, int32_t l, int32_t h) {
         return new(alloc) Range(l, h, false, MaxInt32Exponent);
@@ -410,6 +426,8 @@ class Range : public TempObject {
     static Range *abs(TempAllocator &alloc, const Range *op);
     static Range *min(TempAllocator &alloc, const Range *lhs, const Range *rhs);
     static Range *max(TempAllocator &alloc, const Range *lhs, const Range *rhs);
+    static Range *floor(TempAllocator &alloc, const Range *op);
+    static Range *ceil(TempAllocator &alloc, const Range *op);
 
     static bool negativeZeroMul(const Range *lhs, const Range *rhs);
 
@@ -451,9 +469,14 @@ class Range : public TempObject {
         return canHaveFractionalPart() || max_exponent_ >= MaxTruncatableExponent;
     }
 
+    // Test if an integer x belongs to the range.
+    bool contains(int32_t x) const {
+        return x >= lower_ && x <= upper_;
+    }
+
     // Test whether the range contains zero.
     bool canBeZero() const {
-        return lower_ <= 0 && upper_ >= 0;
+        return contains(0);
     }
 
     // Test whether the range contains NaN values.
@@ -471,7 +494,7 @@ class Range : public TempObject {
     }
 
     uint16_t exponent() const {
-        JS_ASSERT(!canBeInfiniteOrNaN());
+        MOZ_ASSERT(!canBeInfiniteOrNaN());
         return max_exponent_;
     }
 
@@ -481,13 +504,13 @@ class Range : public TempObject {
 
     // Return the lower bound. Asserts that the value has an int32 bound.
     int32_t lower() const {
-        JS_ASSERT(hasInt32LowerBound());
+        MOZ_ASSERT(hasInt32LowerBound());
         return lower_;
     }
 
     // Return the upper bound. Asserts that the value has an int32 bound.
     int32_t upper() const {
-        JS_ASSERT(hasInt32UpperBound());
+        MOZ_ASSERT(hasInt32UpperBound());
         return upper_;
     }
 
@@ -543,7 +566,7 @@ class Range : public TempObject {
 
     void setUnknown() {
         set(NoInt32LowerBound, NoInt32UpperBound, true, IncludesInfinityAndNaN);
-        JS_ASSERT(isUnknown());
+        MOZ_ASSERT(isUnknown());
     }
 
     void set(int64_t l, int64_t h, bool f, uint16_t e) {

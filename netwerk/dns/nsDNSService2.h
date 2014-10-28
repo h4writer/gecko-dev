@@ -16,31 +16,31 @@
 #include "nsString.h"
 #include "nsTHashtable.h"
 #include "nsHashKeys.h"
+#include "nsIObserverService.h"
+#include "nsProxyRelease.h"
 #include "mozilla/Mutex.h"
 #include "mozilla/Attributes.h"
 
-class nsDNSService MOZ_FINAL : public mozilla::MemoryUniReporter
-                             , public nsPIDNSService
+class nsDNSService MOZ_FINAL : public nsPIDNSService
                              , public nsIObserver
+                             , public nsIMemoryReporter
 {
 public:
     NS_DECL_THREADSAFE_ISUPPORTS
     NS_DECL_NSPIDNSSERVICE
     NS_DECL_NSIDNSSERVICE
     NS_DECL_NSIOBSERVER
+    NS_DECL_NSIMEMORYREPORTER
 
     nsDNSService();
-    ~nsDNSService();
 
     static nsIDNSService* GetXPCOMSingleton();
 
-    int64_t Amount() MOZ_OVERRIDE
-    {
-        return SizeOfIncludingThis(MallocSizeOf);
-    }
     size_t SizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
 
 private:
+    ~nsDNSService();
+
     static nsDNSService* GetSingleton();
 
     uint16_t GetAFForLookup(const nsACString &host, uint32_t flags);
@@ -54,12 +54,14 @@ private:
     // mIPv4OnlyDomains is a comma-separated list of domains for which only
     // IPv4 DNS lookups are performed. This allows the user to disable IPv6 on
     // a per-domain basis and work around broken DNS servers. See bug 68796.
-    nsAdoptingCString         mIPv4OnlyDomains;
-    bool                      mDisableIPv6;
-    bool                      mDisablePrefetch;
-    bool                      mFirstTime;
-    bool                      mOffline;
-    nsTHashtable<nsCStringHashKey> mLocalDomains;
+    nsAdoptingCString                         mIPv4OnlyDomains;
+    bool                                      mDisableIPv6;
+    bool                                      mDisablePrefetch;
+    bool                                      mFirstTime;
+    bool                                      mOffline;
+    bool                                      mNotifyResolution;
+    nsMainThreadPtrHandle<nsIObserverService> mObserverService;
+    nsTHashtable<nsCStringHashKey>            mLocalDomains;
 };
 
 #endif //nsDNSService2_h__

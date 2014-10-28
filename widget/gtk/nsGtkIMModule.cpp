@@ -4,9 +4,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifdef MOZ_LOGGING
-#define FORCE_PR_LOG /* Allow logging in the release build */
-#endif // MOZ_LOGGING
 #include "prlog.h"
 #include "prtime.h"
 
@@ -60,22 +57,36 @@ GetEnabledStateName(uint32_t aState)
 }
 #endif
 
-nsGtkIMModule* nsGtkIMModule::sLastFocusedModule = nullptr;
+const static bool kUseSimpleContextDefault = MOZ_WIDGET_GTK == 2;
 
-nsGtkIMModule::nsGtkIMModule(nsWindow* aOwnerWindow) :
-    mOwnerWindow(aOwnerWindow), mLastFocusedWindow(nullptr),
-    mContext(nullptr),
-    mSimpleContext(nullptr),
-    mDummyContext(nullptr),
-    mCompositionStart(UINT32_MAX), mProcessingKeyEvent(nullptr),
-    mCompositionState(eCompositionState_NotComposing),
-    mIsIMFocused(false), mIgnoreNativeCompositionEvent(false)
+nsGtkIMModule* nsGtkIMModule::sLastFocusedModule = nullptr;
+bool nsGtkIMModule::sUseSimpleContext;
+
+nsGtkIMModule::nsGtkIMModule(nsWindow* aOwnerWindow)
+    : mOwnerWindow(aOwnerWindow)
+    , mLastFocusedWindow(nullptr)
+    , mContext(nullptr)
+    , mSimpleContext(nullptr)
+    , mDummyContext(nullptr)
+    , mCompositionStart(UINT32_MAX)
+    , mProcessingKeyEvent(nullptr)
+    , mCompositionTargetOffset(UINT32_MAX)
+    , mCompositionState(eCompositionState_NotComposing)
+    , mIsIMFocused(false)
 {
 #ifdef PR_LOGGING
     if (!gGtkIMLog) {
         gGtkIMLog = PR_NewLogModule("nsGtkIMModuleWidgets");
     }
 #endif
+    static bool sFirstInstance = true;
+    if (sFirstInstance) {
+        sFirstInstance = false;
+        sUseSimpleContext =
+            Preferences::GetBool(
+                "intl.ime.use_simple_context_on_password_field",
+                kUseSimpleContextDefault);
+    }
     Init();
 }
 
@@ -116,26 +127,28 @@ nsGtkIMModule::Init()
                      this);
 
     // Simple context
-    mSimpleContext = gtk_im_context_simple_new();
-    gtk_im_context_set_client_window(mSimpleContext, gdkWindow);
-    g_signal_connect(mSimpleContext, "preedit_changed",
-                     G_CALLBACK(&nsGtkIMModule::OnChangeCompositionCallback),
-                     this);
-    g_signal_connect(mSimpleContext, "retrieve_surrounding",
-                     G_CALLBACK(&nsGtkIMModule::OnRetrieveSurroundingCallback),
-                     this);
-    g_signal_connect(mSimpleContext, "delete_surrounding",
-                     G_CALLBACK(&nsGtkIMModule::OnDeleteSurroundingCallback),
-                     this);
-    g_signal_connect(mSimpleContext, "commit",
-                     G_CALLBACK(&nsGtkIMModule::OnCommitCompositionCallback),
-                     this);
-    g_signal_connect(mSimpleContext, "preedit_start",
-                     G_CALLBACK(nsGtkIMModule::OnStartCompositionCallback),
-                     this);
-    g_signal_connect(mSimpleContext, "preedit_end",
-                     G_CALLBACK(nsGtkIMModule::OnEndCompositionCallback),
-                     this);
+    if (sUseSimpleContext) {
+        mSimpleContext = gtk_im_context_simple_new();
+        gtk_im_context_set_client_window(mSimpleContext, gdkWindow);
+        g_signal_connect(mSimpleContext, "preedit_changed",
+            G_CALLBACK(&nsGtkIMModule::OnChangeCompositionCallback),
+            this);
+        g_signal_connect(mSimpleContext, "retrieve_surrounding",
+            G_CALLBACK(&nsGtkIMModule::OnRetrieveSurroundingCallback),
+            this);
+        g_signal_connect(mSimpleContext, "delete_surrounding",
+            G_CALLBACK(&nsGtkIMModule::OnDeleteSurroundingCallback),
+            this);
+        g_signal_connect(mSimpleContext, "commit",
+            G_CALLBACK(&nsGtkIMModule::OnCommitCompositionCallback),
+            this);
+        g_signal_connect(mSimpleContext, "preedit_start",
+            G_CALLBACK(nsGtkIMModule::OnStartCompositionCallback),
+            this);
+        g_signal_connect(mSimpleContext, "preedit_end",
+            G_CALLBACK(nsGtkIMModule::OnEndCompositionCallback),
+            this);
+    }
 
     // Dummy context
     mDummyContext = gtk_im_multicontext_new();
@@ -161,7 +174,7 @@ nsGtkIMModule::OnDestroyWindow(nsWindow* aWindow)
     NS_PRECONDITION(aWindow, "aWindow must not be null");
 
     if (mLastFocusedWindow == aWindow) {
-        CancelIMEComposition(aWindow);
+        EndIMEComposition(aWindow);
         if (mIsIMFocused) {
             Blur();
         }
@@ -234,11 +247,8 @@ nsGtkIMModule::OnDestroyWindow(nsWindow* aWindow)
 void
 nsGtkIMModule::PrepareToDestroyContext(GtkIMContext *aContext)
 {
-    MozContainer* container = mOwnerWindow->GetMozContainer();
-    NS_PRECONDITION(container, "The container of the window is null");
-
-    GtkIMMulticontext *multicontext = GTK_IM_MULTICONTEXT(aContext);
 #if (MOZ_WIDGET_GTK == 2)
+    GtkIMMulticontext *multicontext = GTK_IM_MULTICONTEXT(aContext);
     GtkIMContext *slave = multicontext->slave;
 #else
     GtkIMContext *slave = nullptr; //TODO GTK3
@@ -249,36 +259,7 @@ nsGtkIMModule::PrepareToDestroyContext(GtkIMContext *aContext)
 
     GType slaveType = G_TYPE_FROM_INSTANCE(slave);
     const gchar *im_type_name = g_type_name(slaveType);
-    if (strcmp(im_type_name, "GtkIMContextXIM") == 0) {
-        if (gtk_check_version(2, 12, 1) == nullptr) {
-            return; // gtk bug has been fixed
-        }
-
-        struct GtkIMContextXIM
-        {
-            GtkIMContext parent;
-            gpointer private_data;
-            // ... other fields
-        };
-
-        gpointer signal_data =
-            reinterpret_cast<GtkIMContextXIM*>(slave)->private_data;
-        if (!signal_data) {
-            return;
-        }
-
-        g_signal_handlers_disconnect_matched(
-            gtk_widget_get_display(GTK_WIDGET(container)),
-            G_SIGNAL_MATCH_DATA, 0, 0, nullptr, nullptr, signal_data);
-
-        // Add a reference to prevent the XIM module from being unloaded
-        // and reloaded: each time the module is loaded and used, it
-        // opens (and doesn't close) new XOpenIM connections.
-        static gpointer gtk_xim_context_class =
-            g_type_class_ref(slaveType);
-        // Mute unused variable warning:
-        (void)gtk_xim_context_class;
-    } else if (strcmp(im_type_name, "GtkIMContextIIIM") == 0) {
+    if (strcmp(im_type_name, "GtkIMContextIIIM") == 0) {
         // Add a reference to prevent the IIIM module from being unloaded
         static gpointer gtk_iiim_context_class =
             g_type_class_ref(slaveType);
@@ -403,20 +384,12 @@ nsGtkIMModule::OnFocusChangeInGecko(bool aFocus)
 {
     PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
         ("GtkIMModule(%p): OnFocusChangeInGecko, aFocus=%s, "
-         "mCompositionState=%s, mIsIMFocused=%s, "
-         "mIgnoreNativeCompositionEvent=%s",
+         "mCompositionState=%s, mIsIMFocused=%s",
          this, aFocus ? "YES" : "NO", GetCompositionStateName(),
-         mIsIMFocused ? "YES" : "NO",
-         mIgnoreNativeCompositionEvent ? "YES" : "NO"));
+         mIsIMFocused ? "YES" : "NO"));
 
     // We shouldn't carry over the removed string to another editor.
     mSelectedString.Truncate();
-
-    if (aFocus) {
-        // If we failed to commit forcedely in previous focused editor,
-        // we should reopen the gate for native signals in new focused editor.
-        mIgnoreNativeCompositionEvent = false;
-    }
 }
 
 void
@@ -433,19 +406,18 @@ nsGtkIMModule::ResetIME()
         return;
     }
 
-    mIgnoreNativeCompositionEvent = true;
     gtk_im_context_reset(im);
 }
 
 nsresult
-nsGtkIMModule::CommitIMEComposition(nsWindow* aCaller)
+nsGtkIMModule::EndIMEComposition(nsWindow* aCaller)
 {
     if (MOZ_UNLIKELY(IsDestroyed())) {
         return NS_OK;
     }
 
     PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
-        ("GtkIMModule(%p): CommitIMEComposition, aCaller=%p, "
+        ("GtkIMModule(%p): EndIMEComposition, aCaller=%p, "
          "mCompositionState=%s",
          this, aCaller, GetCompositionStateName()));
 
@@ -460,46 +432,27 @@ nsGtkIMModule::CommitIMEComposition(nsWindow* aCaller)
         return NS_OK;
     }
 
-    // XXX We should commit composition ourselves temporary...
+    // Currently, GTK has API neither to commit nor to cancel composition
+    // forcibly.  Therefore, TextComposition will recompute commit string for
+    // the request even if native IME will cause unexpected commit string.
+    // So, we don't need to emulate commit or cancel composition with
+    // proper composition events.
+    // XXX ResetIME() might not enough for finishing compositoin on some
+    //     environments.  We should emulate focus change too because some IMEs
+    //     may commit or cancel composition at blur.
     ResetIME();
-    CommitCompositionBy(mDispatchedCompositionString);
 
     return NS_OK;
 }
 
-nsresult
-nsGtkIMModule::CancelIMEComposition(nsWindow* aCaller)
+void
+nsGtkIMModule::OnUpdateComposition(void)
 {
     if (MOZ_UNLIKELY(IsDestroyed())) {
-        return NS_OK;
+        return;
     }
 
-    PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
-        ("GtkIMModule(%p): CancelIMEComposition, aCaller=%p",
-         this, aCaller));
-
-    if (aCaller != mLastFocusedWindow) {
-        PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
-            ("    FAILED, the caller isn't focused window, mLastFocusedWindow=%p",
-             mLastFocusedWindow));
-        return NS_OK;
-    }
-
-    if (!IsComposing()) {
-        return NS_OK;
-    }
-
-    GtkIMContext *im = GetContext();
-    if (MOZ_UNLIKELY(!im)) {
-        PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
-            ("    FAILED, there are no context"));
-        return NS_OK;
-    }
-
-    ResetIME();
-    CommitCompositionBy(EmptyString());
-
-    return NS_OK;
+    SetCursorPosition(mCompositionTargetOffset);
 }
 
 void
@@ -538,22 +491,68 @@ nsGtkIMModule::SetInputContext(nsWindow* aCaller,
     }
 
     bool changingEnabledState =
-        aContext->mIMEState.mEnabled != mInputContext.mIMEState.mEnabled;
+        aContext->mIMEState.mEnabled != mInputContext.mIMEState.mEnabled ||
+        aContext->mHTMLInputType != mInputContext.mHTMLInputType;
 
     // Release current IME focus if IME is enabled.
     if (changingEnabledState && IsEditable()) {
-        CommitIMEComposition(mLastFocusedWindow);
+        EndIMEComposition(mLastFocusedWindow);
         Blur();
     }
 
     mInputContext = *aContext;
 
-    // Even when aState is not enabled state, we need to set IME focus.
-    // Because some IMs are updating the status bar of them at this time.
-    // Be aware, don't use aWindow here because this method shouldn't move
-    // focus actually.
     if (changingEnabledState) {
+#if (MOZ_WIDGET_GTK == 3)
+        static bool sInputPurposeSupported = !gtk_check_version(3, 6, 0);
+        if (sInputPurposeSupported && IsEditable()) {
+            GtkIMContext* context = GetContext();
+            if (context) {
+                GtkInputPurpose purpose = GTK_INPUT_PURPOSE_FREE_FORM;
+                const nsString& inputType = mInputContext.mHTMLInputType;
+                // Password case has difficult issue.  Desktop IMEs disable
+                // composition if input-purpose is password.
+                // For disabling IME on |ime-mode: disabled;|, we need to check
+                // mEnabled value instead of inputType value.  This hack also
+                // enables composition on
+                // <input type="password" style="ime-mode: enabled;">.
+                // This is right behavior of ime-mode on desktop.
+                //
+                // On the other hand, IME for tablet devices may provide a
+                // specific software keyboard for password field.  If so,
+                // the behavior might look strange on both:
+                //   <input type="text" style="ime-mode: disabled;">
+                //   <input type="password" style="ime-mode: enabled;">
+                //
+                // Temporarily, we should focus on desktop environment for now.
+                // I.e., let's ignore tablet devices for now.  When somebody
+                // reports actual trouble on tablet devices, we should try to
+                // look for a way to solve actual problem.
+                if (mInputContext.mIMEState.mEnabled == IMEState::PASSWORD) {
+                    purpose = GTK_INPUT_PURPOSE_PASSWORD;
+                } else if (inputType.EqualsLiteral("email")) {
+                    purpose = GTK_INPUT_PURPOSE_EMAIL;
+                } else if (inputType.EqualsLiteral("url")) {
+                    purpose = GTK_INPUT_PURPOSE_URL;
+                } else if (inputType.EqualsLiteral("tel")) {
+                    purpose = GTK_INPUT_PURPOSE_PHONE;
+                } else if (inputType.EqualsLiteral("number")) {
+                    purpose = GTK_INPUT_PURPOSE_NUMBER;
+                }
+
+                g_object_set(context, "input-purpose", purpose, nullptr);
+            }
+        }
+#endif // #if (MOZ_WIDGET_GTK == 3)
+
+        // Even when aState is not enabled state, we need to set IME focus.
+        // Because some IMs are updating the status bar of them at this time.
+        // Be aware, don't use aWindow here because this method shouldn't move
+        // focus actually.
         Focus();
+
+        // XXX Should we call Blur() when it's not editable?  E.g., it might be
+        //     better to close VKB automatically.
     }
 }
 
@@ -584,10 +583,23 @@ nsGtkIMModule::GetContext()
 }
 
 bool
+nsGtkIMModule::IsValidContext(GtkIMContext* aContext) const
+{
+    if (!aContext) {
+        return false;
+    }
+    return aContext == mContext ||
+           aContext == mSimpleContext ||
+           aContext == mDummyContext;
+}
+
+bool
 nsGtkIMModule::IsEnabled()
 {
     return mInputContext.mIMEState.mEnabled == IMEState::ENABLED ||
-           mInputContext.mIMEState.mEnabled == IMEState::PLUGIN;
+           mInputContext.mIMEState.mEnabled == IMEState::PLUGIN ||
+           (!sUseSimpleContext &&
+            mInputContext.mIMEState.mEnabled == IMEState::PASSWORD);
 }
 
 bool
@@ -656,6 +668,29 @@ nsGtkIMModule::Blur()
     mIsIMFocused = false;
 }
 
+void
+nsGtkIMModule::OnSelectionChange(nsWindow* aCaller)
+{
+    if (MOZ_UNLIKELY(IsDestroyed())) {
+        return;
+    }
+
+    PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
+        ("GtkIMModule(%p): OnSelectionChange(aCaller=0x%p), "
+         "mCompositionState=%s",
+         this, aCaller, GetCompositionStateName()));
+
+    if (aCaller != mLastFocusedWindow) {
+        PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
+            ("    WARNING: the caller isn't focused window, "
+             "mLastFocusedWindow=%p",
+             mLastFocusedWindow));
+        return;
+    }
+
+    ResetIME();
+}
+
 /* static */
 void
 nsGtkIMModule::OnStartCompositionCallback(GtkIMContext *aContext,
@@ -682,7 +717,7 @@ nsGtkIMModule::OnStartCompositionNative(GtkIMContext *aContext)
     if (!DispatchCompositionStart()) {
         return;
     }
-    SetCursorPosition(mCompositionStart);
+    mCompositionTargetOffset = mCompositionStart;
 }
 
 /* static */
@@ -701,22 +736,16 @@ nsGtkIMModule::OnEndCompositionNative(GtkIMContext *aContext)
          this, aContext));
 
     // See bug 472635, we should do nothing if IM context doesn't match.
-    if (GetContext() != aContext) {
+    // Note that if this is called after focus move, the context may different
+    // from the result of GetContext().
+    if (!IsValidContext(aContext)) {
         PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
             ("    FAILED, given context doesn't match, GetContext()=%p",
              GetContext()));
         return;
     }
 
-    bool shouldIgnoreThisEvent = ShouldIgnoreNativeCompositionEvent();
-
-    // Finish the cancelling mode here rather than DispatchCompositionEnd()
-    // because DispatchCompositionEnd() is called ourselves when we need to
-    // commit the composition string *before* the focus moves completely.
-    // Note that the native commit can be fired *after* ResetIME().
-    mIgnoreNativeCompositionEvent = false;
-
-    if (!IsComposing() || shouldIgnoreThisEvent) {
+    if (!IsComposing()) {
         // If we already handled the commit event, we should do nothing here.
         return;
     }
@@ -741,26 +770,24 @@ nsGtkIMModule::OnChangeCompositionNative(GtkIMContext *aContext)
          this, aContext));
 
     // See bug 472635, we should do nothing if IM context doesn't match.
-    if (GetContext() != aContext) {
+    // Note that if this is called after focus move, the context may different
+    // from the result of GetContext().
+    if (!IsValidContext(aContext)) {
         PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
             ("    FAILED, given context doesn't match, GetContext()=%p",
              GetContext()));
         return;
     }
 
-    if (ShouldIgnoreNativeCompositionEvent()) {
-        return;
-    }
-
     nsAutoString compositionString;
-    GetCompositionString(compositionString);
+    GetCompositionString(aContext, compositionString);
     if (!IsComposing() && compositionString.IsEmpty()) {
         mDispatchedCompositionString.Truncate();
         return; // Don't start the composition with empty string.
     }
 
     // Be aware, widget can be gone
-    DispatchTextEvent(compositionString, false);
+    DispatchCompositionChangeEvent(compositionString, false);
 }
 
 /* static */
@@ -872,10 +899,6 @@ nsGtkIMModule::OnCommitCompositionNative(GtkIMContext *aContext,
         return;
     }
 
-    if (ShouldIgnoreNativeCompositionEvent()) {
-        return;
-    }
-
     // If IME doesn't change their keyevent that generated this commit,
     // don't send it through XIM - just send it as a normal key press
     // event.
@@ -910,7 +933,7 @@ nsGtkIMModule::CommitCompositionBy(const nsAString& aString)
          this, NS_ConvertUTF16toUTF8(aString).get(),
          NS_ConvertUTF16toUTF8(mDispatchedCompositionString).get()));
 
-    if (!DispatchTextEvent(aString, true)) {
+    if (!DispatchCompositionChangeEvent(aString, true)) {
         return false;
     }
     // We should dispatch the compositionend event here because some IMEs
@@ -919,12 +942,13 @@ nsGtkIMModule::CommitCompositionBy(const nsAString& aString)
 }
 
 void
-nsGtkIMModule::GetCompositionString(nsAString &aCompositionString)
+nsGtkIMModule::GetCompositionString(GtkIMContext* aContext,
+                                    nsAString& aCompositionString)
 {
     gchar *preedit_string;
     gint cursor_pos;
     PangoAttrList *feedback_list;
-    gtk_im_context_get_preedit_string(GetContext(), &preedit_string,
+    gtk_im_context_get_preedit_string(aContext, &preedit_string,
                                       &feedback_list, &cursor_pos);
     if (preedit_string && *preedit_string) {
         CopyUTF8toUTF16(preedit_string, aCompositionString);
@@ -995,12 +1019,6 @@ nsGtkIMModule::DispatchCompositionStart()
         }
     }
 
-    if (mIgnoreNativeCompositionEvent) {
-        PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
-            ("    WARNING, mIgnoreNativeCompositionEvent is already TRUE, but we forcedly reset"));
-        mIgnoreNativeCompositionEvent = false;
-    }
-
     PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
         ("    mCompositionStart=%u", mCompositionStart));
     mCompositionState = eCompositionState_CompositionStartDispatched;
@@ -1043,12 +1061,13 @@ nsGtkIMModule::DispatchCompositionEnd()
     WidgetCompositionEvent compEvent(true, NS_COMPOSITION_END,
                                      mLastFocusedWindow);
     InitEvent(compEvent);
-    compEvent.data = mDispatchedCompositionString;
+    compEvent.mData = mDispatchedCompositionString;
     nsEventStatus status;
     nsCOMPtr<nsIWidget> kungFuDeathGrip = mLastFocusedWindow;
     mLastFocusedWindow->DispatchEvent(&compEvent, status);
     mCompositionState = eCompositionState_NotComposing;
     mCompositionStart = UINT32_MAX;
+    mCompositionTargetOffset = UINT32_MAX;
     mDispatchedCompositionString.Truncate();
     if (static_cast<nsWindow*>(kungFuDeathGrip.get())->IsDestroyed() ||
         kungFuDeathGrip != mLastFocusedWindow) {
@@ -1061,11 +1080,12 @@ nsGtkIMModule::DispatchCompositionEnd()
 }
 
 bool
-nsGtkIMModule::DispatchTextEvent(const nsAString &aCompositionString,
-                                 bool aIsCommit)
+nsGtkIMModule::DispatchCompositionChangeEvent(
+                   const nsAString &aCompositionString,
+                   bool aIsCommit)
 {
     PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
-        ("GtkIMModule(%p): DispatchTextEvent, aIsCommit=%s",
+        ("GtkIMModule(%p): DispatchCompositionChangeEvent, aIsCommit=%s",
          this, aIsCommit ? "TRUE" : "FALSE"));
 
     if (!mLastFocusedWindow) {
@@ -1086,25 +1106,11 @@ nsGtkIMModule::DispatchTextEvent(const nsAString &aCompositionString,
     nsEventStatus status;
     nsRefPtr<nsWindow> lastFocusedWindow = mLastFocusedWindow;
 
-    if (aCompositionString != mDispatchedCompositionString) {
-      WidgetCompositionEvent compositionUpdate(true, NS_COMPOSITION_UPDATE,
-                                               mLastFocusedWindow);
-      InitEvent(compositionUpdate);
-      compositionUpdate.data = aCompositionString;
-      mDispatchedCompositionString = aCompositionString;
-      mLastFocusedWindow->DispatchEvent(&compositionUpdate, status);
-      if (lastFocusedWindow->IsDestroyed() ||
-          lastFocusedWindow != mLastFocusedWindow) {
-          PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
-              ("    NOTE, the focused widget was destroyed/changed by compositionupdate"));
-          return false;
-      }
-    }
-
-    // Store the selected string which will be removed by following text event.
+    // Store the selected string which will be removed by following
+    // compositionchange event.
     if (mCompositionState == eCompositionState_CompositionStartDispatched) {
         // XXX We should assume, for now, any web applications don't change
-        //     selection at handling this text event.
+        //     selection at handling this compositionchange event.
         WidgetQueryContentEvent querySelectedTextEvent(true,
                                                        NS_QUERY_SELECTED_TEXT,
                                                        mLastFocusedWindow);
@@ -1115,54 +1121,50 @@ nsGtkIMModule::DispatchTextEvent(const nsAString &aCompositionString,
         }
     }
 
-    WidgetTextEvent textEvent(true, NS_TEXT_TEXT, mLastFocusedWindow);
-    InitEvent(textEvent);
+    WidgetCompositionEvent compositionChangeEvent(true, NS_COMPOSITION_CHANGE,
+                                                  mLastFocusedWindow);
+    InitEvent(compositionChangeEvent);
 
     uint32_t targetOffset = mCompositionStart;
 
-    nsAutoTArray<TextRange, 4> textRanges;
+    compositionChangeEvent.mData =
+      mDispatchedCompositionString = aCompositionString;
+
     if (!aIsCommit) {
         // NOTE: SetTextRangeList() assumes that mDispatchedCompositionString
         //       has been updated already.
-        SetTextRangeList(textRanges);
-        for (uint32_t i = 0; i < textRanges.Length(); i++) {
-            TextRange& range = textRanges[i];
-            if (range.mRangeType == NS_TEXTRANGE_SELECTEDRAWTEXT ||
-                range.mRangeType == NS_TEXTRANGE_SELECTEDCONVERTEDTEXT) {
-                targetOffset += range.mStartOffset;
-                break;
-            }
-        }
+        compositionChangeEvent.mRanges = CreateTextRangeArray();
+        targetOffset += compositionChangeEvent.mRanges->TargetClauseOffset();
     }
 
-    textEvent.rangeCount = textRanges.Length();
-    textEvent.rangeArray = textRanges.Elements();
-    textEvent.theText = mDispatchedCompositionString.get();
-
     mCompositionState = aIsCommit ?
-        eCompositionState_CommitTextEventDispatched :
-        eCompositionState_TextEventDispatched;
+        eCompositionState_CommitCompositionChangeEventDispatched :
+        eCompositionState_CompositionChangeEventDispatched;
 
-    mLastFocusedWindow->DispatchEvent(&textEvent, status);
+    mLastFocusedWindow->DispatchEvent(&compositionChangeEvent, status);
     if (lastFocusedWindow->IsDestroyed() ||
         lastFocusedWindow != mLastFocusedWindow) {
         PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
-            ("    NOTE, the focused widget was destroyed/changed by text event"));
+            ("    NOTE, the focused widget was destroyed/changed by "
+             "compositionchange event"));
         return false;
     }
 
-    SetCursorPosition(targetOffset);
+    // We cannot call SetCursorPosition for e10s-aware.
+    // DispatchEvent is async on e10s, so composition rect isn't updated now
+    // on tab parent.
+    mCompositionTargetOffset = targetOffset;
 
     return true;
 }
 
-void
-nsGtkIMModule::SetTextRangeList(nsTArray<TextRange> &aTextRangeList)
+already_AddRefed<TextRangeArray>
+nsGtkIMModule::CreateTextRangeArray()
 {
     PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
-        ("GtkIMModule(%p): SetTextRangeList", this));
+        ("GtkIMModule(%p): CreateTextRangeArray", this));
 
-    NS_PRECONDITION(aTextRangeList.IsEmpty(), "aTextRangeList must be empty");
+    nsRefPtr<TextRangeArray> textRangeArray = new TextRangeArray();
 
     gchar *preedit_string;
     gint cursor_pos;
@@ -1174,7 +1176,7 @@ nsGtkIMModule::SetTextRangeList(nsTArray<TextRange> &aTextRangeList)
             ("    preedit_string is null"));
         pango_attr_list_unref(feedback_list);
         g_free(preedit_string);
-        return;
+        return textRangeArray.forget();
     }
 
     PangoAttrIterator* iter;
@@ -1184,7 +1186,7 @@ nsGtkIMModule::SetTextRangeList(nsTArray<TextRange> &aTextRangeList)
             ("    FAILED, iterator couldn't be allocated"));
         pango_attr_list_unref(feedback_list);
         g_free(preedit_string);
-        return;
+        return textRangeArray.forget();
     }
 
     /*
@@ -1250,7 +1252,7 @@ nsGtkIMModule::SetTextRangeList(nsTArray<TextRange> &aTextRangeList)
             uniStr = nullptr;
         }
 
-        aTextRangeList.AppendElement(range);
+        textRangeArray->AppendElement(range);
 
         PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
             ("    mStartOffset=%u, mEndOffset=%u, mRangeType=%s",
@@ -1268,7 +1270,7 @@ nsGtkIMModule::SetTextRangeList(nsTArray<TextRange> &aTextRangeList)
     }
     range.mEndOffset = range.mStartOffset;
     range.mRangeType = NS_TEXTRANGE_CARETPOSITION;
-    aTextRangeList.AppendElement(range);
+    textRangeArray->AppendElement(range);
 
     PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
         ("    mStartOffset=%u, mEndOffset=%u, mRangeType=%s",
@@ -1278,6 +1280,8 @@ nsGtkIMModule::SetTextRangeList(nsTArray<TextRange> &aTextRangeList)
     pango_attr_iterator_destroy(iter);
     pango_attr_list_unref(feedback_list);
     g_free(preedit_string);
+
+    return textRangeArray.forget();
 }
 
 void
@@ -1458,7 +1462,7 @@ nsGtkIMModule::DeleteText(const int32_t aOffset, const uint32_t aNChars)
     if (wasComposing) {
         selOffset = mCompositionStart;
         if (editorHadCompositionString &&
-            !DispatchTextEvent(mSelectedString, false)) {
+            !DispatchCompositionChangeEvent(mSelectedString, true)) {
             PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
                 ("    FAILED, quitting from DeletText"));
             return NS_ERROR_FAILURE;
@@ -1584,8 +1588,8 @@ nsGtkIMModule::DeleteText(const int32_t aOffset, const uint32_t aNChars)
     }
 
     nsAutoString compositionString;
-    GetCompositionString(compositionString);
-    if (!DispatchTextEvent(compositionString, true)) {
+    GetCompositionString(GetContext(), compositionString);
+    if (!DispatchCompositionChangeEvent(compositionString, false)) {
         PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
             ("    FAILED, restoring composition string"));
         return NS_ERROR_FAILURE;
@@ -1598,19 +1602,4 @@ void
 nsGtkIMModule::InitEvent(WidgetGUIEvent& aEvent)
 {
     aEvent.time = PR_Now() / 1000;
-}
-
-bool
-nsGtkIMModule::ShouldIgnoreNativeCompositionEvent()
-{
-    PR_LOG(gGtkIMLog, PR_LOG_ALWAYS,
-        ("GtkIMModule(%p): ShouldIgnoreNativeCompositionEvent, mLastFocusedWindow=%p, mIgnoreNativeCompositionEvent=%s",
-         this, mLastFocusedWindow,
-         mIgnoreNativeCompositionEvent ? "YES" : "NO"));
-
-    if (!mLastFocusedWindow) {
-        return true; // cannot continue
-    }
-
-    return mIgnoreNativeCompositionEvent;
 }

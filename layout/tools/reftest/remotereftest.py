@@ -16,11 +16,13 @@ from runreftest import ReftestOptions
 from automation import Automation
 import devicemanager
 import droid
+import moznetwork
 from remoteautomation import RemoteAutomation, fennecLogcatFilters
 
 class RemoteOptions(ReftestOptions):
     def __init__(self, automation):
-        ReftestOptions.__init__(self, automation)
+        ReftestOptions.__init__(self)
+        self.automation = automation
 
         defaults = {}
         defaults["logFile"] = "reftest.log"
@@ -28,6 +30,7 @@ class RemoteOptions(ReftestOptions):
         defaults["app"] = ""
         defaults["xrePath"] = ""
         defaults["utilityPath"] = ""
+        defaults["runTestsInParallel"] = False
 
         self.add_option("--remote-app-path", action="store",
                     type = "string", dest = "remoteAppPath",
@@ -38,6 +41,11 @@ class RemoteOptions(ReftestOptions):
                     type = "string", dest = "deviceIP",
                     help = "ip address of remote device to test")
         defaults["deviceIP"] = None
+
+        self.add_option("--deviceSerial", action="store",
+                    type = "string", dest = "deviceSerial",
+                    help = "adb serial number of remote device to test")
+        defaults["deviceSerial"] = None
 
         self.add_option("--devicePort", action="store",
                     type = "string", dest = "devicePort",
@@ -52,7 +60,7 @@ class RemoteOptions(ReftestOptions):
         self.add_option("--remote-webserver", action="store",
                     type = "string", dest = "remoteWebServer",
                     help = "IP Address of the webserver hosting the reftest content")
-        defaults["remoteWebServer"] = automation.getLanIp()
+        defaults["remoteWebServer"] = moznetwork.get_ip()
 
         self.add_option("--http-port", action = "store",
                     type = "string", dest = "httpPort",
@@ -68,10 +76,6 @@ class RemoteOptions(ReftestOptions):
                     type = "string", dest = "remoteLogFile",
                     help = "Name of log file on the device relative to device root.  PLEASE USE ONLY A FILENAME.")
         defaults["remoteLogFile"] = None
-
-        self.add_option("--enable-privilege", action="store_true", dest = "enablePrivilege",
-                    help = "add webserver and port to the user.js file for remote script access and universalXPConnect")
-        defaults["enablePrivilege"] = False
 
         self.add_option("--pidfile", action = "store",
                     type = "string", dest = "pidFile",
@@ -102,9 +106,12 @@ class RemoteOptions(ReftestOptions):
         self.set_defaults(**defaults)
 
     def verifyRemoteOptions(self, options):
+        if options.runTestsInParallel:
+            self.error("Cannot run parallel tests here")
+
         # Ensure our defaults are set properly for everything we can infer
         if not options.remoteTestRoot:
-            options.remoteTestRoot = self._automation._devicemanager.getDeviceRoot() + '/reftest'
+            options.remoteTestRoot = self.automation._devicemanager.deviceRoot + '/reftest'
         options.remoteProfile = options.remoteTestRoot + "/profile"
 
         # Verify that our remotewebserver is set properly
@@ -162,8 +169,8 @@ class RemoteOptions(ReftestOptions):
             options.httpdPath = os.path.join(options.utilityPath, "components")
 
         # TODO: Copied from main, but I think these are no longer used in a post xulrunner world
-        #options.xrePath = options.remoteTestRoot + self._automation._product + '/xulrunner'
-        #options.utilityPath = options.testRoot + self._automation._product + '/bin'
+        #options.xrePath = options.remoteTestRoot + self.automation._product + '/xulrunner'
+        #options.utilityPath = options.testRoot + self.automation._product + '/bin'
         return options
 
 class ReftestServer:
@@ -174,7 +181,7 @@ class ReftestServer:
         it's own class and use it in both remote and non-remote testing. """
 
     def __init__(self, automation, options, scriptDir):
-        self._automation = automation
+        self.automation = automation
         self._utilityPath = options.utilityPath
         self._xrePath = options.xrePath
         self._profileDir = options.serverProfilePath
@@ -188,9 +195,9 @@ class ReftestServer:
     def start(self):
         "Run the Refest server, returning the process ID of the server."
 
-        env = self._automation.environment(xrePath = self._xrePath)
+        env = self.automation.environment(xrePath = self._xrePath)
         env["XPCOM_DEBUG_BREAK"] = "warn"
-        if self._automation.IS_WIN32:
+        if self.automation.IS_WIN32:
             env["PATH"] = env["PATH"] + ";" + self._xrePath
 
         args = ["-g", self._xrePath,
@@ -201,21 +208,21 @@ class ReftestServer:
                 "-f", os.path.join(self.scriptDir, "server.js")]
 
         xpcshell = os.path.join(self._utilityPath,
-                                "xpcshell" + self._automation.BIN_SUFFIX)
+                                "xpcshell" + self.automation.BIN_SUFFIX)
 
         if not os.access(xpcshell, os.F_OK):
             raise Exception('xpcshell not found at %s' % xpcshell)
-        if self._automation.elf_arm(xpcshell):
+        if self.automation.elf_arm(xpcshell):
             raise Exception('xpcshell at %s is an ARM binary; please use '
                             'the --utility-path argument to specify the path '
                             'to a desktop version.' % xpcshell)
 
-        self._process = self._automation.Process([xpcshell] + args, env = env)
+        self._process = self.automation.Process([xpcshell] + args, env = env)
         pid = self._process.pid
         if pid < 0:
             print "TEST-UNEXPECTED-FAIL | remotereftests.py | Error starting server."
             return 2
-        self._automation.log.info("INFO | remotereftests.py | Server pid: %d", pid)
+        self.automation.log.info("INFO | remotereftests.py | Server pid: %d", pid)
 
         if (self.pidFile != ""):
             f = open(self.pidFile + ".xpcshell.pid", 'w')
@@ -254,7 +261,8 @@ class RemoteReftest(RefTest):
     remoteApp = ''
 
     def __init__(self, automation, devicemanager, options, scriptDir):
-        RefTest.__init__(self, automation)
+        RefTest.__init__(self)
+        self.automation = automation
         self._devicemanager = devicemanager
         self.scriptDir = scriptDir
         self.remoteApp = options.app
@@ -268,6 +276,7 @@ class RemoteReftest(RefTest):
         else:
             self.SERVER_STARTUP_TIMEOUT = 90
         self.automation.deleteANRs()
+        self.automation.deleteTombstones()
 
     def findPath(self, paths, filename = None):
         for path in paths:
@@ -349,7 +358,6 @@ class RemoteReftest(RefTest):
 
         # Point the url-classifier to the local testing server for fast failures
         prefs["browser.safebrowsing.gethashURL"] = "http://127.0.0.1:8888/safebrowsing-dummy/gethash"
-        prefs["browser.safebrowsing.keyURL"] = "http://127.0.0.1:8888/safebrowsing-dummy/newkey"
         prefs["browser.safebrowsing.updateURL"] = "http://127.0.0.1:8888/safebrowsing-dummy/update"
         # Point update checks to the local testing server for fast failures
         prefs["extensions.update.url"] = "http://127.0.0.1:8888/extensions-dummy/updateURL"
@@ -402,9 +410,26 @@ class RemoteReftest(RefTest):
                 logcat = self._devicemanager.getLogcat(filterOutRegexps=fennecLogcatFilters)
                 print ''.join(logcat)
             print "Device info: %s" % self._devicemanager.getInfo()
-            print "Test root: %s" % self._devicemanager.getDeviceRoot()
+            print "Test root: %s" % self._devicemanager.deviceRoot
         except devicemanager.DMError:
             print "WARNING: Error getting device information"
+
+    def environment(self, **kwargs):
+     return self.automation.environment(**kwargs)
+
+    def runApp(self, profile, binary, cmdargs, env,
+               timeout=None, debuggerInfo=None,
+               symbolsPath=None, options=None):
+        status = self.automation.runApp(None, env,
+                                        binary,
+                                        profile.profile,
+                                        cmdargs,
+                                        utilityPath=options.utilityPath,
+                                        xrePath=options.xrePath,
+                                        debuggerInfo=debuggerInfo,
+                                        symbolsPath=symbolsPath,
+                                        timeout=timeout)
+        return status
 
     def cleanup(self, profileDir):
         # Pull results back from device
@@ -429,14 +454,16 @@ def main(args):
     parser = RemoteOptions(automation)
     options, args = parser.parse_args()
 
-    if (options.deviceIP == None):
-        print "Error: you must provide a device IP to connect to via the --device option"
+    if (options.dm_trans == 'sut' and options.deviceIP == None):
+        print "Error: If --dm_trans = sut, you must provide a device IP to connect to via the --deviceIP option"
         return 1
 
     try:
         if (options.dm_trans == "adb"):
             if (options.deviceIP):
                 dm = droid.DroidADB(options.deviceIP, options.devicePort, deviceRoot=options.remoteTestRoot)
+            elif (options.deviceSerial):
+                dm = droid.DroidADB(None, None, deviceSerial=options.deviceSerial, deviceRoot=options.remoteTestRoot)
             else:
                 dm = droid.DroidADB(None, None, deviceRoot=options.remoteTestRoot)
         else:

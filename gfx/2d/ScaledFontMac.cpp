@@ -79,7 +79,8 @@ SkTypeface* ScaledFontMac::GetSkTypeface()
 TemporaryRef<Path>
 ScaledFontMac::GetPathForGlyphs(const GlyphBuffer &aBuffer, const DrawTarget *aTarget)
 {
-  if (aTarget->GetType() == BACKEND_COREGRAPHICS || aTarget->GetType() == BACKEND_COREGRAPHICS_ACCELERATED) {
+  if (aTarget->GetBackendType() == BackendType::COREGRAPHICS ||
+      aTarget->GetBackendType() == BackendType::COREGRAPHICS_ACCELERATED) {
       CGMutablePathRef path = CGPathCreateMutable();
 
       for (unsigned int i = 0; i < aBuffer.mNumGlyphs; i++) {
@@ -93,18 +94,17 @@ ScaledFontMac::GetPathForGlyphs(const GlyphBuffer &aBuffer, const DrawTarget *aT
           CGPathAddPath(path, &matrix, glyphPath);
           CGPathRelease(glyphPath);
       }
-      TemporaryRef<Path> ret = new PathCG(path, FILL_WINDING);
+      TemporaryRef<Path> ret = new PathCG(path, FillRule::FILL_WINDING);
       CGPathRelease(path);
       return ret;
-  } else {
-      return ScaledFontBase::GetPathForGlyphs(aBuffer, aTarget);
   }
+  return ScaledFontBase::GetPathForGlyphs(aBuffer, aTarget);
 }
 
 void
 ScaledFontMac::CopyGlyphsToBuilder(const GlyphBuffer &aBuffer, PathBuilder *aBuilder, BackendType aBackendType, const Matrix *aTransformHint)
 {
-  if (!(aBackendType == BACKEND_COREGRAPHICS || aBackendType == BACKEND_COREGRAPHICS_ACCELERATED)) {
+  if (!(aBackendType == BackendType::COREGRAPHICS || aBackendType == BackendType::COREGRAPHICS_ACCELERATED)) {
     ScaledFontBase::CopyGlyphsToBuilder(aBuffer, aBuilder, aBackendType, aTransformHint);
     return;
   }
@@ -161,7 +161,7 @@ int maxPow2LessThan(int a)
 
 struct writeBuf
 {
-    writeBuf(int size)
+    explicit writeBuf(int size)
     {
         this->data = new unsigned char [size];
         this->offset = 0;

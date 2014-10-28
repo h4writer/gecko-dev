@@ -1,14 +1,18 @@
 package org.mozilla.gecko.tests;
 
-import org.mozilla.gecko.*;
-import android.view.View;
-import android.widget.ListAdapter;
-import android.widget.ListView;
-import android.widget.ImageView;
+import java.io.File;
 import java.util.ArrayList;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.mozilla.gecko.Actions;
+import org.mozilla.gecko.GeckoProfile;
+import org.mozilla.gecko.home.HomePager;
+
+import android.widget.ImageView;
+import android.widget.ListAdapter;
+import android.widget.ListView;
 
 /**
  * Test adding a search engine from an input field context menu.
@@ -19,12 +23,7 @@ import org.json.JSONObject;
 public class testAddSearchEngine extends AboutHomeTest {
     private final int MAX_WAIT_TEST_MS = 5000;
     private final String SEARCH_TEXT = "Firefox for Android";
-    private final String ADD_SEARCHENGINE_OPTION_TEXT = "Add Search Engine";
-
-    @Override
-    protected int getTestType() {
-        return TEST_MOCHITEST;
-    }
+    private final String ADD_SEARCHENGINE_OPTION_TEXT = "Add as Search Engine";
 
     public void testAddSearchEngine() {
         String blankPageURL = getAbsoluteUrl(StringHelper.ROBOCOP_BLANK_PAGE_01_URL);
@@ -62,7 +61,7 @@ public class testAddSearchEngine extends AboutHomeTest {
         // Load the page for the search engine to add.
         inputAndLoadUrl(searchEngineURL);
         waitForText(StringHelper.ROBOCOP_SEARCH_TITLE);
-        verifyPageTitle(StringHelper.ROBOCOP_SEARCH_TITLE);
+        verifyPageTitle(StringHelper.ROBOCOP_SEARCH_TITLE, searchEngineURL);
 
         // Used to long-tap on the search input box for the search engine to add.
         getInstrumentation().waitForIdleSync();
@@ -100,10 +99,15 @@ public class testAddSearchEngine extends AboutHomeTest {
 
         mAsserter.dumpLog("Search Engines list = " + searchEngines.toString());
         mAsserter.is(searchEngines.size(), initialNumSearchEngines + 1, "Checking the number of Search Engines has increased");
-        
+
         // Verify that the number of displayed searchengines is the same as the one received through the SearchEngines:Data event.
         verifyDisplayedSearchEnginesCount(initialNumSearchEngines + 1);
         searchEngineDataEventExpector.unregisterListener();
+
+        // Verify that the search plugin XML file for the new engine ended up where we expected it to.
+        // This file name is created in nsSearchService.js based on the name of the new engine.
+        final File f = GeckoProfile.get(getActivity()).getFile("searchplugins/robocop-search-engine.xml");
+        mAsserter.ok(f.exists(), "Checking that new search plugin file exists", "");
     }
 
     /**
@@ -136,13 +140,21 @@ public class testAddSearchEngine extends AboutHomeTest {
         boolean correctNumSearchEnginesDisplayed = waitForTest(new BooleanTest() {
             @Override
             public boolean test() {
-                return (findListViewWithTag("browser_search").getAdapter().getCount() == expectedCount);
+                ListView list = findListViewWithTag(HomePager.LIST_TAG_BROWSER_SEARCH);
+                if (list == null) {
+                    return false;
+                }
+                ListAdapter adapter = list.getAdapter();
+                if (adapter == null) {
+                    return false;
+                }
+                return (adapter.getCount() == expectedCount);
             }
         }, MAX_WAIT_TEST_MS);
-        
+
         // Exit about:home
         mActions.sendSpecialKey(Actions.SpecialKey.BACK);
         waitForText(StringHelper.ROBOCOP_BLANK_PAGE_01_TITLE);
         mAsserter.ok(correctNumSearchEnginesDisplayed, expectedCount + " Search Engines should be displayed" , "The correct number of Search Engines has been displayed");
-   }
+    }
 }

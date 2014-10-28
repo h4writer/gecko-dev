@@ -102,7 +102,7 @@ nsDeleteDir::Shutdown(bool finishDeleting)
       }
 
       rv = gInstance->mCondVar.Wait();
-      thread->Shutdown();
+      nsShutdownThread::BlockingShutdown(thread);
     }
   }
 
@@ -304,13 +304,6 @@ nsDeleteDir::RemoveOldTrashes(nsIFile *cacheDir)
     return NS_ERROR_NOT_INITIALIZED;
 
   nsresult rv;
-
-  static bool firstRun = true;
-
-  if (!firstRun)
-    return NS_OK;
-
-  firstRun = false;
 
   nsCOMPtr<nsIFile> trash;
   rv = GetTrashDir(cacheDir, &trash);

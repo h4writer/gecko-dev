@@ -61,7 +61,7 @@ function testGlobalScope() {
 
   is(globalScope.get("InstallTrigger").target.querySelector(".name").getAttribute("value"), "InstallTrigger",
     "Should have the right property name for 'InstallTrigger'.");
-  is(globalScope.get("InstallTrigger").target.querySelector(".value").getAttribute("value"), "Object",
+  is(globalScope.get("InstallTrigger").target.querySelector(".value").getAttribute("value"), "InstallTriggerImpl",
     "Should have the right property value for 'InstallTrigger'.");
 
   is(globalScope.get("SpecialPowers").target.querySelector(".name").getAttribute("value"), "SpecialPowers",
@@ -71,12 +71,14 @@ function testGlobalScope() {
 
   is(globalScope.get("window").target.querySelector(".name").getAttribute("value"), "window",
     "Should have the right property name for 'window'.");
-  is(globalScope.get("window").target.querySelector(".value").getAttribute("value"), "Window",
+  is(globalScope.get("window").target.querySelector(".value").getAttribute("value"),
+    "Window \u2192 doc_frame-parameters.html",
     "Should have the right property value for 'window'.");
 
   is(globalScope.get("document").target.querySelector(".name").getAttribute("value"), "document",
     "Should have the right property name for 'document'.");
-  is(globalScope.get("document").target.querySelector(".value").getAttribute("value"), "HTMLDocument",
+  is(globalScope.get("document").target.querySelector(".value").getAttribute("value"),
+    "HTMLDocument \u2192 doc_frame-parameters.html",
     "Should have the right property value for 'document'.");
 
   is(globalScope.get("undefined").target.querySelector(".name").getAttribute("value"), "undefined",
@@ -113,7 +115,7 @@ function testWindowVariable() {
 
   is(windowVar.get("InstallTrigger").target.querySelector(".name").getAttribute("value"), "InstallTrigger",
     "Should have the right property name for 'InstallTrigger'.");
-  is(windowVar.get("InstallTrigger").target.querySelector(".value").getAttribute("value"), "Object",
+  is(windowVar.get("InstallTrigger").target.querySelector(".value").getAttribute("value"), "InstallTriggerImpl",
     "Should have the right property value for 'InstallTrigger'.");
 
   is(windowVar.get("SpecialPowers").target.querySelector(".name").getAttribute("value"), "SpecialPowers",
@@ -123,12 +125,14 @@ function testWindowVariable() {
 
   is(windowVar.get("window").target.querySelector(".name").getAttribute("value"), "window",
     "Should have the right property name for 'window'.");
-  is(windowVar.get("window").target.querySelector(".value").getAttribute("value"), "Window",
+  is(windowVar.get("window").target.querySelector(".value").getAttribute("value"),
+    "Window \u2192 doc_frame-parameters.html",
     "Should have the right property value for 'window'.");
 
   is(windowVar.get("document").target.querySelector(".name").getAttribute("value"), "document",
     "Should have the right property name for 'document'.");
-  is(windowVar.get("document").target.querySelector(".value").getAttribute("value"), "HTMLDocument",
+  is(windowVar.get("document").target.querySelector(".value").getAttribute("value"),
+    "HTMLDocument \u2192 doc_frame-parameters.html",
     "Should have the right property value for 'document'.");
 
   is(windowVar.get("undefined").target.querySelector(".name").getAttribute("value"), "undefined",

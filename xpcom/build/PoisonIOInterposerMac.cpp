@@ -17,19 +17,20 @@
 #include "mozilla/Telemetry.h"
 #include "nsPrintfCString.h"
 #include "nsStackWalk.h"
-#include "nsTraceRefcntImpl.h"
+#include "nsTraceRefcnt.h"
 #include "plstr.h"
 #include "prio.h"
 
-#include <vector>
 #include <algorithm>
-#include <string.h>
+#include <vector>
 
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <aio.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 
 namespace {
 
@@ -42,8 +43,8 @@ static bool sIsEnabled = false;
 static bool sOnlyReportDirtyWrites = false;
 
 // Routines for write validation
-bool IsValidWrite(int fd, const void *wbuf, size_t count);
-bool IsIPCWrite(int fd, const struct stat &buf);
+bool IsValidWrite(int aFd, const void* aWbuf, size_t aCount);
+bool IsIPCWrite(int aFd, const struct stat& aBuf);
 
 /******************************** IO AutoTimer ********************************/
 
@@ -54,98 +55,120 @@ bool IsIPCWrite(int fd, const struct stat &buf);
 class MacIOAutoObservation : public IOInterposeObserver::Observation
 {
 public:
-  MacIOAutoObservation(IOInterposeObserver::Operation aOp,
-                       const char* aReference, int aFd)
-    : mShouldObserve(sIsEnabled && IOInterposer::IsObservedOperation(aOp) &&
-                     !IsDebugFile(aFd))
+  MacIOAutoObservation(IOInterposeObserver::Operation aOp, int aFd)
+    : IOInterposeObserver::Observation(aOp, sReference, sIsEnabled &&
+                                       !IsDebugFile(aFd))
+    , mFd(aFd)
+    , mHasQueriedFilename(false)
+    , mFilename(nullptr)
   {
-    if (mShouldObserve) {
-      mOperation = aOp;
-      mReference = aReference;
-      mStart = TimeStamp::Now();
-    }
   }
 
-  MacIOAutoObservation(IOInterposeObserver::Operation aOp,
-                       const char* aReference, int aFd, const void *aBuf,
-                       size_t aCount)
-    : mShouldObserve(sIsEnabled && IOInterposer::IsObservedOperation(aOp) &&
-                     !IsDebugFile(aFd))
+  MacIOAutoObservation(IOInterposeObserver::Operation aOp, int aFd,
+                       const void* aBuf, size_t aCount)
+    : IOInterposeObserver::Observation(aOp, sReference, sIsEnabled &&
+                                       !IsDebugFile(aFd) &&
+                                       IsValidWrite(aFd, aBuf, aCount))
+    , mFd(aFd)
+    , mHasQueriedFilename(false)
+    , mFilename(nullptr)
   {
-    if (mShouldObserve) {
-      mShouldObserve = IsValidWrite(aFd, aBuf, aCount);
-      if (mShouldObserve) {
-        mOperation = aOp;
-        mReference = aReference;
-        mStart = TimeStamp::Now();
-      }
-    }
   }
+
+  // Custom implementation of IOInterposeObserver::Observation::Filename
+  const char16_t* Filename() MOZ_OVERRIDE;
 
   ~MacIOAutoObservation()
   {
-    if (mShouldObserve) {
-      mEnd = TimeStamp::Now();
-
-      // Report this observation
-      IOInterposer::Report(*this);
+    Report();
+    if (mFilename) {
+      NS_Free(mFilename);
+      mFilename = nullptr;
     }
   }
 
 private:
-  bool                mShouldObserve;
+  int                 mFd;
+  bool                mHasQueriedFilename;
+  char16_t*           mFilename;
+  static const char*  sReference;
 };
+
+const char* MacIOAutoObservation::sReference = "PoisonIOInterposer";
+
+// Get filename for this observation
+const char16_t*
+MacIOAutoObservation::Filename()
+{
+  // If mHasQueriedFilename is true, then we already have it
+  if (mHasQueriedFilename) {
+    return mFilename;
+  }
+  char filename[MAXPATHLEN];
+  if (fcntl(mFd, F_GETPATH, filename) != -1) {
+    mFilename = UTF8ToNewUnicode(nsDependentCString(filename));
+  } else {
+    mFilename = nullptr;
+  }
+  mHasQueriedFilename = true;
+
+  // Return filename
+  return mFilename;
+}
 
 /****************************** Write Validation ******************************/
 
 // We want to detect "actual" writes, not IPC. Some IPC mechanisms are
 // implemented with file descriptors, so filter them out.
-bool IsIPCWrite(int fd, const struct stat &buf) {
-  if ((buf.st_mode & S_IFMT) == S_IFIFO) {
+bool
+IsIPCWrite(int aFd, const struct stat& aBuf)
+{
+  if ((aBuf.st_mode & S_IFMT) == S_IFIFO) {
     return true;
   }
 
-  if ((buf.st_mode & S_IFMT) != S_IFSOCK) {
+  if ((aBuf.st_mode & S_IFMT) != S_IFSOCK) {
     return false;
   }
 
   sockaddr_storage address;
   socklen_t len = sizeof(address);
-  if (getsockname(fd, (sockaddr*) &address, &len) != 0) {
-    return true; // Ignore the fd if we can't find what it is.
+  if (getsockname(aFd, (sockaddr*)&address, &len) != 0) {
+    return true; // Ignore the aFd if we can't find what it is.
   }
 
   return address.ss_family == AF_UNIX;
 }
 
 // We want to report actual disk IO not things that don't move bits on the disk
-bool IsValidWrite(int fd, const void *wbuf, size_t count)
+bool
+IsValidWrite(int aFd, const void* aWbuf, size_t aCount)
 {
   // Ignore writes of zero bytes, Firefox does some during shutdown.
-  if (count == 0) {
+  if (aCount == 0) {
     return false;
   }
 
   {
     struct stat buf;
-    int rv = fstat(fd, &buf);
+    int rv = fstat(aFd, &buf);
     if (rv != 0) {
       return true;
     }
 
-    if (IsIPCWrite(fd, buf)) {
+    if (IsIPCWrite(aFd, buf)) {
       return false;
     }
   }
 
-  // For writev we pass a nullptr wbuf. We should only get here from
-  // dbm, and it uses write, so assert that we have wbuf.
-  if (!wbuf) {
+  // For writev we pass a nullptr aWbuf. We should only get here from
+  // dbm, and it uses write, so assert that we have aWbuf.
+  if (!aWbuf) {
     return true;
   }
 
   // Break, here if we're allowed to report non-dirty writes
-  if(!sOnlyReportDirtyWrites) {
+  if (!sOnlyReportDirtyWrites) {
     return true;
   }
 
@@ -153,23 +176,23 @@ bool IsValidWrite(int fd, const void *wbuf, size_t count)
   // content. This is needed because dbm doesn't keep track of dirty bits
   // and can end up writing the same data to disk twice. Once when the
   // user (nss) asks it to sync and once when closing the database.
-  ScopedFreePtr<void> wbuf2(malloc(count));
+  ScopedFreePtr<void> wbuf2(malloc(aCount));
   if (!wbuf2) {
     return true;
   }
-  off_t pos = lseek(fd, 0, SEEK_CUR);
+  off_t pos = lseek(aFd, 0, SEEK_CUR);
   if (pos == -1) {
     return true;
   }
-  ssize_t r = read(fd, wbuf2, count);
-  if (r < 0 || (size_t)r != count) {
+  ssize_t r = read(aFd, wbuf2, aCount);
+  if (r < 0 || (size_t)r != aCount) {
     return true;
   }
-  int cmp = memcmp(wbuf, wbuf2, count);
+  int cmp = memcmp(aWbuf, wbuf2, aCount);
   if (cmp != 0) {
     return true;
   }
-  off_t pos2 = lseek(fd, pos, SEEK_SET);
+  off_t pos2 = lseek(aFd, pos, SEEK_SET);
   if (pos2 != pos) {
     return true;
   }
@@ -181,36 +204,40 @@ bool IsValidWrite(int fd, const void *wbuf, size_t count)
 /*************************** Function Interception  ***************************/
 
 /** Structure for declaration of function override */
-struct FuncData {
-  const char *Name;      // Name of the function for the ones we use dlsym
-  const void *Wrapper;   // The function that we will replace 'Function' with
-  void *Function;        // The function that will be replaced with 'Wrapper'
-  void *Buffer;          // Will point to the jump buffer that lets us call
+struct FuncData
+{
+  const char* Name;      // Name of the function for the ones we use dlsym
+  const void* Wrapper;   // The function that we will replace 'Function' with
+  void* Function;        // The function that will be replaced with 'Wrapper'
+  void* Buffer;          // Will point to the jump buffer that lets us call
                          // 'Function' after it has been replaced.
 };
 
 // Wrap aio_write. We have not seen it before, so just assert/report it.
-typedef ssize_t (*aio_write_t)(struct aiocb *aiocbp);
-ssize_t wrap_aio_write(struct aiocb *aiocbp);
-FuncData aio_write_data = { 0, (void*) wrap_aio_write, (void*) aio_write };
-ssize_t wrap_aio_write(struct aiocb *aiocbp) {
-  const char* ref = "aio_write";
-  MacIOAutoObservation timer(IOInterposeObserver::OpWrite, ref,
-                             aiocbp->aio_fildes);
+typedef ssize_t (*aio_write_t)(struct aiocb* aAioCbp);
+ssize_t wrap_aio_write(struct aiocb* aAioCbp);
+FuncData aio_write_data = { 0, (void*)wrap_aio_write, (void*)aio_write };
+ssize_t
+wrap_aio_write(struct aiocb* aAioCbp)
+{
+  MacIOAutoObservation timer(IOInterposeObserver::OpWrite,
+                             aAioCbp->aio_fildes);
 
-  aio_write_t old_write = (aio_write_t) aio_write_data.Buffer;
-  return old_write(aiocbp);
+  aio_write_t old_write = (aio_write_t)aio_write_data.Buffer;
+  return old_write(aAioCbp);
 }
 
 // Wrap pwrite-like functions.
 // We have not seen them before, so just assert/report it.
-typedef ssize_t (*pwrite_t)(int fd, const void *buf, size_t nbyte, off_t offset);
-template<FuncData &foo>
-ssize_t wrap_pwrite_temp(int fd, const void *buf, size_t nbyte, off_t offset) {
-  const char* ref = "pwrite_*";
-  MacIOAutoObservation timer(IOInterposeObserver::OpWrite, ref, fd);
-  pwrite_t old_write = (pwrite_t) foo.Buffer;
-  return old_write(fd, buf, nbyte, offset);
+typedef ssize_t (*pwrite_t)(int aFd, const void* buf, size_t aNumBytes,
+                            off_t aOffset);
+template<FuncData& foo>
+ssize_t
+wrap_pwrite_temp(int aFd, const void* aBuf, size_t aNumBytes, off_t aOffset)
+{
+  MacIOAutoObservation timer(IOInterposeObserver::OpWrite, aFd);
+  pwrite_t old_write = (pwrite_t)foo.Buffer;
+  return old_write(aFd, aBuf, aNumBytes, aOffset);
 }
 
 // Define a FuncData for a pwrite-like functions.
@@ -226,14 +253,15 @@ DEFINE_PWRITE_DATA(pwrite_UNIX2003, "pwrite$UNIX2003");
 DEFINE_PWRITE_DATA(pwrite_NOCANCEL, "pwrite$NOCANCEL");
 
 
-typedef ssize_t (*writev_t)(int fd, const struct iovec *iov, int iovcnt);
-template<FuncData &foo>
-ssize_t wrap_writev_temp(int fd, const struct iovec *iov, int iovcnt) {
-  const char* ref = "pwrite_*";
-  MacIOAutoObservation timer(IOInterposeObserver::OpWrite, ref, fd, nullptr,
-                             iovcnt);
-  writev_t old_write = (writev_t) foo.Buffer;
-  return old_write(fd, iov, iovcnt);
+typedef ssize_t (*writev_t)(int aFd, const struct iovec* aIov, int aIovCount);
+template<FuncData& foo>
+ssize_t
+wrap_writev_temp(int aFd, const struct iovec* aIov, int aIovCount)
+{
+  MacIOAutoObservation timer(IOInterposeObserver::OpWrite, aFd, nullptr,
+                             aIovCount);
+  writev_t old_write = (writev_t)foo.Buffer;
+  return old_write(aFd, aIov, aIovCount);
 }
 
 // Define a FuncData for a writev-like functions.
@@ -248,14 +276,14 @@ DEFINE_WRITEV_DATA(writev_UNIX2003, "writev$UNIX2003");
 // This exists on 64 bit OS X
 DEFINE_WRITEV_DATA(writev_NOCANCEL, "writev$NOCANCEL");
 
-typedef ssize_t (*write_t)(int fd, const void *buf, size_t count);
-template<FuncData &foo>
-ssize_t wrap_write_temp(int fd, const void *buf, size_t count) {
-  const char* ref = "pwrite_*";
-  MacIOAutoObservation timer(IOInterposeObserver::OpWrite, ref, fd, buf,
-                             count);
-  write_t old_write = (write_t) foo.Buffer;
-  return old_write(fd, buf, count);
+typedef ssize_t (*write_t)(int aFd, const void* aBuf, size_t aCount);
+template<FuncData& foo>
+ssize_t
+wrap_write_temp(int aFd, const void* aBuf, size_t aCount)
+{
+  MacIOAutoObservation timer(IOInterposeObserver::OpWrite, aFd, aBuf, aCount);
+  write_t old_write = (write_t)foo.Buffer;
+  return old_write(aFd, aBuf, aCount);
 }
 
 // Define a FuncData for a write-like functions.
@@ -270,22 +298,24 @@ DEFINE_WRITE_DATA(write_UNIX2003, "write$UNIX2003");
 // This exists on 64 bit OS X
 DEFINE_WRITE_DATA(write_NOCANCEL, "write$NOCANCEL");
 
-FuncData *Functions[] = { &aio_write_data,
+FuncData* Functions[] = {
+  &aio_write_data,
 
-                          &pwrite_data,
-                          &pwrite_NOCANCEL_UNIX2003_data,
-                          &pwrite_UNIX2003_data,
-                          &pwrite_NOCANCEL_data,
+  &pwrite_data,
+  &pwrite_NOCANCEL_UNIX2003_data,
+  &pwrite_UNIX2003_data,
+  &pwrite_NOCANCEL_data,
 
-                          &write_data,
-                          &write_NOCANCEL_UNIX2003_data,
-                          &write_UNIX2003_data,
-                          &write_NOCANCEL_data,
+  &write_data,
+  &write_NOCANCEL_UNIX2003_data,
+  &write_UNIX2003_data,
+  &write_NOCANCEL_data,
 
-                          &writev_data,
-                          &writev_NOCANCEL_UNIX2003_data,
-                          &writev_UNIX2003_data,
-                          &writev_NOCANCEL_data};
+  &writev_data,
+  &writev_NOCANCEL_UNIX2003_data,
+  &writev_UNIX2003_data,
+  &writev_NOCANCEL_data
+};
 
 const int NumFunctions = ArrayLength(Functions);
 
@@ -295,7 +325,9 @@ const int NumFunctions = ArrayLength(Functions);
 
 namespace mozilla {
 
-void InitPoisonIOInterposer() {
+void
+InitPoisonIOInterposer()
+{
   // Enable reporting from poisoned write methods
   sIsEnabled = true;
 
@@ -311,7 +343,7 @@ void InitPoisonIOInterposer() {
   MozillaRegisterDebugFD(2);
 
   for (int i = 0; i < NumFunctions; ++i) {
-    FuncData *d = Functions[i];
+    FuncData* d = Functions[i];
     if (!d->Function) {
       d->Function = dlsym(RTLD_DEFAULT, d->Name);
     }
@@ -319,16 +351,20 @@ void InitPoisonIOInterposer() {
       continue;
     }
     DebugOnly<mach_error_t> t = mach_override_ptr(d->Function, d->Wrapper,
-                                       &d->Buffer);
+                                                  &d->Buffer);
     MOZ_ASSERT(t == err_none);
   }
 }
 
-void OnlyReportDirtyWrites() {
+void
+OnlyReportDirtyWrites()
+{
   sOnlyReportDirtyWrites = true;
 }
 
-void ClearPoisonIOInterposer() {
+void
+ClearPoisonIOInterposer()
+{
   // Not sure how or if we can unpoison the functions. Would be nice, but no
   // worries we won't need to do this anyway.
   sIsEnabled = false;

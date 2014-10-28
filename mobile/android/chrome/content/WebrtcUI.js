@@ -74,17 +74,18 @@ var WebrtcUI = {
 
   handleRequest: function handleRequest(aSubject, aTopic, aData) {
     let constraints = aSubject.getConstraints();
+    let contentWindow = Services.wm.getOuterWindowWithId(aSubject.windowID);
 
-    Services.wm.getMostRecentWindow(null).navigator.mozGetUserMediaDevices(
+    contentWindow.navigator.mozGetUserMediaDevices(
       constraints,
       function (devices) {
-        WebrtcUI.prompt(aSubject.windowID, aSubject.callID, constraints.audio,
+        WebrtcUI.prompt(contentWindow, aSubject.callID, constraints.audio,
                         constraints.video, devices);
       },
       function (error) {
         Cu.reportError(error);
-      }
-    );
+      },
+      aSubject.innerWindowID);
   },
 
   getDeviceButtons: function(audioDevices, videoDevices, aCallID) {
@@ -106,8 +107,8 @@ var WebrtcUI = {
           allowedDevices.AppendElement(audioDevices[audioId]);
 
         let videoId = 0;
-        if (inputs && inputs.videoDevice != undefined)
-          videoId = inputs.videoDevice;
+        if (inputs && inputs.videoSource != undefined)
+          videoId = inputs.videoSource;
         if (videoDevices[videoId])
           allowedDevices.AppendElement(videoDevices[videoId]);
 
@@ -123,7 +124,10 @@ var WebrtcUI = {
         // if this is a Camera input, convert the name to something readable
         let res = /Camera\ \d+,\ Facing (front|back)/.exec(device.name);
         if (res)
-          return Strings.browser.GetStringFromName("getUserMedia." + aType + "." + res[1]);
+          return Strings.browser.GetStringFromName("getUserMedia." + aType + "." + res[1] + "Camera");
+
+        if (device.name.startsWith("&") && device.name.endsWith(";"))
+          return Strings.browser.GetStringFromName(device.name.substring(1, device.name.length -1));
 
         if (device.name.trim() == "") {
           defaultCount++;
@@ -153,7 +157,8 @@ var WebrtcUI = {
     }
   },
 
-  prompt: function prompt(aWindowID, aCallID, aAudioRequested, aVideoRequested, aDevices) {
+  prompt: function prompt(aContentWindow, aCallID, aAudioRequested,
+                          aVideoRequested, aDevices) {
     let audioDevices = [];
     let videoDevices = [];
     for (let device of aDevices) {
@@ -180,8 +185,7 @@ var WebrtcUI = {
     else
       return;
 
-    let contentWindow = Services.wm.getOuterWindowWithId(aWindowID);
-    let host = contentWindow.document.documentURIObject.host;
+    let host = aContentWindow.document.documentURIObject.host;
     let requestor = BrowserApp.manifest ? "'" + BrowserApp.manifest.name  + "'" : host;
     let message = Strings.browser.formatStringFromName("getUserMedia.share" + requestType + ".message", [ requestor ], 1);
 
@@ -193,8 +197,9 @@ var WebrtcUI = {
     if (videoDevices.length > 1 || audioDevices.length > 0) {
       // Only show the No Video option if there are also Audio devices to choose from
       if (audioDevices.length > 0)
-        extraItems = [ Strings.browser.GetStringFromName("getUserMedia.videoDevice.none") ];
-      this._addDevicesToOptions(videoDevices, "videoDevice", options, extraItems);
+        extraItems = [ Strings.browser.GetStringFromName("getUserMedia.videoSource.none") ];
+      // videoSource is both the string used for l10n lookup and the object that will be returned
+      this._addDevicesToOptions(videoDevices, "videoSource", options, extraItems);
     }
 
     if (audioDevices.length > 1 || videoDevices.length > 0) {

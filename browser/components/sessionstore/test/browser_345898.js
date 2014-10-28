@@ -11,7 +11,8 @@ function test() {
       return false;
     }
     catch (ex) {
-      return ex.name == "NS_ERROR_ILLEGAL_VALUE";
+      return ex.name == "NS_ERROR_ILLEGAL_VALUE" ||
+             ex.name == "NS_ERROR_FAILURE";
     }
   }
 
@@ -40,8 +41,4 @@ function test() {
      "Invalid window for getWindowValue throws");
   ok(test(function() ss.setWindowValue({}, "", "")),
      "Invalid window for setWindowValue throws");
-  ok(test(function() ss.getNumberOfTabsClosedLast({})),
-     "Invalid window for getNumberOfTabsClosedLast  throws");
-  ok(test(function() ss.setNumberOfTabsClosedLast({}, 1)),
-     "Invalid window for setNumberOfTabsClosedLast throws");
 }

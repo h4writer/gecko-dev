@@ -13,6 +13,8 @@ function run_test() {
   Log.repository.getLogger("Sync.Resource").level = Log.Level.Trace;
   Log.repository.getLogger("Sync.Service").level = Log.Level.Trace;
 
+  ensureLegacyIdentityManager();
+
   run_next_test();
 }
 
@@ -30,6 +32,7 @@ add_test(function test_change_password() {
 
   try {
     Service.baseURI = "http://localhost:9999/";
+    Service.serverURL = "http://localhost:9999/";
     setBasicCredentials("johndoe", "ilovejane");
 
     _("changePassword() returns false for a network error, the password won't change.");

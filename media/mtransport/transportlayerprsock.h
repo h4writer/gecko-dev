@@ -56,7 +56,6 @@ class TransportLayerPrsock : public TransportLayer {
         prsock_(prsock), fd_(fd) {
         mPollFlags = PR_POLL_READ;
       }
-      virtual ~SocketHandler() {}
 
       void Detach() {
         mCondition = NS_BASE_STREAM_CLOSED;
@@ -92,7 +91,8 @@ class TransportLayerPrsock : public TransportLayer {
       TransportLayerPrsock *prsock_;
       PRFileDesc *fd_;
    private:
-    DISALLOW_COPY_ASSIGN(SocketHandler);
+      DISALLOW_COPY_ASSIGN(SocketHandler);
+      virtual ~SocketHandler() {}
   };
 
   // Allow SocketHandler to talk to our APIs
@@ -101,7 +101,7 @@ class TransportLayerPrsock : public TransportLayer {
   // Functions to be called by SocketHandler
   void OnSocketReady(PRFileDesc *fd, int16_t outflags);
   void OnSocketDetached(PRFileDesc *fd) {
-    SetState(TS_CLOSED);
+    TL_SET_STATE(TS_CLOSED);
   }
   void IsLocal(bool *aIsLocal) {
     // TODO(jesup): better check? Does it matter? (likely no)
@@ -109,7 +109,7 @@ class TransportLayerPrsock : public TransportLayer {
   }
 
   PRFileDesc *fd_;
-  nsCOMPtr<SocketHandler> handler_;
+  nsRefPtr<SocketHandler> handler_;
   nsCOMPtr<nsISocketTransportService> stservice_;
 
 };

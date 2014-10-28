@@ -4,7 +4,7 @@
 
 "use strict";
 
-const EventEmitter = require("devtools/shared/event-emitter");
+const EventEmitter = require("devtools/toolkit/event-emitter");
 
 /**
  * Spectrum creates a color picker widget in any container you give it.
@@ -133,10 +133,11 @@ Spectrum.rgbToHsv = function(r, g, b, a) {
 Spectrum.getOffset = function(el) {
   let curleft = 0, curtop = 0;
   if (el.offsetParent) {
-    do {
+    while (el) {
       curleft += el.offsetLeft;
       curtop += el.offsetTop;
-    } while (el = el.offsetParent);
+      el = el.offsetParent;
+    }
   }
   return {
     left: curleft,
@@ -271,6 +272,10 @@ Spectrum.prototype = {
   },
 
   updateHelperLocations: function() {
+    // If the UI hasn't been shown yet then none of the dimensions will be correct
+    if (!this.element.classList.contains('spectrum-show'))
+      return;
+
     let h = this.hsv[0];
     let s = this.hsv[1];
     let v = this.hsv[2];

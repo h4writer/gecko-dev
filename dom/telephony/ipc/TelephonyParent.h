@@ -9,7 +9,7 @@
 #include "mozilla/dom/telephony/TelephonyCommon.h"
 #include "mozilla/dom/telephony/PTelephonyParent.h"
 #include "mozilla/dom/telephony/PTelephonyRequestParent.h"
-#include "nsITelephonyProvider.h"
+#include "nsITelephonyService.h"
 
 BEGIN_TELEPHONY_NAMESPACE
 
@@ -29,10 +29,10 @@ protected:
   ActorDestroy(ActorDestroyReason why);
 
   virtual bool
-  RecvPTelephonyRequestConstructor(PTelephonyRequestParent* aActor) MOZ_OVERRIDE;
+  RecvPTelephonyRequestConstructor(PTelephonyRequestParent* aActor, const IPCTelephonyRequest& aRequest) MOZ_OVERRIDE;
 
   virtual PTelephonyRequestParent*
-  AllocPTelephonyRequestParent() MOZ_OVERRIDE;
+  AllocPTelephonyRequestParent(const IPCTelephonyRequest& aRequest) MOZ_OVERRIDE;
 
   virtual bool
   DeallocPTelephonyRequestParent(PTelephonyRequestParent* aActor) MOZ_OVERRIDE;
@@ -45,9 +45,6 @@ protected:
 
   virtual bool
   RecvUnregisterListener() MOZ_OVERRIDE;
-
-  virtual bool
-  RecvDialCall(const uint32_t& aClientId, const nsString& aNumber, const bool& aIsEmergency) MOZ_OVERRIDE;
 
   virtual bool
   RecvHangUpCall(const uint32_t& aClientId, const uint32_t& aCallIndex) MOZ_OVERRIDE;
@@ -101,12 +98,15 @@ private:
 
 class TelephonyRequestParent : public PTelephonyRequestParent
                              , public nsITelephonyListener
+                             , public nsITelephonyDialCallback
 {
   friend class TelephonyParent;
 
 public:
   NS_DECL_ISUPPORTS
   NS_DECL_NSITELEPHONYLISTENER
+  NS_DECL_NSITELEPHONYCALLBACK
+  NS_DECL_NSITELEPHONYDIALCALLBACK
 
 protected:
   TelephonyRequestParent();
@@ -115,11 +115,23 @@ protected:
   virtual void
   ActorDestroy(ActorDestroyReason why);
 
+  nsresult
+  SendResponse(const IPCTelephonyResponse& aResponse);
+
 private:
   bool mActorDestroyed;
 
   bool
-  DoRequest();
+  DoRequest(const EnumerateCallsRequest& aRequest);
+
+  bool
+  DoRequest(const DialRequest& aRequest);
+
+  bool
+  DoRequest(const USSDRequest& aRequest);
+
+  bool
+  DoRequest(const HangUpConferenceRequest& aRequest);
 };
 
 END_TELEPHONY_NAMESPACE

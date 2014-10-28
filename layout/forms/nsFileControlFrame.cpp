@@ -8,16 +8,16 @@
 #include "nsGkAtoms.h"
 #include "nsCOMPtr.h"
 #include "nsIDocument.h"
-#include "nsINodeInfo.h"
+#include "mozilla/dom/NodeInfo.h"
 #include "mozilla/dom/Element.h"
+#include "mozilla/dom/DataTransfer.h"
 #include "mozilla/dom/HTMLButtonElement.h"
 #include "mozilla/dom/HTMLInputElement.h"
 #include "nsNodeInfoManager.h"
 #include "nsContentCreatorFunctions.h"
 #include "nsContentUtils.h"
-#include "nsEventStates.h"
-#include "nsIDOMDataTransfer.h"
-#include "nsIDOMDOMStringList.h"
+#include "mozilla/EventStates.h"
+#include "mozilla/dom/DOMStringList.h"
 #include "nsIDOMDragEvent.h"
 #include "nsIDOMFileList.h"
 #include "nsContentList.h"
@@ -43,9 +43,9 @@ nsFileControlFrame::nsFileControlFrame(nsStyleContext* aContext)
 
 
 void
-nsFileControlFrame::Init(nsIContent* aContent,
-                         nsIFrame*   aParent,
-                         nsIFrame*   aPrevInFlow)
+nsFileControlFrame::Init(nsIContent*       aContent,
+                         nsContainerFrame* aParent,
+                         nsIFrame*         aPrevInFlow)
 {
   nsBlockFrame::Init(aContent, aParent, aPrevInFlow);
 
@@ -75,7 +75,7 @@ nsFileControlFrame::DestroyFrom(nsIFrame* aDestructRoot)
 nsresult
 nsFileControlFrame::CreateAnonymousContent(nsTArray<ContentInfo>& aElements)
 {
-  nsCOMPtr<nsIDocument> doc = mContent->GetDocument();
+  nsCOMPtr<nsIDocument> doc = mContent->GetComposedDoc();
 
   // Create and setup the file picking button.
   mBrowse = doc->CreateHTMLElement(nsGkAtoms::button);
@@ -118,7 +118,7 @@ nsFileControlFrame::CreateAnonymousContent(nsTArray<ContentInfo>& aElements)
   }
 
   // Create and setup the text showing the selected files.
-  nsCOMPtr<nsINodeInfo> nodeInfo;
+  nsRefPtr<NodeInfo> nodeInfo;
   nodeInfo = doc->NodeInfoManager()->GetNodeInfo(nsGkAtoms::label, nullptr,
                                                  kNameSpaceID_XUL,
                                                  nsIDOMNode::ELEMENT_NODE);
@@ -150,11 +150,16 @@ nsFileControlFrame::CreateAnonymousContent(nsTArray<ContentInfo>& aElements)
 }
 
 void
-nsFileControlFrame::AppendAnonymousContentTo(nsBaseContentList& aElements,
+nsFileControlFrame::AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
                                              uint32_t aFilter)
 {
-  aElements.MaybeAppendElement(mBrowse);
-  aElements.MaybeAppendElement(mTextContent);
+  if (mBrowse) {
+    aElements.AppendElement(mBrowse);
+  }
+
+  if (mTextContent) {
+    aElements.AppendElement(mTextContent);
+  }
 }
 
 NS_QUERYFRAME_HEAD(nsFileControlFrame)
@@ -222,35 +227,31 @@ nsFileControlFrame::DnDListener::HandleEvent(nsIDOMEvent* aEvent)
 /* static */ bool
 nsFileControlFrame::DnDListener::IsValidDropData(nsIDOMDragEvent* aEvent)
 {
-  nsCOMPtr<nsIDOMDataTransfer> dataTransfer;
-  aEvent->GetDataTransfer(getter_AddRefs(dataTransfer));
+  nsCOMPtr<nsIDOMDataTransfer> domDataTransfer;
+  aEvent->GetDataTransfer(getter_AddRefs(domDataTransfer));
+  nsCOMPtr<DataTransfer> dataTransfer = do_QueryInterface(domDataTransfer);
   NS_ENSURE_TRUE(dataTransfer, false);
 
-  nsCOMPtr<nsIDOMDOMStringList> types;
-  dataTransfer->GetTypes(getter_AddRefs(types));
-  NS_ENSURE_TRUE(types, false);
-
   // We only support dropping files onto a file upload control
-  bool typeSupported;
-  types->Contains(NS_LITERAL_STRING("Files"), &typeSupported);
-  return typeSupported;
+  nsRefPtr<DOMStringList> types = dataTransfer->Types();
+  return types->Contains(NS_LITERAL_STRING("Files"));
 }
 
 nscoord
-nsFileControlFrame::GetMinWidth(nsRenderingContext *aRenderingContext)
+nsFileControlFrame::GetMinISize(nsRenderingContext *aRenderingContext)
 {
   nscoord result;
   DISPLAY_MIN_WIDTH(this, result);
 
   // Our min width is our pref width
-  result = GetPrefWidth(aRenderingContext);
+  result = GetPrefISize(aRenderingContext);
   return result;
 }
 
 void
 nsFileControlFrame::SyncDisabledState()
 {
-  nsEventStates eventStates = mContent->AsElement()->State();
+  EventStates eventStates = mContent->AsElement()->State();
   if (eventStates.HasState(NS_EVENT_STATE_DISABLED)) {
     mBrowse->SetAttr(kNameSpaceID_None, nsGkAtoms::disabled, EmptyString(),
                      true);
@@ -259,7 +260,7 @@ nsFileControlFrame::SyncDisabledState()
   }
 }
 
-NS_IMETHODIMP
+nsresult
 nsFileControlFrame::AttributeChanged(int32_t  aNameSpaceID,
                                      nsIAtom* aAttribute,
                                      int32_t  aModType)
@@ -278,15 +279,15 @@ nsFileControlFrame::AttributeChanged(int32_t  aNameSpaceID,
 }
 
 void
-nsFileControlFrame::ContentStatesChanged(nsEventStates aStates)
+nsFileControlFrame::ContentStatesChanged(EventStates aStates)
 {
   if (aStates.HasState(NS_EVENT_STATE_DISABLED)) {
     nsContentUtils::AddScriptRunner(new SyncDisabledStateEvent(this));
   }
 }
 
-#ifdef DEBUG
-NS_IMETHODIMP
+#ifdef DEBUG_FRAME_DUMP
+nsresult
 nsFileControlFrame::GetFrameName(nsAString& aResult) const
 {
   return MakeFrameName(NS_LITERAL_STRING("FileControl"), aResult);
@@ -328,5 +329,5 @@ nsFileControlFrame::AccessibleType()
 ////////////////////////////////////////////////////////////
 // Mouse listener implementation
 
-NS_IMPL_ISUPPORTS1(nsFileControlFrame::MouseListener,
-                   nsIDOMEventListener)
+NS_IMPL_ISUPPORTS(nsFileControlFrame::MouseListener,
+                  nsIDOMEventListener)

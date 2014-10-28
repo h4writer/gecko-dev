@@ -16,11 +16,8 @@ class StackSlotAllocator
 {
     js::Vector<uint32_t, 4, SystemAllocPolicy> normalSlots;
     js::Vector<uint32_t, 4, SystemAllocPolicy> doubleSlots;
+    js::Vector<uint32_t, 4, SystemAllocPolicy> quadSlots;
     uint32_t height_;
-
-  public:
-    StackSlotAllocator() : height_(0)
-    { }
 
     void freeSlot(uint32_t index) {
         normalSlots.append(index);
@@ -28,31 +25,112 @@ class StackSlotAllocator
     void freeDoubleSlot(uint32_t index) {
         doubleSlots.append(index);
     }
-    void freeValueSlot(uint32_t index) {
-        freeDoubleSlot(index);
+    void freeQuadSlot(uint32_t index) {
+        MOZ_ASSERT(SupportsSimd);
+        quadSlots.append(index);
     }
 
+    uint32_t allocateQuadSlot() {
+        MOZ_ASSERT(SupportsSimd);
+        // This relies on the fact that any architecture specific
+        // alignment of the stack pointer is done a priori.
+        if (!quadSlots.empty())
+            return quadSlots.popCopy();
+        if (height_ % 8 != 0)
+            normalSlots.append(height_ += 4);
+        if (height_ % 16 != 0)
+            doubleSlots.append(height_ += 8);
+        return height_ += 16;
+    }
     uint32_t allocateDoubleSlot() {
         if (!doubleSlots.empty())
             return doubleSlots.popCopy();
-        if (ComputeByteAlignment(height_, DOUBLE_STACK_ALIGNMENT))
-            normalSlots.append(++height_);
-        height_ += (sizeof(double) / STACK_SLOT_SIZE);
-        return height_;
+        if (!quadSlots.empty()) {
+            uint32_t index = quadSlots.popCopy();
+            doubleSlots.append(index - 8);
+            return index;
+        }
+        if (height_ % 8 != 0)
+            normalSlots.append(height_ += 4);
+        return height_ += 8;
     }
     uint32_t allocateSlot() {
         if (!normalSlots.empty())
             return normalSlots.popCopy();
         if (!doubleSlots.empty()) {
             uint32_t index = doubleSlots.popCopy();
-            normalSlots.append(index - 1);
+            normalSlots.append(index - 4);
             return index;
         }
-        return ++height_;
+        if (!quadSlots.empty()) {
+            uint32_t index = quadSlots.popCopy();
+            normalSlots.append(index - 4);
+            doubleSlots.append(index - 8);
+            return index;
+        }
+        return height_ += 4;
     }
-    uint32_t allocateValueSlot() {
-        return allocateDoubleSlot();
+
+  public:
+    StackSlotAllocator() : height_(0)
+    { }
+
+    void freeSlot(LDefinition::Type type, uint32_t index) {
+        switch (type) {
+#if JS_BITS_PER_WORD == 32
+          case LDefinition::GENERAL:
+          case LDefinition::OBJECT:
+          case LDefinition::SLOTS:
+#endif
+          case LDefinition::INT32:
+          case LDefinition::FLOAT32:   return freeSlot(index);
+#if JS_BITS_PER_WORD == 64
+          case LDefinition::GENERAL:
+          case LDefinition::OBJECT:
+          case LDefinition::SLOTS:
+#endif
+#ifdef JS_PUNBOX64
+          case LDefinition::BOX:
+#endif
+#ifdef JS_NUNBOX32
+          case LDefinition::TYPE:
+          case LDefinition::PAYLOAD:
+#endif
+          case LDefinition::DOUBLE:    return freeDoubleSlot(index);
+          case LDefinition::FLOAT32X4:
+          case LDefinition::INT32X4:   return freeQuadSlot(index);
+        }
+        MOZ_CRASH("Unknown slot type");
     }
+
+    uint32_t allocateSlot(LDefinition::Type type) {
+        switch (type) {
+#if JS_BITS_PER_WORD == 32
+          case LDefinition::GENERAL:
+          case LDefinition::OBJECT:
+          case LDefinition::SLOTS:
+#endif
+          case LDefinition::INT32:
+          case LDefinition::FLOAT32:   return allocateSlot();
+#if JS_BITS_PER_WORD == 64
+          case LDefinition::GENERAL:
+          case LDefinition::OBJECT:
+          case LDefinition::SLOTS:
+#endif
+#ifdef JS_PUNBOX64
+          case LDefinition::BOX:
+#endif
+#ifdef JS_NUNBOX32
+          case LDefinition::TYPE:
+          case LDefinition::PAYLOAD:
+#endif
+          case LDefinition::DOUBLE:    return allocateDoubleSlot();
+          case LDefinition::FLOAT32X4:
+          case LDefinition::INT32X4:   return allocateQuadSlot();
+        }
+        MOZ_CRASH("Unknown slot type");
+    }
+
     uint32_t stackHeight() const {
         return height_;
     }

@@ -6,38 +6,60 @@
 #include "mozilla/layers/TextureClient.h"
 #include <stdint.h>                     // for uint8_t, uint32_t, etc
 #include "Layers.h"                     // for Layer, etc
-#include "gfxContext.h"                 // for gfxContext, etc
+#include "gfx2DGlue.h"
 #include "gfxPlatform.h"                // for gfxPlatform
-#include "gfxPoint.h"                   // for gfxIntSize, gfxSize
-#include "gfxReusableSurfaceWrapper.h"  // for gfxReusableSurfaceWrapper
-#include "mozilla/gfx/BaseSize.h"       // for BaseSize
 #include "mozilla/ipc/SharedMemory.h"   // for SharedMemory, etc
-#include "mozilla/layers/CompositableClient.h"  // for CompositableClient
 #include "mozilla/layers/CompositableForwarder.h"
 #include "mozilla/layers/ISurfaceAllocator.h"
 #include "mozilla/layers/ImageDataSerializer.h"
-#include "mozilla/layers/ShadowLayers.h"  // for ShadowLayerForwarder
-#include "mozilla/layers/SharedPlanarYCbCrImage.h"
 #include "mozilla/layers/YCbCrImageDataSerializer.h"
-#include "mozilla/layers/PTextureChild.h"
 #include "nsDebug.h"                    // for NS_ASSERTION, NS_WARNING, etc
-#include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
-#include "ImageContainer.h"             // for PlanarYCbCrImage, etc
+#include "nsISupportsImpl.h"            // for MOZ_COUNT_CTOR, etc
+#include "ImageContainer.h"             // for PlanarYCbCrData, etc
 #include "mozilla/gfx/2D.h"
+#include "mozilla/layers/TextureClientOGL.h"
+#include "mozilla/layers/PTextureChild.h"
+#include "SharedSurface.h"
+#include "GLContext.h"
 
-#ifdef MOZ_ANDROID_OMTC
+#ifdef XP_WIN
+#include "mozilla/layers/TextureD3D9.h"
+#include "mozilla/layers/TextureD3D11.h"
+#include "mozilla/layers/TextureDIB.h"
+#include "gfxWindowsPlatform.h"
+#include "gfx2DGlue.h"
+#endif
+#ifdef MOZ_X11
+#include "mozilla/layers/TextureClientX11.h"
+#ifdef GL_PROVIDER_GLX
+#include "GLXLibrary.h"
+#endif
+#endif
+
+#ifdef MOZ_WIDGET_GONK
+#include <cutils/properties.h>
+#include "mozilla/layers/GrallocTextureClient.h"
+#endif
+
+#ifdef MOZ_WIDGET_ANDROID
 #  include "gfxReusableImageSurfaceWrapper.h"
-#  include "gfxImageSurface.h"
 #else
 #  include "gfxReusableSharedImageSurfaceWrapper.h"
 #  include "gfxSharedImageSurface.h"
 #endif
 
-using namespace mozilla::gl;
-using namespace mozilla::gfx;
+#if 0
+#define RECYCLE_LOG(...) printf_stderr(__VA_ARGS__)
+#else
+#define RECYCLE_LOG(...) do { } while (0)
+#endif
 
 namespace mozilla {
 namespace layers {
+
+using namespace mozilla::ipc;
+using namespace mozilla::gl;
+using namespace mozilla::gfx;
 
 /**
  * TextureChild is the content-side incarnation of the PTexture IPDL actor.
@@ -50,35 +72,35 @@ namespace layers {
  * TextureClient's data until the compositor side confirmed that it is safe to
  * deallocte or recycle the it.
  */
-class TextureChild : public PTextureChild
+class TextureChild MOZ_FINAL : public PTextureChild
 {
+  ~TextureChild() {}
 public:
+  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(TextureChild)
+
   TextureChild()
   : mForwarder(nullptr)
-  , mTextureData(nullptr)
   , mTextureClient(nullptr)
+  , mKeep(nullptr)
+  , mIPCOpen(false)
   {
-    MOZ_COUNT_CTOR(TextureChild);
-  }
-
-  ~TextureChild()
-  {
-    MOZ_COUNT_DTOR(TextureChild);
   }
 
   bool Recv__delete__() MOZ_OVERRIDE;
 
-  /**
-   * Only used during the deallocation phase iff we need synchronization between
-   * the client and host side for deallocation (that is, when the data is going
-   * to be deallocated or recycled on the client side).
-   */
-  void SetTextureData(TextureClientData* aData)
+  bool RecvCompositorRecycle()
   {
-    mTextureData = aData;
+    RECYCLE_LOG("Receive recycle %p (%p)\n", mTextureClient, mWaitForRecycle.get());
+    mWaitForRecycle = nullptr;
+    return true;
   }
 
-  void DeleteTextureData();
+  void WaitForCompositorRecycle()
+  {
+    mWaitForRecycle = mTextureClient;
+    RECYCLE_LOG("Wait for recycle %p\n", mWaitForRecycle.get());
+    SendClientRecycle();
+  }
 
   CompositableForwarder* GetForwarder() { return mForwarder; }
 
@@ -86,29 +108,37 @@ public:
 
   void ActorDestroy(ActorDestroyReason why) MOZ_OVERRIDE;
 
+  bool IPCOpen() const { return mIPCOpen; }
+
 private:
 
-  CompositableForwarder* mForwarder;
-  TextureClientData* mTextureData;
+  // AddIPDLReference and ReleaseIPDLReference are only to be called by CreateIPDLActor
+  // and DestroyIPDLActor, respectively. We intentionally make them private to prevent misuse.
+  // The purpose of these methods is to be aware of when the IPC system around this
+  // actor goes down: mIPCOpen is then set to false.
+  void AddIPDLReference() {
+    MOZ_ASSERT(mIPCOpen == false);
+    mIPCOpen = true;
+    AddRef();
+  }
+  void ReleaseIPDLReference() {
+    MOZ_ASSERT(mIPCOpen == true);
+    mIPCOpen = false;
+    Release();
+  }
+
+  RefPtr<CompositableForwarder> mForwarder;
+  RefPtr<TextureClient> mWaitForRecycle;
   TextureClient* mTextureClient;
+  KeepAlive* mKeep;
+  bool mIPCOpen;
 
   friend class TextureClient;
 };
 
-void
-TextureChild::DeleteTextureData()
-{
-  if (mTextureData) {
-    mTextureData->DeallocateSharedData(GetAllocator());
-    delete mTextureData;
-    mTextureData = nullptr;
-  }
-}
-
 bool
 TextureChild::Recv__delete__()
 {
-  DeleteTextureData();
   return true;
 }
 
@@ -118,39 +148,61 @@ TextureChild::ActorDestroy(ActorDestroyReason why)
   if (mTextureClient) {
     mTextureClient->mActor = nullptr;
   }
+  mWaitForRecycle = nullptr;
+  delete mKeep;
 }
 
 // static
 PTextureChild*
 TextureClient::CreateIPDLActor()
 {
-  return new TextureChild();
+  TextureChild* c = new TextureChild();
+  c->AddIPDLReference();
+  return c;
 }
 
 // static
 bool
 TextureClient::DestroyIPDLActor(PTextureChild* actor)
 {
-  delete actor;
+  static_cast<TextureChild*>(actor)->ReleaseIPDLReference();
   return true;
+}
+
+// static
+TextureClient*
+TextureClient::AsTextureClient(PTextureChild* actor)
+{
+  return actor ? static_cast<TextureChild*>(actor)->mTextureClient : nullptr;
+}
+
+void
+TextureClient::WaitForCompositorRecycle()
+{
+  mActor->WaitForCompositorRecycle();
 }
 
 bool
 TextureClient::InitIPDLActor(CompositableForwarder* aForwarder)
 {
-  MOZ_ASSERT(!mActor);
   MOZ_ASSERT(aForwarder);
+  if (mActor && mActor->GetForwarder() == aForwarder) {
+    return true;
+  }
+  MOZ_ASSERT(!mActor, "Cannot use a texture on several IPC channels.");
 
   SurfaceDescriptor desc;
   if (!ToSurfaceDescriptor(desc)) {
     return false;
   }
 
-  mActor = static_cast<TextureChild*>(aForwarder->CreateEmptyTextureChild());
+  mActor = static_cast<TextureChild*>(aForwarder->CreateTexture(desc, GetFlags()));
+  MOZ_ASSERT(mActor);
   mActor->mForwarder = aForwarder;
   mActor->mTextureClient = this;
+  mAllocator = aForwarder;
   mShared = true;
-  return mActor->SendInit(desc, GetFlags());
+  return mActor->IPCOpen();
 }
 
 PTextureChild*
@@ -159,82 +211,222 @@ TextureClient::GetIPDLActor()
   return mActor;
 }
 
-class ShmemTextureClientData : public TextureClientData
+#ifdef MOZ_WIDGET_GONK
+static bool
+DisableGralloc(SurfaceFormat aFormat, const gfx::IntSize& aSizeHint)
 {
-public:
-  ShmemTextureClientData(ipc::Shmem& aShmem)
-  : mShmem(aShmem)
-  {
-    MOZ_COUNT_CTOR(ShmemTextureClientData);
+  if (gfxPrefs::DisableGralloc()) {
+    return true;
+  }
+  if (aFormat == gfx::SurfaceFormat::A8) {
+    return true;
   }
 
-  ~ShmemTextureClientData()
-  {
-    MOZ_COUNT_CTOR(ShmemTextureClientData);
+#if ANDROID_VERSION <= 15
+  // Adreno 200 has a problem of drawing gralloc buffer width less than 64 and
+  // drawing gralloc buffer with a height 9px-16px.
+  // See Bug 983971.
+  if (aSizeHint.width < 64 || aSizeHint.height < 32) {
+    return true;
   }
+#endif
 
-  virtual void DeallocateSharedData(ISurfaceAllocator* allocator)
-  {
-    allocator->DeallocShmem(mShmem);
-    mShmem = ipc::Shmem();
-  }
+  return false;
+}
+#endif
 
-private:
-  ipc::Shmem mShmem;
-};
-
-class MemoryTextureClientData : public TextureClientData
+static
+TemporaryRef<BufferTextureClient>
+CreateBufferTextureClient(ISurfaceAllocator* aAllocator,
+                          SurfaceFormat aFormat,
+                          TextureFlags aTextureFlags,
+                          gfx::BackendType aMoz2DBackend)
 {
-public:
-  MemoryTextureClientData(uint8_t* aBuffer)
-  : mBuffer(aBuffer)
-  {
-    MOZ_COUNT_CTOR(MemoryTextureClientData);
+  if (aAllocator->IsSameProcess()) {
+    RefPtr<BufferTextureClient> result = new MemoryTextureClient(aAllocator, aFormat,
+                                                                 aMoz2DBackend,
+                                                                 aTextureFlags);
+    return result.forget();
   }
-
-  ~MemoryTextureClientData()
-  {
-    MOZ_ASSERT(!mBuffer, "Forgot to deallocate the shared texture data?");
-    MOZ_COUNT_CTOR(MemoryTextureClientData);
-  }
-
-  virtual void DeallocateSharedData(ISurfaceAllocator*)
-  {
-    delete[] mBuffer;
-    mBuffer = nullptr;
-  }
-
-private:
-  uint8_t* mBuffer;
-};
-
-TextureClientData*
-MemoryTextureClient::DropTextureData()
-{
-  if (!mBuffer) {
-    return nullptr;
-  }
-  TextureClientData* result = new MemoryTextureClientData(mBuffer);
-  MarkInvalid();
-  mBuffer = nullptr;
-  return result;
+  RefPtr<BufferTextureClient> result = new ShmemTextureClient(aAllocator, aFormat,
+                                                              aMoz2DBackend,
+                                                              aTextureFlags);
+  return result.forget();
 }
 
-TextureClientData*
-ShmemTextureClient::DropTextureData()
+// static
+TemporaryRef<TextureClient>
+TextureClient::CreateForDrawing(ISurfaceAllocator* aAllocator,
+                                gfx::SurfaceFormat aFormat,
+                                gfx::IntSize aSize,
+                                gfx::BackendType aMoz2DBackend,
+                                TextureFlags aTextureFlags,
+                                TextureAllocationFlags aAllocFlags)
 {
-  if (!mShmem.IsReadable()) {
+  if (aMoz2DBackend == gfx::BackendType::NONE) {
+    aMoz2DBackend = gfxPlatform::GetPlatform()->GetContentBackend();
+  }
+
+  RefPtr<TextureClient> texture;
+
+#if defined(MOZ_WIDGET_GONK) || defined(XP_WIN)
+  int32_t maxTextureSize = aAllocator->GetMaxTextureSize();
+#endif
+
+#ifdef XP_WIN
+  LayersBackend parentBackend = aAllocator->GetCompositorBackendType();
+  if (parentBackend == LayersBackend::LAYERS_D3D11 &&
+      (aMoz2DBackend == gfx::BackendType::DIRECT2D ||
+        aMoz2DBackend == gfx::BackendType::DIRECT2D1_1) &&
+      gfxWindowsPlatform::GetPlatform()->GetD2DDevice() &&
+      aSize.width <= maxTextureSize &&
+      aSize.height <= maxTextureSize) {
+    texture = new TextureClientD3D11(aFormat, aTextureFlags);
+  }
+  if (parentBackend == LayersBackend::LAYERS_D3D9 &&
+      aMoz2DBackend == gfx::BackendType::CAIRO &&
+      aAllocator->IsSameProcess() &&
+      aSize.width <= maxTextureSize &&
+      aSize.height <= maxTextureSize) {
+    if (gfxWindowsPlatform::GetPlatform()->GetD3D9Device()) {
+      texture = new CairoTextureClientD3D9(aFormat, aTextureFlags);
+    }
+  }
+
+  if (!texture && aFormat == SurfaceFormat::B8G8R8X8 &&
+      aAllocator->IsSameProcess() &&
+      aMoz2DBackend == gfx::BackendType::CAIRO) {
+    texture = new DIBTextureClient(aFormat, aTextureFlags);
+  }
+
+#endif
+
+#ifdef MOZ_X11
+  LayersBackend parentBackend = aAllocator->GetCompositorBackendType();
+  gfxSurfaceType type =
+    gfxPlatform::GetPlatform()->ScreenReferenceSurface()->GetType();
+
+  if (parentBackend == LayersBackend::LAYERS_BASIC &&
+      aMoz2DBackend == gfx::BackendType::CAIRO &&
+      type == gfxSurfaceType::Xlib)
+  {
+    texture = new TextureClientX11(aAllocator, aFormat, aTextureFlags);
+  }
+#ifdef GL_PROVIDER_GLX
+  if (parentBackend == LayersBackend::LAYERS_OPENGL &&
+      type == gfxSurfaceType::Xlib &&
+      aFormat != SurfaceFormat::A8 &&
+      gl::sGLXLibrary.UseTextureFromPixmap())
+  {
+    texture = new TextureClientX11(aAllocator, aFormat, aTextureFlags);
+  }
+#endif
+#endif
+
+#ifdef MOZ_WIDGET_GONK
+  if (!DisableGralloc(aFormat, aSize)) {
+    // Don't allow Gralloc texture clients to exceed the maximum texture size.
+    // BufferTextureClients have code to handle tiling the surface client-side.
+    if (aSize.width <= maxTextureSize && aSize.height <= maxTextureSize) {
+      texture = new GrallocTextureClientOGL(aAllocator, aFormat, aMoz2DBackend,
+                                           aTextureFlags);
+    }
+  }
+#endif
+
+  MOZ_ASSERT(!texture || texture->CanExposeDrawTarget(), "texture cannot expose a DrawTarget?");
+
+  if (texture && texture->AllocateForSurface(aSize, aAllocFlags)) {
+    return texture;
+  }
+
+  if (texture) {
+    NS_WARNING("Failed to allocate a TextureClient, falling back to BufferTextureClient.");
+  }
+
+  // Can't do any better than a buffer texture client.
+  texture = CreateBufferTextureClient(aAllocator, aFormat, aTextureFlags, aMoz2DBackend);
+
+  if (!texture->AllocateForSurface(aSize, aAllocFlags)) {
     return nullptr;
   }
-  TextureClientData* result = new ShmemTextureClientData(mShmem);
-  MarkInvalid();
-  mShmem = ipc::Shmem();
-  return result;
+
+  return texture;
+}
+
+// static
+TemporaryRef<BufferTextureClient>
+TextureClient::CreateForRawBufferAccess(ISurfaceAllocator* aAllocator,
+                                        gfx::SurfaceFormat aFormat,
+                                        gfx::IntSize aSize,
+                                        gfx::BackendType aMoz2DBackend,
+                                        TextureFlags aTextureFlags,
+                                        TextureAllocationFlags aAllocFlags)
+{
+  RefPtr<BufferTextureClient> texture =
+    CreateBufferTextureClient(aAllocator, aFormat,
+                              aTextureFlags, aMoz2DBackend);
+  if (texture) {
+    if (!texture->AllocateForSurface(aSize, aAllocFlags)) {
+      return nullptr;
+    }
+  }
+  return texture;
+}
+
+// static
+TemporaryRef<BufferTextureClient>
+TextureClient::CreateForYCbCr(ISurfaceAllocator* aAllocator,
+                              gfx::IntSize aYSize,
+                              gfx::IntSize aCbCrSize,
+                              StereoMode aStereoMode,
+                              TextureFlags aTextureFlags)
+{
+  RefPtr<BufferTextureClient> texture;
+  if (aAllocator->IsSameProcess()) {
+    texture = new MemoryTextureClient(aAllocator, gfx::SurfaceFormat::YUV,
+                                      gfx::BackendType::NONE,
+                                      aTextureFlags);
+  } else {
+    texture = new ShmemTextureClient(aAllocator, gfx::SurfaceFormat::YUV,
+                                     gfx::BackendType::NONE,
+                                     aTextureFlags);
+  }
+
+  if (!texture->AllocateForYCbCr(aYSize, aCbCrSize, aStereoMode)) {
+    return nullptr;
+  }
+
+  return texture;
+}
+
+// static
+TemporaryRef<BufferTextureClient>
+TextureClient::CreateWithBufferSize(ISurfaceAllocator* aAllocator,
+                     gfx::SurfaceFormat aFormat,
+                     size_t aSize,
+                     TextureFlags aTextureFlags)
+{
+  RefPtr<BufferTextureClient> texture;
+  if (aAllocator->IsSameProcess()) {
+    texture = new MemoryTextureClient(aAllocator, gfx::SurfaceFormat::YUV,
+                                      gfx::BackendType::NONE,
+                                      aTextureFlags);
+  } else {
+    texture = new ShmemTextureClient(aAllocator, gfx::SurfaceFormat::YUV,
+                                     gfx::BackendType::NONE,
+                                     aTextureFlags);
+  }
+
+  if (!texture->Allocate(aSize)) {
+    return nullptr;
+  }
+
+  return texture;
 }
 
 TextureClient::TextureClient(TextureFlags aFlags)
-  : mActor(nullptr)
-  , mFlags(aFlags)
+  : mFlags(aFlags)
   , mShared(false)
   , mValid(true)
 {}
@@ -245,29 +437,70 @@ TextureClient::~TextureClient()
   // be in Finalize() which is called just before the destructor.
 }
 
+void
+TextureClient::KeepUntilFullDeallocation(KeepAlive* aKeep)
+{
+  MOZ_ASSERT(mActor);
+  MOZ_ASSERT(!mActor->mKeep);
+  mActor->mKeep = aKeep;
+}
+
 void TextureClient::ForceRemove()
 {
   if (mValid && mActor) {
-    if (GetFlags() & TEXTURE_DEALLOCATE_CLIENT) {
-      mActor->SetTextureData(DropTextureData());
-      mActor->SendRemoveTextureSync();
-      mActor->DeleteTextureData();
+    if (GetFlags() & TextureFlags::DEALLOCATE_CLIENT) {
+      if (mActor->IPCOpen()) {
+        mActor->SendClearTextureHostSync();
+        mActor->SendRemoveTexture();
+      }
     } else {
-      mActor->SendRemoveTexture();
+      if (mActor->IPCOpen()) {
+        mActor->SendRemoveTexture();
+      }
     }
   }
   MarkInvalid();
 }
 
+bool TextureClient::CopyToTextureClient(TextureClient* aTarget,
+                                        const gfx::IntRect* aRect,
+                                        const gfx::IntPoint* aPoint)
+{
+  MOZ_ASSERT(IsLocked());
+  MOZ_ASSERT(aTarget->IsLocked());
+
+  if (!aTarget->CanExposeDrawTarget() || !CanExposeDrawTarget()) {
+    return false;
+  }
+
+  DrawTarget* destinationTarget = aTarget->BorrowDrawTarget();
+  DrawTarget* sourceTarget = BorrowDrawTarget();
+  RefPtr<gfx::SourceSurface> source = sourceTarget->Snapshot();
+  destinationTarget->CopySurface(source,
+                                 aRect ? *aRect : gfx::IntRect(gfx::IntPoint(0, 0), GetSize()),
+                                 aPoint ? *aPoint : gfx::IntPoint(0, 0));
+  source = nullptr;
+
+  return true;
+}
+
 void
 TextureClient::Finalize()
 {
-  if (mActor) {
-    // this will call ForceRemove in the right thread, using a sync proxy if needed
-    mActor->GetForwarder()->RemoveTexture(this);
+  MOZ_ASSERT(!IsLocked());
+  // Always make a temporary strong reference to the actor before we use it,
+  // in case TextureChild::ActorDestroy might null mActor concurrently.
+  RefPtr<TextureChild> actor = mActor;
 
-    // mActor has a raw pointer to us, mActor->mTextureClient. Null it before we die.
-    mActor->mTextureClient = nullptr;
+  if (actor) {
+    // The actor has a raw pointer to us, actor->mTextureClient.
+    // Null it before RemoveTexture calls to avoid invalid actor->mTextureClient
+    // when calling TextureChild::ActorDestroy()
+    actor->mTextureClient = nullptr;
+    // this will call ForceRemove in the right thread, using a sync proxy if needed
+    if (actor->GetForwarder()) {
+      actor->GetForwarder()->RemoveTexture(this);
+    }
   }
 }
 
@@ -279,16 +512,17 @@ TextureClient::ShouldDeallocateInDestructor() const
   }
 
   // If we're meant to be deallocated by the host,
-  // but we haven't been shared yet, then we should
+  // but we haven't been shared yet or
+  // TextureFlags::DEALLOCATE_CLIENT is set, then we should
   // deallocate on the client instead.
-  return !IsSharedWithCompositor();
+  return !IsSharedWithCompositor() || (GetFlags() & TextureFlags::DEALLOCATE_CLIENT);
 }
 
 bool
 ShmemTextureClient::ToSurfaceDescriptor(SurfaceDescriptor& aDescriptor)
 {
   MOZ_ASSERT(IsValid());
-  if (!IsAllocated() || GetFormat() == gfx::FORMAT_UNKNOWN) {
+  if (!IsAllocated() || GetFormat() == gfx::SurfaceFormat::UNKNOWN) {
     return false;
   }
 
@@ -297,17 +531,11 @@ ShmemTextureClient::ToSurfaceDescriptor(SurfaceDescriptor& aDescriptor)
   return true;
 }
 
-ISurfaceAllocator*
-ShmemTextureClient::GetAllocator() const
-{
-  return mCompositable->GetForwarder();
-}
-
 bool
 ShmemTextureClient::Allocate(uint32_t aSize)
 {
-  MOZ_ASSERT(IsValid());
-  ipc::SharedMemory::SharedMemoryType memType = OptimalShmemType();
+  MOZ_ASSERT(mValid);
+  SharedMemory::SharedMemoryType memType = OptimalShmemType();
   mAllocated = GetAllocator()->AllocUnsafeShmem(aSize, memType, &mShmem);
   return mAllocated;
 }
@@ -329,10 +557,11 @@ ShmemTextureClient::GetBufferSize() const
   return mShmem.Size<uint8_t>();
 }
 
-ShmemTextureClient::ShmemTextureClient(CompositableClient* aCompositable,
+ShmemTextureClient::ShmemTextureClient(ISurfaceAllocator* aAllocator,
                                        gfx::SurfaceFormat aFormat,
+                                       gfx::BackendType aMoz2DBackend,
                                        TextureFlags aFlags)
-  : BufferTextureClient(aCompositable, aFormat, aFlags)
+  : BufferTextureClient(aAllocator, aFormat, aMoz2DBackend, aFlags)
   , mAllocated(false)
 {
   MOZ_COUNT_CTOR(ShmemTextureClient);
@@ -344,7 +573,7 @@ ShmemTextureClient::~ShmemTextureClient()
   if (ShouldDeallocateInDestructor()) {
     // if the buffer has never been shared we must deallocate it or ir would
     // leak.
-    mCompositable->GetForwarder()->DeallocShmem(mShmem);
+    GetAllocator()->DeallocShmem(mShmem);
   }
 }
 
@@ -352,7 +581,7 @@ bool
 MemoryTextureClient::ToSurfaceDescriptor(SurfaceDescriptor& aDescriptor)
 {
   MOZ_ASSERT(IsValid());
-  if (!IsAllocated() || GetFormat() == gfx::FORMAT_UNKNOWN) {
+  if (!IsAllocated() || GetFormat() == gfx::SurfaceFormat::UNKNOWN) {
     return false;
   }
   aDescriptor = SurfaceDescriptorMemory(reinterpret_cast<uintptr_t>(mBuffer),
@@ -375,10 +604,11 @@ MemoryTextureClient::Allocate(uint32_t aSize)
   return true;
 }
 
-MemoryTextureClient::MemoryTextureClient(CompositableClient* aCompositable,
+MemoryTextureClient::MemoryTextureClient(ISurfaceAllocator* aAllocator,
                                          gfx::SurfaceFormat aFormat,
+                                         gfx::BackendType aMoz2DBackend,
                                          TextureFlags aFlags)
-  : BufferTextureClient(aCompositable, aFormat, aFlags)
+  : BufferTextureClient(aAllocator, aFormat, aMoz2DBackend, aFlags)
   , mBuffer(nullptr)
   , mBufSize(0)
 {
@@ -392,79 +622,50 @@ MemoryTextureClient::~MemoryTextureClient()
     // if the buffer has never been shared we must deallocate it or it would
     // leak.
     GfxMemoryImageReporter::WillFree(mBuffer);
-    delete mBuffer;
+    delete [] mBuffer;
   }
 }
 
-BufferTextureClient::BufferTextureClient(CompositableClient* aCompositable,
+BufferTextureClient::BufferTextureClient(ISurfaceAllocator* aAllocator,
                                          gfx::SurfaceFormat aFormat,
+                                         gfx::BackendType aMoz2DBackend,
                                          TextureFlags aFlags)
   : TextureClient(aFlags)
-  , mCompositable(aCompositable)
+  , mAllocator(aAllocator)
   , mFormat(aFormat)
+  , mBackend(aMoz2DBackend)
+  , mOpenMode(OpenMode::OPEN_NONE)
+  , mLocked(false)
 {}
 
 BufferTextureClient::~BufferTextureClient()
 {}
 
-bool
-BufferTextureClient::UpdateSurface(gfxASurface* aSurface)
+TemporaryRef<TextureClient>
+BufferTextureClient::CreateSimilar(TextureFlags aFlags,
+                                   TextureAllocationFlags aAllocFlags) const
 {
-  MOZ_ASSERT(aSurface);
-  MOZ_ASSERT(!IsImmutable());
-  MOZ_ASSERT(IsValid());
+  // This may return null
+  RefPtr<BufferTextureClient> newBufferTex = TextureClient::CreateForRawBufferAccess(
+    mAllocator, mFormat, mSize, mBackend, mFlags | aFlags, aAllocFlags
+  );
 
-  ImageDataSerializer serializer(GetBuffer());
-  if (!serializer.IsValid()) {
-    return false;
-  }
-
-  if (gfxPlatform::GetPlatform()->SupportsAzureContent()) {
-    RefPtr<DrawTarget> dt = serializer.GetAsDrawTarget();
-    RefPtr<SourceSurface> source = gfxPlatform::GetPlatform()->GetSourceSurfaceForSurface(dt, aSurface);
-
-    dt->CopySurface(source, IntRect(IntPoint(), serializer.GetSize()), IntPoint());
-  } else {
-    RefPtr<gfxImageSurface> surf = serializer.GetAsThebesSurface();
-    if (!surf) {
-      return false;
-    }
-
-    nsRefPtr<gfxContext> tmpCtx = new gfxContext(surf.get());
-    tmpCtx->SetOperator(gfxContext::OPERATOR_SOURCE);
-    tmpCtx->DrawSurface(aSurface, gfxSize(serializer.GetSize().width,
-                                          serializer.GetSize().height));
-  }
-
-
-  if (TextureRequiresLocking(mFlags) && !ImplementsLocking()) {
-    // We don't have support for proper locking yet, so we'll
-    // have to be immutable instead.
-    MarkImmutable();
-  }
-  return true;
+  RefPtr<TextureClient> newTex = newBufferTex.get();
+  return newTex;
 }
 
-already_AddRefed<gfxASurface>
-BufferTextureClient::GetAsSurface()
+ISurfaceAllocator*
+BufferTextureClient::GetAllocator() const
 {
-  MOZ_ASSERT(IsValid());
-
-  ImageDataSerializer serializer(GetBuffer());
-  if (!serializer.IsValid()) {
-    return nullptr;
-  }
-
-  RefPtr<gfxImageSurface> surf = serializer.GetAsThebesSurface();
-  nsRefPtr<gfxASurface> result = surf.get();
-  return result.forget();
+  return mAllocator;
 }
 
 bool
 BufferTextureClient::AllocateForSurface(gfx::IntSize aSize, TextureAllocationFlags aFlags)
 {
   MOZ_ASSERT(IsValid());
-  MOZ_ASSERT(mFormat != gfx::FORMAT_YUV, "This textureClient cannot use YCbCr data");
+  MOZ_ASSERT(mFormat != gfx::SurfaceFormat::YUV, "This textureClient cannot use YCbCr data");
+  MOZ_ASSERT(aSize.width * aSize.height);
 
   int bufSize
     = ImageDataSerializer::ComputeMinBufferSize(aSize, mFormat);
@@ -475,35 +676,88 @@ BufferTextureClient::AllocateForSurface(gfx::IntSize aSize, TextureAllocationFla
   if (aFlags & ALLOC_CLEAR_BUFFER) {
     memset(GetBuffer(), 0, bufSize);
   }
+  if (aFlags & ALLOC_CLEAR_BUFFER_WHITE) {
+    memset(GetBuffer(), 0xFF, bufSize);
+  }
 
-  ImageDataSerializer serializer(GetBuffer());
+  ImageDataSerializer serializer(GetBuffer(), GetBufferSize());
   serializer.InitializeBufferInfo(aSize, mFormat);
   mSize = aSize;
   return true;
 }
 
-TemporaryRef<gfx::DrawTarget>
-BufferTextureClient::GetAsDrawTarget()
+gfx::DrawTarget*
+BufferTextureClient::BorrowDrawTarget()
 {
   MOZ_ASSERT(IsValid());
+  MOZ_ASSERT(mLocked, "BorrowDrawTarget should be called on locked textures only");
+  if (!mLocked) {
+    return nullptr;
+  }
 
-  ImageDataSerializer serializer(GetBuffer());
+  if (mDrawTarget) {
+    mDrawTarget->SetTransform(Matrix());
+    return mDrawTarget;
+  }
+
+  ImageDataSerializer serializer(GetBuffer(), GetBufferSize());
   if (!serializer.IsValid()) {
     return nullptr;
   }
 
-  return serializer.GetAsDrawTarget();
+  mDrawTarget = serializer.GetAsDrawTarget(mBackend);
+  if (mDrawTarget) {
+    return mDrawTarget;
+  }
+
+  mDrawTarget = serializer.GetAsDrawTarget(BackendType::CAIRO);
+
+  return mDrawTarget;
+}
+
+bool
+BufferTextureClient::Lock(OpenMode aMode)
+{
+  MOZ_ASSERT(!mLocked, "The TextureClient is already Locked!");
+  mOpenMode = aMode;
+  mLocked = IsValid() && IsAllocated();;
+  return mLocked;
+}
+
+void
+BufferTextureClient::Unlock()
+{
+  MOZ_ASSERT(mLocked, "The TextureClient is already Unlocked!");
+  mLocked = false;
+  if (!mDrawTarget) {
+    return;
+  }
+
+  // see the comment on TextureClient::BorrowDrawTarget.
+  // This DrawTarget is internal to the TextureClient and is only exposed to the
+  // outside world between Lock() and Unlock(). This assertion checks that no outside
+  // reference remains by the time Unlock() is called.
+  MOZ_ASSERT(mDrawTarget->refCount() == 1);
+
+  if (mReadbackSink) {
+    RefPtr<SourceSurface> snapshot = mDrawTarget->Snapshot();
+    RefPtr<DataSourceSurface> dataSurf = snapshot->GetDataSurface();
+    mReadbackSink->ProcessReadback(dataSurf);
+  }
+
+  mDrawTarget->Flush();
 }
 
 bool
 BufferTextureClient::UpdateYCbCr(const PlanarYCbCrData& aData)
 {
-  MOZ_ASSERT(mFormat == gfx::FORMAT_YUV, "This textureClient can only use YCbCr data");
+  MOZ_ASSERT(mLocked);
+  MOZ_ASSERT(mFormat == gfx::SurfaceFormat::YUV, "This textureClient can only use YCbCr data");
   MOZ_ASSERT(!IsImmutable());
   MOZ_ASSERT(IsValid());
   MOZ_ASSERT(aData.mCbSkip == aData.mCrSkip);
 
-  YCbCrImageDataSerializer serializer(GetBuffer());
+  YCbCrImageDataSerializer serializer(GetBuffer(), GetBufferSize());
   MOZ_ASSERT(serializer.IsValid());
   if (!serializer.CopyData(aData.mYChannel, aData.mCbChannel, aData.mCrChannel,
                            aData.mYSize, aData.mYStride,
@@ -533,7 +787,7 @@ BufferTextureClient::AllocateForYCbCr(gfx::IntSize aYSize,
   if (!Allocate(bufSize)) {
     return false;
   }
-  YCbCrImageDataSerializer serializer(GetBuffer());
+  YCbCrImageDataSerializer serializer(GetBuffer(), GetBufferSize());
   serializer.InitializeBufferInfo(aYSize,
                                   aCbCrSize,
                                   aStereoMode);
@@ -541,381 +795,40 @@ BufferTextureClient::AllocateForYCbCr(gfx::IntSize aYSize,
   return true;
 }
 
-
-
-
-
-
-
-
-
-DeprecatedTextureClient::DeprecatedTextureClient(CompositableForwarder* aForwarder,
-                             const TextureInfo& aTextureInfo)
-  : mForwarder(aForwarder)
-  , mTextureInfo(aTextureInfo)
-  , mAccessMode(ACCESS_READ_WRITE)
+uint8_t*
+BufferTextureClient::GetLockedData() const
 {
-  MOZ_COUNT_CTOR(DeprecatedTextureClient);
+  MOZ_ASSERT(IsLocked());
+
+  ImageDataSerializer serializer(GetBuffer(), GetBufferSize());
+  MOZ_ASSERT(serializer.IsValid());
+
+  return serializer.GetData();
 }
 
-DeprecatedTextureClient::~DeprecatedTextureClient()
-{
-  MOZ_COUNT_DTOR(DeprecatedTextureClient);
-  MOZ_ASSERT(mDescriptor.type() == SurfaceDescriptor::T__None, "Need to release surface!");
-}
+////////////////////////////////////////////////////////////////////////
+// SharedSurfaceTextureClient
 
-DeprecatedTextureClientShmem::DeprecatedTextureClientShmem(CompositableForwarder* aForwarder,
-                                       const TextureInfo& aTextureInfo)
-  : DeprecatedTextureClient(aForwarder, aTextureInfo)
+SharedSurfaceTextureClient::SharedSurfaceTextureClient(TextureFlags aFlags,
+                                                       gl::SharedSurface* surf)
+  : TextureClient(aFlags)
+  , mIsLocked(false)
+  , mSurf(surf)
+  , mGL(mSurf->mGL)
 {
 }
 
-DeprecatedTextureClientShmem::~DeprecatedTextureClientShmem()
+SharedSurfaceTextureClient::~SharedSurfaceTextureClient()
 {
-  ReleaseResources();
-}
-
-void
-DeprecatedTextureClientShmem::ReleaseResources()
-{
-  if (mSurface) {
-    mSurface = nullptr;
-    mSurfaceAsImage = nullptr;
-
-    ShadowLayerForwarder::CloseDescriptor(mDescriptor);
-  }
-
-  if (!(mTextureInfo.mTextureFlags & TEXTURE_DEALLOCATE_CLIENT)) {
-    mDescriptor = SurfaceDescriptor();
-    return;
-  }
-
-  if (IsSurfaceDescriptorValid(mDescriptor)) {
-    mForwarder->DestroySharedSurface(&mDescriptor);
-    mDescriptor = SurfaceDescriptor();
-  }
+  // the data is owned externally.
 }
 
 bool
-DeprecatedTextureClientShmem::EnsureAllocated(gfx::IntSize aSize,
-                                    gfxContentType aContentType)
+SharedSurfaceTextureClient::ToSurfaceDescriptor(SurfaceDescriptor& aOutDescriptor)
 {
-  if (aSize != mSize ||
-      aContentType != mContentType ||
-      !IsSurfaceDescriptorValid(mDescriptor)) {
-    ReleaseResources();
-
-    mContentType = aContentType;
-    mSize = aSize;
-
-    if (!mForwarder->AllocSurfaceDescriptor(gfxIntSize(mSize.width, mSize.height),
-                                            mContentType, &mDescriptor)) {
-      NS_WARNING("creating SurfaceDescriptor failed!");
-    }
-    if (mContentType == GFX_CONTENT_COLOR_ALPHA) {
-      gfxASurface* surface = GetSurface();
-      if (!surface) {
-        return false;
-      }
-      nsRefPtr<gfxContext> context = new gfxContext(surface);
-      context->SetColor(gfxRGBA(0, 0, 0, 0));
-      context->SetOperator(gfxContext::OPERATOR_SOURCE);
-      context->Paint();
-    }
-  }
+  aOutDescriptor = SharedSurfaceDescriptor((uintptr_t)mSurf);
   return true;
 }
-
-void
-DeprecatedTextureClientShmem::SetDescriptor(const SurfaceDescriptor& aDescriptor)
-{
-  if (aDescriptor.type() == SurfaceDescriptor::Tnull_t) {
-    EnsureAllocated(mSize, mContentType);
-    return;
-  }
-
-  ReleaseResources();
-  mDescriptor = aDescriptor;
-
-  MOZ_ASSERT(!mSurface);
-  NS_ASSERTION(mDescriptor.type() == SurfaceDescriptor::T__None ||
-               mDescriptor.type() == SurfaceDescriptor::TSurfaceDescriptorGralloc ||
-               mDescriptor.type() == SurfaceDescriptor::TShmem ||
-               mDescriptor.type() == SurfaceDescriptor::TMemoryImage ||
-               mDescriptor.type() == SurfaceDescriptor::TRGBImage,
-               "Invalid surface descriptor");
-}
-
-gfxASurface*
-DeprecatedTextureClientShmem::GetSurface()
-{
-  if (!mSurface) {
-    if (!IsSurfaceDescriptorValid(mDescriptor)) {
-      return nullptr;
-    }
-    MOZ_ASSERT(mAccessMode == ACCESS_READ_WRITE || mAccessMode == ACCESS_READ_ONLY);
-    OpenMode mode = mAccessMode == ACCESS_READ_WRITE
-                    ? OPEN_READ_WRITE
-                    : OPEN_READ_ONLY;
-    mSurface = ShadowLayerForwarder::OpenDescriptor(mode, mDescriptor);
-    MOZ_ASSERT(!mSurface || mSurface->GetContentType() == mContentType);
-  }
-
-  return mSurface.get();
-}
-
-
-gfx::DrawTarget*
-DeprecatedTextureClientShmem::LockDrawTarget()
-{
-  if (mDrawTarget) {
-    return mDrawTarget;
-  }
-
-  gfxASurface* surface = GetSurface();
-  if (!surface) {
-    return nullptr;
-  }
-
-  mDrawTarget = gfxPlatform::GetPlatform()->CreateDrawTargetForSurface(surface, mSize);
-
-  return mDrawTarget;
-}
-
-void
-DeprecatedTextureClientShmem::Unlock()
-{
-  if (mSurface) {
-    mSurface = nullptr;
-    mSurfaceAsImage = nullptr;
-    ShadowLayerForwarder::CloseDescriptor(mDescriptor);
-  }
-  mDrawTarget = nullptr;
-}
-
-gfxImageSurface*
-DeprecatedTextureClientShmem::LockImageSurface()
-{
-  if (!mSurfaceAsImage) {
-    gfxASurface* surface = GetSurface();
-    if (!surface) {
-      return nullptr;
-    }
-    mSurfaceAsImage = surface->GetAsImageSurface();
-  }
-
-  return mSurfaceAsImage.get();
-}
-
-DeprecatedTextureClientTile::DeprecatedTextureClientTile(const DeprecatedTextureClientTile& aOther)
-  : DeprecatedTextureClient(aOther.mForwarder, aOther.mTextureInfo)
-  , mSurface(aOther.mSurface)
-{}
-
-DeprecatedTextureClientTile::~DeprecatedTextureClientTile()
-{}
-
-void
-DeprecatedTextureClientShmemYCbCr::ReleaseResources()
-{
-  GetForwarder()->DestroySharedSurface(&mDescriptor);
-}
-
-void
-DeprecatedTextureClientShmemYCbCr::SetDescriptor(const SurfaceDescriptor& aDescriptor)
-{
-  MOZ_ASSERT(aDescriptor.type() == SurfaceDescriptor::TYCbCrImage ||
-             aDescriptor.type() == SurfaceDescriptor::T__None);
-
-  if (IsSurfaceDescriptorValid(mDescriptor)) {
-    GetForwarder()->DestroySharedSurface(&mDescriptor);
-  }
-  mDescriptor = aDescriptor;
-}
-
-void
-DeprecatedTextureClientShmemYCbCr::SetDescriptorFromReply(const SurfaceDescriptor& aDescriptor)
-{
-  MOZ_ASSERT(aDescriptor.type() == SurfaceDescriptor::TYCbCrImage);
-  DeprecatedSharedPlanarYCbCrImage* shYCbCr = DeprecatedSharedPlanarYCbCrImage::FromSurfaceDescriptor(aDescriptor);
-  if (shYCbCr) {
-    shYCbCr->Release();
-    mDescriptor = SurfaceDescriptor();
-  } else {
-    SetDescriptor(aDescriptor);
-  }
-}
-
-bool
-DeprecatedTextureClientShmemYCbCr::EnsureAllocated(gfx::IntSize aSize,
-                                         gfxContentType aType)
-{
-  NS_RUNTIMEABORT("not enough arguments to do this (need both Y and CbCr sizes)");
-  return false;
-}
-
-
-DeprecatedTextureClientTile::DeprecatedTextureClientTile(CompositableForwarder* aForwarder,
-                                                         const TextureInfo& aTextureInfo,
-                                                         gfxReusableSurfaceWrapper* aSurface)
-  : DeprecatedTextureClient(aForwarder, aTextureInfo)
-  , mSurface(aSurface)
-{
-  mTextureInfo.mDeprecatedTextureHostFlags = TEXTURE_HOST_TILED;
-}
-
-bool
-DeprecatedTextureClientTile::EnsureAllocated(gfx::IntSize aSize, gfxContentType aType)
-{
-  if (!mSurface ||
-      mSurface->Format() != gfxPlatform::GetPlatform()->OptimalFormatForContent(aType)) {
-#ifdef MOZ_ANDROID_OMTC
-    // If we're using OMTC, we can save some cycles by not using shared
-    // memory. Using shared memory here is a small, but significant
-    // performance regression.
-    gfxImageSurface* tmpTile = new gfxImageSurface(gfxIntSize(aSize.width, aSize.height),
-                                                   gfxPlatform::GetPlatform()->OptimalFormatForContent(aType),
-                                                   aType != GFX_CONTENT_COLOR);
-    mSurface = new gfxReusableImageSurfaceWrapper(tmpTile);
-#else
-    nsRefPtr<gfxSharedImageSurface> sharedImage =
-      gfxSharedImageSurface::CreateUnsafe(mForwarder,
-                                          gfxIntSize(aSize.width, aSize.height),
-                                          gfxPlatform::GetPlatform()->OptimalFormatForContent(aType));
-    mSurface = new gfxReusableSharedImageSurfaceWrapper(mForwarder, sharedImage);
-#endif
-    mContentType = aType;
-  }
-  return true;
-}
-
-gfxImageSurface*
-DeprecatedTextureClientTile::LockImageSurface()
-{
-  // Use the gfxReusableSurfaceWrapper, which will reuse the surface
-  // if the compositor no longer has a read lock, otherwise the surface
-  // will be copied into a new writable surface.
-  gfxImageSurface* writableSurface = nullptr;
-  mSurface = mSurface->GetWritable(&writableSurface);
-  return writableSurface;
-}
-
-// XXX - All the code below can be removed as soon as we remove
-// DeprecatedImageClientSingle (which has already been ported to the new
-// textures).
-
-bool AutoLockShmemClient::Update(Image* aImage,
-                                 uint32_t aContentFlags,
-                                 gfxASurface *aSurface)
-{
-  if (!aImage) {
-    return false;
-  }
-
-  gfxIntSize size = aImage->GetSize();
-
-  gfxContentType contentType = aSurface->GetContentType();
-  bool isOpaque = (aContentFlags & Layer::CONTENT_OPAQUE);
-  if (contentType != GFX_CONTENT_ALPHA &&
-      isOpaque) {
-    contentType = GFX_CONTENT_COLOR;
-  }
-  mDeprecatedTextureClient->EnsureAllocated(gfx::IntSize(size.width, size.height), contentType);
-
-  OpenMode mode = mDeprecatedTextureClient->GetAccessMode() == DeprecatedTextureClient::ACCESS_READ_WRITE
-                  ? OPEN_READ_WRITE
-                  : OPEN_READ_ONLY;
-  nsRefPtr<gfxASurface> tmpASurface =
-    ShadowLayerForwarder::OpenDescriptor(mode,
-                                         *mDeprecatedTextureClient->LockSurfaceDescriptor());
-  if (!tmpASurface) {
-    return false;
-  }
-  nsRefPtr<gfxContext> tmpCtx = new gfxContext(tmpASurface.get());
-  tmpCtx->SetOperator(gfxContext::OPERATOR_SOURCE);
-  tmpCtx->DrawSurface(aSurface, gfxSize(size.width, size.height));
-
-  return true;
-}
-
-bool
-AutoLockYCbCrClient::Update(PlanarYCbCrImage* aImage)
-{
-  MOZ_ASSERT(aImage);
-  MOZ_ASSERT(mDescriptor);
-
-  const PlanarYCbCrData *data = aImage->GetData();
-  NS_ASSERTION(data, "Must be able to retrieve yuv data from image!");
-  if (!data) {
-    return false;
-  }
-
-  if (!EnsureDeprecatedTextureClient(aImage)) {
-    return false;
-  }
-
-  ipc::Shmem& shmem = mDescriptor->get_YCbCrImage().data();
-
-  YCbCrImageDataSerializer serializer(shmem.get<uint8_t>());
-  if (!serializer.CopyData(data->mYChannel, data->mCbChannel, data->mCrChannel,
-                           data->mYSize, data->mYStride,
-                           data->mCbCrSize, data->mCbCrStride,
-                           data->mYSkip, data->mCbSkip)) {
-    NS_WARNING("Failed to copy image data!");
-    return false;
-  }
-  return true;
-}
-
-bool AutoLockYCbCrClient::EnsureDeprecatedTextureClient(PlanarYCbCrImage* aImage)
-{
-  MOZ_ASSERT(aImage);
-  if (!aImage) {
-    return false;
-  }
-
-  const PlanarYCbCrData *data = aImage->GetData();
-  NS_ASSERTION(data, "Must be able to retrieve yuv data from image!");
-  if (!data) {
-    return false;
-  }
-
-  bool needsAllocation = false;
-  if (mDescriptor->type() != SurfaceDescriptor::TYCbCrImage) {
-    needsAllocation = true;
-  } else {
-    ipc::Shmem& shmem = mDescriptor->get_YCbCrImage().data();
-    YCbCrImageDataSerializer serializer(shmem.get<uint8_t>());
-    if (serializer.GetYSize() != data->mYSize ||
-        serializer.GetCbCrSize() != data->mCbCrSize) {
-      needsAllocation = true;
-    }
-  }
-
-  if (!needsAllocation) {
-    return true;
-  }
-
-  mDeprecatedTextureClient->ReleaseResources();
-
-  ipc::SharedMemory::SharedMemoryType shmType = OptimalShmemType();
-  size_t size = YCbCrImageDataSerializer::ComputeMinBufferSize(data->mYSize,
-                                                               data->mCbCrSize);
-  ipc::Shmem shmem;
-  if (!mDeprecatedTextureClient->GetForwarder()->AllocUnsafeShmem(size, shmType, &shmem)) {
-    return false;
-  }
-
-  YCbCrImageDataSerializer serializer(shmem.get<uint8_t>());
-  serializer.InitializeBufferInfo(data->mYSize,
-                                  data->mCbCrSize,
-                                  data->mStereoMode);
-
-  *mDescriptor = YCbCrImage(shmem, 0);
-
-  return true;
-}
-
 
 }
 }

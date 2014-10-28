@@ -61,19 +61,19 @@ public:
     Clear();
   }
 
-  TISInputSourceWrapper(const char* aID)
+  explicit TISInputSourceWrapper(const char* aID)
   {
     mInputSourceList = nullptr;
     InitByInputSourceID(aID);
   }
 
-  TISInputSourceWrapper(SInt32 aLayoutID)
+  explicit TISInputSourceWrapper(SInt32 aLayoutID)
   {
     mInputSourceList = nullptr;
     InitByLayoutID(aLayoutID);
   }
 
-  TISInputSourceWrapper(TISInputSourceRef aInputSource)
+  explicit TISInputSourceWrapper(TISInputSourceRef aInputSource)
   {
     mInputSourceList = nullptr;
     InitByTISInputSourceRef(aInputSource);
@@ -94,6 +94,12 @@ public:
    *                                3: Swedish-Pro
    *                                4: Dvorak-Qwerty Cmd
    *                                5: Thai
+   *                                6: Arabic
+   *                                7: French
+   *                                8: Hebrew
+   *                                9: Lithuanian
+   *                               10: Norwegian
+   *                               11: Spanish
    * @param aOverrideKeyboard     When testing set to TRUE, otherwise, set to
    *                              FALSE.  When TRUE, we use an ANSI keyboard
    *                              instead of the actual keyboard.
@@ -239,6 +245,13 @@ public:
    */
   static KeyNameIndex ComputeGeckoKeyNameIndex(UInt32 aNativeKeyCode);
 
+  /**
+   * ComputeGeckoCodeNameIndex() returns Gecko code name index for the key.
+   *
+   * @param aNativeKeyCode        A native keycode.
+   */
+  static CodeNameIndex ComputeGeckoCodeNameIndex(UInt32 aNativeKeyCode);
+
 protected:
   /**
    * TranslateToString() computes the inputted text from the native keyCode,
@@ -286,7 +299,7 @@ protected:
    *                              this is a result of ::LMGetKbdType().
    */
   void InitKeyPressEvent(NSEvent *aNativeKeyEvent,
-                         PRUnichar aInsertChar,
+                         char16_t aInsertChar,
                          WidgetKeyboardEvent& aKeyEvent,
                          UInt32 aKbType);
 
@@ -483,7 +496,7 @@ protected:
       Clear();
     }    
 
-    KeyEventState(NSEvent* aNativeKeyEvent) : mKeyEvent(nullptr)
+    explicit KeyEventState(NSEvent* aNativeKeyEvent) : mKeyEvent(nullptr)
     {
       Clear();
       Set(aNativeKeyEvent);
@@ -542,7 +555,7 @@ protected:
   class AutoKeyEventStateCleaner
   {
   public:
-    AutoKeyEventStateCleaner(TextInputHandlerBase* aHandler) :
+    explicit AutoKeyEventStateCleaner(TextInputHandlerBase* aHandler) :
       mHandler(aHandler)
     {
     }
@@ -629,7 +642,7 @@ protected:
    *                              if aChar is a non-printable ASCII character,
    *                              FALSE.
    */
-  static bool IsPrintableChar(PRUnichar aChar);
+  static bool IsPrintableChar(char16_t aChar);
 
   /**
    * IsNormalCharInputtingEvent() checks whether aKeyEvent causes text input.
@@ -833,7 +846,8 @@ public:
   void OnSelectionChange() { mSelectedRange.location = NSNotFound; }
 
   /**
-   * DispatchTextEvent() dispatches a text event on mWidget.
+   * DispatchCompositionChangeEvent() dispatches a compositionchange event on
+   * mWidget.
    *
    * @param aText                 User text input.
    * @param aAttrString           An NSAttributedString instance which indicates
@@ -842,10 +856,10 @@ public:
    * @param aDoCommit             TRUE if the composition string should be
    *                              committed.  Otherwise, FALSE.
    */
-  bool DispatchTextEvent(const nsString& aText,
-                           NSAttributedString* aAttrString,
-                           NSRange& aSelectedRange,
-                           bool aDoCommit);
+  bool DispatchCompositionChangeEvent(const nsString& aText,
+                                      NSAttributedString* aAttrString,
+                                      NSRange& aSelectedRange,
+                                      bool aDoCommit);
 
   /**
    * SetMarkedText() is a handler of setMarkedText of NSTextInput.
@@ -1061,21 +1075,18 @@ private:
   uint32_t GetRangeCount(NSAttributedString *aString);
 
   /**
-   * SetTextRangeList() appends text ranges to aTextRangeList.
+   * CreateTextRangeArray() returns text ranges for clauses and/or caret.
    *
-   * @param aTextRangeList        When SetTextRangeList() returns, this will
-   *                              be set to the NSUnderlineStyleAttributeName
-   *                              ranges in aAttrString.  Note that if you pass
-   *                              in a large enough auto-range instance for most
-   *                              cases (e.g., nsAutoTArray<TextRange, 4>),
-   *                              it prevents memory fragmentation.
    * @param aAttrString           An NSAttributedString instance which indicates
    *                              current composition string.
    * @param aSelectedRange        Current selected range (or caret position).
+   * @return                      The result is set to the
+   *                              NSUnderlineStyleAttributeName ranges in
+   *                              aAttrString.
    */
-  void SetTextRangeList(nsTArray<TextRange>& aTextRangeList,
-                        NSAttributedString *aAttrString,
-                        NSRange& aSelectedRange);
+  already_AddRefed<mozilla::TextRangeArray>
+    CreateTextRangeArray(NSAttributedString *aAttrString,
+                         NSRange& aSelectedRange);
 
   /**
    * InitCompositionEvent() initializes aCompositionEvent.

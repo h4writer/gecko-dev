@@ -14,14 +14,15 @@ struct gr_segment;
 
 class gfxGraphiteShaper : public gfxFontShaper {
 public:
-    gfxGraphiteShaper(gfxFont *aFont);
+    explicit gfxGraphiteShaper(gfxFont *aFont);
     virtual ~gfxGraphiteShaper();
 
     virtual bool ShapeText(gfxContext      *aContext,
-                           const PRUnichar *aText,
+                           const char16_t *aText,
                            uint32_t         aOffset,
                            uint32_t         aLength,
                            int32_t          aScript,
+                           bool             aVertical,
                            gfxShapedText   *aShapedText);
 
     static void Shutdown();
@@ -31,7 +32,7 @@ protected:
                                   gfxShapedText   *aShapedText,
                                   uint32_t         aOffset,
                                   uint32_t         aLength,
-                                  const PRUnichar *aText,
+                                  const char16_t *aText,
                                   gr_segment      *aSegment);
 
     static float GrGetAdvance(const void* appFontHandle, uint16_t glyphid);
@@ -47,6 +48,7 @@ protected:
     };
 
     CallbackData mCallbackData;
+    bool mFallbackToSmallCaps; // special fallback for the petite-caps case
 
     // Convert HTML 'lang' (BCP47) to Graphite language code
     static uint32_t GetGraphiteTagForLang(const nsCString& aLang);

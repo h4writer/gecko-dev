@@ -19,10 +19,9 @@ XPIDL_SOURCES += [
 
 XPIDL_MODULE = 'exthandler'
 
-if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'os2':
-    osdir = 'os2'
-elif CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
+if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
     osdir = 'win'
+    LOCAL_INCLUDES += ['win']
 elif CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':
     osdir = 'win'
 elif CONFIG['MOZ_WIDGET_TOOLKIT'] == 'android':
@@ -46,11 +45,6 @@ if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'android':
         'nsExternalURLHandlerService.h',
     ]]
 
-if CONFIG['MOZ_ENABLE_MEEGOTOUCHSHARE']:
-    EXPORTS += [
-        osdir + '/nsExternalSharingAppService.h',
-    ]
-
 EXPORTS.mozilla.dom += [
     'ExternalHelperAppChild.h',
     'ExternalHelperAppParent.h',
@@ -59,27 +53,20 @@ EXPORTS.mozilla.dom += [
 UNIFIED_SOURCES += [
     'ExternalHelperAppChild.cpp',
     'ExternalHelperAppParent.cpp',
-    'nsLocalHandlerApp.cpp',
-    'nsMIMEInfoImpl.cpp',
-]
-
-# These files can't be built in unified mode because they force NSPR logging.
-SOURCES += [
     'nsExternalHelperAppService.cpp',
     'nsExternalProtocolHandler.cpp',
+    'nsLocalHandlerApp.cpp',
+    'nsMIMEInfoImpl.cpp',
 ]
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':
     UNIFIED_SOURCES += [
         'mac/nsLocalHandlerAppMac.mm',
         'mac/nsMIMEInfoMac.mm',
-    ]
-    # These files can't be built in unified mode because they force NSPR logging.
-    SOURCES += [
         'mac/nsOSHelperAppService.mm',
     ]
 else:
-    # These files can't be built in unified mode because they force NSPR logging.
+    # These files can't be built in unified mode because they redefine LOG.
     SOURCES += [
         osdir + '/nsOSHelperAppService.cpp',
     ]
@@ -102,24 +89,13 @@ elif CONFIG['MOZ_WIDGET_TOOLKIT'] == 'qt':
         'unix/nsMIMEInfoUnix.cpp',
     ]
 elif CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
-    # These files can't be built in unified mode because they force NSPR logging.
-    SOURCES += [
+    UNIFIED_SOURCES += [
         'win/nsMIMEInfoWin.cpp',
-    ]
-elif CONFIG['MOZ_WIDGET_TOOLKIT'] == 'os2':
-    # These files can't be built in unified mode because they force NSPR logging.
-    SOURCES += [
-        'os2/nsMIMEInfoOS2.cpp',
     ]
 
 if CONFIG['MOZ_ENABLE_DBUS']:
     UNIFIED_SOURCES += [
         'nsDBusHandlerApp.cpp',
-    ]
-
-if CONFIG['MOZ_ENABLE_MEEGOTOUCHSHARE']:
-    UNIFIED_SOURCES += [
-        'unix/nsMeegoExternalSharingAppService.cpp',
     ]
 
 if CONFIG['MOZ_ENABLE_CONTENTACTION']:
@@ -143,3 +119,18 @@ FAIL_ON_WARNINGS = True
 include('/ipc/chromium/chromium-config.mozbuild')
 
 FINAL_LIBRARY = 'xul'
+
+LOCAL_INCLUDES += [
+    '/dom/base',
+    '/dom/ipc',
+    '/netwerk/base/src',
+    '/netwerk/protocol/http',
+]
+
+if CONFIG['MOZ_ENABLE_DBUS']:
+    CXXFLAGS += CONFIG['TK_CFLAGS']
+    CXXFLAGS += CONFIG['MOZ_DBUS_CFLAGS']
+
+if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('qt', 'gtk2', 'gtk3'):
+    CXXFLAGS += CONFIG['TK_CFLAGS']
+    CXXFLAGS += CONFIG['MOZ_DBUS_GLIB_CFLAGS']

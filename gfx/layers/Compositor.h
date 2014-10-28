@@ -13,10 +13,12 @@
 #include "mozilla/gfx/Rect.h"           // for Rect, IntRect
 #include "mozilla/gfx/Types.h"          // for Float
 #include "mozilla/layers/CompositorTypes.h"  // for DiagnosticTypes, etc
+#include "mozilla/layers/FenceUtils.h"  // for FenceHandle
 #include "mozilla/layers/LayersTypes.h"  // for LayersBackend
-#include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+#include "nsISupportsImpl.h"            // for MOZ_COUNT_CTOR, etc
 #include "nsRegion.h"
 #include <vector>
+#include "mozilla/WidgetUtils.h"
 
 /**
  * Different elements of a web pages are rendered into separate "layers" before
@@ -98,18 +100,18 @@
  * under gfx/layers/. To add a new backend, implement at least the following
  * interfaces:
  * - Compositor (ex. CompositorOGL)
- * - TextureHost (ex. SharedTextureHostOGL)
+ * - TextureHost (ex. SurfaceTextureHost)
  * Depending on the type of data that needs to be serialized, you may need to
  * add specific TextureClient implementations.
  */
 
 class nsIWidget;
-struct gfxMatrix;
 struct nsIntSize;
 class nsIntRegion;
 
 namespace mozilla {
 namespace gfx {
+class Matrix;
 class Matrix4x4;
 class DrawTarget;
 }
@@ -120,7 +122,8 @@ struct Effect;
 struct EffectChain;
 class Image;
 class ISurfaceAllocator;
-class NewTextureSource;
+class Layer;
+class TextureSource;
 class DataTextureSource;
 class CompositingRenderTarget;
 class PCompositorParent;
@@ -130,6 +133,17 @@ enum SurfaceInitMode
 {
   INIT_MODE_NONE,
   INIT_MODE_CLEAR
+};
+
+/**
+ * A base class for a platform-dependent helper for use by TextureHost.
+ */
+class CompositorBackendSpecificData
+{
+  NS_INLINE_DECL_REFCOUNTING(CompositorBackendSpecificData)
+
+protected:
+  virtual ~CompositorBackendSpecificData() {}
 };
 
 /**
@@ -176,22 +190,23 @@ enum SurfaceInitMode
  * The target and viewport methods can be called before any DrawQuad call and
  * affect any subsequent DrawQuad calls.
  */
-class Compositor : public RefCounted<Compositor>
+class Compositor
 {
+protected:
+  virtual ~Compositor() {}
+
 public:
-  Compositor(PCompositorParent* aParent = nullptr)
+  NS_INLINE_DECL_REFCOUNTING(Compositor)
+
+  explicit Compositor(PCompositorParent* aParent = nullptr)
     : mCompositorID(0)
-    , mDiagnosticTypes(DIAGNOSTIC_NONE)
+    , mDiagnosticTypes(DiagnosticTypes::NO_DIAGNOSTIC)
     , mParent(aParent)
+    , mScreenRotation(ROTATION_0)
   {
-    MOZ_COUNT_CTOR(Compositor);
-  }
-  virtual ~Compositor()
-  {
-    MOZ_COUNT_DTOR(Compositor);
   }
 
-  virtual TemporaryRef<DataTextureSource> CreateDataTextureSource(TextureFlags aFlags = 0) = 0;
+  virtual TemporaryRef<DataTextureSource> CreateDataTextureSource(TextureFlags aFlags = TextureFlags::NO_FLAGS) = 0;
   virtual bool Initialize() = 0;
   virtual void Destroy() = 0;
 
@@ -224,7 +239,15 @@ public:
    * If this method is not used, or we pass in nullptr, we target the compositor's
    * usual swap chain and render to the screen.
    */
-  virtual void SetTargetContext(gfx::DrawTarget* aTarget) = 0;
+  void SetTargetContext(gfx::DrawTarget* aTarget, const nsIntRect& aRect)
+  {
+    mTarget = aTarget;
+    mTargetBounds = aRect;
+  }
+  void ClearTargetContext()
+  {
+    mTarget = nullptr;
+  }
 
   typedef uint32_t MakeCurrentFlags;
   static const MakeCurrentFlags ForceMakeCurrent = 0x1;
@@ -270,7 +293,7 @@ public:
    * Returns the current target for rendering. Will return null if we are
    * rendering to the screen.
    */
-  virtual CompositingRenderTarget* GetCurrentRenderTarget() = 0;
+  virtual CompositingRenderTarget* GetCurrentRenderTarget() const = 0;
 
   /**
    * Mostly the compositor will pull the size from a widget and this method will
@@ -294,14 +317,10 @@ public:
                         const EffectChain& aEffectChain,
                         gfx::Float aOpacity, const gfx::Matrix4x4 &aTransform) = 0;
 
-  /**
-   * Tell the compositor to draw lines connecting the points. Behaves like
-   * DrawQuad.
+  /*
+   * Clear aRect on current render target.
    */
-  virtual void DrawLines(const std::vector<gfx::Point>& aLines, const gfx::Rect& aClipRect,
-                         const gfx::Color& aColor,
-                         gfx::Float aOpacity, const gfx::Matrix4x4 &aTransform)
-  { /* Should turn into pure virtual once implemented in D3D */ }
+  virtual void ClearRect(const gfx::Rect& aRect) = 0;
 
   /**
    * Start a new frame.
@@ -324,7 +343,6 @@ public:
    */
   virtual void BeginFrame(const nsIntRegion& aInvalidRegion,
                           const gfx::Rect* aClipRectIn,
-                          const gfxMatrix& aTransform,
                           const gfx::Rect& aRenderBounds,
                           gfx::Rect* aClipRectOut = nullptr,
                           gfx::Rect* aRenderBoundsOut = nullptr) = 0;
@@ -334,12 +352,19 @@ public:
    */
   virtual void EndFrame() = 0;
 
+  virtual void SetFBAcquireFence(Layer* aLayer) {}
+
+  virtual FenceHandle GetReleaseFence()
+  {
+    return FenceHandle();
+  }
+
   /**
    * Post-rendering stuff if the rendering is done outside of this Compositor
    * e.g., by Composer2D.
    * aTransform is the transform from user space to window space.
    */
-  virtual void EndFrameForExternalComposition(const gfxMatrix& aTransform) = 0;
+  virtual void EndFrameForExternalComposition(const gfx::Matrix& aTransform) = 0;
 
   /**
    * Tidy up if BeginFrame has been called, but EndFrame won't be.
@@ -353,11 +378,8 @@ public:
    * target, usually the screen. Calling this method prepares the compositor to
    * render using a different viewport (that is, size and transform), usually
    * associated with a new render target.
-   * aWorldTransform is the transform from user space to the new viewport's
-   * coordinate space.
    */
-  virtual void PrepareViewport(const gfx::IntSize& aSize,
-                               const gfxMatrix& aWorldTransform) = 0;
+  virtual void PrepareViewport(const gfx::IntSize& aSize) = 0;
 
   /**
    * Whether textures created by this compositor can receive partial updates.
@@ -369,21 +391,28 @@ public:
     mDiagnosticTypes = aDiagnostics;
   }
 
+  DiagnosticTypes GetDiagnosticTypes() const
+  {
+    return mDiagnosticTypes;
+  }
+
   void DrawDiagnostics(DiagnosticFlags aFlags,
                        const gfx::Rect& visibleRect,
                        const gfx::Rect& aClipRect,
-                       const gfx::Matrix4x4& transform);
+                       const gfx::Matrix4x4& transform,
+                       uint32_t aFlashCounter = DIAGNOSTIC_FLASH_COUNTER_MAX);
 
   void DrawDiagnostics(DiagnosticFlags aFlags,
                        const nsIntRegion& visibleRegion,
                        const gfx::Rect& aClipRect,
-                       const gfx::Matrix4x4& transform);
-
+                       const gfx::Matrix4x4& transform,
+                       uint32_t aFlashCounter = DIAGNOSTIC_FLASH_COUNTER_MAX);
 
 #ifdef MOZ_DUMP_PAINTING
   virtual const char* Name() const = 0;
 #endif // MOZ_DUMP_PAINTING
 
+  virtual LayersBackend GetBackendType() const = 0;
 
   /**
    * Each Compositor has a unique ID.
@@ -401,13 +430,6 @@ public:
     MOZ_ASSERT(mCompositorID == 0, "The compositor ID must be set only once.");
     mCompositorID = aID;
   }
-
-  /**
-   * Notify the compositor that a layers transaction has occured. This is only
-   * used for FPS information at the moment.
-   * XXX: surely there is a better way to do this?
-   */
-  virtual void NotifyLayersTransaction() = 0;
 
   /**
    * Notify the compositor that composition is being paused. This allows the
@@ -432,12 +454,6 @@ public:
   // these methods properly.
   virtual nsIWidget* GetWidget() const { return nullptr; }
 
-  // Call before and after any rendering not done by this compositor but which
-  // might affect the compositor's internal state or the state of any APIs it
-  // uses. For example, internal GL state.
-  virtual void SaveState() {}
-  virtual void RestoreState() {}
-
   /**
    * Debug-build assertion that can be called to ensure code is running on the
    * compositor thread.
@@ -454,16 +470,53 @@ public:
    */
   static LayersBackend GetBackend();
 
+  size_t GetFillRatio() {
+    float fillRatio = 0;
+    if (mPixelsFilled > 0 && mPixelsPerFrame > 0) {
+      fillRatio = 100.0f * float(mPixelsFilled) / float(mPixelsPerFrame);
+      if (fillRatio > 999.0f) {
+        fillRatio = 999.0f;
+      }
+    }
+    return fillRatio;
+  }
+
+  virtual CompositorBackendSpecificData* GetCompositorBackendSpecificData() {
+    return nullptr;
+  }
+
+  ScreenRotation GetScreenRotation() const {
+    return mScreenRotation;
+  }
+
+  void SetScreenRotation(ScreenRotation aRotation) {
+    mScreenRotation = aRotation;
+  }
+
+  // On b2g the clip rect is in the coordinate space of the physical screen
+  // independently of its rotation, while the coordinate space of the layers,
+  // on the other hand, depends on the screen orientation.
+  // This only applies to b2g as with other platforms, orientation is handled
+  // at the OS level rather than in Gecko.
+  // In addition, the clip rect needs to be offset by the rendering origin.
+  // This becomes important if intermediate surfaces are used.
+  RenderTargetRect ClipRectInLayersCoordinates(Layer* aLayer, RenderTargetIntRect aClip) const;
+
 protected:
   void DrawDiagnosticsInternal(DiagnosticFlags aFlags,
                                const gfx::Rect& aVisibleRect,
                                const gfx::Rect& aClipRect,
-                               const gfx::Matrix4x4& transform);
+                               const gfx::Matrix4x4& transform,
+                               uint32_t aFlashCounter);
 
   bool ShouldDrawDiagnostics(DiagnosticFlags);
 
+  /**
+   * Set the global Compositor backend, checking that one isn't already set.
+   */
+  static void SetBackend(LayersBackend backend);
+
   uint32_t mCompositorID;
-  static LayersBackend sBackend;
   DiagnosticTypes mDiagnosticTypes;
   PCompositorParent* mParent;
 
@@ -474,6 +527,17 @@ protected:
    */
   size_t mPixelsPerFrame;
   size_t mPixelsFilled;
+
+  ScreenRotation mScreenRotation;
+
+  virtual gfx::IntSize GetWidgetSize() const = 0;
+
+  RefPtr<gfx::DrawTarget> mTarget;
+  nsIntRect mTargetBounds;
+
+private:
+  static LayersBackend sBackend;
+
 };
 
 } // namespace layers

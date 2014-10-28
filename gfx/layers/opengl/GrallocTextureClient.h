@@ -8,14 +8,18 @@
 #ifdef MOZ_WIDGET_GONK
 
 #include "mozilla/layers/TextureClient.h"
-#include "ISurfaceAllocator.h" // For IsSurfaceDescriptorValid
+#include "mozilla/layers/ISurfaceAllocator.h" // For IsSurfaceDescriptorValid
+#include "mozilla/layers/FenceUtils.h" // for FenceHandle
 #include "mozilla/layers/ShadowLayerUtilsGralloc.h"
 #include <ui/GraphicBuffer.h>
 
+
+namespace android {
+class MediaBuffer;
+};
+
 namespace mozilla {
 namespace layers {
-
-class GraphicBufferLocked;
 
 /**
  * A TextureClient implementation based on android::GraphicBuffer (also referred to
@@ -33,12 +37,14 @@ class GraphicBufferLocked;
 class GrallocTextureClientOGL : public BufferTextureClient
 {
 public:
-  GrallocTextureClientOGL(GrallocBufferActor* aActor,
+  GrallocTextureClientOGL(MaybeMagicGrallocBufferHandle buffer,
                           gfx::IntSize aSize,
-                          TextureFlags aFlags = TEXTURE_FLAGS_DEFAULT);
-  GrallocTextureClientOGL(CompositableClient* aCompositable,
+                          gfx::BackendType aMoz2dBackend,
+                          TextureFlags aFlags = TextureFlags::DEFAULT);
+  GrallocTextureClientOGL(ISurfaceAllocator* aAllocator,
                           gfx::SurfaceFormat aFormat,
-                          TextureFlags aFlags = TEXTURE_FLAGS_DEFAULT);
+                          gfx::BackendType aMoz2dBackend,
+                          TextureFlags aFlags = TextureFlags::DEFAULT);
 
   ~GrallocTextureClientOGL();
 
@@ -48,19 +54,25 @@ public:
 
   virtual bool ImplementsLocking() const MOZ_OVERRIDE { return true; }
 
+  virtual bool HasInternalBuffer() const MOZ_OVERRIDE { return false; }
+
   virtual bool IsAllocated() const MOZ_OVERRIDE;
 
   virtual bool ToSurfaceDescriptor(SurfaceDescriptor& aOutDescriptor) MOZ_OVERRIDE;
 
-  virtual TextureClientData* DropTextureData() MOZ_OVERRIDE;
+  virtual void SetRemoveFromCompositableTracker(AsyncTransactionTracker* aTracker) MOZ_OVERRIDE;
 
-  void InitWith(GrallocBufferActor* aActor, gfx::IntSize aSize);
+  virtual void WaitForBufferOwnership() MOZ_OVERRIDE;
+
+  void InitWith(MaybeMagicGrallocBufferHandle aDesc, gfx::IntSize aSize);
+
+  void SetTextureFlags(TextureFlags aFlags) { AddFlags(aFlags); }
 
   gfx::IntSize GetSize() const MOZ_OVERRIDE { return mSize; }
 
-  android::GraphicBuffer* GetGraphicBuffer()
+  android::sp<android::GraphicBuffer> GetGraphicBuffer()
   {
-    return mGraphicBuffer.get();
+    return mGraphicBuffer;
   }
 
   android::PixelFormat GetPixelFormat()
@@ -68,17 +80,9 @@ public:
     return mGraphicBuffer->getPixelFormat();
   }
 
-  /**
-   * These flags are important for performances because they'll let the driver
-   * optimize for the right usage.
-   * Be sure to specify them before calling Lock.
-   */
-  void SetGrallocOpenFlags(uint32_t aFlags)
-  {
-    mGrallocFlags = aFlags;
-  }
-
   virtual uint8_t* GetBuffer() const MOZ_OVERRIDE;
+
+  virtual gfx::DrawTarget* BorrowDrawTarget() MOZ_OVERRIDE;
 
   virtual bool AllocateForSurface(gfx::IntSize aSize,
                                   TextureAllocationFlags aFlags = ALLOC_DEFAULT) MOZ_OVERRIDE;
@@ -87,40 +91,62 @@ public:
                                 gfx::IntSize aCbCrSize,
                                 StereoMode aStereoMode) MOZ_OVERRIDE;
 
+  bool AllocateForGLRendering(gfx::IntSize aSize);
+
   bool AllocateGralloc(gfx::IntSize aYSize, uint32_t aAndroidFormat, uint32_t aUsage);
 
   virtual bool Allocate(uint32_t aSize) MOZ_OVERRIDE;
 
   virtual size_t GetBufferSize() const MOZ_OVERRIDE;
 
-  void SetGraphicBufferLocked(GraphicBufferLocked* aBufferLocked);
+  /**
+   * Hold android::MediaBuffer.
+   * MediaBuffer needs to be add refed to keep MediaBuffer alive
+   * during TextureClient is in use.
+   */
+  void SetMediaBuffer(android::MediaBuffer* aMediaBuffer)
+  {
+    mMediaBuffer = aMediaBuffer;
+  }
+
+  android::MediaBuffer* GetMediaBuffer()
+  {
+    return mMediaBuffer;
+  }
+
+  virtual TemporaryRef<TextureClient>
+  CreateSimilar(TextureFlags aFlags = TextureFlags::DEFAULT,
+                TextureAllocationFlags aAllocFlags = ALLOC_DEFAULT) const MOZ_OVERRIDE;
+
+  static TemporaryRef<TextureClient> FromSharedSurface(gl::SharedSurface* surf,
+                                                       TextureFlags flags);
 
 protected:
-
   /**
    * Unfortunately, until bug 879681 is fixed we need to use a GrallocBufferActor.
    */
-  GrallocBufferActor* mGrallocActor;
+  MaybeMagicGrallocBufferHandle mGrallocHandle;
 
-  RefPtr<GraphicBufferLocked> mBufferLocked;
+  RefPtr<AsyncTransactionTracker> mRemoveFromCompositableTracker;
 
   android::sp<android::GraphicBuffer> mGraphicBuffer;
 
-  /**
-   * Flags that are used when locking the gralloc buffer
-   */
-  uint32_t mGrallocFlags;
   /**
    * Points to a mapped gralloc buffer between calls to lock and unlock.
    * Should be null outside of the lock-unlock pair.
    */
   uint8_t* mMappedBuffer;
+
+  RefPtr<gfx::DrawTarget> mDrawTarget;
+
   /**
    * android::GraphicBuffer has a size information. But there are cases
    * that GraphicBuffer's size and actual video's size are different.
    * Extra size member is necessary. See Bug 850566.
    */
   gfx::IntSize mSize;
+
+  android::MediaBuffer* mMediaBuffer;
 };
 
 } // namespace layers

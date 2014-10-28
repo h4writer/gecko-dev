@@ -14,7 +14,7 @@ interface nsIURL;
  *                    future releases.
  */
 
-[scriptable, uuid(4b525eab-d4b8-4f71-bf43-b698e306631b)]
+[scriptable, uuid(ee431adc-21dd-42d9-968b-e19b4c62960a)]
 interface nsICrashReporter : nsISupports
 {
   /**
@@ -109,4 +109,20 @@ interface nsICrashReporter : nsISupports
    * User preference for submitting crash reports.
    */
   attribute boolean submitReports;
+
+  /**
+   * Cause the crash reporter to re-evaluate where crash events should go.
+   *
+   * This should be called during application startup and whenever profiles
+   * change.
+   */
+  void UpdateCrashEventsDir();
+
+  /**
+   * Save an anonymized memory report file for inclusion in a future crash
+   * report in this session.
+   *
+   * @throws NS_ERROR_NOT_INITIALIZED if crash reporting is disabled.
+   */
+  void saveMemoryReport();
 };

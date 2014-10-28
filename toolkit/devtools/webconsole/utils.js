@@ -1,4 +1,4 @@
-/* -*- js2-basic-offset: 2; indent-tabs-mode: nil; -*- */
+/* -*- js-indent-level: 2; indent-tabs-mode: nil -*- */
 /* vim: set ft=javascript ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -10,14 +10,8 @@ const {Cc, Ci, Cu, components} = require("chrome");
 
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 
-loader.lazyGetter(this, "NetworkHelper", () => require("devtools/toolkit/webconsole/network-helper"));
 loader.lazyImporter(this, "Services", "resource://gre/modules/Services.jsm");
-loader.lazyImporter(this, "ConsoleAPIStorage", "resource://gre/modules/ConsoleAPIStorage.jsm");
-loader.lazyImporter(this, "NetUtil", "resource://gre/modules/NetUtil.jsm");
-loader.lazyImporter(this, "PrivateBrowsingUtils", "resource://gre/modules/PrivateBrowsingUtils.jsm");
-loader.lazyServiceGetter(this, "gActivityDistributor",
-                         "@mozilla.org/network/http-activity-distributor;1",
-                         "nsIHttpActivityDistributor");
+loader.lazyImporter(this, "LayoutHelpers", "resource://gre/modules/devtools/LayoutHelpers.jsm");
 
 // TODO: Bug 842672 - toolkit/ imports modules from browser/.
 // Note that these are only used in JSTermHelpers, see $0 and pprint().
@@ -36,6 +30,17 @@ const REGEX_MATCH_FUNCTION_NAME = /^\(?function\s+([^(\s]+)\s*\(/;
 
 // Match the function arguments from the result of toString() or toSource().
 const REGEX_MATCH_FUNCTION_ARGS = /^\(?function\s*[^\s(]*\s*\((.+?)\)/;
+
+// Number of terminal entries for the self-xss prevention to go away
+const CONSOLE_ENTRY_THRESHOLD = 5
+
+// Provide an easy way to bail out of even attempting an autocompletion
+// if an object has way too many properties. Protects against large objects
+// with numeric values that wouldn't be tallied towards MAX_AUTOCOMPLETIONS.
+const MAX_AUTOCOMPLETE_ATTEMPTS = exports.MAX_AUTOCOMPLETE_ATTEMPTS = 100000;
+
+// Prevent iterating over too many properties during autocomplete suggestions.
+const MAX_AUTOCOMPLETIONS = exports.MAX_AUTOCOMPLETIONS = 1500;
 
 let WebConsoleUtils = {
   /**
@@ -188,12 +193,18 @@ let WebConsoleUtils = {
    *
    * @param string aSourceURL
    *        The source URL to shorten.
+   * @param object [aOptions]
+   *        Options:
+   *        - onlyCropQuery: boolean that tells if the URL abbreviation function
+   *        should only remove the query parameters and the hash fragment from
+   *        the given URL.
    * @return string
    *         The abbreviated form of the source URL.
    */
-  abbreviateSourceURL: function WCU_abbreviateSourceURL(aSourceURL)
+  abbreviateSourceURL:
+  function WCU_abbreviateSourceURL(aSourceURL, aOptions = {})
   {
-    if (aSourceURL.substr(0, 5) == "data:") {
+    if (!aOptions.onlyCropQuery && aSourceURL.substr(0, 5) == "data:") {
       let commaIndex = aSourceURL.indexOf(",");
       if (commaIndex > -1) {
         aSourceURL = "data:" + aSourceURL.substring(commaIndex + 1);
@@ -214,13 +225,15 @@ let WebConsoleUtils = {
 
     // Remove a trailing "/".
     if (aSourceURL[aSourceURL.length - 1] == "/") {
-      aSourceURL = aSourceURL.substring(0, aSourceURL.length - 1);
+      aSourceURL = aSourceURL.replace(/\/+$/, "");
     }
 
     // Remove all but the last path component.
-    let slashIndex = aSourceURL.lastIndexOf("/");
-    if (slashIndex > -1) {
-      aSourceURL = aSourceURL.substring(slashIndex + 1);
+    if (!aOptions.onlyCropQuery) {
+      let slashIndex = aSourceURL.lastIndexOf("/");
+      if (slashIndex > -1) {
+        aSourceURL = aSourceURL.substring(slashIndex + 1);
+      }
     }
 
     return aSourceURL;
@@ -528,7 +541,78 @@ let WebConsoleUtils = {
   {
     return aGrip && typeof(aGrip) == "object" && aGrip.actor;
   },
+  /**
+   * Value of devtools.selfxss.count preference
+   *
+   * @type number
+   * @private
+   */
+  _usageCount: 0,
+  get usageCount() {
+    if (WebConsoleUtils._usageCount < CONSOLE_ENTRY_THRESHOLD) {
+      WebConsoleUtils._usageCount = Services.prefs.getIntPref("devtools.selfxss.count")
+      if (Services.prefs.getBoolPref("devtools.chrome.enabled")) {
+        WebConsoleUtils.usageCount = CONSOLE_ENTRY_THRESHOLD;
+      }
+    }
+    return WebConsoleUtils._usageCount;
+  },
+  set usageCount(newUC) {
+    if (newUC <= CONSOLE_ENTRY_THRESHOLD) {
+      WebConsoleUtils._usageCount = newUC;
+      Services.prefs.setIntPref("devtools.selfxss.count", newUC);
+    }
+  },
+  /**
+   * The inputNode "paste" event handler generator. Helps prevent self-xss attacks
+   *
+   * @param nsIDOMElement inputField
+   * @param nsIDOMElement notificationBox
+   * @returns A function to be added as a handler to 'paste' and 'drop' events on the input field
+   */
+  pasteHandlerGen: function WCU_pasteHandlerGen(inputField, notificationBox, msg, okstring) {
+    let handler = function WCU_pasteHandler(aEvent) {
+      if (WebConsoleUtils.usageCount >= CONSOLE_ENTRY_THRESHOLD) {
+        inputField.removeEventListener("paste", handler);
+        inputField.removeEventListener("drop", handler);
+        return true;
+      }
+      if (notificationBox.getNotificationWithValue("selfxss-notification")) {
+        aEvent.preventDefault();
+        aEvent.stopPropagation();
+        return false;
+      }
+
+
+      let notification = notificationBox.appendNotification(msg,
+        "selfxss-notification", null, notificationBox.PRIORITY_WARNING_HIGH, null,
+        function(eventType) {
+          // Cleanup function if notification is dismissed
+          if (eventType == "removed") {
+            inputField.removeEventListener("keyup", pasteKeyUpHandler);
+          }
+        });
+
+      function pasteKeyUpHandler(aEvent2) {
+        let value = inputField.value || inputField.textContent;
+        if (value.contains(okstring)) {
+          notificationBox.removeNotification(notification);
+          inputField.removeEventListener("keyup", pasteKeyUpHandler);
+          WebConsoleUtils.usageCount = CONSOLE_ENTRY_THRESHOLD;
+        }
+      }
+      inputField.addEventListener("keyup", pasteKeyUpHandler);
+
+      aEvent.preventDefault();
+      aEvent.stopPropagation();
+      return false;
+    };
+    return handler;
+  },
+
+
 };
+
 exports.Utils = WebConsoleUtils;
 
 //////////////////////////////////////////////////////////////////////////
@@ -632,8 +716,6 @@ const OPEN_CLOSE_BODY = {
   "[": "]",
   "(": ")",
 };
-
-const MAX_COMPLETIONS = 1500;
 
 /**
  * Analyses a given string to find the last statement that is interesting for
@@ -830,7 +912,14 @@ function JSPropertyProvider(aDbgObject, anEnvironment, aInputValue, aCursor)
       return null;
     }
 
-    obj = DevToolsUtils.getProperty(obj, prop);
+    if (/\[\d+\]$/.test(prop)) {
+      // The property to autocomplete is a member of array. For example
+      // list[i][j]..[n]. Traverse the array to get the actual element.
+      obj = getArrayMemberProperty(obj, prop);
+    }
+    else {
+      obj = DevToolsUtils.getProperty(obj, prop);
+    }
 
     if (!isObjectUsable(obj)) {
       return null;
@@ -843,6 +932,50 @@ function JSPropertyProvider(aDbgObject, anEnvironment, aInputValue, aCursor)
   }
 
   return getMatchedPropsInDbgObject(obj, matchProp);
+}
+
+/**
+ * Get the array member of aObj for the given aProp. For example, given
+ * aProp='list[0][1]' the element at [0][1] of aObj.list is returned.
+ *
+ * @param object aObj
+ *        The object to operate on.
+ * @param string aProp
+ *        The property to return.
+ * @return null or Object
+ *         Returns null if the property couldn't be located. Otherwise the array
+ *         member identified by aProp.
+ */
+function getArrayMemberProperty(aObj, aProp)
+{
+  // First get the array.
+  let obj = aObj;
+  let propWithoutIndices = aProp.substr(0, aProp.indexOf("["));
+  obj = DevToolsUtils.getProperty(obj, propWithoutIndices);
+  if (!isObjectUsable(obj)) {
+    return null;
+  }
+
+  // Then traverse the list of indices to get the actual element.
+  let result;
+  let arrayIndicesRegex = /\[[^\]]*\]/g;
+  while ((result = arrayIndicesRegex.exec(aProp)) !== null) {
+    let indexWithBrackets = result[0];
+    let indexAsText = indexWithBrackets.substr(1, indexWithBrackets.length - 2);
+    let index = parseInt(indexAsText);
+
+    if (isNaN(index)) {
+      return null;
+    }
+
+    obj = DevToolsUtils.getProperty(obj, index);
+
+    if (!isObjectUsable(obj)) {
+      return null;
+    }
+  }
+
+  return obj;
 }
 
 /**
@@ -916,12 +1049,24 @@ function getMatchedProps(aObj, aMatch)
 function getMatchedProps_impl(aObj, aMatch, {chainIterator, getProperties})
 {
   let matches = new Set();
+  let numProps = 0;
 
   // We need to go up the prototype chain.
   let iter = chainIterator(aObj);
   for (let obj of iter) {
     let props = getProperties(obj);
-    for (let prop of props) {
+    numProps += props.length;
+
+    // If there are too many properties to event attempt autocompletion,
+    // or if we have already added the max number, then stop looping
+    // and return the partial set that has already been discovered.
+    if (numProps >= MAX_AUTOCOMPLETE_ATTEMPTS ||
+        matches.size >= MAX_AUTOCOMPLETIONS) {
+      break;
+    }
+
+    for (let i = 0; i < props.length; i++) {
+      let prop = props[i];
       if (prop.indexOf(aMatch) != 0) {
         continue;
       }
@@ -933,13 +1078,9 @@ function getMatchedProps_impl(aObj, aMatch, {chainIterator, getProperties})
         matches.add(prop);
       }
 
-      if (matches.size > MAX_COMPLETIONS) {
+      if (matches.size >= MAX_AUTOCOMPLETIONS) {
         break;
       }
-    }
-
-    if (matches.size > MAX_COMPLETIONS) {
-      break;
     }
   }
 
@@ -1035,12 +1176,16 @@ let DebuggerEnvironmentSupport = {
   {
     // TODO: we should use getVariableDescriptor() here - bug 725815.
     let result = aObj.getVariable(aName);
-    return result === undefined ? null : { value: result };
+    // FIXME: Need actual UI, bug 941287.
+    if (result === undefined || result.optimizedOut || result.missingArguments) {
+      return null;
+    }
+    return { value: result };
   },
 };
 
 
-exports.JSPropertyProvider = JSPropertyProvider;
+exports.JSPropertyProvider = DevToolsUtils.makeInfallible(JSPropertyProvider);
 })(WebConsoleUtils);
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1064,6 +1209,9 @@ function ConsoleServiceListener(aWindow, aListener)
 {
   this.window = aWindow;
   this.listener = aListener;
+  if (this.window) {
+    this.layoutHelpers = new LayoutHelpers(this.window);
+  }
 }
 exports.ConsoleServiceListener = ConsoleServiceListener;
 
@@ -1113,7 +1261,7 @@ ConsoleServiceListener.prototype =
       }
 
       let errorWindow = Services.wm.getOuterWindowWithId(aMessage.outerWindowID);
-      if (!errorWindow || errorWindow.top != this.window) {
+      if (!errorWindow || !this.layoutHelpers.isIncludedInTopLevelWindow(errorWindow)) {
         return;
       }
     }
@@ -1230,11 +1378,17 @@ ConsoleServiceListener.prototype =
  *        - onConsoleAPICall(). This method is invoked with one argument, the
  *        Console API message that comes from the observer service, whenever
  *        a relevant console API call is received.
+ * @param string aConsoleID
+ *        Options - The consoleID that this listener should listen to
  */
-function ConsoleAPIListener(aWindow, aOwner)
+function ConsoleAPIListener(aWindow, aOwner, aConsoleID)
 {
   this.window = aWindow;
   this.owner = aOwner;
+  this.consoleID = aConsoleID;
+  if (this.window) {
+    this.layoutHelpers = new LayoutHelpers(this.window);
+  }
 }
 exports.ConsoleAPIListener = ConsoleAPIListener;
 
@@ -1257,6 +1411,12 @@ ConsoleAPIListener.prototype =
    * @see WebConsoleActor
    */
   owner: null,
+
+  /**
+   * The consoleID that we listen for. If not null then only messages from this
+   * console will be returned.
+   */
+  consoleID: null,
 
   /**
    * Initialize the window.console API observer.
@@ -1285,11 +1445,14 @@ ConsoleAPIListener.prototype =
 
     let apiMessage = aMessage.wrappedJSObject;
     if (this.window) {
-      let msgWindow = Services.wm.getOuterWindowWithId(apiMessage.ID);
-      if (!msgWindow || msgWindow.top != this.window) {
+      let msgWindow = Services.wm.getCurrentInnerWindowWithId(apiMessage.innerID);
+      if (!msgWindow || !this.layoutHelpers.isIncludedInTopLevelWindow(msgWindow)) {
         // Not the same window!
         return;
       }
+    }
+    if (this.consoleID && apiMessage.consoleID != this.consoleID) {
+      return;
     }
 
     this.owner.onConsoleAPICall(apiMessage);
@@ -1307,6 +1470,8 @@ ConsoleAPIListener.prototype =
   getCachedMessages: function CAL_getCachedMessages(aIncludePrivate = false)
   {
     let messages = [];
+    let ConsoleAPIStorage = Cc["@mozilla.org/consoleAPI-storage;1"]
+                              .getService(Ci.nsIConsoleAPIStorage);
 
     // if !this.window, we're in a browser console. Retrieve all events
     // for filtering based on privacy.
@@ -1317,6 +1482,10 @@ ConsoleAPIListener.prototype =
       ids.forEach((id) => {
         messages = messages.concat(ConsoleAPIStorage.getEvents(id));
       });
+    }
+
+    if (this.consoleID) {
+      messages = messages.filter((m) => m.consoleID == this.consoleID);
     }
 
     if (aIncludePrivate) {
@@ -1406,42 +1575,15 @@ function JSTermHelpers(aOwner)
   /**
    * Returns the currently selected object in the highlighter.
    *
-   * TODO: this implementation crosses the client/server boundaries! This is not
-   * usable within a remote browser. To implement this feature correctly we need
-   * support for remote inspection capabilities within the Inspector as well.
-   * See bug 787975.
-   *
-   * @return nsIDOMElement|null
-   *         The DOM element currently selected in the highlighter.
+   * @return Object representing the current selection in the
+   *         Inspector, or null if no selection exists.
    */
-   Object.defineProperty(aOwner.sandbox, "$0", {
+  Object.defineProperty(aOwner.sandbox, "$0", {
     get: function() {
-      let window = aOwner.chromeWindow();
-      if (!window) {
-        return null;
-      }
-
-      let target = null;
-      try {
-        target = devtools.TargetFactory.forTab(window.gBrowser.selectedTab);
-      }
-      catch (ex) {
-        // If we report this exception the user will get it in the Browser
-        // Console every time when she evaluates any string.
-      }
-
-      if (!target) {
-        return null;
-      }
-
-      let toolbox = gDevTools.getToolbox(target);
-      let panel = toolbox ? toolbox.getPanel("inspector") : null;
-      let node = panel ? panel.selection.node : null;
-
-      return node ? aOwner.makeDebuggeeValue(node) : null;
+      return aOwner.makeDebuggeeValue(aOwner.selectedNode)
     },
     enumerable: true,
-    configurable: false
+    configurable: true
   });
 
   /**
@@ -1491,6 +1633,40 @@ function JSTermHelpers(aOwner)
   aOwner.sandbox.help = function JSTH_help()
   {
     aOwner.helperResult = { type: "help" };
+  };
+
+  /**
+   * Change the JS evaluation scope.
+   *
+   * @param DOMElement|string|window aWindow
+   *        The window object to use for eval scope. This can be a string that
+   *        is used to perform document.querySelector(), to find the iframe that
+   *        you want to cd() to. A DOMElement can be given as well, the
+   *        .contentWindow property is used. Lastly, you can directly pass
+   *        a window object. If you call cd() with no arguments, the current
+   *        eval scope is cleared back to its default (the top window).
+   */
+  aOwner.sandbox.cd = function JSTH_cd(aWindow)
+  {
+    if (!aWindow) {
+      aOwner.consoleActor.evalWindow = null;
+      aOwner.helperResult = { type: "cd" };
+      return;
+    }
+
+    if (typeof aWindow == "string") {
+      aWindow = aOwner.window.document.querySelector(aWindow);
+    }
+    if (aWindow instanceof Ci.nsIDOMElement && aWindow.contentWindow) {
+      aWindow = aWindow.contentWindow;
+    }
+    if (!(aWindow instanceof Ci.nsIDOMWindow)) {
+      aOwner.helperResult = { type: "error", message: "cdFunctionInvalidArgument" };
+      return;
+    }
+
+    aOwner.consoleActor.evalWindow = aWindow;
+    aOwner.helperResult = { type: "cd" };
   };
 
   /**
@@ -1558,1170 +1734,26 @@ function JSTermHelpers(aOwner)
   };
 
   /**
-   * Print a string to the output, as-is.
+   * Print the String representation of a value to the output, as-is.
    *
-   * @param string aString
-   *        A string you want to output.
+   * @param any aValue
+   *        A value you want to output as a string.
    * @return void
    */
-  aOwner.sandbox.print = function JSTH_print(aString)
+  aOwner.sandbox.print = function JSTH_print(aValue)
   {
     aOwner.helperResult = { rawOutput: true };
-    return String(aString);
+    if (typeof aValue === "symbol") {
+      return Symbol.prototype.toString.call(aValue);
+    }
+    // Waiving Xrays here allows us to see a closer representation of the
+    // underlying object. This may execute arbitrary content code, but that
+    // code will run with content privileges, and the result will be rendered
+    // inert by coercing it to a String.
+    return String(Cu.waiveXrays(aValue));
   };
 }
 exports.JSTermHelpers = JSTermHelpers;
-
-(function(WCU) {
-///////////////////////////////////////////////////////////////////////////////
-// Network logging
-///////////////////////////////////////////////////////////////////////////////
-
-// The maximum uint32 value.
-const PR_UINT32_MAX = 4294967295;
-
-// HTTP status codes.
-const HTTP_MOVED_PERMANENTLY = 301;
-const HTTP_FOUND = 302;
-const HTTP_SEE_OTHER = 303;
-const HTTP_TEMPORARY_REDIRECT = 307;
-
-// The maximum number of bytes a NetworkResponseListener can hold.
-const RESPONSE_BODY_LIMIT = 1048576; // 1 MB
-
-/**
- * The network response listener implements the nsIStreamListener and
- * nsIRequestObserver interfaces. This is used within the NetworkMonitor feature
- * to get the response body of the request.
- *
- * The code is mostly based on code listings from:
- *
- *   http://www.softwareishard.com/blog/firebug/
- *      nsitraceablechannel-intercept-http-traffic/
- *
- * @constructor
- * @param object aOwner
- *        The response listener owner. This object needs to hold the
- *        |openResponses| object.
- * @param object aHttpActivity
- *        HttpActivity object associated with this request. See NetworkMonitor
- *        for more information.
- */
-function NetworkResponseListener(aOwner, aHttpActivity)
-{
-  this.owner = aOwner;
-  this.receivedData = "";
-  this.httpActivity = aHttpActivity;
-  this.bodySize = 0;
-}
-
-NetworkResponseListener.prototype = {
-  QueryInterface:
-    XPCOMUtils.generateQI([Ci.nsIStreamListener, Ci.nsIInputStreamCallback,
-                           Ci.nsIRequestObserver, Ci.nsISupports]),
-
-  /**
-   * This NetworkResponseListener tracks the NetworkMonitor.openResponses object
-   * to find the associated uncached headers.
-   * @private
-   */
-  _foundOpenResponse: false,
-
-  /**
-   * The response listener owner.
-   */
-  owner: null,
-
-  /**
-   * The response will be written into the outputStream of this nsIPipe.
-   * Both ends of the pipe must be blocking.
-   */
-  sink: null,
-
-  /**
-   * The HttpActivity object associated with this response.
-   */
-  httpActivity: null,
-
-  /**
-   * Stores the received data as a string.
-   */
-  receivedData: null,
-
-  /**
-   * The network response body size.
-   */
-  bodySize: null,
-
-  /**
-   * The nsIRequest we are started for.
-   */
-  request: null,
-
-  /**
-   * Set the async listener for the given nsIAsyncInputStream. This allows us to
-   * wait asynchronously for any data coming from the stream.
-   *
-   * @param nsIAsyncInputStream aStream
-   *        The input stream from where we are waiting for data to come in.
-   * @param nsIInputStreamCallback aListener
-   *        The input stream callback you want. This is an object that must have
-   *        the onInputStreamReady() method. If the argument is null, then the
-   *        current callback is removed.
-   * @return void
-   */
-  setAsyncListener: function NRL_setAsyncListener(aStream, aListener)
-  {
-    // Asynchronously wait for the stream to be readable or closed.
-    aStream.asyncWait(aListener, 0, 0, Services.tm.mainThread);
-  },
-
-  /**
-   * Stores the received data, if request/response body logging is enabled. It
-   * also does limit the number of stored bytes, based on the
-   * RESPONSE_BODY_LIMIT constant.
-   *
-   * Learn more about nsIStreamListener at:
-   * https://developer.mozilla.org/en/XPCOM_Interface_Reference/nsIStreamListener
-   *
-   * @param nsIRequest aRequest
-   * @param nsISupports aContext
-   * @param nsIInputStream aInputStream
-   * @param unsigned long aOffset
-   * @param unsigned long aCount
-   */
-  onDataAvailable:
-  function NRL_onDataAvailable(aRequest, aContext, aInputStream, aOffset, aCount)
-  {
-    this._findOpenResponse();
-    let data = NetUtil.readInputStreamToString(aInputStream, aCount);
-
-    this.bodySize += aCount;
-
-    if (!this.httpActivity.discardResponseBody &&
-        this.receivedData.length < RESPONSE_BODY_LIMIT) {
-      this.receivedData += NetworkHelper.
-                           convertToUnicode(data, aRequest.contentCharset);
-    }
-  },
-
-  /**
-   * See documentation at
-   * https://developer.mozilla.org/En/NsIRequestObserver
-   *
-   * @param nsIRequest aRequest
-   * @param nsISupports aContext
-   */
-  onStartRequest: function NRL_onStartRequest(aRequest)
-  {
-    this.request = aRequest;
-    this._findOpenResponse();
-    // Asynchronously wait for the data coming from the request.
-    this.setAsyncListener(this.sink.inputStream, this);
-  },
-
-  /**
-   * Handle the onStopRequest by closing the sink output stream.
-   *
-   * For more documentation about nsIRequestObserver go to:
-   * https://developer.mozilla.org/En/NsIRequestObserver
-   */
-  onStopRequest: function NRL_onStopRequest()
-  {
-    this._findOpenResponse();
-    this.sink.outputStream.close();
-  },
-
-  /**
-   * Find the open response object associated to the current request. The
-   * NetworkMonitor._httpResponseExaminer() method saves the response headers in
-   * NetworkMonitor.openResponses. This method takes the data from the open
-   * response object and puts it into the HTTP activity object, then sends it to
-   * the remote Web Console instance.
-   *
-   * @private
-   */
-  _findOpenResponse: function NRL__findOpenResponse()
-  {
-    if (!this.owner || this._foundOpenResponse) {
-      return;
-    }
-
-    let openResponse = null;
-
-    for each (let item in this.owner.openResponses) {
-      if (item.channel === this.httpActivity.channel) {
-        openResponse = item;
-        break;
-      }
-    }
-
-    if (!openResponse) {
-      return;
-    }
-    this._foundOpenResponse = true;
-
-    delete this.owner.openResponses[openResponse.id];
-
-    this.httpActivity.owner.addResponseHeaders(openResponse.headers);
-    this.httpActivity.owner.addResponseCookies(openResponse.cookies);
-  },
-
-  /**
-   * Clean up the response listener once the response input stream is closed.
-   * This is called from onStopRequest() or from onInputStreamReady() when the
-   * stream is closed.
-   * @return void
-   */
-  onStreamClose: function NRL_onStreamClose()
-  {
-    if (!this.httpActivity) {
-      return;
-    }
-    // Remove our listener from the request input stream.
-    this.setAsyncListener(this.sink.inputStream, null);
-
-    this._findOpenResponse();
-
-    if (!this.httpActivity.discardResponseBody && this.receivedData.length) {
-      this._onComplete(this.receivedData);
-    }
-    else if (!this.httpActivity.discardResponseBody &&
-             this.httpActivity.responseStatus == 304) {
-      // Response is cached, so we load it from cache.
-      let charset = this.request.contentCharset || this.httpActivity.charset;
-      NetworkHelper.loadFromCache(this.httpActivity.url, charset,
-                                  this._onComplete.bind(this));
-    }
-    else {
-      this._onComplete();
-    }
-  },
-
-  /**
-   * Handler for when the response completes. This function cleans up the
-   * response listener.
-   *
-   * @param string [aData]
-   *        Optional, the received data coming from the response listener or
-   *        from the cache.
-   */
-  _onComplete: function NRL__onComplete(aData)
-  {
-    let response = {
-      mimeType: "",
-      text: aData || "",
-    };
-
-    response.size = response.text.length;
-
-    try {
-      response.mimeType = this.request.contentType;
-    }
-    catch (ex) { }
-
-    if (!response.mimeType || !NetworkHelper.isTextMimeType(response.mimeType)) {
-      response.encoding = "base64";
-      response.text = btoa(response.text);
-    }
-
-    if (response.mimeType && this.request.contentCharset) {
-      response.mimeType += "; charset=" + this.request.contentCharset;
-    }
-
-    this.receivedData = "";
-
-    this.httpActivity.owner.
-      addResponseContent(response, this.httpActivity.discardResponseBody);
-
-    this.httpActivity.channel = null;
-    this.httpActivity.owner = null;
-    this.httpActivity = null;
-    this.sink = null;
-    this.inputStream = null;
-    this.request = null;
-    this.owner = null;
-  },
-
-  /**
-   * The nsIInputStreamCallback for when the request input stream is ready -
-   * either it has more data or it is closed.
-   *
-   * @param nsIAsyncInputStream aStream
-   *        The sink input stream from which data is coming.
-   * @returns void
-   */
-  onInputStreamReady: function NRL_onInputStreamReady(aStream)
-  {
-    if (!(aStream instanceof Ci.nsIAsyncInputStream) || !this.httpActivity) {
-      return;
-    }
-
-    let available = -1;
-    try {
-      // This may throw if the stream is closed normally or due to an error.
-      available = aStream.available();
-    }
-    catch (ex) { }
-
-    if (available != -1) {
-      if (available != 0) {
-        // Note that passing 0 as the offset here is wrong, but the
-        // onDataAvailable() method does not use the offset, so it does not
-        // matter.
-        this.onDataAvailable(this.request, null, aStream, 0, available);
-      }
-      this.setAsyncListener(aStream, this);
-    }
-    else {
-      this.onStreamClose();
-    }
-  },
-};
-
-/**
- * The network monitor uses the nsIHttpActivityDistributor to monitor network
- * requests. The nsIObserverService is also used for monitoring
- * http-on-examine-response notifications. All network request information is
- * routed to the remote Web Console.
- *
- * @constructor
- * @param nsIDOMWindow aWindow
- *        Optional, the window that we monitor network requests for. If no
- *        window is given, all browser network requests are logged.
- * @param object aOwner
- *        The network monitor owner. This object needs to hold:
- *        - onNetworkEvent(aRequestInfo, aChannel). This method is invoked once for
- *        every new network request and it is given two arguments: the initial network
- *        request information, and the channel. onNetworkEvent() must return an object
- *        which holds several add*() methods which are used to add further network
- *        request/response information.
- *        - saveRequestAndResponseBodies property which tells if you want to log
- *        request and response bodies.
- */
-function NetworkMonitor(aWindow, aOwner)
-{
-  this.window = aWindow;
-  this.owner = aOwner;
-  this.openRequests = {};
-  this.openResponses = {};
-  this._httpResponseExaminer = this._httpResponseExaminer.bind(this);
-}
-
-NetworkMonitor.prototype = {
-  httpTransactionCodes: {
-    0x5001: "REQUEST_HEADER",
-    0x5002: "REQUEST_BODY_SENT",
-    0x5003: "RESPONSE_START",
-    0x5004: "RESPONSE_HEADER",
-    0x5005: "RESPONSE_COMPLETE",
-    0x5006: "TRANSACTION_CLOSE",
-
-    0x804b0003: "STATUS_RESOLVING",
-    0x804b000b: "STATUS_RESOLVED",
-    0x804b0007: "STATUS_CONNECTING_TO",
-    0x804b0004: "STATUS_CONNECTED_TO",
-    0x804b0005: "STATUS_SENDING_TO",
-    0x804b000a: "STATUS_WAITING_FOR",
-    0x804b0006: "STATUS_RECEIVING_FROM"
-  },
-
-  // Network response bodies are piped through a buffer of the given size (in
-  // bytes).
-  responsePipeSegmentSize: null,
-
-  owner: null,
-
-  /**
-   * Whether to save the bodies of network requests and responses. Disabled by
-   * default to save memory.
-   */
-  get saveRequestAndResponseBodies()
-    this.owner && this.owner.saveRequestAndResponseBodies,
-
-  /**
-   * Object that holds the HTTP activity objects for ongoing requests.
-   */
-  openRequests: null,
-
-  /**
-   * Object that holds response headers coming from this._httpResponseExaminer.
-   */
-  openResponses: null,
-
-  /**
-   * The network monitor initializer.
-   */
-  init: function NM_init()
-  {
-    this.responsePipeSegmentSize = Services.prefs
-                                   .getIntPref("network.buffer.cache.size");
-
-    gActivityDistributor.addObserver(this);
-
-    if (Services.appinfo.processType != Ci.nsIXULRuntime.PROCESS_TYPE_CONTENT) {
-      Services.obs.addObserver(this._httpResponseExaminer,
-                               "http-on-examine-response", false);
-    }
-  },
-
-  /**
-   * Observe notifications for the http-on-examine-response topic, coming from
-   * the nsIObserverService.
-   *
-   * @private
-   * @param nsIHttpChannel aSubject
-   * @param string aTopic
-   * @returns void
-   */
-  _httpResponseExaminer: function NM__httpResponseExaminer(aSubject, aTopic)
-  {
-    // The httpResponseExaminer is used to retrieve the uncached response
-    // headers. The data retrieved is stored in openResponses. The
-    // NetworkResponseListener is responsible with updating the httpActivity
-    // object with the data from the new object in openResponses.
-
-    if (!this.owner || aTopic != "http-on-examine-response" ||
-        !(aSubject instanceof Ci.nsIHttpChannel)) {
-      return;
-    }
-
-    let channel = aSubject.QueryInterface(Ci.nsIHttpChannel);
-
-    if (this.window) {
-      // Try to get the source window of the request.
-      let win = NetworkHelper.getWindowForRequest(channel);
-      if (!win || win.top !== this.window) {
-        return;
-      }
-    }
-
-    let response = {
-      id: gSequenceId(),
-      channel: channel,
-      headers: [],
-      cookies: [],
-    };
-
-    let setCookieHeader = null;
-
-    channel.visitResponseHeaders({
-      visitHeader: function NM__visitHeader(aName, aValue) {
-        let lowerName = aName.toLowerCase();
-        if (lowerName == "set-cookie") {
-          setCookieHeader = aValue;
-        }
-        response.headers.push({ name: aName, value: aValue });
-      }
-    });
-
-    if (!response.headers.length) {
-      return; // No need to continue.
-    }
-
-    if (setCookieHeader) {
-      response.cookies = NetworkHelper.parseSetCookieHeader(setCookieHeader);
-    }
-
-    // Determine the HTTP version.
-    let httpVersionMaj = {};
-    let httpVersionMin = {};
-
-    channel.QueryInterface(Ci.nsIHttpChannelInternal);
-    channel.getResponseVersion(httpVersionMaj, httpVersionMin);
-
-    response.status = channel.responseStatus;
-    response.statusText = channel.responseStatusText;
-    response.httpVersion = "HTTP/" + httpVersionMaj.value + "." +
-                                     httpVersionMin.value;
-
-    this.openResponses[response.id] = response;
-  },
-
-  /**
-   * Begin observing HTTP traffic that originates inside the current tab.
-   *
-   * @see https://developer.mozilla.org/en/XPCOM_Interface_Reference/nsIHttpActivityObserver
-   *
-   * @param nsIHttpChannel aChannel
-   * @param number aActivityType
-   * @param number aActivitySubtype
-   * @param number aTimestamp
-   * @param number aExtraSizeData
-   * @param string aExtraStringData
-   */
-  observeActivity:
-  function NM_observeActivity(aChannel, aActivityType, aActivitySubtype,
-                              aTimestamp, aExtraSizeData, aExtraStringData)
-  {
-    if (!this.owner ||
-        aActivityType != gActivityDistributor.ACTIVITY_TYPE_HTTP_TRANSACTION &&
-        aActivityType != gActivityDistributor.ACTIVITY_TYPE_SOCKET_TRANSPORT) {
-      return;
-    }
-
-    if (!(aChannel instanceof Ci.nsIHttpChannel)) {
-      return;
-    }
-
-    aChannel = aChannel.QueryInterface(Ci.nsIHttpChannel);
-
-    if (aActivitySubtype ==
-        gActivityDistributor.ACTIVITY_SUBTYPE_REQUEST_HEADER) {
-      this._onRequestHeader(aChannel, aTimestamp, aExtraStringData);
-      return;
-    }
-
-    // Iterate over all currently ongoing requests. If aChannel can't
-    // be found within them, then exit this function.
-    let httpActivity = null;
-    for each (let item in this.openRequests) {
-      if (item.channel === aChannel) {
-        httpActivity = item;
-        break;
-      }
-    }
-
-    if (!httpActivity) {
-      return;
-    }
-
-    let transCodes = this.httpTransactionCodes;
-
-    // Store the time information for this activity subtype.
-    if (aActivitySubtype in transCodes) {
-      let stage = transCodes[aActivitySubtype];
-      if (stage in httpActivity.timings) {
-        httpActivity.timings[stage].last = aTimestamp;
-      }
-      else {
-        httpActivity.timings[stage] = {
-          first: aTimestamp,
-          last: aTimestamp,
-        };
-      }
-    }
-
-    switch (aActivitySubtype) {
-      case gActivityDistributor.ACTIVITY_SUBTYPE_REQUEST_BODY_SENT:
-        this._onRequestBodySent(httpActivity);
-        break;
-      case gActivityDistributor.ACTIVITY_SUBTYPE_RESPONSE_HEADER:
-        this._onResponseHeader(httpActivity, aExtraStringData);
-        break;
-      case gActivityDistributor.ACTIVITY_SUBTYPE_TRANSACTION_CLOSE:
-        this._onTransactionClose(httpActivity);
-        break;
-      default:
-        break;
-    }
-  },
-
-  /**
-   * Handler for ACTIVITY_SUBTYPE_REQUEST_HEADER. When a request starts the
-   * headers are sent to the server. This method creates the |httpActivity|
-   * object where we store the request and response information that is
-   * collected through its lifetime.
-   *
-   * @private
-   * @param nsIHttpChannel aChannel
-   * @param number aTimestamp
-   * @param string aExtraStringData
-   * @return void
-   */
-  _onRequestHeader:
-  function NM__onRequestHeader(aChannel, aTimestamp, aExtraStringData)
-  {
-    let win = NetworkHelper.getWindowForRequest(aChannel);
-
-    // Try to get the source window of the request.
-    if (this.window && (!win || win.top !== this.window)) {
-      return;
-    }
-
-    let httpActivity = this.createActivityObject(aChannel);
-
-    // see NM__onRequestBodySent()
-    httpActivity.charset = win ? win.document.characterSet : null;
-    httpActivity.private = win ? PrivateBrowsingUtils.isWindowPrivate(win) : false;
-
-    httpActivity.timings.REQUEST_HEADER = {
-      first: aTimestamp,
-      last: aTimestamp
-    };
-
-    let httpVersionMaj = {};
-    let httpVersionMin = {};
-    let event = {};
-    event.startedDateTime = new Date(Math.round(aTimestamp / 1000)).toISOString();
-    event.headersSize = aExtraStringData.length;
-    event.method = aChannel.requestMethod;
-    event.url = aChannel.URI.spec;
-    event.private = httpActivity.private;
-
-    // Determine if this is an XHR request.
-    try {
-      let callbacks = aChannel.notificationCallbacks;
-      let xhrRequest = callbacks ? callbacks.getInterface(Ci.nsIXMLHttpRequest) : null;
-      httpActivity.isXHR = event.isXHR = !!xhrRequest;
-    } catch (e) {
-      httpActivity.isXHR = event.isXHR = false;
-    }
-
-    // Determine the HTTP version.
-    aChannel.QueryInterface(Ci.nsIHttpChannelInternal);
-    aChannel.getRequestVersion(httpVersionMaj, httpVersionMin);
-
-    event.httpVersion = "HTTP/" + httpVersionMaj.value + "." +
-                                  httpVersionMin.value;
-
-    event.discardRequestBody = !this.saveRequestAndResponseBodies;
-    event.discardResponseBody = !this.saveRequestAndResponseBodies;
-
-    let headers = [];
-    let cookies = [];
-    let cookieHeader = null;
-
-    // Copy the request header data.
-    aChannel.visitRequestHeaders({
-      visitHeader: function NM__visitHeader(aName, aValue)
-      {
-        if (aName == "Cookie") {
-          cookieHeader = aValue;
-        }
-        headers.push({ name: aName, value: aValue });
-      }
-    });
-
-    if (cookieHeader) {
-      cookies = NetworkHelper.parseCookieHeader(cookieHeader);
-    }
-
-    httpActivity.owner = this.owner.onNetworkEvent(event, aChannel);
-
-    this._setupResponseListener(httpActivity);
-
-    this.openRequests[httpActivity.id] = httpActivity;
-
-    httpActivity.owner.addRequestHeaders(headers);
-    httpActivity.owner.addRequestCookies(cookies);
-  },
-
-  /**
-   * Create the empty HTTP activity object. This object is used for storing all
-   * the request and response information.
-   *
-   * This is a HAR-like object. Conformance to the spec is not guaranteed at
-   * this point.
-   *
-   * TODO: Bug 708717 - Add support for network log export to HAR
-   *
-   * @see http://www.softwareishard.com/blog/har-12-spec
-   * @param nsIHttpChannel aChannel
-   *        The HTTP channel for which the HTTP activity object is created.
-   * @return object
-   *         The new HTTP activity object.
-   */
-  createActivityObject: function NM_createActivityObject(aChannel)
-  {
-    return {
-      id: gSequenceId(),
-      channel: aChannel,
-      charset: null, // see NM__onRequestHeader()
-      url: aChannel.URI.spec,
-      discardRequestBody: !this.saveRequestAndResponseBodies,
-      discardResponseBody: !this.saveRequestAndResponseBodies,
-      timings: {}, // internal timing information, see NM_observeActivity()
-      responseStatus: null, // see NM__onResponseHeader()
-      owner: null, // the activity owner which is notified when changes happen
-    };
-  },
-
-  /**
-   * Setup the network response listener for the given HTTP activity. The
-   * NetworkResponseListener is responsible for storing the response body.
-   *
-   * @private
-   * @param object aHttpActivity
-   *        The HTTP activity object we are tracking.
-   */
-  _setupResponseListener: function NM__setupResponseListener(aHttpActivity)
-  {
-    let channel = aHttpActivity.channel;
-    channel.QueryInterface(Ci.nsITraceableChannel);
-
-    // The response will be written into the outputStream of this pipe.
-    // This allows us to buffer the data we are receiving and read it
-    // asynchronously.
-    // Both ends of the pipe must be blocking.
-    let sink = Cc["@mozilla.org/pipe;1"].createInstance(Ci.nsIPipe);
-
-    // The streams need to be blocking because this is required by the
-    // stream tee.
-    sink.init(false, false, this.responsePipeSegmentSize, PR_UINT32_MAX, null);
-
-    // Add listener for the response body.
-    let newListener = new NetworkResponseListener(this, aHttpActivity);
-
-    // Remember the input stream, so it isn't released by GC.
-    newListener.inputStream = sink.inputStream;
-    newListener.sink = sink;
-
-    let tee = Cc["@mozilla.org/network/stream-listener-tee;1"].
-              createInstance(Ci.nsIStreamListenerTee);
-
-    let originalListener = channel.setNewListener(tee);
-
-    tee.init(originalListener, sink.outputStream, newListener);
-  },
-
-  /**
-   * Handler for ACTIVITY_SUBTYPE_REQUEST_BODY_SENT. The request body is logged
-   * here.
-   *
-   * @private
-   * @param object aHttpActivity
-   *        The HTTP activity object we are working with.
-   */
-  _onRequestBodySent: function NM__onRequestBodySent(aHttpActivity)
-  {
-    if (aHttpActivity.discardRequestBody) {
-      return;
-    }
-
-    let sentBody = NetworkHelper.
-                   readPostTextFromRequest(aHttpActivity.channel,
-                                           aHttpActivity.charset);
-
-    if (!sentBody && this.window &&
-        aHttpActivity.url == this.window.location.href) {
-      // If the request URL is the same as the current page URL, then
-      // we can try to get the posted text from the page directly.
-      // This check is necessary as otherwise the
-      //   NetworkHelper.readPostTextFromPageViaWebNav()
-      // function is called for image requests as well but these
-      // are not web pages and as such don't store the posted text
-      // in the cache of the webpage.
-      let webNav = this.window.QueryInterface(Ci.nsIInterfaceRequestor).
-                   getInterface(Ci.nsIWebNavigation);
-      sentBody = NetworkHelper.
-                 readPostTextFromPageViaWebNav(webNav, aHttpActivity.charset);
-    }
-
-    if (sentBody) {
-      aHttpActivity.owner.addRequestPostData({ text: sentBody });
-    }
-  },
-
-  /**
-   * Handler for ACTIVITY_SUBTYPE_RESPONSE_HEADER. This method stores
-   * information about the response headers.
-   *
-   * @private
-   * @param object aHttpActivity
-   *        The HTTP activity object we are working with.
-   * @param string aExtraStringData
-   *        The uncached response headers.
-   */
-  _onResponseHeader:
-  function NM__onResponseHeader(aHttpActivity, aExtraStringData)
-  {
-    // aExtraStringData contains the uncached response headers. The first line
-    // contains the response status (e.g. HTTP/1.1 200 OK).
-    //
-    // Note: The response header is not saved here. Calling the
-    // channel.visitResponseHeaders() methood at this point sometimes causes an
-    // NS_ERROR_NOT_AVAILABLE exception.
-    //
-    // We could parse aExtraStringData to get the headers and their values, but
-    // that is not trivial to do in an accurate manner. Hence, we save the
-    // response headers in this._httpResponseExaminer().
-
-    let headers = aExtraStringData.split(/\r\n|\n|\r/);
-    let statusLine = headers.shift();
-    let statusLineArray = statusLine.split(" ");
-
-    let response = {};
-    response.httpVersion = statusLineArray.shift();
-    response.status = statusLineArray.shift();
-    response.statusText = statusLineArray.join(" ");
-    response.headersSize = aExtraStringData.length;
-
-    aHttpActivity.responseStatus = response.status;
-
-    // Discard the response body for known response statuses.
-    switch (parseInt(response.status)) {
-      case HTTP_MOVED_PERMANENTLY:
-      case HTTP_FOUND:
-      case HTTP_SEE_OTHER:
-      case HTTP_TEMPORARY_REDIRECT:
-        aHttpActivity.discardResponseBody = true;
-        break;
-    }
-
-    response.discardResponseBody = aHttpActivity.discardResponseBody;
-
-    aHttpActivity.owner.addResponseStart(response);
-  },
-
-  /**
-   * Handler for ACTIVITY_SUBTYPE_TRANSACTION_CLOSE. This method updates the HAR
-   * timing information on the HTTP activity object and clears the request
-   * from the list of known open requests.
-   *
-   * @private
-   * @param object aHttpActivity
-   *        The HTTP activity object we work with.
-   */
-  _onTransactionClose: function NM__onTransactionClose(aHttpActivity)
-  {
-    let result = this._setupHarTimings(aHttpActivity);
-    aHttpActivity.owner.addEventTimings(result.total, result.timings);
-    delete this.openRequests[aHttpActivity.id];
-  },
-
-  /**
-   * Update the HTTP activity object to include timing information as in the HAR
-   * spec. The HTTP activity object holds the raw timing information in
-   * |timings| - these are timings stored for each activity notification. The
-   * HAR timing information is constructed based on these lower level data.
-   *
-   * @param object aHttpActivity
-   *        The HTTP activity object we are working with.
-   * @return object
-   *         This object holds two properties:
-   *         - total - the total time for all of the request and response.
-   *         - timings - the HAR timings object.
-   */
-  _setupHarTimings: function NM__setupHarTimings(aHttpActivity)
-  {
-    let timings = aHttpActivity.timings;
-    let harTimings = {};
-
-    // Not clear how we can determine "blocked" time.
-    harTimings.blocked = -1;
-
-    // DNS timing information is available only in when the DNS record is not
-    // cached.
-    harTimings.dns = timings.STATUS_RESOLVING && timings.STATUS_RESOLVED ?
-                     timings.STATUS_RESOLVED.last -
-                     timings.STATUS_RESOLVING.first : -1;
-
-    if (timings.STATUS_CONNECTING_TO && timings.STATUS_CONNECTED_TO) {
-      harTimings.connect = timings.STATUS_CONNECTED_TO.last -
-                           timings.STATUS_CONNECTING_TO.first;
-    }
-    else if (timings.STATUS_SENDING_TO) {
-      harTimings.connect = timings.STATUS_SENDING_TO.first -
-                           timings.REQUEST_HEADER.first;
-    }
-    else {
-      harTimings.connect = -1;
-    }
-
-    if ((timings.STATUS_WAITING_FOR || timings.STATUS_RECEIVING_FROM) &&
-        (timings.STATUS_CONNECTED_TO || timings.STATUS_SENDING_TO)) {
-      harTimings.send = (timings.STATUS_WAITING_FOR ||
-                         timings.STATUS_RECEIVING_FROM).first -
-                        (timings.STATUS_CONNECTED_TO ||
-                         timings.STATUS_SENDING_TO).last;
-    }
-    else {
-      harTimings.send = -1;
-    }
-
-    if (timings.RESPONSE_START) {
-      harTimings.wait = timings.RESPONSE_START.first -
-                        (timings.REQUEST_BODY_SENT ||
-                         timings.STATUS_SENDING_TO).last;
-    }
-    else {
-      harTimings.wait = -1;
-    }
-
-    if (timings.RESPONSE_START && timings.RESPONSE_COMPLETE) {
-      harTimings.receive = timings.RESPONSE_COMPLETE.last -
-                           timings.RESPONSE_START.first;
-    }
-    else {
-      harTimings.receive = -1;
-    }
-
-    let totalTime = 0;
-    for (let timing in harTimings) {
-      let time = Math.max(Math.round(harTimings[timing] / 1000), -1);
-      harTimings[timing] = time;
-      if (time > -1) {
-        totalTime += time;
-      }
-    }
-
-    return {
-      total: totalTime,
-      timings: harTimings,
-    };
-  },
-
-  /**
-   * Suspend Web Console activity. This is called when all Web Consoles are
-   * closed.
-   */
-  destroy: function NM_destroy()
-  {
-    if (Services.appinfo.processType != Ci.nsIXULRuntime.PROCESS_TYPE_CONTENT) {
-      Services.obs.removeObserver(this._httpResponseExaminer,
-                                  "http-on-examine-response");
-    }
-
-    gActivityDistributor.removeObserver(this);
-
-    this.openRequests = {};
-    this.openResponses = {};
-    this.owner = null;
-    this.window = null;
-  },
-};
-
-exports.NetworkMonitor = NetworkMonitor;
-exports.NetworkResponseListener = NetworkResponseListener;
-})(WebConsoleUtils);
-
-/**
- * A WebProgressListener that listens for location changes.
- *
- * This progress listener is used to track file loads and other kinds of
- * location changes.
- *
- * @constructor
- * @param object aWindow
- *        The window for which we need to track location changes.
- * @param object aOwner
- *        The listener owner which needs to implement two methods:
- *        - onFileActivity(aFileURI)
- *        - onLocationChange(aState, aTabURI, aPageTitle)
- */
-function ConsoleProgressListener(aWindow, aOwner)
-{
-  this.window = aWindow;
-  this.owner = aOwner;
-}
-exports.ConsoleProgressListener = ConsoleProgressListener;
-
-ConsoleProgressListener.prototype = {
-  /**
-   * Constant used for startMonitor()/stopMonitor() that tells you want to
-   * monitor file loads.
-   */
-  MONITOR_FILE_ACTIVITY: 1,
-
-  /**
-   * Constant used for startMonitor()/stopMonitor() that tells you want to
-   * monitor page location changes.
-   */
-  MONITOR_LOCATION_CHANGE: 2,
-
-  /**
-   * Tells if you want to monitor file activity.
-   * @private
-   * @type boolean
-   */
-  _fileActivity: false,
-
-  /**
-   * Tells if you want to monitor location changes.
-   * @private
-   * @type boolean
-   */
-  _locationChange: false,
-
-  /**
-   * Tells if the console progress listener is initialized or not.
-   * @private
-   * @type boolean
-   */
-  _initialized: false,
-
-  _webProgress: null,
-
-  QueryInterface: XPCOMUtils.generateQI([Ci.nsIWebProgressListener,
-                                         Ci.nsISupportsWeakReference]),
-
-  /**
-   * Initialize the ConsoleProgressListener.
-   * @private
-   */
-  _init: function CPL__init()
-  {
-    if (this._initialized) {
-      return;
-    }
-
-    this._webProgress = this.window.QueryInterface(Ci.nsIInterfaceRequestor)
-                        .getInterface(Ci.nsIWebNavigation)
-                        .QueryInterface(Ci.nsIWebProgress);
-    this._webProgress.addProgressListener(this,
-                                          Ci.nsIWebProgress.NOTIFY_STATE_ALL);
-
-    this._initialized = true;
-  },
-
-  /**
-   * Start a monitor/tracker related to the current nsIWebProgressListener
-   * instance.
-   *
-   * @param number aMonitor
-   *        Tells what you want to track. Available constants:
-   *        - this.MONITOR_FILE_ACTIVITY
-   *          Track file loads.
-   *        - this.MONITOR_LOCATION_CHANGE
-   *          Track location changes for the top window.
-   */
-  startMonitor: function CPL_startMonitor(aMonitor)
-  {
-    switch (aMonitor) {
-      case this.MONITOR_FILE_ACTIVITY:
-        this._fileActivity = true;
-        break;
-      case this.MONITOR_LOCATION_CHANGE:
-        this._locationChange = true;
-        break;
-      default:
-        throw new Error("ConsoleProgressListener: unknown monitor type " +
-                        aMonitor + "!");
-    }
-    this._init();
-  },
-
-  /**
-   * Stop a monitor.
-   *
-   * @param number aMonitor
-   *        Tells what you want to stop tracking. See this.startMonitor() for
-   *        the list of constants.
-   */
-  stopMonitor: function CPL_stopMonitor(aMonitor)
-  {
-    switch (aMonitor) {
-      case this.MONITOR_FILE_ACTIVITY:
-        this._fileActivity = false;
-        break;
-      case this.MONITOR_LOCATION_CHANGE:
-        this._locationChange = false;
-        break;
-      default:
-        throw new Error("ConsoleProgressListener: unknown monitor type " +
-                        aMonitor + "!");
-    }
-
-    if (!this._fileActivity && !this._locationChange) {
-      this.destroy();
-    }
-  },
-
-  onStateChange:
-  function CPL_onStateChange(aProgress, aRequest, aState, aStatus)
-  {
-    if (!this.owner) {
-      return;
-    }
-
-    if (this._fileActivity) {
-      this._checkFileActivity(aProgress, aRequest, aState, aStatus);
-    }
-
-    if (this._locationChange) {
-      this._checkLocationChange(aProgress, aRequest, aState, aStatus);
-    }
-  },
-
-  /**
-   * Check if there is any file load, given the arguments of
-   * nsIWebProgressListener.onStateChange. If the state change tells that a file
-   * URI has been loaded, then the remote Web Console instance is notified.
-   * @private
-   */
-  _checkFileActivity:
-  function CPL__checkFileActivity(aProgress, aRequest, aState, aStatus)
-  {
-    if (!(aState & Ci.nsIWebProgressListener.STATE_START)) {
-      return;
-    }
-
-    let uri = null;
-    if (aRequest instanceof Ci.imgIRequest) {
-      let imgIRequest = aRequest.QueryInterface(Ci.imgIRequest);
-      uri = imgIRequest.URI;
-    }
-    else if (aRequest instanceof Ci.nsIChannel) {
-      let nsIChannel = aRequest.QueryInterface(Ci.nsIChannel);
-      uri = nsIChannel.URI;
-    }
-
-    if (!uri || !uri.schemeIs("file") && !uri.schemeIs("ftp")) {
-      return;
-    }
-
-    this.owner.onFileActivity(uri.spec);
-  },
-
-  /**
-   * Check if the current window.top location is changing, given the arguments
-   * of nsIWebProgressListener.onStateChange. If that is the case, the remote
-   * Web Console instance is notified.
-   * @private
-   */
-  _checkLocationChange:
-  function CPL__checkLocationChange(aProgress, aRequest, aState, aStatus)
-  {
-    let isStart = aState & Ci.nsIWebProgressListener.STATE_START;
-    let isStop = aState & Ci.nsIWebProgressListener.STATE_STOP;
-    let isNetwork = aState & Ci.nsIWebProgressListener.STATE_IS_NETWORK;
-    let isWindow = aState & Ci.nsIWebProgressListener.STATE_IS_WINDOW;
-
-    // Skip non-interesting states.
-    if (!isNetwork || !isWindow || aProgress.DOMWindow != this.window) {
-      return;
-    }
-
-    if (isStart && aRequest instanceof Ci.nsIChannel) {
-      this.owner.onLocationChange("start", aRequest.URI.spec, "");
-    }
-    else if (isStop) {
-      this.owner.onLocationChange("stop", this.window.location.href,
-                                  this.window.document.title);
-    }
-  },
-
-  onLocationChange: function() {},
-  onStatusChange: function() {},
-  onProgressChange: function() {},
-  onSecurityChange: function() {},
-
-  /**
-   * Destroy the ConsoleProgressListener.
-   */
-  destroy: function CPL_destroy()
-  {
-    if (!this._initialized) {
-      return;
-    }
-
-    this._initialized = false;
-    this._fileActivity = false;
-    this._locationChange = false;
-
-    try {
-      this._webProgress.removeProgressListener(this);
-    }
-    catch (ex) {
-      // This can throw during browser shutdown.
-    }
-
-    this._webProgress = null;
-    this.window = null;
-    this.owner = null;
-  },
-};
 
 
 /**

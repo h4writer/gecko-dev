@@ -11,14 +11,11 @@
 #include <stddef.h>                     // for size_t
 #include <stdint.h>                     // for uint64_t, uint32_t
 #include "CompositableTransactionParent.h"
-#include "gfxPoint.h"                   // for gfxIntSize
 #include "mozilla/Attributes.h"         // for MOZ_OVERRIDE
 #include "mozilla/ipc/SharedMemory.h"   // for SharedMemory, etc
 #include "mozilla/layers/PLayerTransactionParent.h"
 #include "nsAutoPtr.h"                  // for nsRefPtr
 #include "nsTArrayForwardDeclare.h"     // for InfallibleTArray
-
-class gfx3DMatrix;
 
 namespace mozilla {
 
@@ -44,13 +41,18 @@ class LayerTransactionParent : public PLayerTransactionParent,
   typedef mozilla::layout::RenderFrameParent RenderFrameParent;
   typedef InfallibleTArray<Edit> EditArray;
   typedef InfallibleTArray<EditReply> EditReplyArray;
+  typedef InfallibleTArray<AsyncChildMessageData> AsyncChildMessageArray;
 
 public:
   LayerTransactionParent(LayerManagerComposite* aManager,
                          ShadowLayersManager* aLayersManager,
-                         uint64_t aId);
+                         uint64_t aId,
+                         ProcessId aOtherProcess);
+
+protected:
   ~LayerTransactionParent();
 
+public:
   void Destroy();
 
   LayerManagerComposite* layer_manager() const { return mLayerManager; }
@@ -76,29 +78,63 @@ public:
     PLayerTransactionParent::DeallocShmem(aShmem);
   }
 
+  virtual LayersBackend GetCompositorBackendType() const MOZ_OVERRIDE;
+
+  virtual bool IsSameProcess() const MOZ_OVERRIDE;
+
+  const uint64_t& GetPendingTransactionId() { return mPendingTransaction; }
+  void SetPendingTransactionId(uint64_t aId) { mPendingTransaction = aId; }
+
+  // CompositableParentManager
+  virtual void SendFenceHandleIfPresent(PTextureParent* aTexture,
+                                        CompositableHost* aCompositableHost) MOZ_OVERRIDE;
+
+  virtual void SendFenceHandle(AsyncTransactionTracker* aTracker,
+                               PTextureParent* aTexture,
+                               const FenceHandle& aFence) MOZ_OVERRIDE;
+
+  virtual void SendAsyncMessage(const InfallibleTArray<AsyncParentMessageData>& aMessage) MOZ_OVERRIDE;
+
+  virtual base::ProcessId GetChildProcessId() MOZ_OVERRIDE
+  {
+    return mChildProcessId;
+  }
 
 protected:
+  virtual bool RecvShutdown() MOZ_OVERRIDE;
+
   virtual bool RecvUpdate(const EditArray& cset,
+                          const uint64_t& aTransactionId,
                           const TargetConfig& targetConfig,
                           const bool& isFirstPaint,
+                          const bool& scheduleComposite,
+                          const uint32_t& paintSequenceNumber,
+                          const bool& isRepeatTransaction,
+                          const mozilla::TimeStamp& aTransactionStart,
                           EditReplyArray* reply) MOZ_OVERRIDE;
 
   virtual bool RecvUpdateNoSwap(const EditArray& cset,
+                                const uint64_t& aTransactionId,
                                 const TargetConfig& targetConfig,
-                                const bool& isFirstPaint) MOZ_OVERRIDE;
+                                const bool& isFirstPaint,
+                                const bool& scheduleComposite,
+                                const uint32_t& paintSequenceNumber,
+                                const bool& isRepeatTransaction,
+                                const mozilla::TimeStamp& aTransactionStart) MOZ_OVERRIDE;
 
   virtual bool RecvClearCachedResources() MOZ_OVERRIDE;
+  virtual bool RecvForceComposite() MOZ_OVERRIDE;
+  virtual bool RecvSetTestSampleTime(const TimeStamp& aTime) MOZ_OVERRIDE;
+  virtual bool RecvLeaveTestMode() MOZ_OVERRIDE;
   virtual bool RecvGetOpacity(PLayerParent* aParent,
                               float* aOpacity) MOZ_OVERRIDE;
-  virtual bool RecvGetTransform(PLayerParent* aParent,
-                                gfx3DMatrix* aTransform) MOZ_OVERRIDE;
-
-  virtual PGrallocBufferParent*
-  AllocPGrallocBufferParent(const gfxIntSize& aSize,
-                      const uint32_t& aFormat, const uint32_t& aUsage,
-                      MaybeMagicGrallocBufferHandle* aOutHandle) MOZ_OVERRIDE;
-  virtual bool
-  DeallocPGrallocBufferParent(PGrallocBufferParent* actor) MOZ_OVERRIDE;
+  virtual bool RecvGetAnimationTransform(PLayerParent* aParent,
+                                         MaybeTransform* aTransform)
+                                         MOZ_OVERRIDE;
+  virtual bool RecvSetAsyncScrollOffset(const FrameMetrics::ViewID& aId,
+                                        const int32_t& aX, const int32_t& aY) MOZ_OVERRIDE;
+  virtual bool RecvGetAPZTestData(APZTestData* aOutData) MOZ_OVERRIDE;
+  virtual bool RecvRequestProperty(const nsString& aProperty, float* aValue) MOZ_OVERRIDE;
 
   virtual PLayerParent* AllocPLayerParent() MOZ_OVERRIDE;
   virtual bool DeallocPLayerParent(PLayerParent* actor) MOZ_OVERRIDE;
@@ -106,11 +142,17 @@ protected:
   virtual PCompositableParent* AllocPCompositableParent(const TextureInfo& aInfo) MOZ_OVERRIDE;
   virtual bool DeallocPCompositableParent(PCompositableParent* actor) MOZ_OVERRIDE;
 
-  virtual PTextureParent* AllocPTextureParent() MOZ_OVERRIDE;
+  virtual PTextureParent* AllocPTextureParent(const SurfaceDescriptor& aSharedData,
+                                              const TextureFlags& aFlags) MOZ_OVERRIDE;
   virtual bool DeallocPTextureParent(PTextureParent* actor) MOZ_OVERRIDE;
 
-  void Attach(ShadowLayerParent* aLayerParent,
-              CompositableParent* aCompositable,
+  virtual bool
+  RecvChildAsyncMessages(const InfallibleTArray<AsyncChildMessageData>& aMessages) MOZ_OVERRIDE;
+
+  virtual void ActorDestroy(ActorDestroyReason why) MOZ_OVERRIDE;
+
+  bool Attach(ShadowLayerParent* aLayerParent,
+              CompositableHost* aCompositable,
               bool aIsAsyncVideo);
 
   void AddIPDLReference() {
@@ -138,6 +180,8 @@ private:
   //   mId != 0 => mRoot == null
   // because the "real tree" is owned by the compositor.
   uint64_t mId;
+
+  uint64_t mPendingTransaction;
   // When the widget/frame/browser stuff in this process begins its
   // destruction process, we need to Disconnect() all the currently
   // live shadow layers, because some of them might be orphaned from
@@ -151,6 +195,10 @@ private:
   // called on us but the mLayerManager might not be destroyed, or
   // vice versa.  In both cases though, we want to ignore shadow-layer
   // transactions posted by the child.
+
+  // Child side's process id.
+  base::ProcessId mChildProcessId;
+
   bool mDestroyed;
 
   bool mIPCOpen;

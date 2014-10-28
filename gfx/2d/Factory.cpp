@@ -19,7 +19,7 @@
 #endif
 #endif
 
-#if defined(WIN32) && defined(USE_SKIA)
+#if defined(WIN32)
 #include "ScaledFontWin.h"
 #endif
 
@@ -43,6 +43,7 @@
 #endif
 
 #include "DrawTargetDual.h"
+#include "DrawTargetTiled.h"
 #include "DrawTargetRecording.h"
 
 #include "SourceSurfaceRawData.h"
@@ -51,8 +52,10 @@
 
 #include "Logging.h"
 
-#ifdef PR_LOGGING
-PRLogModuleInfo *
+#include "mozilla/CheckedInt.h"
+
+#if defined(DEBUG) || defined(PR_LOGGING)
+GFX2D_API PRLogModuleInfo *
 GetGFX2DLog()
 {
   static PRLogModuleInfo *sLog;
@@ -154,7 +157,7 @@ namespace mozilla {
 namespace gfx {
 
 // XXX - Need to define an API to set this.
-int sGfxLogLevel = LOG_DEBUG;
+GFX2D_API int sGfxLogLevel = LOG_DEBUG;
 
 #ifdef WIN32
 ID3D10Device1 *Factory::mD3D10Device;
@@ -175,19 +178,77 @@ Factory::HasSSE2()
   // cl.exe with -arch:SSE2 (default on x64 compiler)
   return true;
 #elif defined(HAVE_CPU_DETECTION)
-  return HasCPUIDBit(1u, edx, (1u<<26));
+  static enum {
+    UNINITIALIZED,
+    NO_SSE2,
+    HAS_SSE2
+  } sDetectionState = UNINITIALIZED;
+
+  if (sDetectionState == UNINITIALIZED) {
+    sDetectionState = HasCPUIDBit(1u, edx, (1u<<26)) ? HAS_SSE2 : NO_SSE2;
+  }
+  return sDetectionState == HAS_SSE2;
 #else
   return false;
 #endif
 }
 
+bool
+Factory::CheckSurfaceSize(const IntSize &sz, int32_t limit)
+{
+  if (sz.width < 0 || sz.height < 0) {
+    gfxDebug() << "Surface width or height < 0!";
+    return false;
+  }
+
+  // reject images with sides bigger than limit
+  if (limit && (sz.width > limit || sz.height > limit)) {
+    gfxDebug() << "Surface size too large (exceeds caller's limit)!";
+    return false;
+  }
+
+  // make sure the surface area doesn't overflow a int32_t
+  CheckedInt<int32_t> tmp = sz.width;
+  tmp *= sz.height;
+  if (!tmp.isValid()) {
+    gfxDebug() << "Surface size too large (would overflow)!";
+    return false;
+  }
+
+  // assuming 4 bytes per pixel, make sure the allocation size
+  // doesn't overflow a int32_t either
+  CheckedInt<int32_t> stride = sz.width;
+  stride *= 4;
+
+  // When aligning the stride to 16 bytes, it can grow by up to 15 bytes.
+  stride += 16 - 1;
+
+  if (!stride.isValid()) {
+    gfxDebug() << "Surface size too large (stride overflows int32_t)!";
+    return false;
+  }
+
+  CheckedInt<int32_t> numBytes = GetAlignedStride<16>(sz.width * 4);
+  numBytes *= sz.height;
+  if (!numBytes.isValid()) {
+    gfxDebug() << "Surface size too large (allocation size would overflow int32_t)!";
+    return false;
+  }
+
+  return true;
+}
+
 TemporaryRef<DrawTarget>
 Factory::CreateDrawTarget(BackendType aBackend, const IntSize &aSize, SurfaceFormat aFormat)
 {
+  if (!CheckSurfaceSize(aSize)) {
+    return nullptr;
+  }
+
   RefPtr<DrawTarget> retVal;
   switch (aBackend) {
 #ifdef WIN32
-  case BACKEND_DIRECT2D:
+  case BackendType::DIRECT2D:
     {
       RefPtr<DrawTargetD2D> newTarget;
       newTarget = new DrawTargetD2D();
@@ -197,7 +258,7 @@ Factory::CreateDrawTarget(BackendType aBackend, const IntSize &aSize, SurfaceFor
       break;
     }
 #ifdef USE_D2D1_1
-  case BACKEND_DIRECT2D1_1:
+  case BackendType::DIRECT2D1_1:
     {
       RefPtr<DrawTargetD2D1> newTarget;
       newTarget = new DrawTargetD2D1();
@@ -208,8 +269,8 @@ Factory::CreateDrawTarget(BackendType aBackend, const IntSize &aSize, SurfaceFor
     }
 #endif
 #elif defined XP_MACOSX
-  case BACKEND_COREGRAPHICS:
-  case BACKEND_COREGRAPHICS_ACCELERATED:
+  case BackendType::COREGRAPHICS:
+  case BackendType::COREGRAPHICS_ACCELERATED:
     {
       RefPtr<DrawTargetCG> newTarget;
       newTarget = new DrawTargetCG();
@@ -220,7 +281,7 @@ Factory::CreateDrawTarget(BackendType aBackend, const IntSize &aSize, SurfaceFor
     }
 #endif
 #ifdef USE_SKIA
-  case BACKEND_SKIA:
+  case BackendType::SKIA:
     {
       RefPtr<DrawTargetSkia> newTarget;
       newTarget = new DrawTargetSkia();
@@ -231,7 +292,7 @@ Factory::CreateDrawTarget(BackendType aBackend, const IntSize &aSize, SurfaceFor
     }
 #endif
 #ifdef USE_CAIRO
-  case BACKEND_CAIRO:
+  case BackendType::CAIRO:
     {
       RefPtr<DrawTargetCairo> newTarget;
       newTarget = new DrawTargetCairo();
@@ -247,17 +308,15 @@ Factory::CreateDrawTarget(BackendType aBackend, const IntSize &aSize, SurfaceFor
   }
 
   if (mRecorder && retVal) {
-    RefPtr<DrawTarget> recordDT;
-    recordDT = new DrawTargetRecording(mRecorder, retVal);
-    return recordDT;
+    return new DrawTargetRecording(mRecorder, retVal);
   }
 
   if (!retVal) {
     // Failed
-    gfxDebug() << "Failed to create DrawTarget, Type: " << aBackend << " Size: " << aSize;
+    gfxDebug() << "Failed to create DrawTarget, Type: " << int(aBackend) << " Size: " << aSize;
   }
   
-  return retVal;
+  return retVal.forget();
 }
 
 TemporaryRef<DrawTarget>
@@ -273,34 +332,39 @@ Factory::CreateDrawTargetForData(BackendType aBackend,
                                  int32_t aStride, 
                                  SurfaceFormat aFormat)
 {
+  if (!CheckSurfaceSize(aSize)) {
+    return nullptr;
+  }
+
   RefPtr<DrawTarget> retVal;
 
   switch (aBackend) {
 #ifdef USE_SKIA
-  case BACKEND_SKIA:
+  case BackendType::SKIA:
     {
       RefPtr<DrawTargetSkia> newTarget;
       newTarget = new DrawTargetSkia();
       newTarget->Init(aData, aSize, aStride, aFormat);
       retVal = newTarget;
+      break;
     }
 #endif
 #ifdef XP_MACOSX
-  case BACKEND_COREGRAPHICS:
+  case BackendType::COREGRAPHICS:
     {
       RefPtr<DrawTargetCG> newTarget = new DrawTargetCG();
       if (newTarget->Init(aBackend, aData, aSize, aStride, aFormat))
-        return newTarget;
+        return newTarget.forget();
       break;
     }
 #endif
 #ifdef USE_CAIRO
-  case BACKEND_CAIRO:
+  case BackendType::CAIRO:
     {
       RefPtr<DrawTargetCairo> newTarget;
       newTarget = new DrawTargetCairo();
       if (newTarget->Init(aData, aSize, aStride, aFormat)) {
-        retVal = newTarget;
+        retVal = newTarget.forget();
       }
       break;
     }
@@ -311,15 +375,26 @@ Factory::CreateDrawTargetForData(BackendType aBackend,
   }
 
   if (mRecorder && retVal) {
-    RefPtr<DrawTarget> recordDT = new DrawTargetRecording(mRecorder, retVal, true);
-    return recordDT;
+    return new DrawTargetRecording(mRecorder, retVal, true);
   }
 
   if (!retVal) {
-    gfxDebug() << "Failed to create DrawTarget, Type: " << aBackend << " Size: " << aSize;
+    gfxDebug() << "Failed to create DrawTarget, Type: " << int(aBackend) << " Size: " << aSize;
   }
 
-  return retVal;
+  return retVal.forget();
+}
+
+TemporaryRef<DrawTarget>
+Factory::CreateTiledDrawTarget(const TileSet& aTileSet)
+{
+  RefPtr<DrawTargetTiled> dt = new DrawTargetTiled();
+
+  if (!dt->Init(aTileSet)) {
+    return nullptr;
+  }
+
+  return dt.forget();
 }
 
 TemporaryRef<ScaledFont>
@@ -327,25 +402,25 @@ Factory::CreateScaledFontForNativeFont(const NativeFont &aNativeFont, Float aSiz
 {
   switch (aNativeFont.mType) {
 #ifdef WIN32
-  case NATIVE_FONT_DWRITE_FONT_FACE:
+  case NativeFontType::DWRITE_FONT_FACE:
     {
       return new ScaledFontDWrite(static_cast<IDWriteFontFace*>(aNativeFont.mFont), aSize);
     }
 #if defined(USE_CAIRO) || defined(USE_SKIA)
-  case NATIVE_FONT_GDI_FONT_FACE:
+  case NativeFontType::GDI_FONT_FACE:
     {
       return new ScaledFontWin(static_cast<LOGFONT*>(aNativeFont.mFont), aSize);
     }
 #endif
 #endif
 #ifdef XP_MACOSX
-  case NATIVE_FONT_MAC_FONT_FACE:
+  case NativeFontType::MAC_FONT_FACE:
     {
       return new ScaledFontMac(static_cast<CGFontRef>(aNativeFont.mFont), aSize);
     }
 #endif
 #if defined(USE_CAIRO) || defined(USE_SKIA_FREETYPE)
-  case NATIVE_FONT_CAIRO_FONT_FACE:
+  case NativeFontType::CAIRO_FONT_FACE:
     {
       return new ScaledFontCairo(static_cast<cairo_scaled_font_t*>(aNativeFont.mFont), aSize);
     }
@@ -363,7 +438,7 @@ Factory::CreateScaledFontForTrueTypeData(uint8_t *aData, uint32_t aSize,
 {
   switch (aType) {
 #ifdef WIN32
-  case FONT_DWRITE:
+  case FontType::DWRITE:
     {
       return new ScaledFontDWrite(aData, aSize, aFaceIndex, aGlyphSize);
     }
@@ -384,7 +459,7 @@ Factory::CreateScaledFontWithCairo(const NativeFont& aNativeFont, Float aSize, c
   // Therefore, we just reuse CreateScaledFontForNativeFont's implementation.
   RefPtr<ScaledFont> font = CreateScaledFontForNativeFont(aNativeFont, aSize);
   static_cast<ScaledFontBase*>(font.get())->SetCairoScaledFont(aScaledFont);
-  return font;
+  return font.forget();
 #else
   return nullptr;
 #endif
@@ -402,7 +477,7 @@ Factory::CreateDualDrawTarget(DrawTarget *targetA, DrawTarget *targetB)
     retVal = new DrawTargetRecording(mRecorder, retVal);
   }
 
-  return retVal;
+  return retVal.forget();
 }
 
 
@@ -420,7 +495,7 @@ Factory::CreateDrawTargetForD3D10Texture(ID3D10Texture2D *aTexture, SurfaceForma
       retVal = new DrawTargetRecording(mRecorder, retVal, true);
     }
 
-    return retVal;
+    return retVal.forget();
   }
 
   gfxWarning() << "Failed to create draw target for D3D10 texture.";
@@ -458,22 +533,54 @@ Factory::CreateDualDrawTargetForD3D10Textures(ID3D10Texture2D *aTextureA,
     retVal = new DrawTargetRecording(mRecorder, retVal);
   }
 
-  return retVal;
+  return retVal.forget();
 }
 
 void
 Factory::SetDirect3D10Device(ID3D10Device1 *aDevice)
 {
+  // do not throw on failure; return error codes and disconnect the device
+  // On Windows 8 error codes are the default, but on Windows 7 the
+  // default is to throw (or perhaps only with some drivers?)
+  aDevice->SetExceptionMode(0);
   mD3D10Device = aDevice;
 }
 
 ID3D10Device1*
 Factory::GetDirect3D10Device()
 {
+#ifdef DEBUG
+  if (mD3D10Device) {
+    UINT mode = mD3D10Device->GetExceptionMode();
+    MOZ_ASSERT(0 == mode);
+  }
+#endif
   return mD3D10Device;
 }
 
 #ifdef USE_D2D1_1
+TemporaryRef<DrawTarget>
+Factory::CreateDrawTargetForD3D11Texture(ID3D11Texture2D *aTexture, SurfaceFormat aFormat)
+{
+  RefPtr<DrawTargetD2D1> newTarget;
+
+  newTarget = new DrawTargetD2D1();
+  if (newTarget->Init(aTexture, aFormat)) {
+    RefPtr<DrawTarget> retVal = newTarget;
+
+    if (mRecorder) {
+      retVal = new DrawTargetRecording(mRecorder, retVal, true);
+    }
+
+    return retVal;
+  }
+
+  gfxWarning() << "Failed to create draw target for D3D10 texture.";
+
+  // Failed
+  return nullptr;
+}
+
 void
 Factory::SetDirect3D11Device(ID3D11Device *aDevice)
 {
@@ -497,15 +604,18 @@ Factory::GetD2D1Device()
 {
   return mD2D1Device;
 }
+
+bool
+Factory::SupportsD2D1()
+{
+  return !!D2DFactory1();
+}
 #endif
 
 TemporaryRef<GlyphRenderingOptions>
 Factory::CreateDWriteGlyphRenderingOptions(IDWriteRenderingParams *aParams)
 {
-  RefPtr<GlyphRenderingOptions> options =
-    new GlyphRenderingOptionsDWrite(aParams);
-
-  return options;
+  return new GlyphRenderingOptionsDWrite(aParams);
 }
 
 uint64_t
@@ -530,30 +640,22 @@ Factory::D2DCleanup()
 
 #ifdef USE_SKIA_GPU
 TemporaryRef<DrawTarget>
-Factory::CreateDrawTargetSkiaWithGLContextAndGrGLInterface(GenericRefCountedBase* aGLContext,
-                                                           GrGLInterface* aGrGLInterface,
-                                                           const IntSize &aSize,
-                                                           SurfaceFormat aFormat)
+Factory::CreateDrawTargetSkiaWithGrContext(GrContext* aGrContext,
+                                           const IntSize &aSize,
+                                           SurfaceFormat aFormat)
 {
-  DrawTargetSkia* newDrawTargetSkia = new DrawTargetSkia();
-  newDrawTargetSkia->InitWithGLContextAndGrGLInterface(aGLContext, aGrGLInterface, aSize, aFormat);
-  RefPtr<DrawTarget> newTarget = newDrawTargetSkia;
-  return newTarget;
+  RefPtr<DrawTarget> newTarget = new DrawTargetSkia();
+  if (!newTarget->InitWithGrContext(aGrContext, aSize, aFormat)) {
+    return nullptr;
+  }
+  return newTarget.forget();
 }
 
-void
-Factory::SetGlobalSkiaCacheLimits(int aCount, int aSizeInBytes)
-{
-    DrawTargetSkia::SetGlobalCacheLimits(aCount, aSizeInBytes);
-}
 #endif // USE_SKIA_GPU
 
 void
 Factory::PurgeAllCaches()
 {
-#ifdef USE_SKIA_GPU
-  DrawTargetSkia::PurgeAllCaches();
-#endif
 }
 
 #ifdef USE_SKIA_FREETYPE
@@ -565,40 +667,28 @@ Factory::CreateCairoGlyphRenderingOptions(FontHinting aHinting, bool aAutoHintin
 
   options->SetHinting(aHinting);
   options->SetAutoHinting(aAutoHinting);
-  return options;
+  return options.forget();
 }
 #endif
 
 TemporaryRef<DrawTarget>
-Factory::CreateDrawTargetForCairoSurface(cairo_surface_t* aSurface, const IntSize& aSize)
+Factory::CreateDrawTargetForCairoSurface(cairo_surface_t* aSurface, const IntSize& aSize, SurfaceFormat* aFormat)
 {
   RefPtr<DrawTarget> retVal;
 
 #ifdef USE_CAIRO
   RefPtr<DrawTargetCairo> newTarget = new DrawTargetCairo();
 
-  if (newTarget->Init(aSurface, aSize)) {
+  if (newTarget->Init(aSurface, aSize, aFormat)) {
     retVal = newTarget;
   }
 
   if (mRecorder && retVal) {
     RefPtr<DrawTarget> recordDT = new DrawTargetRecording(mRecorder, retVal, true);
-    return recordDT;
+    return recordDT.forget();
   }
 #endif
-  return retVal;
-}
-
-TemporaryRef<SourceSurface>
-Factory::CreateSourceSurfaceForCairoSurface(cairo_surface_t* aSurface,
-                                            SurfaceFormat aFormat)
-{
-  RefPtr<SourceSurface> retVal;
-
-#ifdef USE_CAIRO
-  retVal = DrawTargetCairo::CreateSourceSurfaceForCairoSurface(aSurface, aFormat);
-#endif
-  return retVal;
+  return retVal.forget();
 }
 
 #ifdef XP_MACOSX
@@ -614,10 +704,15 @@ Factory::CreateDrawTargetForCairoCGContext(CGContextRef cg, const IntSize& aSize
   }
 
   if (mRecorder && retVal) {
-    RefPtr<DrawTarget> recordDT = new DrawTargetRecording(mRecorder, retVal);
-    return recordDT;
+    return new DrawTargetRecording(mRecorder, retVal);
   }
-  return retVal;
+  return retVal.forget();
+}
+
+TemporaryRef<GlyphRenderingOptions>
+Factory::CreateCGGlyphRenderingOptions(const Color &aFontSmoothingBackgroundColor)
+{
+  return new GlyphRenderingOptionsCG(aFontSmoothingBackgroundColor);
 }
 #endif
 
@@ -633,7 +728,7 @@ Factory::CreateWrappingDataSourceSurface(uint8_t *aData, int32_t aStride,
   RefPtr<SourceSurfaceRawData> newSurf = new SourceSurfaceRawData();
 
   if (newSurf->InitWrappingData(aData, aSize, aStride, aFormat, false)) {
-    return newSurf;
+    return newSurf.forget();
   }
 
   return nullptr;
@@ -641,13 +736,40 @@ Factory::CreateWrappingDataSourceSurface(uint8_t *aData, int32_t aStride,
 
 TemporaryRef<DataSourceSurface>
 Factory::CreateDataSourceSurface(const IntSize &aSize,
-                                 SurfaceFormat aFormat)
+                                 SurfaceFormat aFormat,
+                                 bool aZero)
 {
-  RefPtr<SourceSurfaceAlignedRawData> newSurf = new SourceSurfaceAlignedRawData();
-  if (newSurf->Init(aSize, aFormat)) {
-    return newSurf;
+  if (!CheckSurfaceSize(aSize)) {
+    gfxWarning() << "CreateDataSourceSurface failed with bad size";
+    return nullptr;
   }
 
+  RefPtr<SourceSurfaceAlignedRawData> newSurf = new SourceSurfaceAlignedRawData();
+  if (newSurf->Init(aSize, aFormat, aZero)) {
+    return newSurf.forget();
+  }
+
+  gfxWarning() << "CreateDataSourceSurface failed in init";
+  return nullptr;
+}
+
+TemporaryRef<DataSourceSurface>
+Factory::CreateDataSourceSurfaceWithStride(const IntSize &aSize,
+                                           SurfaceFormat aFormat,
+                                           int32_t aStride,
+                                           bool aZero)
+{
+  if (aStride < aSize.width * BytesPerPixel(aFormat)) {
+    gfxWarning() << "CreateDataSourceSurfaceWithStride failed with bad stride";
+    return nullptr;
+  }
+
+  RefPtr<SourceSurfaceAlignedRawData> newSurf = new SourceSurfaceAlignedRawData();
+  if (newSurf->InitWithStride(aSize, aFormat, aStride, aZero)) {
+    return newSurf.forget();
+  }
+
+  gfxWarning() << "CreateDataSourceSurfaceWithStride failed to initialize";
   return nullptr;
 }
 
@@ -661,6 +783,25 @@ void
 Factory::SetGlobalEventRecorder(DrawEventRecorder *aRecorder)
 {
   mRecorder = aRecorder;
+}
+
+LogForwarder* Factory::mLogForwarder = nullptr;
+
+// static
+void
+Factory::SetLogForwarder(LogForwarder* aLogFwd) {
+  mLogForwarder = aLogFwd;
+}
+
+// static
+void
+CriticalLogger::OutputMessage(const std::string &aString, int aLevel)
+{
+  if (Factory::GetLogForwarder()) {
+    Factory::GetLogForwarder()->Log(aString);
+  }
+
+  BasicLogger::OutputMessage(aString, aLevel);
 }
 
 }

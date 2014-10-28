@@ -8,14 +8,14 @@ SOURCES += [
     'nsI18nModule.cpp',
 ]
 
-LIBRARY_NAME = 'i18n'
-
 FINAL_LIBRARY = 'xul'
 LOCAL_INCLUDES += [
-    '../locale/src',
-    '../lwbrk/src',
-    '../strres/src',
-    '../uconv/src',
-    '../unicharutil/src',
+    '../icu/source/common',
+    '../icu/source/i18n',
+    '../locale',
+    '../lwbrk',
+    '../strres',
+    '../uconv',
+    '../unicharutil',
 ]
 

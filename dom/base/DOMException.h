@@ -21,16 +21,19 @@
 #include "nsIDOMDOMException.h"
 #include "nsWrapperCache.h"
 #include "xpcexception.h"
+#include "nsString.h"
 
 class nsIStackFrame;
 class nsString;
 
 nsresult
-NS_GetNameAndMessageForDOMNSResult(nsresult aNSResult, const char** aName,
-                                   const char** aMessage,
+NS_GetNameAndMessageForDOMNSResult(nsresult aNSResult, nsACString& aName,
+                                   nsACString& aMessage,
                                    uint16_t* aCode = nullptr);
 
 namespace mozilla {
+class ErrorResult;
+
 namespace dom {
 
 #define MOZILLA_EXCEPTION_IID \
@@ -57,7 +60,7 @@ public:
   void StowJSVal(JS::Value& aVp);
 
   // WebIDL API
-  virtual JSObject* WrapObject(JSContext* cx, JS::Handle<JSObject*> scope)
+  virtual JSObject* WrapObject(JSContext* cx)
     MOZ_OVERRIDE;
 
   nsISupports* GetParentObject() const { return nullptr; }
@@ -68,7 +71,8 @@ public:
 
   void GetName(nsString& retval);
 
-  void GetFilename(nsString& retval);
+  // The XPCOM GetFilename does the right thing.  It might throw, but we want to
+  // return an empty filename in that case anyway, instead of throwing.
 
   uint32_t LineNumber() const;
 
@@ -80,26 +84,28 @@ public:
 
   already_AddRefed<nsISupports> GetData() const;
 
+  void GetStack(nsAString& aStack, ErrorResult& aRv) const;
+
   void Stringify(nsString& retval);
 
   // XPCOM factory ctor.
   Exception();
 
-  Exception(const char *aMessage,
+  Exception(const nsACString& aMessage,
             nsresult aResult,
-            const char *aName,
+            const nsACString& aName,
             nsIStackFrame *aLocation,
             nsISupports *aData);
 
 protected:
   virtual ~Exception();
 
-  char*           mMessage;
+  nsCString       mMessage;
   nsresult        mResult;
-  char*           mName;
+  nsCString       mName;
   nsCOMPtr<nsIStackFrame> mLocation;
   nsCOMPtr<nsISupports> mData;
-  char*           mFilename;
+  nsString        mFilename;
   int             mLineNumber;
   nsCOMPtr<nsIException> mInner;
   bool            mInitialized;
@@ -117,17 +123,17 @@ class DOMException : public Exception,
                      public nsIDOMDOMException
 {
 public:
-  DOMException(nsresult aRv, const char* aMessage,
-               const char* aName, uint16_t aCode);
+  DOMException(nsresult aRv, const nsACString& aMessage,
+               const nsACString& aName, uint16_t aCode);
 
   NS_DECL_ISUPPORTS_INHERITED
   NS_DECL_NSIDOMDOMEXCEPTION
 
   // nsIException overrides
-  NS_IMETHOD ToString(char **aReturn) MOZ_OVERRIDE;
+  NS_IMETHOD ToString(nsACString& aReturn) MOZ_OVERRIDE;
 
   // nsWrapperCache overrides
-  virtual JSObject* WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope)
+  virtual JSObject* WrapObject(JSContext* aCx)
     MOZ_OVERRIDE;
 
   uint16_t Code() const {
@@ -145,9 +151,8 @@ protected:
 
   virtual ~DOMException() {}
 
-  // Intentionally shadow the nsXPCException version.
-  const char* mName;
-  const char* mMessage;
+  nsCString mName;
+  nsCString mMessage;
 
   uint16_t mCode;
 };

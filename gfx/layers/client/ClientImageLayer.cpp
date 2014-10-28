@@ -6,7 +6,6 @@
 #include "ClientLayerManager.h"         // for ClientLayerManager, etc
 #include "ImageContainer.h"             // for AutoLockImage, etc
 #include "ImageLayers.h"                // for ImageLayer
-#include "gfxASurface.h"                // for gfxASurface
 #include "mozilla/Attributes.h"         // for MOZ_OVERRIDE
 #include "mozilla/RefPtr.h"             // for RefPtr
 #include "mozilla/layers/CompositorTypes.h"
@@ -18,33 +17,34 @@
 #include "nsDebug.h"                    // for NS_ASSERTION
 #include "nsISupportsImpl.h"            // for Layer::AddRef, etc
 #include "nsRegion.h"                   // for nsIntRegion
-#include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
-
-using namespace mozilla::gfx;
 
 namespace mozilla {
 namespace layers {
 
+using namespace mozilla::gfx;
+
 class ClientImageLayer : public ImageLayer, 
                          public ClientLayer {
 public:
-  ClientImageLayer(ClientLayerManager* aLayerManager)
+  explicit ClientImageLayer(ClientLayerManager* aLayerManager)
     : ImageLayer(aLayerManager,
                  static_cast<ClientLayer*>(MOZ_THIS_IN_INITIALIZER_LIST()))
-    , mImageClientTypeContainer(BUFFER_UNKNOWN)
+    , mImageClientTypeContainer(CompositableType::BUFFER_UNKNOWN)
   {
     MOZ_COUNT_CTOR(ClientImageLayer);
   }
+
+protected:
   virtual ~ClientImageLayer()
   {
     DestroyBackBuffer();
     MOZ_COUNT_DTOR(ClientImageLayer);
   }
-  
+
   virtual void SetContainer(ImageContainer* aContainer) MOZ_OVERRIDE
   {
     ImageLayer::SetContainer(aContainer);
-    mImageClientTypeContainer = BUFFER_UNKNOWN;
+    mImageClientTypeContainer = CompositableType::BUFFER_UNKNOWN;
   }
 
   virtual void SetVisibleRegion(const nsIntRegion& aRegion)
@@ -96,20 +96,38 @@ protected:
 
   CompositableType GetImageClientType()
   {
-    if (mImageClientTypeContainer != BUFFER_UNKNOWN) {
+    if (mImageClientTypeContainer != CompositableType::BUFFER_UNKNOWN) {
       return mImageClientTypeContainer;
     }
 
     if (mContainer->IsAsync()) {
-      mImageClientTypeContainer = BUFFER_BRIDGE;
+      mImageClientTypeContainer = CompositableType::BUFFER_BRIDGE;
       return mImageClientTypeContainer;
     }
 
-    nsRefPtr<gfxASurface> surface;
-    AutoLockImage autoLock(mContainer, getter_AddRefs(surface));
+    // Since D3D11 TextureClient doesn't have an internal buffer, modifying the
+    // front buffer directly may break the transactional property of layer updates.
+    if (ClientManager()->GetCompositorBackendType() == LayersBackend::LAYERS_D3D11) {
+      mImageClientTypeContainer = CompositableType::BUFFER_IMAGE_BUFFERED;
+      return mImageClientTypeContainer;
+    }
+
+    AutoLockImage autoLock(mContainer);
+
+#ifdef MOZ_WIDGET_GONK
+    // gralloc buffer needs CompositableType::BUFFER_IMAGE_BUFFERED to prevent
+    // the buffer's usage conflict.
+    if (autoLock.GetImage()->GetFormat() == ImageFormat::OVERLAY_IMAGE) {
+      mImageClientTypeContainer = CompositableType::IMAGE_OVERLAY;
+      return mImageClientTypeContainer;
+    }
 
     mImageClientTypeContainer = autoLock.GetImage() ?
-                                  BUFFER_IMAGE_SINGLE : BUFFER_UNKNOWN;
+                                  CompositableType::BUFFER_IMAGE_BUFFERED : CompositableType::BUFFER_UNKNOWN;
+#else
+    mImageClientTypeContainer = autoLock.GetImage() ?
+                                  CompositableType::BUFFER_IMAGE_SINGLE : CompositableType::BUFFER_UNKNOWN;
+#endif
     return mImageClientTypeContainer;
   }
 
@@ -135,17 +153,17 @@ ClientImageLayer::RenderLayer()
   if (!mImageClient ||
       !mImageClient->UpdateImage(mContainer, GetContentFlags())) {
     CompositableType type = GetImageClientType();
-    if (type == BUFFER_UNKNOWN) {
+    if (type == CompositableType::BUFFER_UNKNOWN) {
       return;
     }
-    TextureFlags flags = TEXTURE_FRONT;
+    TextureFlags flags = TextureFlags::FRONT;
     if (mDisallowBigImage) {
-      flags |= TEXTURE_DISALLOW_BIGIMAGE;
+      flags |= TextureFlags::DISALLOW_BIGIMAGE;
     }
     mImageClient = ImageClient::CreateImageClient(type,
                                                   ClientManager()->AsShadowForwarder(),
                                                   flags);
-    if (type == BUFFER_BRIDGE) {
+    if (type == CompositableType::BUFFER_BRIDGE) {
       static_cast<ImageClientBridge*>(mImageClient.get())->SetLayer(this);
     }
 

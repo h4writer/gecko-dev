@@ -22,7 +22,7 @@ class BasicCanvasLayer : public CopyableCanvasLayer,
                          public BasicImplData
 {
 public:
-  BasicCanvasLayer(BasicLayerManager* aLayerManager) :
+  explicit BasicCanvasLayer(BasicLayerManager* aLayerManager) :
     CopyableCanvasLayer(aLayerManager,
                         static_cast<BasicImplData*>(MOZ_THIS_IN_INITIALIZER_LIST()))
   { }
@@ -34,7 +34,9 @@ public:
     CanvasLayer::SetVisibleRegion(aRegion);
   }
   
-  virtual void Paint(gfxContext* aContext, Layer* aMaskLayer);
+  virtual void Paint(gfx::DrawTarget* aDT,
+                     const gfx::Point& aDeviceOffset,
+                     Layer* aMaskLayer) MOZ_OVERRIDE;
  
 protected:
   BasicLayerManager* BasicManager()

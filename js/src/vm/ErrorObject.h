@@ -7,8 +7,9 @@
 #ifndef vm_ErrorObject_h_
 #define vm_ErrorObject_h_
 
-#include "jsobj.h"
+#include "mozilla/ArrayUtils.h"
 
+#include "vm/NativeObject.h"
 #include "vm/Shape.h"
 
 struct JSExnPrivate;
@@ -21,11 +22,13 @@ js_InitExceptionClasses(JSContext *cx, JS::HandleObject obj);
 
 namespace js {
 
-class ErrorObject : public JSObject
+class ErrorObject : public NativeObject
 {
-    static ErrorObject *
-    createProto(JSContext *cx, JS::Handle<GlobalObject*> global, JSExnType type,
-                JS::HandleObject proto);
+    static JSObject *
+    createProto(JSContext *cx, JSProtoKey key);
+
+    static JSObject *
+    createConstructor(JSContext *cx, JSProtoKey key);
 
     /* For access to createProto. */
     friend JSObject *
@@ -61,7 +64,17 @@ class ErrorObject : public JSObject
     static const uint32_t RESERVED_SLOTS = MESSAGE_SLOT + 1;
 
   public:
-    static const Class class_;
+    static const Class classes[JSEXN_LIMIT];
+
+    static const Class * classForType(JSExnType type) {
+        MOZ_ASSERT(type != JSEXN_NONE);
+        MOZ_ASSERT(type < JSEXN_LIMIT);
+        return &classes[type];
+    }
+
+    static bool isErrorClass(const Class *clasp) {
+        return &classes[0] <= clasp && clasp < &classes[0] + mozilla::ArrayLength(classes);
+    }
 
     // Create an error of the given type corresponding to the provided location
     // info.  If |message| is non-null, then the error will have a .message
@@ -77,32 +90,32 @@ class ErrorObject : public JSObject
     }
 
     JSErrorReport * getErrorReport() const {
-        void *priv = getReservedSlot(ERROR_REPORT_SLOT).toPrivate();
-        return static_cast<JSErrorReport*>(priv);
+        const Value &slot = getReservedSlot(ERROR_REPORT_SLOT);
+        if (slot.isUndefined())
+            return nullptr;
+        return static_cast<JSErrorReport*>(slot.toPrivate());
     }
 
-    JSString * fileName() const {
-        return getReservedSlot(FILENAME_SLOT).toString();
-    }
+    JSErrorReport * getOrCreateErrorReport(JSContext *cx);
 
-    uint32_t lineNumber() const {
-        return getReservedSlot(LINENUMBER_SLOT).toInt32();
-    }
-
-    uint32_t columnNumber() const {
-        return getReservedSlot(COLUMNNUMBER_SLOT).toInt32();
-    }
-
-    JSString * stack() const {
-        return getReservedSlot(STACK_SLOT).toString();
-    }
+    inline JSString * fileName(JSContext *cx) const;
+    inline uint32_t lineNumber() const;
+    inline uint32_t columnNumber() const;
+    inline JSString * stack(JSContext *cx) const;
 
     JSString * getMessage() const {
-        HeapSlot &slot = const_cast<ErrorObject*>(this)->getReservedSlotRef(MESSAGE_SLOT);
+        const HeapSlot &slot = getReservedSlotRef(MESSAGE_SLOT);
         return slot.isString() ? slot.toString() : nullptr;
     }
 };
 
 } // namespace js
+
+template<>
+inline bool
+JSObject::is<js::ErrorObject>() const
+{
+    return js::ErrorObject::isErrorClass(getClass());
+}
 
 #endif // vm_ErrorObject_h_

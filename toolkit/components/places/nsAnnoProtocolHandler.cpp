@@ -23,6 +23,7 @@
 #include "nsISupportsUtils.h"
 #include "nsIURI.h"
 #include "nsNetUtil.h"
+#include "nsContentUtils.h"
 #include "nsServiceManagerUtils.h"
 #include "nsStringStream.h"
 #include "mozilla/storage.h"
@@ -46,7 +47,12 @@ GetDefaultIcon(nsIChannel **aChannel)
   nsresult rv = NS_NewURI(getter_AddRefs(defaultIconURI),
                           NS_LITERAL_CSTRING(FAVICON_DEFAULT_URL));
   NS_ENSURE_SUCCESS(rv, rv);
-  return NS_NewChannel(aChannel, defaultIconURI);
+
+  return NS_NewChannel(aChannel,
+                       defaultIconURI,
+                       nsContentUtils::GetSystemPrincipal(),
+                       nsILoadInfo::SEC_NORMAL,
+                       nsIContentPolicy::TYPE_OTHER);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -179,13 +185,16 @@ public:
     return NS_OK;
   }
 
+protected:
+  virtual ~faviconAsyncLoader() {}
+
 private:
   nsCOMPtr<nsIChannel> mChannel;
   nsCOMPtr<nsIOutputStream> mOutputStream;
   bool mReturnDefaultIcon;
 };
 
-NS_IMPL_ISUPPORTS_INHERITED1(
+NS_IMPL_ISUPPORTS_INHERITED(
   faviconAsyncLoader,
   AsyncStatementCallback,
   nsIRequestObserver
@@ -196,7 +205,7 @@ NS_IMPL_ISUPPORTS_INHERITED1(
 ////////////////////////////////////////////////////////////////////////////////
 //// nsAnnoProtocolHandler
 
-NS_IMPL_ISUPPORTS1(nsAnnoProtocolHandler, nsIProtocolHandler)
+NS_IMPL_ISUPPORTS(nsAnnoProtocolHandler, nsIProtocolHandler)
 
 // nsAnnoProtocolHandler::GetScheme
 
@@ -254,7 +263,9 @@ nsAnnoProtocolHandler::NewURI(const nsACString& aSpec,
 //
 
 NS_IMETHODIMP
-nsAnnoProtocolHandler::NewChannel(nsIURI *aURI, nsIChannel **_retval)
+nsAnnoProtocolHandler::NewChannel2(nsIURI* aURI,
+                                   nsILoadInfo* aLoadInfo,
+                                   nsIChannel** _retval)
 {
   NS_ENSURE_ARG_POINTER(aURI);
 
@@ -269,6 +280,12 @@ nsAnnoProtocolHandler::NewChannel(nsIURI *aURI, nsIChannel **_retval)
     return NS_ERROR_INVALID_ARG;
 
   return NewFaviconChannel(aURI, annoURI, _retval);
+}
+
+NS_IMETHODIMP
+nsAnnoProtocolHandler::NewChannel(nsIURI *aURI, nsIChannel **_retval)
+{
+  return NewChannel2(aURI, nullptr, _retval);
 }
 
 
@@ -326,8 +343,12 @@ nsAnnoProtocolHandler::NewFaviconChannel(nsIURI *aURI, nsIURI *aAnnotationURI,
   // Create our channel.  We'll call SetContentType with the right type when
   // we know what it actually is.
   nsCOMPtr<nsIChannel> channel;
-  rv = NS_NewInputStreamChannel(getter_AddRefs(channel), aURI, inputStream,
-                                EmptyCString());
+  rv = NS_NewInputStreamChannel(getter_AddRefs(channel),
+                                aURI,
+                                inputStream,
+                                nsContentUtils::GetSystemPrincipal(),
+                                nsILoadInfo::SEC_NORMAL,
+                                nsIContentPolicy::TYPE_OTHER);
   NS_ENSURE_SUCCESS(rv, GetDefaultIcon(_channel));
 
   // Now we go ahead and get our data asynchronously for the favicon.

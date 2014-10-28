@@ -68,21 +68,22 @@ public: // new functions
                                         FontCacheSizes* aSizes) const;
 
 #ifdef USE_SKIA
-    virtual mozilla::TemporaryRef<mozilla::gfx::GlyphRenderingOptions> GetGlyphRenderingOptions();
+    virtual mozilla::TemporaryRef<mozilla::gfx::GlyphRenderingOptions>
+        GetGlyphRenderingOptions(const TextRunDrawParams* aRunParams = nullptr) MOZ_OVERRIDE;
 #endif
 
 protected:
     virtual bool ShapeText(gfxContext      *aContext,
-                           const PRUnichar *aText,
+                           const char16_t *aText,
                            uint32_t         aOffset,
                            uint32_t         aLength,
                            int32_t          aScript,
-                           gfxShapedText   *aShapedText,
-                           bool             aPreferPlatformShaping);
+                           bool             aVertical,
+                           gfxShapedText   *aShapedText);
 
     void FillGlyphDataForChar(uint32_t ch, CachedGlyphData *gd);
 
-    void AddRange(const PRUnichar *aText,
+    void AddRange(const char16_t *aText,
                   uint32_t         aOffset,
                   uint32_t         aLength,
                   gfxShapedText   *aShapedText);
@@ -91,44 +92,6 @@ protected:
     typedef nsTHashtable<CharGlyphMapEntryType> CharGlyphMap;
     CharGlyphMap mCharGlyphCache;
 };
-
-#ifndef ANDROID // not needed on Android, uses the standard gfxFontGroup directly
-class gfxFT2FontGroup : public gfxFontGroup {
-public: // new functions
-    gfxFT2FontGroup (const nsAString& families,
-                    const gfxFontStyle *aStyle,
-                    gfxUserFontSet *aUserFontSet);
-    virtual ~gfxFT2FontGroup ();
-
-protected: // from gfxFontGroup
-
-    virtual gfxFontGroup *Copy(const gfxFontStyle *aStyle);
-
-
-protected: // new functions
-
-    static bool FontCallback (const nsAString & fontName, 
-                                const nsACString & genericName, 
-                                bool aUseFontSet,
-                                void *closure);
-    bool mEnableKerning;
-
-    void GetPrefFonts(nsIAtom *aLangGroup,
-                      nsTArray<nsRefPtr<gfxFontEntry> >& aFontEntryList);
-    void GetCJKPrefFonts(nsTArray<nsRefPtr<gfxFontEntry> >& aFontEntryList);
-    void FamilyListToArrayList(const nsString& aFamilies,
-                               nsIAtom *aLangGroup,
-                               nsTArray<nsRefPtr<gfxFontEntry> > *aFontEntryList);
-    already_AddRefed<gfxFT2Font> WhichFontSupportsChar(const nsTArray<nsRefPtr<gfxFontEntry> >& aFontEntryList,
-                                                       uint32_t aCh);
-    already_AddRefed<gfxFont> WhichPrefFontSupportsChar(uint32_t aCh);
-    already_AddRefed<gfxFont>
-        WhichSystemFontSupportsChar(uint32_t aCh, int32_t aRunScript);
-
-    nsTArray<gfxTextRange> mRanges;
-    nsString mString;
-};
-#endif // !ANDROID
 
 #endif /* GFX_FT2FONTS_H */
 

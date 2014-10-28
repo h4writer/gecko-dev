@@ -1039,11 +1039,32 @@ CERT_AddCertToListHead;
 ;+};
 ;+NSS_3.15.4 { 	# NSS 3.15.4 release
 ;+    global:
-CERT_DestroyCrl;
 CERT_ForcePostMethodForOCSP;
-CERT_GetEncodedOCSPResponseByMechanism;
-CERT_GetSPKIDigest;
 CERT_GetSubjectNameDigest;
+CERT_GetSubjectPublicKeyDigest;
+;+    local:
+;+       *;
+;+};
+;+NSS_3.16.1 { 	# NSS 3.16.1 release
+;+    global:
+PK11_ExportDERPrivateKeyInfo;
+PK11_ExportPrivKeyInfo;
+SECMOD_InternaltoPubMechFlags;
+;+    local:
+;+       *;
+;+};
+;+NSS_3.16.2 { 	# NSS 3.16.2 release
+;+    global:
+CERT_AddExtensionByOID;
+CERT_GetGeneralNameTypeFromString;
+PK11_PubEncrypt;
+PK11_PrivDecrypt;
+;+    local:
+;+       *;
+;+};
+;+NSS_3.18 { 	# NSS 3.18 release
+;+    global:
+PK11_SetCertificateNickname;
 ;+    local:
 ;+       *;
 ;+};

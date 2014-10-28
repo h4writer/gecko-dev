@@ -4,7 +4,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "jsctypes-test.h"
-#include "nsCRTGlue.h"
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -145,7 +144,7 @@ test_ansi_len(const char* string)
 }
 
 int32_t
-test_wide_len(const PRUnichar* string)
+test_wide_len(const char16_t* string)
 {
   return StrLen(string);
 }
@@ -156,10 +155,10 @@ test_ansi_ret()
   return "success";
 }
 
-const PRUnichar *
+const char16_t *
 test_wide_ret()
 {
-  static const PRUnichar kSuccess[] = {'s', 'u', 'c', 'c', 'e', 's', 's', '\0'};
+  static const char16_t kSuccess[] = {'s', 'u', 'c', 'c', 'e', 's', 's', '\0'};
   return kSuccess;
 }
 

@@ -6,7 +6,7 @@
 #include "nsFontFace.h"
 #include "nsFontFaceLoader.h"
 #include "nsIFrame.h"
-#include "gfxFont.h"
+#include "gfxTextRun.h"
 #include "mozilla/gfx/2D.h"
 
 nsFontFaceList::nsFontFaceList()
@@ -20,7 +20,7 @@ nsFontFaceList::~nsFontFaceList()
 ////////////////////////////////////////////////////////////////////////
 // nsISupports
 
-NS_IMPL_ISUPPORTS1(nsFontFaceList, nsIDOMFontFaceList)
+NS_IMPL_ISUPPORTS(nsFontFaceList, nsIDOMFontFaceList)
 
 ////////////////////////////////////////////////////////////////////////
 // nsIDOMFontFaceList
@@ -71,8 +71,7 @@ nsFontFaceList::GetLength(uint32_t *aLength)
 
 nsresult
 nsFontFaceList::AddFontsFromTextRun(gfxTextRun* aTextRun,
-                                    uint32_t aOffset, uint32_t aLength,
-                                    nsIFrame* aFrame)
+                                    uint32_t aOffset, uint32_t aLength)
 {
   gfxTextRun::GlyphRunIterator iter(aTextRun, aOffset, aLength);
   while (iter.NextRun()) {
@@ -85,7 +84,7 @@ nsFontFaceList::AddFontsFromTextRun(gfxTextRun* aTextRun,
       existingFace->AddMatchType(iter.GetGlyphRun()->mMatchType);
     } else {
       // A new font entry we haven't seen before
-      nsCOMPtr<nsFontFace> ff =
+      nsRefPtr<nsFontFace> ff =
         new nsFontFace(fe, aTextRun->GetFontGroup(),
                        iter.GetGlyphRun()->mMatchType);
       mFontFaces.Put(fe, ff);

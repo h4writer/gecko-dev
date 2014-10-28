@@ -18,15 +18,15 @@
 #include "nsIDOMMozNamedAttrMap.h"
 #include "nsIDOMMutationEvent.h"
 #include "nsBindingManager.h"
-#include "nsINameSpaceManager.h"
+#include "nsNameSpaceManager.h"
 #include "nsIDocument.h"
 #include "nsIServiceManager.h"
 #include "nsITreeColumns.h"
 #include "nsITreeBoxObject.h"
 #include "mozilla/dom/Element.h"
+#include "mozilla/Services.h"
 
 #ifdef ACCESSIBILITY
-#include "nsIAccessible.h"
 #include "nsIAccessibilityService.h"
 #endif
 
@@ -39,7 +39,7 @@ class inDOMViewNode
 {
 public:
   inDOMViewNode() {}
-  inDOMViewNode(nsIDOMNode* aNode);
+  explicit inDOMViewNode(nsIDOMNode* aNode);
   ~inDOMViewNode();
 
   nsCOMPtr<nsIDOMNode> node;
@@ -93,10 +93,10 @@ inDOMView::~inDOMView()
 ////////////////////////////////////////////////////////////////////////
 // nsISupports
 
-NS_IMPL_ISUPPORTS3(inDOMView,
-                   inIDOMView,
-                   nsITreeView,
-                   nsIMutationObserver)
+NS_IMPL_ISUPPORTS(inDOMView,
+                  inIDOMView,
+                  nsITreeView,
+                  nsIMutationObserver)
 
 ////////////////////////////////////////////////////////////////////////
 // inIDOMView
@@ -329,14 +329,11 @@ inDOMView::GetCellProperties(int32_t row, nsITreeColumn* col,
 
 #ifdef ACCESSIBILITY
   if (mShowAccessibleNodes) {
-    nsCOMPtr<nsIAccessibilityService> accService(
-      do_GetService("@mozilla.org/accessibilityService;1"));
+	  nsCOMPtr<nsIAccessibilityService> accService =
+        services::GetAccessibilityService();
     NS_ENSURE_TRUE(accService, NS_ERROR_FAILURE);
 
-    nsCOMPtr<nsIAccessible> accessible;
-    nsresult rv =
-      accService->GetAccessibleFor(node->node, getter_AddRefs(accessible));
-    if (NS_SUCCEEDED(rv) && accessible)
+    if (accService->HasAccessible(node->node))
       aProps.AppendLiteral(" ACCESSIBLE_NODE");
   }
 #endif
@@ -606,19 +603,19 @@ inDOMView::Drop(int32_t row, int32_t orientation, nsIDOMDataTransfer* aDataTrans
 }
 
 NS_IMETHODIMP
-inDOMView::PerformAction(const PRUnichar *action)
+inDOMView::PerformAction(const char16_t *action)
 {
   return NS_OK;
 }
 
 NS_IMETHODIMP
-inDOMView::PerformActionOnRow(const PRUnichar *action, int32_t row)
+inDOMView::PerformActionOnRow(const char16_t *action, int32_t row)
 {
   return NS_OK;
 }
 
 NS_IMETHODIMP
-inDOMView::PerformActionOnCell(const PRUnichar* action, int32_t row, nsITreeColumn* col)
+inDOMView::PerformActionOnCell(const char16_t* action, int32_t row, nsITreeColumn* col)
 {
   return NS_OK;
 }
@@ -652,8 +649,7 @@ inDOMView::AttributeChanged(nsIDocument* aDocument, dom::Element* aElement,
   nsCOMPtr<nsIDOMAttr> domAttr;
   nsDependentAtomString attrStr(aAttribute);
   if (aNameSpaceID) {
-    nsCOMPtr<nsINameSpaceManager> nsm =
-      do_GetService(NS_NAMESPACEMANAGER_CONTRACTID);
+    nsNameSpaceManager* nsm = nsNameSpaceManager::GetInstance();
     if (!nsm) {
       // we can't find out which attribute we want :(
       return;
@@ -791,7 +787,7 @@ inDOMView::ContentInserted(nsIDocument *aDocument, nsIContent* aContainer,
   nsCOMPtr<nsIDOMNode> childDOMNode(do_QueryInterface(aChild));
   nsCOMPtr<nsIDOMNode> parent;
   if (!mDOMUtils) {
-    mDOMUtils = do_GetService("@mozilla.org/inspector/dom-utils;1");
+    mDOMUtils = services::GetInDOMUtils();
     if (!mDOMUtils) {
       return;
     }
@@ -1190,7 +1186,7 @@ inDOMView::GetChildNodesFor(nsIDOMNode* aNode, nsCOMArray<nsIDOMNode>& aResult)
   if (mWhatToShow & nsIDOMNodeFilter::SHOW_ELEMENT) {
     nsCOMPtr<nsIDOMNodeList> kids;
     if (!mDOMUtils) {
-      mDOMUtils = do_GetService("@mozilla.org/inspector/dom-utils;1");
+      mDOMUtils = services::GetInDOMUtils();
       if (!mDOMUtils) {
         return NS_ERROR_FAILURE;
       }
@@ -1235,7 +1231,7 @@ inDOMView::AppendKidsToArray(nsIDOMNodeList* aKids,
 
   // Try and get DOM Utils in case we don't have one yet.
   if (!mShowWhitespaceNodes && !mDOMUtils) {
-    mDOMUtils = do_CreateInstance("@mozilla.org/inspector/dom-utils;1");
+    mDOMUtils = services::GetInDOMUtils();
   }
 
   for (uint32_t i = 0; i < l; ++i) {

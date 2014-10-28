@@ -9,14 +9,11 @@
 #include <stdint.h>                     // for uint8_t
 #include "ImageContainer.h"             // for ISharedImage, Image, etc
 #include "gfxTypes.h"
-#include "gfxPoint.h"                   // for gfxIntSize
 #include "mozilla/Attributes.h"         // for MOZ_OVERRIDE
 #include "mozilla/RefPtr.h"             // for RefPtr
 #include "mozilla/gfx/Point.h"          // for IntSize
 #include "mozilla/gfx/Types.h"          // for SurfaceFormat
 #include "nsCOMPtr.h"                   // for already_AddRefed
-
-class gfxASurface;
 
 namespace mozilla {
 namespace ipc {
@@ -39,86 +36,27 @@ already_AddRefed<Image> CreateSharedRGBImage(ImageContainer* aImageContainer,
  * Stores RGB data in shared memory
  * It is assumed that the image width and stride are equal
  */
-class DeprecatedSharedRGBImage : public Image,
-                                 public ISharedImage
-{
-friend already_AddRefed<Image> CreateSharedRGBImage(ImageContainer* aImageContainer,
-                                                    nsIntSize aSize,
-                                                    gfxImageFormat aImageFormat);
-public:
-  struct Header {
-    gfxImageFormat mImageFormat;
-  };
-
-  DeprecatedSharedRGBImage(ISurfaceAllocator *aAllocator);
-  ~DeprecatedSharedRGBImage();
-
-  virtual ISharedImage* AsSharedImage() MOZ_OVERRIDE { return this; }
-
-  virtual uint8_t *GetBuffer() MOZ_OVERRIDE;
-
-  gfxIntSize GetSize();
-  size_t GetBufferSize();
-
-  static uint8_t BytesPerPixel(gfxImageFormat aImageFormat);
-  already_AddRefed<gfxASurface> GetAsSurface();
-
-  /**
-   * Setup the Surface descriptor to contain this image's shmem, while keeping
-   * ownership of the shmem.
-   * if the operation succeeds, return true and AddRef this DeprecatedSharedRGBImage.
-   */
-  bool ToSurfaceDescriptor(SurfaceDescriptor& aResult);
-
-  /**
-   * Setup the Surface descriptor to contain this image's shmem, and loose
-   * ownership of the shmem.
-   * if the operation succeeds, return true (and does _not_ AddRef this
-   * DeprecatedSharedRGBImage).
-   */
-  bool DropToSurfaceDescriptor(SurfaceDescriptor& aResult);
-
-  /**
-   * Returns a DeprecatedSharedRGBImage* iff the descriptor was initialized with
-   * ToSurfaceDescriptor.
-   */
-  static DeprecatedSharedRGBImage* FromSurfaceDescriptor(const SurfaceDescriptor& aDescriptor);
-
-  bool AllocateBuffer(nsIntSize aSize, gfxImageFormat aImageFormat);
-
-  TextureClient* GetTextureClient() MOZ_OVERRIDE { return nullptr; }
-
-protected:
-  gfxIntSize mSize;
-  gfxImageFormat mImageFormat;
-  RefPtr<ISurfaceAllocator> mSurfaceAllocator;
-
-  bool mAllocated;
-  ipc::Shmem *mShmem;
-};
-
-/**
- * Stores RGB data in shared memory
- * It is assumed that the image width and stride are equal
- */
 class SharedRGBImage : public Image
                      , public ISharedImage
 {
 public:
-  SharedRGBImage(ImageClient* aCompositable);
+  explicit SharedRGBImage(ImageClient* aCompositable);
+
+protected:
   ~SharedRGBImage();
 
+public:
   virtual ISharedImage* AsSharedImage() MOZ_OVERRIDE { return this; }
 
-  virtual TextureClient* GetTextureClient() MOZ_OVERRIDE;
+  virtual TextureClient* GetTextureClient(CompositableClient* aClient) MOZ_OVERRIDE;
 
   virtual uint8_t* GetBuffer() MOZ_OVERRIDE;
 
-  gfxIntSize GetSize();
+  gfx::IntSize GetSize();
 
   size_t GetBufferSize();
 
-  already_AddRefed<gfxASurface> GetAsSurface();
+  TemporaryRef<gfx::SourceSurface> GetAsSourceSurface();
 
   bool Allocate(gfx::IntSize aSize, gfx::SurfaceFormat aFormat);
 private:

@@ -13,9 +13,13 @@
 #include "unistd.h"
 #include "dirent.h"
 #include "sys/stat.h"
-#if !defined(ANDROID)
+#if defined(ANDROID)
+#include <sys/vfs.h>
+#define statvfs statfs
+#else
+#include "sys/statvfs.h"
 #include <spawn.h>
-#endif // !defined(ANDROID)
+#endif // defined(ANDROID)
 #endif // defined(XP_UNIX)
 
 #if defined(XP_LINUX)
@@ -28,6 +32,10 @@
 
 #if defined(XP_WIN)
 #include <windows.h>
+#include <accctrl.h>
+
+#define PATH_MAX MAX_PATH
+
 #endif // defined(XP_WIN)
 
 #include "jsapi.h"
@@ -41,11 +49,13 @@
 #include "nsIObserver.h"
 #include "nsDirectoryServiceUtils.h"
 #include "nsIXULRuntime.h"
+#include "nsIPropertyBag2.h"
 #include "nsXPCOMCIDInternal.h"
 #include "nsServiceManagerUtils.h"
 #include "nsString.h"
 #include "nsAutoPtr.h"
 #include "nsDirectoryServiceDefs.h"
+#include "nsXULAppAPI.h"
 #include "nsAppDirectoryServiceDefs.h"
 #include "mozJSComponentLoader.h"
 
@@ -91,6 +101,21 @@ struct Paths {
    * the same as homeDir.
    */
   nsString desktopDir;
+  /**
+   * The user's 'application data' directory.
+   * Windows:
+   *   HOME = Documents and Settings\$USER\Application Data
+   *   UAppData = $HOME[\$vendor]\$name
+   *
+   * Unix:
+   *   HOME = ~
+   *   UAppData = $HOME/.[$vendor/]$name
+   *
+   * Mac:
+   *   HOME = ~
+   *   UAppData = $HOME/Library/Application Support/$name
+   */
+  nsString userApplicationDataDir;
 
 #if defined(XP_WIN)
   /**
@@ -113,6 +138,10 @@ struct Paths {
    * system.
    */
   nsString macLocalApplicationsDir;
+  /**
+   * The user's trash directory.
+   */
+  nsString macTrashDir;
 #endif // defined(XP_MACOSX)
 
   Paths()
@@ -123,6 +152,7 @@ struct Paths {
     localProfileDir.SetIsVoid(true);
     homeDir.SetIsVoid(true);
     desktopDir.SetIsVoid(true);
+    userApplicationDataDir.SetIsVoid(true);
 
 #if defined(XP_WIN)
     winAppDataDir.SetIsVoid(true);
@@ -132,6 +162,7 @@ struct Paths {
 #if defined(XP_MACOSX)
     macUserLibDir.SetIsVoid(true);
     macLocalApplicationsDir.SetIsVoid(true);
+    macTrashDir.SetIsVoid(true);
 #endif // defined(XP_MACOSX)
   }
 };
@@ -141,6 +172,12 @@ struct Paths {
  */
 Paths* gPaths = nullptr;
 
+/**
+ * (Unix) the umask, which goes in OS.Constants.Sys but
+ * can only be looked up (via the system-info service)
+ * on the main thread.
+ */
+uint32_t gUserUmask = 0;
 }
 
 /**
@@ -173,16 +210,18 @@ nsresult GetPathToSpecialDir(const char *aKey, nsString& aOutPath)
  */
 class DelayedPathSetter MOZ_FINAL: public nsIObserver
 {
+  ~DelayedPathSetter() {}
+
   NS_DECL_ISUPPORTS
   NS_DECL_NSIOBSERVER
 
   DelayedPathSetter() {}
 };
 
-NS_IMPL_ISUPPORTS1(DelayedPathSetter, nsIObserver)
+NS_IMPL_ISUPPORTS(DelayedPathSetter, nsIObserver)
 
 NS_IMETHODIMP
-DelayedPathSetter::Observe(nsISupports*, const char * aTopic, const PRUnichar*)
+DelayedPathSetter::Observe(nsISupports*, const char * aTopic, const char16_t*)
 {
   if (gPaths == nullptr) {
     // Initialization of gPaths has not taken place, something is wrong,
@@ -218,7 +257,7 @@ nsresult InitOSFileConstants()
 
   // Initialize paths->libDir
   nsCOMPtr<nsIFile> file;
-  nsresult rv = NS_GetSpecialDirectory("XpcomLib", getter_AddRefs(file));
+  nsresult rv = NS_GetSpecialDirectory(NS_XPCOM_LIBRARY_FILE, getter_AddRefs(file));
   if (NS_FAILED(rv)) {
     return rv;
   }
@@ -262,6 +301,7 @@ nsresult InitOSFileConstants()
   GetPathToSpecialDir(NS_OS_TEMP_DIR, paths->tmpDir);
   GetPathToSpecialDir(NS_OS_HOME_DIR, paths->homeDir);
   GetPathToSpecialDir(NS_OS_DESKTOP_DIR, paths->desktopDir);
+  GetPathToSpecialDir(XRE_USER_APP_DATA_DIR, paths->userApplicationDataDir);
 
 #if defined(XP_WIN)
   GetPathToSpecialDir(NS_WIN_APPDATA_DIR, paths->winAppDataDir);
@@ -271,9 +311,23 @@ nsresult InitOSFileConstants()
 #if defined(XP_MACOSX)
   GetPathToSpecialDir(NS_MAC_USER_LIB_DIR, paths->macUserLibDir);
   GetPathToSpecialDir(NS_OSX_LOCAL_APPLICATIONS_DIR, paths->macLocalApplicationsDir);
+  GetPathToSpecialDir(NS_MAC_TRASH_DIR, paths->macTrashDir);
 #endif // defined(XP_MACOSX)
 
   gPaths = paths.forget();
+
+  // Get the umask from the system-info service.
+  // The property will always be present, but it will be zero on
+  // non-Unix systems.
+  nsCOMPtr<nsIPropertyBag2> infoService =
+    do_GetService("@mozilla.org/system-info;1");
+  MOZ_ASSERT(infoService, "Could not access the system information service");
+  rv = infoService->GetPropertyAsUint32(NS_LITERAL_STRING("umask"),
+                                        &gUserUmask);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+
   return NS_OK;
 }
 
@@ -302,6 +356,17 @@ void CleanupOSFileConstants()
  */
 #define INT_CONSTANT(name)      \
   { #name, INT_TO_JSVAL(name) }
+
+/**
+ * Define a simple read-only property holding an unsigned integer.
+ *
+ * @param name The name of the constant. Used both as the JS name for the
+ * constant and to access its value. Must be defined.
+ *
+ * Produces a |ConstantSpec|.
+ */
+#define UINT_CONSTANT(name)      \
+  { #name, UINT_TO_JSVAL((name)) }
 
 /**
  * End marker for ConstantSpec
@@ -486,6 +551,8 @@ static const dom::ConstantSpec gLibcProperties[] =
   INT_CONSTANT(S_IFSOCK),
 #endif // defined(S_IFIFO)
 
+  INT_CONSTANT(PATH_MAX),
+
   // Constants used to define data structures
   //
   // Many data structures have different fields/sizes/etc. on
@@ -506,6 +573,9 @@ static const dom::ConstantSpec gLibcProperties[] =
 
   // The size of |time_t|.
   { "OSFILE_SIZEOF_TIME_T", INT_TO_JSVAL(sizeof (time_t)) },
+
+  // The size of |fsblkcnt_t|.
+  { "OSFILE_SIZEOF_FSBLKCNT_T", INT_TO_JSVAL(sizeof (fsblkcnt_t)) },
 
 #if !defined(ANDROID)
   // The size of |posix_spawn_file_actions_t|.
@@ -565,6 +635,13 @@ static const dom::ConstantSpec gLibcProperties[] =
 #if defined(_DARWIN_FEATURE_64_BIT_INODE)
   { "OSFILE_OFFSETOF_STAT_ST_BIRTHTIME", INT_TO_JSVAL(offsetof (struct stat, st_birthtime)) },
 #endif // defined(_DARWIN_FEATURE_64_BIT_INODE)
+
+  // Defining |statvfs|
+
+  { "OSFILE_SIZEOF_STATVFS", INT_TO_JSVAL(sizeof (struct statvfs)) },
+
+  { "OSFILE_OFFSETOF_STATVFS_F_BSIZE", INT_TO_JSVAL(offsetof (struct statvfs, f_bsize)) },
+  { "OSFILE_OFFSETOF_STATVFS_F_BAVAIL", INT_TO_JSVAL(offsetof (struct statvfs, f_bavail)) },
 
 #endif // defined(XP_UNIX)
 
@@ -649,7 +726,7 @@ static const dom::ConstantSpec gWinProperties[] =
   INT_CONSTANT(FILE_END),
 
   // SetFilePointer error constant
-  INT_CONSTANT(INVALID_SET_FILE_POINTER),
+  UINT_CONSTANT(INVALID_SET_FILE_POINTER),
 
   // File attributes
   INT_CONSTANT(FILE_ATTRIBUTE_DIRECTORY),
@@ -662,7 +739,13 @@ static const dom::ConstantSpec gWinProperties[] =
   // GetFileAttributes error constant
   INT_CONSTANT(INVALID_FILE_ATTRIBUTES),
 
+  // GetNamedSecurityInfo and SetNamedSecurityInfo constants
+  INT_CONSTANT(UNPROTECTED_DACL_SECURITY_INFORMATION),
+  INT_CONSTANT(SE_FILE_OBJECT),
+  INT_CONSTANT(DACL_SECURITY_INFORMATION),
+
   // Errors
+  INT_CONSTANT(ERROR_INVALID_HANDLE),
   INT_CONSTANT(ERROR_ACCESS_DENIED),
   INT_CONSTANT(ERROR_DIR_NOT_EMPTY),
   INT_CONSTANT(ERROR_FILE_EXISTS),
@@ -670,6 +753,9 @@ static const dom::ConstantSpec gWinProperties[] =
   INT_CONSTANT(ERROR_FILE_NOT_FOUND),
   INT_CONSTANT(ERROR_NO_MORE_FILES),
   INT_CONSTANT(ERROR_PATH_NOT_FOUND),
+  INT_CONSTANT(ERROR_BAD_ARGUMENTS),
+  INT_CONSTANT(ERROR_SHARING_VIOLATION),
+  INT_CONSTANT(ERROR_NOT_SUPPORTED),
 
   PROP_END
 };
@@ -698,7 +784,7 @@ JSObject *GetOrCreateObjectProperty(JSContext *cx, JS::Handle<JSObject*> aObject
       JSMSG_UNEXPECTED_TYPE, aProperty, "not an object");
     return nullptr;
   }
-  return JS_DefineObject(cx, aObject, aProperty, nullptr, nullptr,
+  return JS_DefineObject(cx, aObject, aProperty, nullptr, JS::NullPtr(),
                          JSPROP_ENUMERATE);
 }
 
@@ -777,6 +863,16 @@ bool DefineOSFileConstants(JSContext *cx, JS::Handle<JSObject*> global)
     return false;
   }
 
+#if defined(MOZ_WIDGET_GONK)
+    JSString* strVersion = JS_NewStringCopyZ(cx, "Gonk");
+    if (!strVersion){
+      return false;
+    }
+    JS::Rooted<JS::Value> valVersion(cx, STRING_TO_JSVAL(strVersion));
+    if (!JS_SetProperty(cx, objSys, "Name", valVersion)) {
+      return false;
+  }
+#else
   nsCOMPtr<nsIXULRuntime> runtime = do_GetService(XULRUNTIME_SERVICE_CONTRACTID);
   if (runtime) {
     nsAutoCString os;
@@ -793,6 +889,7 @@ bool DefineOSFileConstants(JSContext *cx, JS::Handle<JSObject*> global)
       return false;
     }
   }
+#endif // defined(MOZ_WIDGET_GONK)
 
 #if defined(DEBUG)
   JS::Rooted<JS::Value> valDebug(cx, JSVAL_TRUE);
@@ -800,6 +897,14 @@ bool DefineOSFileConstants(JSContext *cx, JS::Handle<JSObject*> global)
     return false;
   }
 #endif
+
+  dom::ConstantSpec umask_cs[] = {
+    { "umask", UINT_TO_JSVAL(gUserUmask) },
+    PROP_END
+  };
+  if (!dom::DefineConstants(cx, objSys, umask_cs)) {
+      return false;
+  }
 
   // Build OS.Constants.Path
 
@@ -811,22 +916,24 @@ bool DefineOSFileConstants(JSContext *cx, JS::Handle<JSObject*> global)
   // Locate libxul
   // Note that we don't actually provide the full path, only the name of the
   // library, which is sufficient to link to the library using js-ctypes.
-  {
+
 #if defined(XP_MACOSX)
-    // Under MacOS X, for some reason, libxul is called simply "XUL"
-    nsAutoString xulPath(NS_LITERAL_STRING("XUL"));
+  // Under MacOS X, for some reason, libxul is called simply "XUL",
+  // and we need to provide the full path.
+  nsAutoString libxul;
+  libxul.Append(gPaths->libDir);
+  libxul.AppendLiteral("/XUL");
 #else
-    // On other platforms, libxul is a library "xul" with regular
-    // library prefix/suffix
-    nsAutoString xulPath;
-    xulPath.Append(NS_LITERAL_STRING(DLL_PREFIX));
-    xulPath.Append(NS_LITERAL_STRING("xul"));
-    xulPath.Append(NS_LITERAL_STRING(DLL_SUFFIX));
+  // On other platforms, libxul is a library "xul" with regular
+  // library prefix/suffix.
+  nsAutoString libxul;
+  libxul.AppendLiteral(DLL_PREFIX);
+  libxul.AppendLiteral("xul");
+  libxul.AppendLiteral(DLL_SUFFIX);
 #endif // defined(XP_MACOSX)
 
-    if (!SetStringProperty(cx, objPath, "libxul", xulPath)) {
-      return false;
-    }
+  if (!SetStringProperty(cx, objPath, "libxul", libxul)) {
+    return false;
   }
 
   if (!SetStringProperty(cx, objPath, "libDir", gPaths->libDir)) {
@@ -857,6 +964,10 @@ bool DefineOSFileConstants(JSContext *cx, JS::Handle<JSObject*> global)
     return false;
   }
 
+  if (!SetStringProperty(cx, objPath, "userApplicationDataDir", gPaths->userApplicationDataDir)) {
+    return false;
+  }
+
 #if defined(XP_WIN)
   if (!SetStringProperty(cx, objPath, "winAppDataDir", gPaths->winAppDataDir)) {
     return false;
@@ -875,12 +986,37 @@ bool DefineOSFileConstants(JSContext *cx, JS::Handle<JSObject*> global)
   if (!SetStringProperty(cx, objPath, "macLocalApplicationsDir", gPaths->macLocalApplicationsDir)) {
     return false;
   }
+
+  if (!SetStringProperty(cx, objPath, "macTrashDir", gPaths->macTrashDir)) {
+    return false;
+  }
 #endif // defined(XP_MACOSX)
+
+  // sqlite3 is linked from different places depending on the platform
+  nsAutoString libsqlite3;
+#if defined(ANDROID)
+  // On Android, we use the system's libsqlite3
+  libsqlite3.AppendLiteral(DLL_PREFIX);
+  libsqlite3.AppendLiteral("sqlite3");
+  libsqlite3.AppendLiteral(DLL_SUFFIX);
+#elif defined(XP_WIN)
+  // On Windows, for some reason, this is part of nss3.dll
+  libsqlite3.AppendLiteral(DLL_PREFIX);
+  libsqlite3.AppendLiteral("nss3");
+  libsqlite3.AppendLiteral(DLL_SUFFIX);
+#else
+    // On other platforms, we link sqlite3 into libxul
+  libsqlite3 = libxul;
+#endif // defined(ANDROID) || defined(XP_WIN)
+
+  if (!SetStringProperty(cx, objPath, "libsqlite3", libsqlite3)) {
+    return false;
+  }
 
   return true;
 }
 
-NS_IMPL_ISUPPORTS1(OSFileConstantsService, nsIOSFileConstantsService)
+NS_IMPL_ISUPPORTS(OSFileConstantsService, nsIOSFileConstantsService)
 
 OSFileConstantsService::OSFileConstantsService()
 {

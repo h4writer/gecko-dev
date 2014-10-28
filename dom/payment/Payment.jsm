@@ -93,9 +93,6 @@ let PaymentManager =  {
           if (!pr) {
             continue;
           }
-          if (!(pr instanceof Ci.nsIDOMPaymentRequestInfo)) {
-            return;
-          }
           // We consider jwt type repetition an error.
           if (jwtTypes[pr.type]) {
             this.paymentFailed(requestId,
@@ -201,6 +198,18 @@ let PaymentManager =  {
       }
     }
 
+#ifdef MOZ_B2G
+    let appsService = Cc["@mozilla.org/AppsService;1"]
+                        .getService(Ci.nsIAppsService);
+    let systemAppId = Ci.nsIScriptSecurityManager.NO_APP_ID;
+
+    try {
+      let manifestURL = Services.prefs.getCharPref("b2g.system_manifest_url");
+      systemAppId = appsService.getAppLocalIdByManifestURL(manifestURL);
+      this.LOG("System app id=" + systemAppId);
+    } catch(e) {}
+#endif
+
     // Now register the payment providers.
     for (let i in nums) {
       let branch = prefService
@@ -214,12 +223,28 @@ let PaymentManager =  {
         if (type in this.registeredProviders) {
           continue;
         }
-        this.registeredProviders[type] = {
+        let provider = this.registeredProviders[type] = {
           name: branch.getCharPref("name"),
           uri: branch.getCharPref("uri"),
           description: branch.getCharPref("description"),
           requestMethod: branch.getCharPref("requestMethod")
         };
+
+#ifdef MOZ_B2G
+        // Let this payment provider access the firefox-accounts API when
+        // it's loaded in the trusted UI.
+        if (systemAppId != Ci.nsIScriptSecurityManager.NO_APP_ID) {
+          this.LOG("Granting firefox-accounts permission to " + provider.uri);
+          let uri = Services.io.newURI(provider.uri, null, null);
+          let principal = Services.scriptSecurityManager
+                            .getAppCodebasePrincipal(uri, systemAppId, true);
+
+          Services.perms.addFromPrincipal(principal, "firefox-accounts",
+                                          Ci.nsIPermissionManager.ALLOW_ACTION,
+                                          Ci.nsIPermissionManager.EXPIRE_SESSION);
+        }
+#endif
+
         if (this._debug) {
           this.LOG("Registered Payment Providers: " +
                     JSON.stringify(this.registeredProviders[type]));
@@ -342,17 +367,7 @@ let PaymentManager =  {
     }
 
     let pldRequest = payloadObject.request;
-    let request = Cc["@mozilla.org/payment/request-info;1"]
-                  .createInstance(Ci.nsIDOMPaymentRequestInfo);
-    if (!request) {
-      this.paymentFailed(aRequestId,
-                         "INTERNAL_ERROR_ERROR_CREATING_PAY_REQUEST");
-      return true;
-    }
-    request.wrappedJSObject.init(aJwt,
-                                 payloadObject.typ,
-                                 provider.name);
-    return request;
+    return { jwt: aJwt, type: payloadObject.typ, providerName: provider.name };
   },
 
   showPaymentFlow: function showPaymentFlow(aRequestId,

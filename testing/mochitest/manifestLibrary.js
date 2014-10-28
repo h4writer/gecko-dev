@@ -1,4 +1,4 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim:set ts=2 sw=2 sts=2 et: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -19,14 +19,17 @@ function parseTestManifest(testManifest, params, callback) {
   // For mochitest-plain, we define lists as an array of testnames.
   for (var obj of testManifest['tests']) {
     var path = obj['path'];
-    if (obj.disabled) {
+    // Note that obj.disabled may be "". We still want to skip in that case.
+    if ("disabled" in obj) {
       dump("TEST-SKIPPED | " + path + " | " + obj.disabled + "\n");
       continue;
     }
     if (params.testRoot != 'tests' && params.testRoot !== undefined) {
-      links[params.baseurl + '/' + params.testRoot + '/' + path] = true
+      name = params.baseurl + '/' + params.testRoot + '/' + path;
+      links[name] = {'test': {'url': name, 'expected': obj['expected']}};
     } else {
-      paths.push(params.testPrefix + path);
+      name = params.testPrefix + path;
+      paths.push({'test': {'url': name, 'expected': obj['expected']}});
     }
   }
   if (paths.length > 0) {
@@ -42,9 +45,14 @@ function getTestManifest(url, params, callback) {
   req.onload = function() {
     if (req.readyState == 4) {
       if (req.status == 200) {
-        parseTestManifest(JSON.parse(req.responseText), params, callback);
+        try {
+          parseTestManifest(JSON.parse(req.responseText), params, callback);
+        } catch (e) {
+          dump("TEST-UNEXPECTED-FAIL: setup.js | error parsing " + url + " (" + e + ")\n");
+          throw e;
+        }
       } else {
-        dump("TEST-ERROR: setup.js | error loading " + url + "\n");
+        dump("TEST-UNEXPECTED-FAIL: setup.js | error loading " + url + "\n");
         callback({});
       }
     }
@@ -94,7 +102,11 @@ function filterTests(filter, testList, runOnly) {
   // filteredTests.
   if (Object.keys(runtests).length) {
     for (var i = 0; i < testList.length; i++) {
-      var testpath = testList[i];
+      if ((testList[i] instanceof Object) && ('test' in testList[i])) {
+        var testpath = testList[i]['test']['url'];
+      } else {
+        var testpath = testList[i];
+      }
       var tmppath = testpath.replace(/^\//, '');
       for (var f in runtests) {
         // Remove leading /tests/ if exists
@@ -121,7 +133,11 @@ function filterTests(filter, testList, runOnly) {
   var refilteredTests = [];
   for (var i = 0; i < filteredTests.length; i++) {
     var found = false;
-    var testpath = filteredTests[i];
+    if ((filteredTests[i] instanceof Object) && ('test' in filteredTests[i])) {
+      var testpath = filteredTests[i]['test']['url'];
+    } else {
+      var testpath = filteredTests[i];
+    }
     var tmppath = testpath.replace(/^\//, '');
     for (var f in excludetests) {
       // Remove leading /tests/ if exists
@@ -140,4 +156,3 @@ function filterTests(filter, testList, runOnly) {
   }
   return refilteredTests;
 }
-

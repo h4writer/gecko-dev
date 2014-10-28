@@ -10,14 +10,16 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <algorithm>
 #include "mozilla/ThreadLocal.h"
 #include "mozilla/Assertions.h"
-#include "nsAlgorithm.h"
 #include "nscore.h"
 #include "GeckoProfilerFunc.h"
 #include "PseudoStack.h"
 #include "nsISupports.h"
+
+#ifdef MOZ_TASK_TRACER
+#include "GeckoTaskTracer.h"
+#endif
 
 /* QT has a #define for the word "slots" and jsfriendapi.h has a struct with
  * this variable name, causing compilation problems. Alleviate this for now by
@@ -56,12 +58,18 @@ extern bool stack_key_initialized;
 static inline
 void profiler_init(void* stackTop)
 {
+#ifdef MOZ_TASK_TRACER
+  mozilla::tasktracer::InitTaskTracer();
+#endif
   mozilla_sampler_init(stackTop);
 }
 
 static inline
 void profiler_shutdown()
 {
+#ifdef MOZ_TASK_TRACER
+  mozilla::tasktracer::ShutdownTaskTracer();
+#endif
   mozilla_sampler_shutdown();
 }
 
@@ -77,6 +85,24 @@ static inline
 void profiler_stop()
 {
   mozilla_sampler_stop();
+}
+
+static inline
+bool profiler_is_paused()
+{
+  return mozilla_sampler_is_paused();
+}
+
+static inline
+void profiler_pause()
+{
+  mozilla_sampler_pause();
+}
+
+static inline
+void profiler_resume()
+{
+  mozilla_sampler_resume();
 }
 
 static inline
@@ -98,15 +124,15 @@ bool profiler_is_active()
 }
 
 static inline
-void profiler_responsiveness(const mozilla::TimeStamp& aTime)
+bool profiler_feature_active(const char* aName)
 {
-  mozilla_sampler_responsiveness(aTime);
+  return mozilla_sampler_feature_active(aName);
 }
 
 static inline
-const double* profiler_get_responsiveness()
+void profiler_responsiveness(const mozilla::TimeStamp& aTime)
 {
-  return mozilla_sampler_get_responsiveness();
+  mozilla_sampler_responsiveness(aTime);
 }
 
 static inline
@@ -125,6 +151,12 @@ static inline
 JSObject* profiler_get_profile_jsobject(JSContext* aCx)
 {
   return mozilla_sampler_get_profile_data(aCx);
+}
+
+static inline
+void profiler_save_profile_to_file(const char* aFilename)
+{
+  return mozilla_sampler_save_profile_to_file(aFilename);
 }
 
 static inline
@@ -168,6 +200,18 @@ void profiler_unregister_thread()
 }
 
 static inline
+void profiler_sleep_start()
+{
+  mozilla_sampler_sleep_start();
+}
+
+static inline
+void profiler_sleep_end()
+{
+  mozilla_sampler_sleep_end();
+}
+
+static inline
 void profiler_js_operation_callback()
 {
   PseudoStack *stack = tlsPseudoStack.get();
@@ -201,6 +245,22 @@ bool profiler_in_privacy_mode()
 }
 
 static inline void profiler_tracing(const char* aCategory, const char* aInfo,
+                                    ProfilerBacktrace* aCause,
+                                    TracingMetadata aMetaData = TRACING_DEFAULT)
+{
+  if (!stack_key_initialized)
+    return;
+
+  // Don't insert a marker if we're not profiling to avoid
+  // the heap copy (malloc).
+  if (!profiler_is_active()) {
+    return;
+  }
+
+  mozilla_sampler_tracing(aCategory, aInfo, aCause, aMetaData);
+}
+
+static inline void profiler_tracing(const char* aCategory, const char* aInfo,
                                     TracingMetadata aMetaData = TRACING_DEFAULT)
 {
   if (!stack_key_initialized)
@@ -215,6 +275,34 @@ static inline void profiler_tracing(const char* aCategory, const char* aInfo,
   mozilla_sampler_tracing(aCategory, aInfo, aMetaData);
 }
 
+// Uncomment this to turn on systrace or build with
+// ac_add_options --enable-systace
+//#define MOZ_USE_SYSTRACE
+#ifdef MOZ_USE_SYSTRACE
+# define ATRACE_TAG ATRACE_TAG_ALWAYS
+// We need HAVE_ANDROID_OS to be defined for Trace.h.
+// If its not set we will set it temporary and remove it.
+# ifndef HAVE_ANDROID_OS
+#   define HAVE_ANDROID_OS
+#   define REMOVE_HAVE_ANDROID_OS
+# endif
+// Android source code will include <cutils/trace.h> before this. There is no
+// HAVE_ANDROID_OS defined in Firefox OS build at that time. Enabled it globally
+// will cause other build break. So atrace_begin and atrace_end are not defined.
+// It will cause a build-break when we include <utils/Trace.h>. Use undef
+// _LIBS_CUTILS_TRACE_H will force <cutils/trace.h> to define atrace_begin and
+// atrace_end with defined HAVE_ANDROID_OS again. Then there is no build-break.
+# undef _LIBS_CUTILS_TRACE_H
+# include <utils/Trace.h>
+# define MOZ_PLATFORM_TRACING(name) ATRACE_NAME(name);
+# ifdef REMOVE_HAVE_ANDROID_OS
+#  undef HAVE_ANDROID_OS
+#  undef REMOVE_HAVE_ANDROID_OS
+# endif
+#else
+# define MOZ_PLATFORM_TRACING(name)
+#endif
+
 // we want the class and function name but can't easily get that using preprocessor macros
 // __func__ doesn't have the class name and __PRETTY_FUNCTION__ has the parameters
 
@@ -222,15 +310,16 @@ static inline void profiler_tracing(const char* aCategory, const char* aInfo,
 #define SAMPLER_APPEND_LINE_NUMBER_EXPAND(id, line) SAMPLER_APPEND_LINE_NUMBER_PASTE(id, line)
 #define SAMPLER_APPEND_LINE_NUMBER(id) SAMPLER_APPEND_LINE_NUMBER_EXPAND(id, __LINE__)
 
-#define PROFILER_LABEL(name_space, info) mozilla::SamplerStackFrameRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__)
-#define PROFILER_LABEL_PRINTF(name_space, info, ...) mozilla::SamplerStackFramePrintfRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__, __VA_ARGS__)
+#define PROFILER_LABEL(name_space, info, category) MOZ_PLATFORM_TRACING(name_space "::" info) mozilla::SamplerStackFrameRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, category, __LINE__)
+#define PROFILER_LABEL_FUNC(category) MOZ_PLATFORM_TRACING(SAMPLE_FUNCTION_NAME) mozilla::SamplerStackFrameRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(SAMPLE_FUNCTION_NAME, category, __LINE__)
+#define PROFILER_LABEL_PRINTF(name_space, info, category, ...) MOZ_PLATFORM_TRACING(name_space "::" info) mozilla::SamplerStackFramePrintfRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, category, __LINE__, __VA_ARGS__)
 
 #define PROFILER_MARKER(info) mozilla_sampler_add_marker(info)
 #define PROFILER_MARKER_PAYLOAD(info, payload) mozilla_sampler_add_marker(info, payload)
 #define PROFILER_MAIN_THREAD_MARKER(info)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla_sampler_add_marker(info)
 
-#define PROFILER_MAIN_THREAD_LABEL(name_space, info)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla::SamplerStackFrameRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__)
-#define PROFILER_MAIN_THREAD_LABEL_PRINTF(name_space, info, ...)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla::SamplerStackFramePrintfRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, __LINE__, __VA_ARGS__)
+#define PROFILER_MAIN_THREAD_LABEL(name_space, info, category)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla::SamplerStackFrameRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, category, __LINE__)
+#define PROFILER_MAIN_THREAD_LABEL_PRINTF(name_space, info, category, ...)  MOZ_ASSERT(NS_IsMainThread(), "This can only be called on the main thread"); mozilla::SamplerStackFramePrintfRAII SAMPLER_APPEND_LINE_NUMBER(sampler_raii)(name_space "::" info, category, __LINE__, __VA_ARGS__)
 
 
 /* FIXME/bug 789667: memory constraints wouldn't much of a problem for
@@ -279,8 +368,10 @@ namespace mozilla {
 class MOZ_STACK_CLASS SamplerStackFrameRAII {
 public:
   // we only copy the strings at save time, so to take multiple parameters we'd need to copy them then.
-  SamplerStackFrameRAII(const char *aInfo, uint32_t line) {
-    mHandle = mozilla_sampler_call_enter(aInfo, this, false, line);
+  SamplerStackFrameRAII(const char *aInfo,
+    js::ProfileEntry::Category aCategory, uint32_t line)
+  {
+    mHandle = mozilla_sampler_call_enter(aInfo, aCategory, this, false, line);
   }
   ~SamplerStackFrameRAII() {
     mozilla_sampler_call_exit(mHandle);
@@ -293,7 +384,9 @@ static const int SAMPLER_MAX_STRING = 128;
 class MOZ_STACK_CLASS SamplerStackFramePrintfRAII {
 public:
   // we only copy the strings at save time, so to take multiple parameters we'd need to copy them then.
-  SamplerStackFramePrintfRAII(const char *aDefault, uint32_t line, const char *aFormat, ...) {
+  SamplerStackFramePrintfRAII(const char *aInfo,
+    js::ProfileEntry::Category aCategory, uint32_t line, const char *aFormat, ...)
+  {
     if (profiler_is_active() && !profiler_in_privacy_mode()) {
       va_list args;
       va_start(args, aFormat);
@@ -303,15 +396,15 @@ public:
       // the vargs.
 #if _MSC_VER
       _vsnprintf(buff, SAMPLER_MAX_STRING, aFormat, args);
-      _snprintf(mDest, SAMPLER_MAX_STRING, "%s %s", aDefault, buff);
+      _snprintf(mDest, SAMPLER_MAX_STRING, "%s %s", aInfo, buff);
 #else
       ::vsnprintf(buff, SAMPLER_MAX_STRING, aFormat, args);
-      ::snprintf(mDest, SAMPLER_MAX_STRING, "%s %s", aDefault, buff);
+      ::snprintf(mDest, SAMPLER_MAX_STRING, "%s %s", aInfo, buff);
 #endif
-      mHandle = mozilla_sampler_call_enter(mDest, this, true, line);
+      mHandle = mozilla_sampler_call_enter(mDest, aCategory, this, true, line);
       va_end(args);
     } else {
-      mHandle = mozilla_sampler_call_enter(aDefault, nullptr, false, line);
+      mHandle = mozilla_sampler_call_enter(aInfo, aCategory, this, false, line);
     }
   }
   ~SamplerStackFramePrintfRAII() {
@@ -331,8 +424,8 @@ inline PseudoStack* mozilla_get_pseudo_stack(void)
   return tlsPseudoStack.get();
 }
 
-inline void* mozilla_sampler_call_enter(const char *aInfo, void *aFrameAddress,
-                                        bool aCopy, uint32_t line)
+inline void* mozilla_sampler_call_enter(const char *aInfo,
+  js::ProfileEntry::Category aCategory, void *aFrameAddress, bool aCopy, uint32_t line)
 {
   // check if we've been initialized to avoid calling pthread_getspecific
   // with a null tlsStack which will return undefined results.
@@ -347,7 +440,7 @@ inline void* mozilla_sampler_call_enter(const char *aInfo, void *aFrameAddress,
   if (!stack) {
     return stack;
   }
-  stack->push(aInfo, aFrameAddress, aCopy, line);
+  stack->push(aInfo, aCategory, aFrameAddress, aCopy, line);
 
   // The handle is meant to support future changes
   // but for now it is simply use to save a call to

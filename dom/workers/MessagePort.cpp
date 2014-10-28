@@ -5,17 +5,21 @@
 
 #include "MessagePort.h"
 
+#include "mozilla/EventDispatcher.h"
 #include "mozilla/dom/MessagePortBinding.h"
-#include "nsDOMEvent.h"
-#include "nsEventDispatcher.h"
+#include "mozilla/dom/ScriptSettings.h"
+#include "nsIDOMEvent.h"
 
 #include "SharedWorker.h"
 #include "WorkerPrivate.h"
+#include "WorkerRunnable.h"
 
 using mozilla::dom::EventHandlerNonNull;
 using mozilla::dom::MessagePortBase;
 using mozilla::dom::Optional;
 using mozilla::dom::Sequence;
+using mozilla::dom::AutoNoJSAPI;
+using namespace mozilla;
 
 USING_WORKERS_NAMESPACE
 
@@ -23,18 +27,15 @@ namespace {
 
 class DelayedEventRunnable MOZ_FINAL : public WorkerRunnable
 {
-  nsRefPtr<MessagePort> mMessagePort;
+  nsRefPtr<mozilla::dom::workers::MessagePort> mMessagePort;
   nsTArray<nsCOMPtr<nsIDOMEvent>> mEvents;
 
 public:
   DelayedEventRunnable(WorkerPrivate* aWorkerPrivate,
-                       Target aTarget,
-                       MessagePort* aMessagePort,
+                       TargetAndBusyBehavior aBehavior,
+                       mozilla::dom::workers::MessagePort* aMessagePort,
                        nsTArray<nsCOMPtr<nsIDOMEvent>>& aEvents)
-  : WorkerRunnable(aWorkerPrivate, aTarget,
-                   aTarget == WorkerThread ? ModifyBusyCount : UnchangedBusyCount,
-                   SkipWhenClearing),
-    mMessagePort(aMessagePort)
+  : WorkerRunnable(aWorkerPrivate, aBehavior), mMessagePort(aMessagePort)
   {
     AssertIsOnMainThread();
     MOZ_ASSERT(aMessagePort);
@@ -43,11 +44,35 @@ public:
     mEvents.SwapElements(aEvents);
   }
 
+  bool PreDispatch(JSContext* aCx, WorkerPrivate* aWorkerPrivate)
+  {
+    if (mBehavior == WorkerThreadModifyBusyCount) {
+      return aWorkerPrivate->ModifyBusyCount(aCx, true);
+    }
+
+    return true;
+  }
+
+  void PostDispatch(JSContext* aCx, WorkerPrivate* aWorkerPrivate,
+                    bool aDispatchResult)
+  {
+    if (!aDispatchResult) {
+      if (mBehavior == WorkerThreadModifyBusyCount) {
+        aWorkerPrivate->ModifyBusyCount(aCx, false);
+      }
+      if (aCx) {
+        JS_ReportPendingException(aCx);
+      }
+    }
+  }
+
   bool
   WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate);
 };
 
 } // anonymous namespace
+
+BEGIN_WORKERS_NAMESPACE
 
 MessagePort::MessagePort(nsPIDOMWindow* aWindow, SharedWorker* aSharedWorker,
                          uint64_t aSerial)
@@ -56,14 +81,12 @@ MessagePort::MessagePort(nsPIDOMWindow* aWindow, SharedWorker* aSharedWorker,
 {
   AssertIsOnMainThread();
   MOZ_ASSERT(aSharedWorker);
-  SetIsDOMBinding();
 }
 
 MessagePort::MessagePort(WorkerPrivate* aWorkerPrivate, uint64_t aSerial)
 : mWorkerPrivate(aWorkerPrivate), mSerial(aSerial), mStarted(false)
 {
   aWorkerPrivate->AssertIsOnWorkerThread();
-  SetIsDOMBinding();
 }
 
 MessagePort::~MessagePort()
@@ -109,16 +132,22 @@ MessagePort::Start()
   mStarted = true;
 
   if (!mQueuedEvents.IsEmpty()) {
-    WorkerRunnable::Target target = WorkerRunnable::WorkerThread;
-    WorkerPrivate* workerPrivate = mWorkerPrivate;
+    WorkerPrivate* workerPrivate;
+    WorkerRunnable::TargetAndBusyBehavior behavior;
 
-    if (!workerPrivate) {
-      target = WorkerRunnable::ParentThread;
+    if (mWorkerPrivate) {
+      workerPrivate = mWorkerPrivate;
+      behavior = WorkerRunnable::WorkerThreadModifyBusyCount;
+    }
+    else {
       workerPrivate = mSharedWorker->GetWorkerPrivate();
+      MOZ_ASSERT(workerPrivate);
+
+      behavior = WorkerRunnable::ParentThreadUnchangedBusyCount;
     }
 
     nsRefPtr<DelayedEventRunnable> runnable =
-      new DelayedEventRunnable(workerPrivate, target, this, mQueuedEvents);
+      new DelayedEventRunnable(workerPrivate, behavior, this, mQueuedEvents);
     runnable->Dispatch(nullptr);
   }
 }
@@ -212,35 +241,35 @@ MessagePort::AssertCorrectThread() const
 }
 #endif
 
-NS_IMPL_ADDREF_INHERITED(MessagePort, nsDOMEventTargetHelper)
-NS_IMPL_RELEASE_INHERITED(MessagePort, nsDOMEventTargetHelper)
+NS_IMPL_ADDREF_INHERITED(mozilla::dom::workers::MessagePort, DOMEventTargetHelper)
+NS_IMPL_RELEASE_INHERITED(mozilla::dom::workers::MessagePort, DOMEventTargetHelper)
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION_INHERITED(MessagePort)
-NS_INTERFACE_MAP_END_INHERITING(nsDOMEventTargetHelper)
+NS_INTERFACE_MAP_END_INHERITING(DOMEventTargetHelper)
 
 NS_IMPL_CYCLE_COLLECTION_CLASS(MessagePort)
 
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(MessagePort,
-                                                  nsDOMEventTargetHelper)
+                                                  DOMEventTargetHelper)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSharedWorker)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mQueuedEvents)
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(MessagePort,
-                                                nsDOMEventTargetHelper)
+                                                DOMEventTargetHelper)
   tmp->Close();
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 JSObject*
-MessagePort::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope)
+MessagePort::WrapObject(JSContext* aCx)
 {
   AssertCorrectThread();
 
-  return MessagePortBinding::Wrap(aCx, aScope, this);
+  return MessagePortBinding::Wrap(aCx, this);
 }
 
 nsresult
-MessagePort::PreHandleEvent(nsEventChainPreVisitor& aVisitor)
+MessagePort::PreHandleEvent(EventChainPreVisitor& aVisitor)
 {
   AssertCorrectThread();
 
@@ -266,8 +295,10 @@ MessagePort::PreHandleEvent(nsEventChainPreVisitor& aVisitor)
     }
   }
 
-  return nsDOMEventTargetHelper::PreHandleEvent(aVisitor);
+  return DOMEventTargetHelper::PreHandleEvent(aVisitor);
 }
+
+END_WORKERS_NAMESPACE
 
 bool
 DelayedEventRunnable::WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate)
@@ -275,6 +306,8 @@ DelayedEventRunnable::WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate)
   MOZ_ASSERT(mMessagePort);
   mMessagePort->AssertCorrectThread();
   MOZ_ASSERT(mEvents.Length());
+
+  AutoNoJSAPI nojsapi;
 
   bool ignored;
   for (uint32_t i = 0; i < mEvents.Length(); i++) {

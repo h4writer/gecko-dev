@@ -20,10 +20,10 @@
 #include "nsCOMArray.h"
 #include "nsCycleCollectionParticipant.h"
 
-class nsAutoCompleteController : public nsIAutoCompleteController,
-                                 public nsIAutoCompleteObserver,
-                                 public nsITimerCallback,
-                                 public nsITreeView
+class nsAutoCompleteController MOZ_FINAL : public nsIAutoCompleteController,
+                                           public nsIAutoCompleteObserver,
+                                           public nsITimerCallback,
+                                           public nsITreeView
 {
 public:
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
@@ -35,9 +35,10 @@ public:
   NS_DECL_NSITIMERCALLBACK
    
   nsAutoCompleteController();
-  virtual ~nsAutoCompleteController();
   
 protected:
+  virtual ~nsAutoCompleteController();
+
   nsresult OpenPopup();
   nsresult ClosePopup();
 
@@ -47,6 +48,7 @@ protected:
   nsresult StartSearches();
   void AfterSearches();
   nsresult ClearSearchTimer();
+  void MaybeCompletePlaceholder();
 
   nsresult ProcessResult(int32_t aSearchIndex, nsIAutoCompleteResult *aResult);
   nsresult PostSearchCleanup();
@@ -59,12 +61,11 @@ protected:
 
   nsresult GetResultAt(int32_t aIndex, nsIAutoCompleteResult** aResult,
                        int32_t* aRowIndex);
-  nsresult GetResultValueAt(int32_t aIndex, bool aValueOnly,
+  nsresult GetResultValueAt(int32_t aIndex, bool aGetFinalValue,
                             nsAString & _retval);
-  nsresult GetResultLabelAt(int32_t aIndex, bool aValueOnly,
-                            nsAString & _retval);
+  nsresult GetResultLabelAt(int32_t aIndex, nsAString & _retval);
 private:
-  nsresult GetResultValueLabelAt(int32_t aIndex, bool aValueOnly,
+  nsresult GetResultValueLabelAt(int32_t aIndex, bool aGetFinalValue,
                                  bool aGetValue, nsAString & _retval);
 protected:
 
@@ -134,6 +135,7 @@ protected:
   nsCOMPtr<nsITreeBoxObject> mTree;
 
   nsString mSearchString;
+  nsString mPlaceholderCompletionString;
   bool mDefaultIndexCompleted;
   bool mBackspaced;
   bool mPopupClosedByCompositionStart;

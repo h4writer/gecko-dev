@@ -447,10 +447,12 @@ Readability.prototype = {
 
         let matchString = node.className + node.id;
         if (matchString.search(this.REGEXPS.byline) !== -1 && !this._articleByline) {
-          this._articleByline = node.textContent;
-          node.parentNode.removeChild(node);
-          purgeNode(node);
-          continue;
+          if (this._isValidByline(node.textContent)) {
+            this._articleByline = node.textContent.trim();
+            node.parentNode.removeChild(node);
+            purgeNode(node);
+            continue;
+          }
         }
 
         // Remove unlikely candidates
@@ -583,7 +585,6 @@ Readability.prototype = {
       }
 
       let topCandidate = topCandidates[0] || null;
-      let lastTopCandidate = (topCandidates.length > 3 ? topCandidates[topCandidates.length - 1] : null);
 
       // If we still have no top candidate, just use the body as a last resort.
       // We also have to copy the body node so it is something we can modify.
@@ -702,20 +703,96 @@ Readability.prototype = {
           return null;
         }
       } else {
-        if (lastTopCandidate !== null) {
-          // EXPERIMENTAL: Contrast ratio is how we measure the level of competition between candidates in the
-          // readability algorithm. This is to avoid offering reader mode on pages that are more like
-          // a list or directory of links with summaries. It takes the score of the last top candidate
-          // (see N_TOP_CANDIDATES) and checks how it compares to the top candidate's. On pages that are not
-          // actual articles, there will likely be many candidates with similar score (i.e. higher contrast ratio).
-          let contrastRatio = lastTopCandidate.readability.contentScore / topCandidate.readability.contentScore;
-          if (contrastRatio > 0.45)
-            return null;
-        }
-
         return articleContent;
       }
     }
+  },
+
+  /**
+   * Check whether the input string could be a byline.
+   * This verifies that the input is a string, and that the length
+   * is less than 100 chars.
+   *
+   * @param possibleByline {string} - a string to check whether its a byline.
+   * @return Boolean - whether the input string is a byline.
+   */
+  _isValidByline: function(byline) {
+    if (typeof byline == 'string' || byline instanceof String) {
+      byline = byline.trim();
+      return (byline.length > 0) && (byline.length < 100);
+    }
+    return false;
+  },
+
+  /**
+   * Attempts to get the excerpt from these
+   * sources in the following order:
+   * - meta description tag
+   * - open-graph description
+   * - twitter cards description
+   * - article's first paragraph
+   * If no excerpt is found, an empty string will be
+   * returned.
+   *
+   * @param Element - root element of the processed version page
+   * @return String - excerpt of the article
+  **/
+  _getExcerpt: function(articleContent) {
+    let values = {};
+    let metaElements = this._doc.getElementsByTagName("meta");
+
+    // Match "description", or Twitter's "twitter:description" (Cards)
+    // in name attribute.
+    let namePattern = /^\s*((twitter)\s*:\s*)?description\s*$/gi;
+
+    // Match Facebook's og:description (Open Graph) in property attribute.
+    let propertyPattern = /^\s*og\s*:\s*description\s*$/gi;
+
+    // Find description tags.
+    for (let i = 0; i < metaElements.length; i++) {
+      let element = metaElements[i];
+      let elementName = element.getAttribute("name");
+      let elementProperty = element.getAttribute("property");
+
+      let name;
+      if (namePattern.test(elementName)) {
+        name = elementName;
+      } else if (propertyPattern.test(elementProperty)) {
+        name = elementProperty;
+      }
+
+      if (name) {
+        let content = element.getAttribute("content");
+        if (content) {
+          // Convert to lowercase and remove any whitespace
+          // so we can match below.
+          name = name.toLowerCase().replace(/\s/g, '');
+          values[name] = content.trim();
+        }
+      }
+    }
+
+    if ("description" in values) {
+      return values["description"];
+    }
+
+    if ("og:description" in values) {
+      // Use facebook open graph description.
+      return values["og:description"];
+    }
+
+    if ("twitter:description" in values) {
+      // Use twitter cards description.
+      return values["twitter:description"];
+    }
+
+    // No description meta tags, use the article's first paragraph.
+    let paragraphs = articleContent.getElementsByTagName("p");
+    if (paragraphs.length > 0) {
+      return paragraphs[0].textContent;
+    }
+
+    return "";
   },
 
   /**
@@ -1434,9 +1511,13 @@ Readability.prototype = {
     //   }).bind(this), 500);
     // }
 
+    let excerpt = this._getExcerpt(articleContent);
+
     return { title: articleTitle,
              byline: this._articleByline,
              dir: this._articleDir,
-             content: articleContent.innerHTML };
+             content: articleContent.innerHTML,
+             length: articleContent.textContent.length,
+             excerpt: excerpt };
   }
 };

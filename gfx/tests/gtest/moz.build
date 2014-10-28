@@ -4,8 +4,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-LIBRARY_NAME = 'gfxtest'
-
 UNIFIED_SOURCES += [
     'gfxSurfaceRefCountTest.cpp',
     # Disabled on suspicion of causing bug 904227
@@ -13,8 +11,10 @@ UNIFIED_SOURCES += [
     'TestAsyncPanZoomController.cpp',
     'TestBufferRotation.cpp',
     'TestColorNames.cpp',
+    'TestGfxPrefs.cpp',
     'TestLayers.cpp',
     'TestRegion.cpp',
+    'TestSkipChars.cpp',
     # Hangs on linux in ApplyGdkScreenFontOptions
     #'gfxFontSelectionTest.cpp',
     'TestTextures.cpp',
@@ -37,10 +37,6 @@ if CONFIG['MOZ_WIDGET_TOOLKIT'] != 'windows':
         'TestRect.cpp',
     ]
 
-LIBXUL_LIBRARY = True
-
-EXPORT_LIBRARY = True
-
 include('/ipc/chromium/chromium-config.mozbuild')
 
 LOCAL_INCLUDES += [
@@ -49,3 +45,6 @@ LOCAL_INCLUDES += [
     '/gfx/layers',
 ]
 
+FINAL_LIBRARY = 'xul-gtest'
+
+CXXFLAGS += CONFIG['MOZ_CAIRO_CFLAGS']

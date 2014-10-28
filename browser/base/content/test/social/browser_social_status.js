@@ -40,16 +40,14 @@ function openWindowAndWaitForInit(callback) {
 function test() {
   waitForExplicitFinish();
 
-  Services.prefs.setBoolPref("social.allowMultipleWorkers", true);
-  runSocialTestWithProvider(manifest, function () {
+  runSocialTestWithProvider(manifest, function (finishcb) {
     runSocialTests(tests, undefined, undefined, function () {
       Services.prefs.clearUserPref("social.remote-install.enabled");
       // just in case the tests failed, clear these here as well
-      Services.prefs.clearUserPref("social.allowMultipleWorkers");
       Services.prefs.clearUserPref("social.whitelist");
       ok(CustomizableUI.inDefaultState, "Should be in the default state when we finish");
       CustomizableUI.reset();
-      finish();
+      finishcb();
     });
   });
 }
@@ -70,7 +68,7 @@ var tests = {
       let doc = tab.linkedBrowser.contentDocument;
       Social.installProvider(doc, manifest3, function(addonManifest) {
         // enable the provider so we know the button would have appeared
-        SocialService.addBuiltinProvider(manifest3.origin, function(provider) {
+        SocialService.enableProvider(manifest3.origin, function(provider) {
           is(provider.origin, manifest3.origin, "provider is installed");
           let id = SocialStatus._toolbarHelper.idFromOrigin(provider.origin);
           let widget = CustomizableUI.getWidget(id);
@@ -96,7 +94,7 @@ var tests = {
     addTab(activationURL, function(tab) {
       let doc = tab.linkedBrowser.contentDocument;
       Social.installProvider(doc, manifest2, function(addonManifest) {
-        SocialService.addBuiltinProvider(manifest2.origin, function(provider) {
+        SocialService.enableProvider(manifest2.origin, function(provider) {
           is(provider.origin, manifest2.origin, "provider is installed");
           let id = SocialStatus._toolbarHelper.idFromOrigin(manifest2.origin);
           let widget = CustomizableUI.getWidget(id).forWindow(window);
@@ -114,6 +112,11 @@ var tests = {
       iconURL: "chrome://browser/skin/Info.png",
       counter: 1
     };
+
+    // Disable the transition
+    let panel = document.getElementById("social-notification-panel");
+    panel.setAttribute("animate", "false");
+
     // click on panel to open and wait for visibility
     let provider = Social._getProviderFromOrigin(manifest2.origin);
     let id = SocialStatus._toolbarHelper.idFromOrigin(manifest2.origin);
@@ -133,14 +136,14 @@ var tests = {
         case "got-social-panel-visibility":
           ok(true, "got the panel message " + e.data.result);
           if (e.data.result == "shown") {
-            let panel = document.getElementById("social-notification-panel");
             panel.hidePopup();
+            panel.removeAttribute("animate");
           } else {
             port.postMessage({topic: "test-ambient-notification", data: icon});
             port.close();
             waitForCondition(function() { return btn.getAttribute("badge"); },
                        function() {
-                         is(btn.getAttribute("image"), icon.iconURL, "notification icon updated");
+                         is(btn.style.listStyleImage, "url(\"" + icon.iconURL + "\")", "notification icon updated");
                          next();
                        }, "button updated by notification");
           }
@@ -153,7 +156,7 @@ var tests = {
     // enable the provider now
     let provider = Social._getProviderFromOrigin(manifest2.origin);
     ok(provider, "provider is installed");
-    SocialService.removeProvider(manifest2.origin, function() {
+    SocialService.disableProvider(manifest2.origin, function() {
       let id = SocialStatus._toolbarHelper.idFromOrigin(manifest2.origin);
       waitForCondition(function() { return !document.getElementById(id) },
                        function() {

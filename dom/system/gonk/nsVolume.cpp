@@ -45,7 +45,7 @@ NS_VolumeStateStr(int32_t aState)
 // allocate an nsVolume which is then passed to MainThread. Since we
 // have a situation where we allocate on one thread and free on another
 // we use a thread safe AddRef implementation.
-NS_IMPL_ISUPPORTS1(nsVolume, nsIVolume)
+NS_IMPL_ISUPPORTS(nsVolume, nsIVolume)
 
 nsVolume::nsVolume(const Volume* aVolume)
   : mName(NS_ConvertUTF8toUTF16(aVolume->Name())),
@@ -56,7 +56,8 @@ nsVolume::nsVolume(const Volume* aVolume)
     mIsFake(false),
     mIsMediaPresent(aVolume->MediaPresent()),
     mIsSharing(aVolume->IsSharing()),
-    mIsFormatting(aVolume->IsFormatting())
+    mIsFormatting(aVolume->IsFormatting()),
+    mIsUnmounting(aVolume->IsUnmounting())
 {
 }
 
@@ -110,30 +111,42 @@ bool nsVolume::Equals(nsIVolume* aVolume)
     return false;
   }
 
+  bool isUnmounting;
+  aVolume->GetIsUnmounting(&isUnmounting);
+  if (mIsUnmounting != isUnmounting) {
+    return false;
+  }
+
   return true;
 }
 
-NS_IMETHODIMP nsVolume::GetIsMediaPresent(bool *aIsMediaPresent)
+NS_IMETHODIMP nsVolume::GetIsMediaPresent(bool* aIsMediaPresent)
 {
   *aIsMediaPresent = mIsMediaPresent;
   return NS_OK;
 }
 
-NS_IMETHODIMP nsVolume::GetIsMountLocked(bool *aIsMountLocked)
+NS_IMETHODIMP nsVolume::GetIsMountLocked(bool* aIsMountLocked)
 {
   *aIsMountLocked = mMountLocked;
   return NS_OK;
 }
 
-NS_IMETHODIMP nsVolume::GetIsSharing(bool *aIsSharing)
+NS_IMETHODIMP nsVolume::GetIsSharing(bool* aIsSharing)
 {
   *aIsSharing = mIsSharing;
   return NS_OK;
 }
 
-NS_IMETHODIMP nsVolume::GetIsFormatting(bool *aIsFormatting)
+NS_IMETHODIMP nsVolume::GetIsFormatting(bool* aIsFormatting)
 {
   *aIsFormatting = mIsFormatting;
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsVolume::GetIsUnmounting(bool* aIsUnmounting)
+{
+  *aIsUnmounting = mIsUnmounting;
   return NS_OK;
 }
 
@@ -187,6 +200,8 @@ NS_IMETHODIMP nsVolume::GetIsFake(bool *aIsFake)
 
 NS_IMETHODIMP nsVolume::Format()
 {
+  MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
+
   XRE_GetIOMessageLoop()->PostTask(
       FROM_HERE,
       NewRunnableFunction(FormatVolumeIOThread, NameStr()));
@@ -197,6 +212,8 @@ NS_IMETHODIMP nsVolume::Format()
 /* static */
 void nsVolume::FormatVolumeIOThread(const nsCString& aVolume)
 {
+  MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
+
   MOZ_ASSERT(MessageLoop::current() == XRE_GetIOMessageLoop());
   if (VolumeManager::State() != VolumeManager::VOLUMES_READY) {
     return;
@@ -205,16 +222,64 @@ void nsVolume::FormatVolumeIOThread(const nsCString& aVolume)
   AutoMounterFormatVolume(aVolume);
 }
 
+NS_IMETHODIMP nsVolume::Mount()
+{
+  MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
+
+  XRE_GetIOMessageLoop()->PostTask(
+      FROM_HERE,
+      NewRunnableFunction(MountVolumeIOThread, NameStr()));
+
+  return NS_OK;
+}
+
+/* static */
+void nsVolume::MountVolumeIOThread(const nsCString& aVolume)
+{
+  MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
+
+  MOZ_ASSERT(MessageLoop::current() == XRE_GetIOMessageLoop());
+  if (VolumeManager::State() != VolumeManager::VOLUMES_READY) {
+    return;
+  }
+
+  AutoMounterMountVolume(aVolume);
+}
+
+NS_IMETHODIMP nsVolume::Unmount()
+{
+  MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
+
+  XRE_GetIOMessageLoop()->PostTask(
+      FROM_HERE,
+      NewRunnableFunction(UnmountVolumeIOThread, NameStr()));
+
+  return NS_OK;
+}
+
+/* static */
+void nsVolume::UnmountVolumeIOThread(const nsCString& aVolume)
+{
+  MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
+
+  MOZ_ASSERT(MessageLoop::current() == XRE_GetIOMessageLoop());
+  if (VolumeManager::State() != VolumeManager::VOLUMES_READY) {
+    return;
+  }
+
+  AutoMounterUnmountVolume(aVolume);
+}
+
 void
 nsVolume::LogState() const
 {
   if (mState == nsIVolume::STATE_MOUNTED) {
     LOG("nsVolume: %s state %s @ '%s' gen %d locked %d fake %d "
-        "media %d sharing %d formatting %d",
+        "media %d sharing %d formatting %d unmounting %d",
         NameStr().get(), StateStr(), MountPointStr().get(),
         MountGeneration(), (int)IsMountLocked(), (int)IsFake(),
         (int)IsMediaPresent(), (int)IsSharing(),
-        (int)IsFormatting());
+        (int)IsFormatting(), (int)IsUnmounting());
     return;
   }
 
@@ -232,6 +297,7 @@ void nsVolume::Set(nsIVolume* aVolume)
   aVolume->GetIsMediaPresent(&mIsMediaPresent);
   aVolume->GetIsSharing(&mIsSharing);
   aVolume->GetIsFormatting(&mIsFormatting);
+  aVolume->GetIsUnmounting(&mIsUnmounting);
 
   int32_t volMountGeneration;
   aVolume->GetMountGeneration(&volMountGeneration);

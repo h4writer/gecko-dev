@@ -23,10 +23,10 @@ class nsGIFDecoder2 : public Decoder
 {
 public:
 
-  nsGIFDecoder2(RasterImage &aImage);
+  explicit nsGIFDecoder2(RasterImage &aImage);
   ~nsGIFDecoder2();
 
-  virtual void WriteInternal(const char* aBuffer, uint32_t aCount);
+  virtual void WriteInternal(const char* aBuffer, uint32_t aCount, DecodeStrategy aStrategy);
   virtual void FinishInternal();
   virtual Telemetry::ID SpeedHistogram();
 
@@ -55,7 +55,7 @@ private:
 
   // The frame number of the currently-decoding frame when we're in the middle
   // of decoding it, and -1 otherwise.
-  int32_t mCurrentFrame;
+  int32_t mCurrentFrameIndex;
 
   uint8_t mCurrentPass;
   uint8_t mLastFlushedPass;

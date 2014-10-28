@@ -10,12 +10,13 @@
 #include "nsString.h"
 #include "nsCOMPtr.h"
 
+#include "nsILoadInfo.h"
 #include "nsIWyciwygChannel.h"
 #include "nsIStreamListener.h"
-#include "nsICacheListener.h"
+#include "nsICacheEntryOpenCallback.h"
 #include "PrivateBrowsingChannel.h"
 
-class nsICacheEntryDescriptor;
+class nsICacheEntry;
 class nsIEventTarget;
 class nsIInputStream;
 class nsIInputStreamPump;
@@ -30,7 +31,7 @@ extern PRLogModuleInfo * gWyciwygLog;
 
 class nsWyciwygChannel: public nsIWyciwygChannel,
                         public nsIStreamListener,
-                        public nsICacheListener,
+                        public nsICacheEntryOpenCallback,
                         public mozilla::net::PrivateBrowsingChannel<nsWyciwygChannel>
 {
 public:
@@ -40,7 +41,7 @@ public:
     NS_DECL_NSIWYCIWYGCHANNEL
     NS_DECL_NSIREQUESTOBSERVER
     NS_DECL_NSISTREAMLISTENER
-    NS_DECL_NSICACHELISTENER
+    NS_DECL_NSICACHEENTRYOPENCALLBACK
 
     friend class nsWyciwygSetCharsetandSourceEvent;
     friend class nsWyciwygWriteEvent;
@@ -48,17 +49,19 @@ public:
 
     // nsWyciwygChannel methods:
     nsWyciwygChannel();
-    virtual ~nsWyciwygChannel();
 
     nsresult Init(nsIURI *uri);
 
 protected:
-    nsresult WriteToCacheEntryInternal(const nsAString& aData, const nsACString& spec);
+    virtual ~nsWyciwygChannel();
+
+    nsresult WriteToCacheEntryInternal(const nsAString& aData);
     void SetCharsetAndSourceInternal();
     nsresult CloseCacheEntryInternal(nsresult reason);
 
     nsresult ReadFromCache();
-    nsresult OpenCacheEntry(const nsACString & aCacheKey, nsCacheAccessMode aWriteAccess);
+    nsresult EnsureWriteCacheEntry();
+    nsresult OpenCacheEntry(nsIURI *aURI, uint32_t aOpenFlags);
 
     void WriteCharsetAndSourceToCache(int32_t aSource,
                                       const nsCString& aCharset);
@@ -68,6 +71,13 @@ protected:
 
     friend class mozilla::net::PrivateBrowsingChannel<nsWyciwygChannel>;
 
+    enum EMode {
+      NONE,
+      WRITING,
+      READING
+    };
+
+    EMode                               mMode;
     nsresult                            mStatus;
     bool                                mIsPending;
     bool                                mCharsetAndSourceSet;
@@ -81,6 +91,7 @@ protected:
     nsCOMPtr<nsIURI>                    mURI;
     nsCOMPtr<nsIURI>                    mOriginalURI;
     nsCOMPtr<nsISupports>               mOwner;
+    nsCOMPtr<nsILoadInfo>               mLoadInfo;
     nsCOMPtr<nsIInterfaceRequestor>     mCallbacks;
     nsCOMPtr<nsIProgressEventSink>      mProgressSink;
     nsCOMPtr<nsILoadGroup>              mLoadGroup;
@@ -91,7 +102,7 @@ protected:
     nsCOMPtr<nsIInputStreamPump>        mPump;
     
     // Cache related stuff    
-    nsCOMPtr<nsICacheEntryDescriptor>   mCacheEntry;
+    nsCOMPtr<nsICacheEntry>             mCacheEntry;
     nsCOMPtr<nsIOutputStream>           mCacheOutputStream;
     nsCOMPtr<nsIInputStream>            mCacheInputStream;
     nsCOMPtr<nsIEventTarget>            mCacheIOTarget;

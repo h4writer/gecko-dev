@@ -50,6 +50,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef nricectx_h__
 #define nricectx_h__
 
+#include <string>
 #include <vector>
 
 #include "sigslot.h"
@@ -58,6 +59,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "mozilla/RefPtr.h"
 #include "mozilla/Scoped.h"
+#include "mozilla/TimeStamp.h"
 #include "nsAutoPtr.h"
 #include "nsIEventTarget.h"
 #include "nsITimer.h"
@@ -79,14 +81,19 @@ typedef void* NR_SOCKET;
 
 namespace mozilla {
 
+// Timestamps set whenever a packet is dropped due to global rate limiting
+// (see nr_socket_prsock.cpp)
+TimeStamp nr_socket_short_term_violation_time();
+TimeStamp nr_socket_long_term_violation_time();
+
 class NrIceMediaStream;
 
-const std::string kNrIceTransportUdp("udp");
-const std::string kNrIceTransportTcp("tcp");
+extern const char kNrIceTransportUdp[];
+extern const char kNrIceTransportTcp[];
 
 class NrIceStunServer {
  public:
-  NrIceStunServer(const PRNetAddr& addr) : has_addr_(true) {
+  explicit NrIceStunServer(const PRNetAddr& addr) : has_addr_(true) {
     memcpy(&addr_, &addr, sizeof(addr));
   }
 
@@ -102,8 +109,8 @@ class NrIceStunServer {
     return server.forget();
   }
 
-  nsresult ToNicerStunStruct(nr_ice_stun_server *server,
-                             const std::string transport =
+  nsresult ToNicerStunStruct(nr_ice_stun_server* server,
+                             const std::string& transport =
                              kNrIceTransportUdp) const;
 
  protected:
@@ -140,7 +147,7 @@ class NrIceTurnServer : public NrIceStunServer {
   static NrIceTurnServer *Create(const std::string& addr, uint16_t port,
                                  const std::string& username,
                                  const std::vector<unsigned char>& password,
-                                 const std::string& transport = kNrIceTransportUdp) {
+                                 const char *transport = kNrIceTransportUdp) {
     ScopedDeletePtr<NrIceTurnServer> server(
         new NrIceTurnServer(username, password, transport));
 
@@ -156,7 +163,7 @@ class NrIceTurnServer : public NrIceStunServer {
  private:
   NrIceTurnServer(const std::string& username,
                   const std::vector<unsigned char>& password,
-                  const std::string& transport) :
+                  const char *transport) :
       username_(username), password_(password), transport_(transport) {}
 
   std::string username_;
@@ -183,8 +190,12 @@ class NrIceCtx {
 
   static RefPtr<NrIceCtx> Create(const std::string& name,
                                  bool offerer,
-                                 bool set_interface_priorities = true);
-  virtual ~NrIceCtx();
+                                 bool set_interface_priorities = true,
+                                 bool allow_loopback = false);
+
+  // Deinitialize all ICE global state. Used only for testing.
+  static void internal_DeinitializeGlobal();
+
 
   nr_ice_ctx *ctx() { return ctx_; }
   nr_ice_peer_ctx *peer() { return peer_; }
@@ -217,6 +228,8 @@ class NrIceCtx {
 
   // Set whether we are controlling or not.
   nsresult SetControlling(Controlling controlling);
+
+  Controlling GetControlling();
 
   // Set the STUN servers. Must be called before StartGathering
   // (if at all).
@@ -272,6 +285,8 @@ class NrIceCtx {
     (void)offerer_;
   }
 
+  virtual ~NrIceCtx();
+
   DISALLOW_COPY_ASSIGN(NrIceCtx);
 
   // Callbacks for nICEr
@@ -283,6 +298,7 @@ class NrIceCtx {
                          int potential_ct);
   static int stream_ready(void *obj, nr_ice_media_stream *stream);
   static int stream_failed(void *obj, nr_ice_media_stream *stream);
+  static int ice_checking(void *obj, nr_ice_peer_ctx *pctx);
   static int ice_completed(void *obj, nr_ice_peer_ctx *pctx);
   static int msg_recvd(void *obj, nr_ice_peer_ctx *pctx,
                        nr_ice_media_stream *stream, int component_id,

@@ -19,86 +19,112 @@ using namespace js;
 using namespace js::gc;
 using mozilla::ReentrancyGuard;
 
-/*** SlotEdge ***/
+/*** Edges ***/
 
-JS_ALWAYS_INLINE HeapSlot *
-StoreBuffer::SlotEdge::slotLocation() const
+void
+StoreBuffer::SlotsEdge::mark(JSTracer *trc)
 {
-    if (kind == HeapSlot::Element) {
-        if (offset >= object->getDenseInitializedLength())
-            return nullptr;
-        return (HeapSlot *)&object->getDenseElement(offset);
+    NativeObject *obj = object();
+
+    // Beware JSObject::swap exchanging a native object for a non-native one.
+    if (!obj->isNative())
+        return;
+
+    if (IsInsideNursery(obj))
+        return;
+
+    if (kind() == ElementKind) {
+        int32_t initLen = obj->getDenseInitializedLength();
+        int32_t clampedStart = Min(start_, initLen);
+        int32_t clampedEnd = Min(start_ + count_, initLen);
+        gc::MarkArraySlots(trc, clampedEnd - clampedStart,
+                           obj->getDenseElements() + clampedStart, "element");
+    } else {
+        int32_t start = Min(uint32_t(start_), obj->slotSpan());
+        int32_t end = Min(uint32_t(start_) + count_, obj->slotSpan());
+        MOZ_ASSERT(end >= start);
+        MarkObjectSlots(trc, obj, start, end - start);
     }
-    if (offset >= object->slotSpan())
-        return nullptr;
-    return &object->getSlotRef(offset);
-}
-
-JS_ALWAYS_INLINE void *
-StoreBuffer::SlotEdge::deref() const
-{
-    HeapSlot *loc = slotLocation();
-    return (loc && loc->isGCThing()) ? loc->toGCThing() : nullptr;
-}
-
-JS_ALWAYS_INLINE void *
-StoreBuffer::SlotEdge::location() const
-{
-    return (void *)slotLocation();
-}
-
-bool
-StoreBuffer::SlotEdge::inRememberedSet(const Nursery &nursery) const
-{
-    return !nursery.isInside(object) && nursery.isInside(deref());
-}
-
-JS_ALWAYS_INLINE bool
-StoreBuffer::SlotEdge::isNullEdge() const
-{
-    return !deref();
 }
 
 void
 StoreBuffer::WholeCellEdges::mark(JSTracer *trc)
 {
-    JS_ASSERT(tenured->isTenured());
-    JSGCTraceKind kind = GetGCThingTraceKind(tenured);
+    MOZ_ASSERT(edge->isTenured());
+    JSGCTraceKind kind = GetGCThingTraceKind(edge);
     if (kind <= JSTRACE_OBJECT) {
-        JSObject *object = static_cast<JSObject *>(tenured);
+        JSObject *object = static_cast<JSObject *>(edge);
         if (object->is<ArgumentsObject>())
             ArgumentsObject::trace(trc, object);
-        else
-            MarkChildren(trc, object);
+        MarkChildren(trc, object);
         return;
     }
-#ifdef JS_ION
-    JS_ASSERT(kind == JSTRACE_IONCODE);
-    static_cast<jit::IonCode *>(tenured)->trace(trc);
-#else
-    MOZ_ASSUME_UNREACHABLE("Only objects can be in the wholeCellBuffer if IonMonkey is disabled.");
-#endif
+    MOZ_ASSERT(kind == JSTRACE_JITCODE);
+    static_cast<jit::JitCode *>(edge)->trace(trc);
+}
+
+void
+StoreBuffer::CellPtrEdge::mark(JSTracer *trc)
+{
+    if (!*edge)
+        return;
+
+    MOZ_ASSERT(GetGCThingTraceKind(*edge) == JSTRACE_OBJECT);
+    MarkObjectRoot(trc, reinterpret_cast<JSObject**>(edge), "store buffer edge");
+}
+
+void
+StoreBuffer::ValueEdge::mark(JSTracer *trc)
+{
+    if (!deref())
+        return;
+
+    MarkValueRoot(trc, edge, "store buffer edge");
 }
 
 /*** MonoTypeBuffer ***/
 
 template <typename T>
 void
+StoreBuffer::MonoTypeBuffer<T>::handleOverflow(StoreBuffer *owner)
+{
+    if (!owner->isAboutToOverflow()) {
+        /*
+         * Compact the buffer now, and if that fails to free enough space then
+         * trigger a minor collection.
+         */
+        compact(owner);
+        if (isLowOnSpace())
+            owner->setAboutToOverflow();
+    } else {
+         /*
+          * A minor GC has already been triggered, so there's no point
+          * compacting unless the buffer is totally full.
+          */
+        if (storage_->availableInCurrentChunk() < sizeof(T))
+            maybeCompact(owner);
+    }
+}
+
+template <typename T>
+void
 StoreBuffer::MonoTypeBuffer<T>::compactRemoveDuplicates(StoreBuffer *owner)
 {
-    EdgeSet duplicates;
+    typedef HashSet<T, typename T::Hasher, SystemAllocPolicy> DedupSet;
+
+    DedupSet duplicates;
     if (!duplicates.init())
         return; /* Failure to de-dup is acceptable. */
 
     LifoAlloc::Enum insert(*storage_);
     for (LifoAlloc::Enum e(*storage_); !e.empty(); e.popFront<T>()) {
         T *edge = e.get<T>();
-        if (!duplicates.has(edge->location())) {
+        if (!duplicates.has(*edge)) {
             insert.updateFront<T>(*edge);
             insert.popFront<T>();
 
             /* Failure to insert will leave the set with duplicates. Oh well. */
-            duplicates.put(edge->location());
+            duplicates.put(*edge);
         }
     }
     storage_->release(insert.mark());
@@ -110,27 +136,33 @@ template <typename T>
 void
 StoreBuffer::MonoTypeBuffer<T>::compact(StoreBuffer *owner)
 {
-    if (!storage_)
-        return;
-
+    MOZ_ASSERT(storage_);
     compactRemoveDuplicates(owner);
+    usedAtLastCompact_ = storage_->used();
+}
+
+template <typename T>
+void
+StoreBuffer::MonoTypeBuffer<T>::maybeCompact(StoreBuffer *owner)
+{
+    MOZ_ASSERT(storage_);
+    if (storage_->used() != usedAtLastCompact_)
+        compact(owner);
 }
 
 template <typename T>
 void
 StoreBuffer::MonoTypeBuffer<T>::mark(StoreBuffer *owner, JSTracer *trc)
 {
+    MOZ_ASSERT(owner->isEnabled());
     ReentrancyGuard g(*owner);
     if (!storage_)
         return;
 
-    compact(owner);
+    maybeCompact(owner);
     for (LifoAlloc::Enum e(*storage_); !e.empty(); e.popFront<T>()) {
         T *edge = e.get<T>();
-        if (edge->isNullEdge())
-            continue;
         edge->mark(trc);
-
     }
 }
 
@@ -143,16 +175,16 @@ StoreBuffer::RelocatableMonoTypeBuffer<T>::compactMoved(StoreBuffer *owner)
     LifoAlloc &storage = *this->storage_;
     EdgeSet invalidated;
     if (!invalidated.init())
-        MOZ_CRASH("RelocatableMonoTypeBuffer::compactMoved: Failed to init table.");
+        CrashAtUnhandlableOOM("RelocatableMonoTypeBuffer::compactMoved: Failed to init table.");
 
     /* Collect the set of entries which are currently invalid. */
     for (LifoAlloc::Enum e(storage); !e.empty(); e.popFront<T>()) {
         T *edge = e.get<T>();
         if (edge->isTagged()) {
-            if (!invalidated.put(edge->location()))
-                MOZ_CRASH("RelocatableMonoTypeBuffer::compactMoved: Failed to put removal.");
+            if (!invalidated.put(edge->untagged().edge))
+                CrashAtUnhandlableOOM("RelocatableMonoTypeBuffer::compactMoved: Failed to put removal.");
         } else {
-            invalidated.remove(edge->location());
+            invalidated.remove(edge->untagged().edge);
         }
     }
 
@@ -160,7 +192,7 @@ StoreBuffer::RelocatableMonoTypeBuffer<T>::compactMoved(StoreBuffer *owner)
     LifoAlloc::Enum insert(storage);
     for (LifoAlloc::Enum e(storage); !e.empty(); e.popFront<T>()) {
         T *edge = e.get<T>();
-        if (!edge->isTagged() && !invalidated.has(edge->location())) {
+        if (!edge->isTagged() && !invalidated.has(edge->untagged().edge)) {
             insert.updateFront<T>(*edge);
             insert.popFront<T>();
         }
@@ -171,7 +203,7 @@ StoreBuffer::RelocatableMonoTypeBuffer<T>::compactMoved(StoreBuffer *owner)
 
 #ifdef DEBUG
     for (LifoAlloc::Enum e(storage); !e.empty(); e.popFront<T>())
-        JS_ASSERT(!e.get<T>()->isTagged());
+        MOZ_ASSERT(!e.get<T>()->isTagged());
 #endif
 }
 
@@ -188,6 +220,7 @@ StoreBuffer::RelocatableMonoTypeBuffer<T>::compact(StoreBuffer *owner)
 void
 StoreBuffer::GenericBuffer::mark(StoreBuffer *owner, JSTracer *trc)
 {
+    MOZ_ASSERT(owner->isEnabled());
     ReentrancyGuard g(*owner);
     if (!storage_)
         return;
@@ -199,30 +232,6 @@ StoreBuffer::GenericBuffer::mark(StoreBuffer *owner, JSTracer *trc)
         edge->mark(trc);
         e.popFront(size);
     }
-}
-
-/*** Edges ***/
-
-void
-StoreBuffer::CellPtrEdge::mark(JSTracer *trc)
-{
-    JS_ASSERT(GetGCThingTraceKind(*edge) == JSTRACE_OBJECT);
-    MarkObjectRoot(trc, reinterpret_cast<JSObject**>(edge), "store buffer edge");
-}
-
-void
-StoreBuffer::ValueEdge::mark(JSTracer *trc)
-{
-    MarkValueRoot(trc, edge, "store buffer edge");
-}
-
-void
-StoreBuffer::SlotEdge::mark(JSTracer *trc)
-{
-    if (kind == HeapSlot::Element)
-        MarkSlot(trc, (HeapSlot*)&object->getDenseElement(offset), "store buffer edge");
-    else
-        MarkSlot(trc, &object->getSlotRef(offset), "store buffer edge");
 }
 
 /*** StoreBuffer ***/
@@ -279,10 +288,8 @@ StoreBuffer::clear()
 }
 
 void
-StoreBuffer::mark(JSTracer *trc)
+StoreBuffer::markAll(JSTracer *trc)
 {
-    JS_ASSERT(isEnabled());
-
     bufferVal.mark(this, trc);
     bufferCell.mark(this, trc);
     bufferSlot.mark(this, trc);
@@ -296,7 +303,7 @@ void
 StoreBuffer::setAboutToOverflow()
 {
     aboutToOverflow_ = true;
-    runtime_->triggerOperationCallback(JSRuntime::TriggerCallbackMainThread);
+    runtime_->requestInterrupt(JSRuntime::RequestInterruptMainThread);
 }
 
 bool
@@ -305,45 +312,68 @@ StoreBuffer::inParallelSection() const
     return InParallelSection();
 }
 
+void
+StoreBuffer::addSizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf, JS::GCSizes
+*sizes)
+{
+    sizes->storeBufferVals       += bufferVal.sizeOfExcludingThis(mallocSizeOf);
+    sizes->storeBufferCells      += bufferCell.sizeOfExcludingThis(mallocSizeOf);
+    sizes->storeBufferSlots      += bufferSlot.sizeOfExcludingThis(mallocSizeOf);
+    sizes->storeBufferWholeCells += bufferWholeCell.sizeOfExcludingThis(mallocSizeOf);
+    sizes->storeBufferRelocVals  += bufferRelocVal.sizeOfExcludingThis(mallocSizeOf);
+    sizes->storeBufferRelocCells += bufferRelocCell.sizeOfExcludingThis(mallocSizeOf);
+    sizes->storeBufferGenerics   += bufferGeneric.sizeOfExcludingThis(mallocSizeOf);
+}
+
 JS_PUBLIC_API(void)
 JS::HeapCellPostBarrier(js::gc::Cell **cellp)
 {
-    JS_ASSERT(*cellp);
-    JSRuntime *runtime = (*cellp)->runtimeFromMainThread();
-    runtime->gcStoreBuffer.putRelocatableCell(cellp);
+    MOZ_ASSERT(cellp);
+    MOZ_ASSERT(*cellp);
+    StoreBuffer *storeBuffer = (*cellp)->storeBuffer();
+    if (storeBuffer)
+        storeBuffer->putRelocatableCellFromAnyThread(cellp);
 }
 
 JS_PUBLIC_API(void)
 JS::HeapCellRelocate(js::gc::Cell **cellp)
 {
-    /* Called with old contents of *pp before overwriting. */
-    JS_ASSERT(*cellp);
+    /* Called with old contents of *cellp before overwriting. */
+    MOZ_ASSERT(cellp);
+    MOZ_ASSERT(*cellp);
     JSRuntime *runtime = (*cellp)->runtimeFromMainThread();
-    runtime->gcStoreBuffer.removeRelocatableCell(cellp);
+    runtime->gc.storeBuffer.removeRelocatableCellFromAnyThread(cellp);
 }
 
 JS_PUBLIC_API(void)
 JS::HeapValuePostBarrier(JS::Value *valuep)
 {
-    JS_ASSERT(JSVAL_IS_TRACEABLE(*valuep));
-    JSRuntime *runtime = static_cast<js::gc::Cell *>(valuep->toGCThing())->runtimeFromMainThread();
-    runtime->gcStoreBuffer.putRelocatableValue(valuep);
+    MOZ_ASSERT(valuep);
+    MOZ_ASSERT(valuep->isMarkable());
+    if (valuep->isObject()) {
+        StoreBuffer *storeBuffer = valuep->toObject().storeBuffer();
+        if (storeBuffer)
+            storeBuffer->putRelocatableValueFromAnyThread(valuep);
+    }
 }
 
 JS_PUBLIC_API(void)
 JS::HeapValueRelocate(JS::Value *valuep)
 {
     /* Called with old contents of *valuep before overwriting. */
-    JS_ASSERT(JSVAL_IS_TRACEABLE(*valuep));
+    MOZ_ASSERT(valuep);
+    MOZ_ASSERT(valuep->isMarkable());
+    if (valuep->isString() && valuep->toString()->isPermanentAtom())
+        return;
     JSRuntime *runtime = static_cast<js::gc::Cell *>(valuep->toGCThing())->runtimeFromMainThread();
-    runtime->gcStoreBuffer.removeRelocatableValue(valuep);
+    runtime->gc.storeBuffer.removeRelocatableValueFromAnyThread(valuep);
 }
 
-template class StoreBuffer::MonoTypeBuffer<StoreBuffer::ValueEdge>;
-template class StoreBuffer::MonoTypeBuffer<StoreBuffer::CellPtrEdge>;
-template class StoreBuffer::MonoTypeBuffer<StoreBuffer::SlotEdge>;
-template class StoreBuffer::MonoTypeBuffer<StoreBuffer::WholeCellEdges>;
-template class StoreBuffer::RelocatableMonoTypeBuffer<StoreBuffer::ValueEdge>;
-template class StoreBuffer::RelocatableMonoTypeBuffer<StoreBuffer::CellPtrEdge>;
+template struct StoreBuffer::MonoTypeBuffer<StoreBuffer::ValueEdge>;
+template struct StoreBuffer::MonoTypeBuffer<StoreBuffer::CellPtrEdge>;
+template struct StoreBuffer::MonoTypeBuffer<StoreBuffer::SlotsEdge>;
+template struct StoreBuffer::MonoTypeBuffer<StoreBuffer::WholeCellEdges>;
+template struct StoreBuffer::RelocatableMonoTypeBuffer<StoreBuffer::ValueEdge>;
+template struct StoreBuffer::RelocatableMonoTypeBuffer<StoreBuffer::CellPtrEdge>;
 
 #endif /* JSGC_GENERATIONAL */

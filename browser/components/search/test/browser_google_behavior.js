@@ -13,39 +13,28 @@ const MOZ_PARAM_LOCALE         = /\{moz:locale\}/g;
 const MOZ_PARAM_DIST_ID        = /\{moz:distributionID\}/g;
 const MOZ_PARAM_OFFICIAL       = /\{moz:official\}/g;
 
+let runtime = Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULRuntime);
 // Custom search parameters
-#ifdef MOZ_OFFICIAL_BRANDING
-const MOZ_OFFICIAL = "official";
-#else
-const MOZ_OFFICIAL = "unofficial";
-#endif
+const MOZ_OFFICIAL = runtime.isOfficialBranding ? "official" : "unofficial";
 
-#if MOZ_UPDATE_CHANNEL == beta
-const GOOGLE_CLIENT = "firefox-beta";
-#elif MOZ_UPDATE_CHANNEL == aurora
-const GOOGLE_CLIENT = "firefox-aurora";
-#elif MOZ_UPDATE_CHANNEL == nightly
-const GOOGLE_CLIENT = "firefox-nightly";
-#else
-const GOOGLE_CLIENT = "firefox-a";
-#endif
-
-#expand const MOZ_DISTRIBUTION_ID = __MOZ_DISTRIBUTION_ID__;
-
-function getLocale() {
-  const localePref = "general.useragent.locale";
-  return getLocalizedPref(localePref, Services.prefs.getCharPref(localePref));
+var google_client;
+switch (runtime.defaultUpdateChannel) {
+case "beta":
+  google_client = "firefox-beta";
+  break;
+case "aurora":
+  google_client = "firefox-aurora";
+  break;
+case "nightly":
+  google_client = "firefox-nightly";
+  break;
+default:
+  google_client = "firefox-a";
+  break;
 }
 
-function getLocalizedPref(aPrefName, aDefault) {
-  try {
-    return Services.prefs.getComplexValue(aPrefName, Ci.nsIPrefLocalizedString).data;
-  } catch (ex) {
-    return aDefault;
-  }
-
-  return aDefault;
-}
+const GOOGLE_CLIENT = google_client;
+const MOZ_DISTRIBUTION_ID = runtime.distributionID;
 
 function test() {
   let engine = Services.search.getEngineByName("Google");
@@ -107,9 +96,56 @@ function test() {
       }
     },
     {
+      name: "new tab search",
+      searchURL: base + "&channel=nts",
+      run: function () {
+        function doSearch(doc) {
+          // Re-add the listener, and perform a search
+          gBrowser.addProgressListener(listener);
+          doc.getElementById("newtab-search-text").value = "foo";
+          doc.getElementById("newtab-search-submit").click();
+        }
+
+        // load about:newtab, but remove the listener first so it doesn't
+        // get in the way
+        gBrowser.removeProgressListener(listener);
+        gBrowser.loadURI("about:newtab");
+        info("Waiting for about:newtab load");
+        tab.linkedBrowser.addEventListener("load", function load(event) {
+          if (event.originalTarget != tab.linkedBrowser.contentDocument ||
+              event.target.location.href == "about:blank") {
+            info("skipping spurious load event");
+            return;
+          }
+          tab.linkedBrowser.removeEventListener("load", load, true);
+
+          // Observe page setup
+          let win = gBrowser.contentWindow;
+          if (win.gSearch.currentEngineName ==
+              Services.search.currentEngine.name) {
+            doSearch(win.document);
+          }
+          else {
+            info("Waiting for newtab search init");
+            win.addEventListener("ContentSearchService", function done(event) {
+              info("Got newtab search event " + event.detail.type);
+              if (event.detail.type == "State") {
+                win.removeEventListener("ContentSearchService", done);
+                // Let gSearch respond to the event before continuing.
+                executeSoon(() => doSearch(win.document));
+              }
+            });
+          }
+        }, true);
+      }
+    },
+    {
       name: "home page search",
       searchURL: base + "&channel=np&source=hp",
       run: function () {
+        // Bug 992270: Ignore uncaught about:home exceptions (related to snippets from IndexedDB)
+        ignoreAllUncaughtExceptions(true);
+
         // load about:home, but remove the listener first so it doesn't
         // get in the way
         gBrowser.removeProgressListener(listener);
@@ -142,6 +178,9 @@ function test() {
   ];
 
   function nextTest() {
+    // Make sure we listen again for uncaught exceptions in the next test or cleanup.
+    ignoreAllUncaughtExceptions(false);
+
     if (gTests.length) {
       gCurrTest = gTests.shift();
       info("Running : " + gCurrTest.name);

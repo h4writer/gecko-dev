@@ -24,12 +24,13 @@ extern PRLogModuleInfo* gFTPLog;
 
 //-----------------------------------------------------------------------------
 
-NS_IMPL_ISUPPORTS_INHERITED4(nsFtpChannel,
-                             nsBaseChannel,
-                             nsIUploadChannel,
-                             nsIResumableChannel,
-                             nsIFTPChannel,
-                             nsIProxiedChannel)
+NS_IMPL_ISUPPORTS_INHERITED(nsFtpChannel,
+                            nsBaseChannel,
+                            nsIUploadChannel,
+                            nsIResumableChannel,
+                            nsIFTPChannel,
+                            nsIProxiedChannel,
+                            nsIForcePendingChannel)
 
 //-----------------------------------------------------------------------------
 
@@ -38,7 +39,7 @@ nsFtpChannel::SetUploadStream(nsIInputStream *stream,
                               const nsACString &contentType,
                               int64_t contentLength)
 {
-    NS_ENSURE_TRUE(!IsPending(), NS_ERROR_IN_PROGRESS);
+    NS_ENSURE_TRUE(!Pending(), NS_ERROR_IN_PROGRESS);
 
     mUploadStream = stream;
 
@@ -61,7 +62,7 @@ nsFtpChannel::GetUploadStream(nsIInputStream **stream)
 NS_IMETHODIMP
 nsFtpChannel::ResumeAt(uint64_t aStartPos, const nsACString& aEntityID)
 {
-    NS_ENSURE_TRUE(!IsPending(), NS_ERROR_IN_PROGRESS);
+    NS_ENSURE_TRUE(!Pending(), NS_ERROR_IN_PROGRESS);
     mEntityID = aEntityID;
     mStartPos = aStartPos;
     mResumeRequested = (mStartPos || !mEntityID.IsEmpty());
@@ -132,8 +133,10 @@ namespace {
 
 class FTPEventSinkProxy MOZ_FINAL : public nsIFTPEventSink
 {
+    ~FTPEventSinkProxy() {}
+
 public:
-    FTPEventSinkProxy(nsIFTPEventSink* aTarget)
+    explicit FTPEventSinkProxy(nsIFTPEventSink* aTarget)
         : mTarget(aTarget)
         , mTargetThread(do_GetCurrentThread())
     { }
@@ -165,7 +168,7 @@ private:
     nsCOMPtr<nsIThread> mTargetThread;
 };
 
-NS_IMPL_ISUPPORTS1(FTPEventSinkProxy, nsIFTPEventSink)
+NS_IMPL_ISUPPORTS(FTPEventSinkProxy, nsIFTPEventSink)
 
 NS_IMETHODIMP
 FTPEventSinkProxy::OnFTPControlLog(bool aServer, const char* aMsg)
@@ -195,4 +198,29 @@ nsFtpChannel::GetFTPEventSink(nsCOMPtr<nsIFTPEventSink> &aResult)
         }
     }
     aResult = mFTPEventSink;
+}
+
+NS_IMETHODIMP
+nsFtpChannel::ForcePending(bool aForcePending)
+{
+    // Set true here so IsPending will return true.
+    // Required for callback diversion from child back to parent. In such cases
+    // OnStopRequest can be called in the parent before callbacks are diverted
+    // back from the child to the listener in the parent.
+    mForcePending = aForcePending;
+
+    return NS_OK;
+}
+
+NS_IMETHODIMP
+nsFtpChannel::IsPending(bool *result)
+{
+  *result = Pending();
+  return NS_OK;
+}
+
+bool
+nsFtpChannel::Pending() const
+{
+  return nsBaseChannel::Pending() || mForcePending;
 }

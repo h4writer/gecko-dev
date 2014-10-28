@@ -3,12 +3,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-interface nsIVariant;
-
 [Pref="dom.gamepad.enabled"]
 interface GamepadButton {
   readonly    attribute boolean pressed;
   readonly    attribute double  value;
+};
+
+enum GamepadMappingType {
+  "",
+  "standard"
 };
 
 [Pref="dom.gamepad.enabled"]
@@ -28,7 +31,7 @@ interface Gamepad {
    * The mapping in use for this device. The empty string
    * indicates that no mapping is in use.
    */
-  readonly attribute DOMString mapping;
+  readonly attribute GamepadMappingType mapping;
 
   /**
    * true if this gamepad is currently connected to the system.
@@ -39,13 +42,13 @@ interface Gamepad {
    * The current state of all buttons on the device, an
    * array of GamepadButton.
    */
-  [Throws]
-  readonly attribute nsIVariant buttons;
+  [Pure, Cached, Frozen]
+  readonly attribute sequence<GamepadButton> buttons;
 
   /**
    * The current position of all axes on the device, an
    * array of doubles.
    */
-  [Throws]
-  readonly attribute nsIVariant axes;
+  [Pure, Cached, Frozen]
+  readonly attribute sequence<double> axes;
 };

@@ -8,15 +8,16 @@
  * Copyright © 2013 Deutsche Telekom, Inc.
  */
 
-[JSImplementation="@mozilla.org/nfc/NFCPeer;1"]
+[JSImplementation="@mozilla.org/nfc/NFCPeer;1", AvailableIn="CertifiedApps"]
 interface MozNFCPeer {
-  DOMRequest sendNDEF(sequence<MozNdefRecord> records);
+  [Throws]
+  DOMRequest sendNDEF(sequence<MozNDEFRecord> records);
+  [Throws]
+  DOMRequest sendFile(Blob blob);
 };
 
 // Mozilla Only
 partial interface MozNFCPeer {
   [ChromeOnly]
   attribute DOMString session;
-  [ChromeOnly]
-  void setSessionToken(DOMString sessionToken);
 };

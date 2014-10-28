@@ -14,7 +14,7 @@
 #include "mozilla/LinkedList.h"
 #include "mozilla/MemoryReporting.h"
 
-#if !defined(XP_WIN) && !defined(XP_OS2)
+#if !defined(XP_WIN)
 #include <arpa/inet.h>
 #endif
 
@@ -103,14 +103,10 @@ union NetAddr {
     IPv6Addr ip;                    /* the actual 128 bits of address */
     uint32_t scope_id;              /* set of interfaces for a scope */
   } inet6;
-#if defined(XP_UNIX) || defined(XP_OS2)
+#if defined(XP_UNIX)
   struct {                          /* Unix domain socket address */
     uint16_t family;                /* address family (AF_UNIX) */
-#ifdef XP_OS2
-    char path[108];                 /* null-terminated pathname */
-#else
     char path[104];                 /* null-terminated pathname */
-#endif
   } local;
 #endif
   // introduced to support nsTArray<NetAddr> (for DNSRequestParent.cpp)
@@ -122,7 +118,7 @@ union NetAddr {
 // which is converted to a mozilla::dns::NetAddr.
 class NetAddrElement : public LinkedListElement<NetAddrElement> {
 public:
-  NetAddrElement(const PRNetAddr *prNetAddr);
+  explicit NetAddrElement(const PRNetAddr *prNetAddr);
   NetAddrElement(const NetAddrElement& netAddr);
   ~NetAddrElement();
 
@@ -146,6 +142,9 @@ public:
 
   char *mHostName;
   char *mCanonicalName;
+  uint16_t ttl;
+  static const uint16_t NO_TTL_DATA = (uint16_t) -1;
+
   LinkedList<NetAddrElement> mAddresses;
 
 private:
@@ -169,6 +168,8 @@ bool IsIPAddrAny(const NetAddr *addr);
 bool IsIPAddrV4Mapped(const NetAddr *addr);
 
 bool IsIPAddrLocal(const NetAddr *addr);
+
+nsresult GetPort(const NetAddr *aAddr, uint16_t *aResult);
 
 } // namespace net
 } // namespace mozilla

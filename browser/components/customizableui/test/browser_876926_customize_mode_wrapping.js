@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+"use strict";
+
 const kXULWidgetId = "sync-button";
 const kAPIWidgetId = "feed-button";
 const kPanel = CustomizableUI.AREA_PANEL;
@@ -40,13 +42,43 @@ let move = {
     }
     return CustomizableUI.addWidgetToArea(id, target, null);
   }
-}
+};
 
 function isLast(containerId, defaultPlacements, id) {
   assertAreaPlacements(containerId, defaultPlacements.concat([id]));
   is(document.getElementById(containerId).customizationTarget.lastChild.firstChild.id, id,
      "Widget " + id + " should be in " + containerId + " in customizing window.");
   is(otherWin.document.getElementById(containerId).customizationTarget.lastChild.id, id,
+     "Widget " + id + " should be in " + containerId + " in other window.");
+}
+
+function getLastVisibleNodeInToolbar(containerId, win=window) {
+  let container = win.document.getElementById(containerId).customizationTarget;
+  let rv = container.lastChild;
+  while (rv && (rv.getAttribute('hidden') == 'true' || (rv.firstChild && rv.firstChild.getAttribute('hidden') == 'true'))) {
+    rv = rv.previousSibling;
+  }
+  return rv;
+}
+
+function isLastVisibleInToolbar(containerId, defaultPlacements, id) {
+  let newPlacements;
+  for (let i = defaultPlacements.length - 1; i >= 0; i--) {
+    let el = document.getElementById(defaultPlacements[i]);
+    if (el && el.getAttribute('hidden') != 'true') {
+      newPlacements = [...defaultPlacements];
+      newPlacements.splice(i + 1, 0, id);
+      break;
+    }
+  }
+  if (!newPlacements) {
+    assertAreaPlacements(containerId, defaultPlacements.concat([id]));
+  } else {
+    assertAreaPlacements(containerId, newPlacements);
+  }
+  is(getLastVisibleNodeInToolbar(containerId).firstChild.id, id,
+     "Widget " + id + " should be in " + containerId + " in customizing window.");
+  is(getLastVisibleNodeInToolbar(containerId, otherWin).id, id,
      "Widget " + id + " should be in " + containerId + " in other window.");
 }
 
@@ -64,6 +96,8 @@ function checkToolbar(id, method) {
   move[method](id, kToolbar);
   if (method == "dragToItem") {
     isFirst(kToolbar, toolbarPlacements, id);
+  } else if (method == "drag") {
+    isLastVisibleInToolbar(kToolbar, toolbarPlacements, id);
   } else {
     isLast(kToolbar, toolbarPlacements, id);
   }
@@ -108,47 +142,30 @@ function checkPalette(id, method) {
 }
 
 let otherWin;
-let gTests = [
-  {
-    desc: "Moving widgets in two windows, one with customize mode and one without, should work",
-    setup: startCustomizing,
-    run: function() {
-      otherWin = yield openAndLoadWindow(null, true);
-      yield otherWin.PanelUI.ensureReady();
-      ok(CustomizableUI.inDefaultState, "Should start in default state");
 
-      for (let widgetId of [kXULWidgetId, kAPIWidgetId]) {
-        for (let method of ["API", "drag", "dragToItem"]) {
-          info("Moving widget " + widgetId + " using " + method);
-          checkToolbar(widgetId, method);
-          checkPanel(widgetId, method);
-          checkPalette(widgetId, method);
-          checkPanel(widgetId, method);
-          checkToolbar(widgetId, method);
-          checkPalette(widgetId, method);
-        }
-      }
+// Moving widgets in two windows, one with customize mode and one without, should work.
+add_task(function MoveWidgetsInTwoWindows() {
+  yield startCustomizing();
+  otherWin = yield openAndLoadWindow(null, true);
+  yield otherWin.PanelUI.ensureReady();
+  ok(CustomizableUI.inDefaultState, "Should start in default state");
 
-      otherWin.close();
-      otherWin = null;
-    },
-    teardown: function() {
-      if (otherWin) {
-        otherWin.close();
-      }
-      yield endCustomizing();
+  for (let widgetId of [kXULWidgetId, kAPIWidgetId]) {
+    for (let method of ["API", "drag", "dragToItem"]) {
+      info("Moving widget " + widgetId + " using " + method);
+      checkToolbar(widgetId, method);
+      checkPanel(widgetId, method);
+      checkPalette(widgetId, method);
+      checkPanel(widgetId, method);
+      checkToolbar(widgetId, method);
+      checkPalette(widgetId, method);
     }
   }
-];
+  yield promiseWindowClosed(otherWin);
+  otherWin = null;
+  yield endCustomizing();
+});
 
-function asyncCleanup() {
-  Services.prefs.clearUserPref("browser.uiCustomization.skipSourceNodeCheck");
+add_task(function asyncCleanup() {
   yield resetCustomization();
-}
-
-function test() {
-  Services.prefs.setBoolPref("browser.uiCustomization.skipSourceNodeCheck", true);
-  waitForExplicitFinish();
-  runTests(gTests, asyncCleanup);
-}
-
+});

@@ -1,3 +1,7 @@
+/* -*- indent-tabs-mode: nil; js-indent-level: 2; fill-column: 80 -*- */
+
+"use strict";
+
 /*
  * Copyright 2013 Mozilla Foundation and contributors
  * Licensed under the New BSD license. See LICENSE.md or:
@@ -6,6 +10,7 @@
 var prettyFast = this.prettyFast || require("./pretty-fast");
 
 var testCases = [
+
   {
     name: "Simple function",
     input: "function foo() { bar(); }",
@@ -179,7 +184,7 @@ var testCases = [
   {
     name: "String with quote",
     input: "var foo = \"'\";\n",
-    output: "var foo = '\'';\n"
+    output: "var foo = '\\'';\n"
   },
 
   {
@@ -218,13 +223,16 @@ var testCases = [
 
   {
     name: "Continue/break statements",
-    input: "while(1){if(x){continue}if(y){break}}",
+    input: "while(1){if(x){continue}if(y){break}if(z){break foo}}",
     output: "while (1) {\n" +
             "  if (x) {\n" +
             "    continue\n" +
             "  }\n" +
             "  if (y) {\n" +
             "    break\n" +
+            "  }\n" +
+            "  if (z) {\n" +
+            "    break foo\n" +
             "  }\n" +
             "}\n"
   },
@@ -342,11 +350,11 @@ var testCases = [
     name: "Switch statements",
     input: "switch(x){case a:foo();break;default:bar()}",
     output: "switch (x) {\n" +
-            "case a:\n" +
-            "  foo();\n" +
-            "  break;\n" +
-            "default:\n" +
-            "  bar()\n" +
+            "  case a:\n" +
+            "    foo();\n" +
+            "    break;\n" +
+            "  default:\n" +
+            "    bar()\n" +
             "}\n"
   },
 
@@ -428,6 +436,93 @@ var testCases = [
     output: "new F()\n"
   },
 
+  {
+    name: "Getter and setter literals",
+    input: "var obj={get foo(){return this._foo},set foo(v){this._foo=v}}",
+    output: "var obj = {\n" +
+            "  get foo() {\n" +
+            "    return this._foo\n" +
+            "  },\n" +
+            "  set foo(v) {\n" +
+            "    this._foo = v\n" +
+            "  }\n" +
+            "}\n"
+  },
+
+  {
+    name: "Escaping backslashes in strings",
+    input: "'\\\\'\n",
+    output: "'\\\\'\n"
+  },
+
+  {
+    name: "Escaping carriage return in strings",
+    input: "'\\r'\n",
+    output: "'\\r'\n"
+  },
+
+  {
+    name: "Escaping tab in strings",
+    input: "'\\t'\n",
+    output: "'\\t'\n"
+  },
+
+  {
+    name: "Escaping vertical tab in strings",
+    input: "'\\v'\n",
+    output: "'\\v'\n"
+  },
+
+  {
+    name: "Escaping form feed in strings",
+    input: "'\\f'\n",
+    output: "'\\f'\n"
+  },
+
+  {
+    name: "Escaping null character in strings",
+    input: "'\\0'\n",
+    output: "'\\0'\n"
+  },
+
+  {
+    name: "Bug 977082 - space between grouping operator and dot notation",
+    input: "JSON.stringify(3).length;\n" +
+           "([1,2,3]).length;\n" +
+           "(new Date()).toLocaleString();\n",
+    output: "JSON.stringify(3).length;\n" +
+            "([1,\n" +
+            "2,\n" +
+            "3]).length;\n" +
+            "(new Date()).toLocaleString();\n"
+  },
+
+  {
+    name: "Bug 975477 don't move end of line comments to next line",
+    input: "switch (request.action) {\n" +
+           "  case 'show': //$NON-NLS-0$\n" +
+           "    if (localStorage.hideicon !== 'true') { //$NON-NLS-0$\n" +
+           "      chrome.pageAction.show(sender.tab.id);\n" +
+           "    }\n" +
+           "    break;\n" +
+           "  default:\n" +
+           "    console.warn('unknown request'); //$NON-NLS-0$\n" +
+           "    // don't respond if you don't understand the message.\n" +
+           "    return;\n" +
+           "}\n",
+    output: "switch (request.action) {\n" +
+            "  case 'show': //$NON-NLS-0$\n" +
+            "    if (localStorage.hideicon !== 'true') { //$NON-NLS-0$\n" +
+            "      chrome.pageAction.show(sender.tab.id);\n" +
+            "    }\n" +
+            "    break;\n" +
+            "  default:\n" +
+            "    console.warn('unknown request'); //$NON-NLS-0$\n" +
+            "    // don't respond if you don't understand the message.\n" +
+            "    return;\n" +
+            "}\n"
+  }
+
 ];
 
 var sourceMap = this.sourceMap || require("source-map");
@@ -465,6 +560,7 @@ function run_test() {
 // Only run the tests if this is node and we are running this file
 // directly. (Firefox's test runner will import this test file, and then call
 // run_test itself.)
-if (typeof exports == "object") {
+if (typeof require == "function" && typeof module == "object"
+    && require.main === module) {
   run_test();
 }

@@ -4,11 +4,10 @@
 
 #include "base/basictypes.h"
 #include "GetUserMediaRequest.h"
-#include "mozilla/dom/MediaStreamTrackBinding.h"
+#include "mozilla/dom/MediaStreamBinding.h"
 #include "mozilla/dom/GetUserMediaRequestBinding.h"
 #include "nsIScriptGlobalObject.h"
 #include "nsPIDOMWindow.h"
-#include "nsCxPusher.h"
 
 namespace mozilla {
 namespace dom {
@@ -16,16 +15,17 @@ namespace dom {
 GetUserMediaRequest::GetUserMediaRequest(
     nsPIDOMWindow* aInnerWindow,
     const nsAString& aCallID,
-    const MediaStreamConstraintsInternal& aConstraints)
-  : mInnerWindow(aInnerWindow)
-  , mWindowID(aInnerWindow->GetOuterWindow()->WindowID())
+    const MediaStreamConstraints& aConstraints,
+    bool aIsSecure)
+  : mInnerWindowID(aInnerWindow->WindowID())
+  , mOuterWindowID(aInnerWindow->GetOuterWindow()->WindowID())
   , mCallID(aCallID)
-  , mConstraints(aConstraints)
+  , mConstraints(new MediaStreamConstraints(aConstraints))
+  , mIsSecure(aIsSecure)
 {
-  SetIsDOMBinding();
 }
 
-NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE_1(GetUserMediaRequest, mInnerWindow)
+NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE_0(GetUserMediaRequest)
 NS_IMPL_CYCLE_COLLECTING_ADDREF(GetUserMediaRequest)
 NS_IMPL_CYCLE_COLLECTING_RELEASE(GetUserMediaRequest)
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(GetUserMediaRequest)
@@ -34,14 +34,14 @@ NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(GetUserMediaRequest)
 NS_INTERFACE_MAP_END
 
 JSObject*
-GetUserMediaRequest::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope)
+GetUserMediaRequest::WrapObject(JSContext* aCx)
 {
-  return GetUserMediaRequestBinding::Wrap(aCx, aScope, this);
+  return GetUserMediaRequestBinding::Wrap(aCx, this);
 }
 
 nsISupports* GetUserMediaRequest::GetParentObject()
 {
-  return mInnerWindow;
+  return nullptr;
 }
 
 void GetUserMediaRequest::GetCallID(nsString& retval)
@@ -51,13 +51,23 @@ void GetUserMediaRequest::GetCallID(nsString& retval)
 
 uint64_t GetUserMediaRequest::WindowID()
 {
-  return mWindowID;
+  return mOuterWindowID;
+}
+
+uint64_t GetUserMediaRequest::InnerWindowID()
+{
+  return mInnerWindowID;
+}
+
+bool GetUserMediaRequest::IsSecure()
+{
+  return mIsSecure;
 }
 
 void
-GetUserMediaRequest::GetConstraints(MediaStreamConstraintsInternal &result)
+GetUserMediaRequest::GetConstraints(MediaStreamConstraints &result)
 {
-  result = mConstraints;
+  result = *mConstraints;
 }
 
 } // namespace dom

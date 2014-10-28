@@ -4,10 +4,6 @@
 
 function run_test() {
   // we are testing worker startup specifically
-  Services.prefs.setBoolPref("social.allowMultipleWorkers", true);
-  do_register_cleanup(function() {
-    Services.prefs.clearUserPref("social.allowMultipleWorkers");
-  });
   do_test_pending();
   add_test(testStartupEnabled);
   add_test(testDisableAfterStartup);
@@ -17,18 +13,20 @@ function run_test() {
 function testStartupEnabled() {
   // wait on startup before continuing
   do_check_eq(Social.providers.length, 2, "two social providers enabled");
-  do_check_true(Social.providers[0].enabled, "provider is enabled");
-  do_check_true(Social.providers[1].enabled, "provider is enabled");
+  do_check_true(Social.providers[0].enabled, "provider 0 is enabled");
+  do_check_true(Social.providers[1].enabled, "provider 1 is enabled");
   run_next_test();
 }
 
 function testDisableAfterStartup() {
-  do_wait_observer("social:provider-set", function() {
-    do_check_eq(Social.enabled, false, "Social is disabled");
-    do_check_false(Social.providers[0].enabled, "provider is enabled");
-    do_check_false(Social.providers[1].enabled, "provider is enabled");
-    do_test_finished();
-    run_next_test();
+  let SocialService = Cu.import("resource://gre/modules/SocialService.jsm", {}).SocialService;
+  SocialService.disableProvider(Social.providers[0].origin, function() {
+    do_wait_observer("social:providers-changed", function() {
+      do_check_eq(Social.enabled, false, "Social is disabled");
+      do_check_eq(Social.providers.length, 0, "no social providers available");
+      do_test_finished();
+      run_next_test();
+    });
+    SocialService.disableProvider(Social.providers[0].origin)
   });
-  Social.enabled = false;
 }

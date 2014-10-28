@@ -36,11 +36,10 @@
 #include "prclist.h"
 #include "nsThreadUtils.h"
 #include "ScrollbarStyles.h"
+#include "nsIMessageManager.h"
+#include "mozilla/RestyleLogging.h"
 
-#ifdef IBMBIDI
 class nsBidiPresUtils;
-#endif // IBMBIDI
-
 class nsAString;
 class nsIPrintSettings;
 class nsDocShell;
@@ -53,25 +52,28 @@ class nsIFrame;
 class nsFrameManager;
 class nsILinkHandler;
 class nsIAtom;
-class nsEventStateManager;
 class nsICSSPseudoComparator;
 struct nsStyleBackground;
 struct nsStyleBorder;
 class nsIRunnable;
 class gfxUserFontSet;
 class gfxTextPerfMetrics;
-class nsUserFontSet;
 struct nsFontFaceRuleContainer;
-class nsObjectFrame;
+class nsPluginFrame;
 class nsTransitionManager;
 class nsAnimationManager;
-class nsIDOMMediaQueryList;
 class nsRefreshDriver;
 class nsIWidget;
 class nsDeviceContext;
 
 namespace mozilla {
+class EventStateManager;
 class RestyleManager;
+class CounterStyleManager;
+namespace dom {
+class FontFaceSet;
+class MediaQueryList;
+}
 namespace layers {
 class ContainerLayer;
 }
@@ -136,6 +138,7 @@ class nsRootPresContext;
 class nsPresContext : public nsIObserver {
 public:
   typedef mozilla::FramePropertyTable FramePropertyTable;
+  typedef mozilla::ScrollbarStyles ScrollbarStyles;
 
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
   NS_DECL_NSIOBSERVER
@@ -149,27 +152,21 @@ public:
     eContext_PageLayout    // paginated & editable.
   };
 
-  // Policies for rebuilding style data.
-  enum StyleRebuildType {
-    eRebuildStyleIfNeeded,
-    eAlwaysRebuildStyle
-  };
-
-  nsPresContext(nsIDocument* aDocument, nsPresContextType aType) NS_HIDDEN;
+  nsPresContext(nsIDocument* aDocument, nsPresContextType aType);
 
   /**
    * Initialize the presentation context from a particular device.
    */
-  NS_HIDDEN_(nsresult) Init(nsDeviceContext* aDeviceContext);
+  nsresult Init(nsDeviceContext* aDeviceContext);
 
   /**
    * Set the presentation shell that this context is bound to.
    * A presentation context may only be bound to a single shell.
    */
-  NS_HIDDEN_(void) SetShell(nsIPresShell* aShell);
+  void SetShell(nsIPresShell* aShell);
 
 
-  NS_HIDDEN_(nsPresContextType) Type() const { return mType; }
+  nsPresContextType Type() const { return mType; }
 
   /**
    * Get the PresentationShell that this context is bound to.
@@ -242,34 +239,60 @@ public:
   nsRefreshDriver* RefreshDriver() { return mRefreshDriver; }
 
   mozilla::RestyleManager* RestyleManager() { return mRestyleManager; }
+
+  mozilla::CounterStyleManager* CounterStyleManager() {
+    return mCounterStyleManager;
+  }
 #endif
 
   /**
    * Rebuilds all style data by throwing out the old rule tree and
    * building a new one, and additionally applying aExtraHint (which
    * must not contain nsChangeHint_ReconstructFrame) to the root frame.
-   * Also rebuild the user font set.
+   * For aRestyleHint, see RestyleManager::RebuildAllStyleData.
+   * Also rebuild the user font set and counter style manager.
    */
-  void RebuildAllStyleData(nsChangeHint aExtraHint);
+  void RebuildAllStyleData(nsChangeHint aExtraHint, nsRestyleHint aRestyleHint);
   /**
    * Just like RebuildAllStyleData, except (1) asynchronous and (2) it
    * doesn't rebuild the user font set.
    */
-  void PostRebuildAllStyleDataEvent(nsChangeHint aExtraHint);
+  void PostRebuildAllStyleDataEvent(nsChangeHint aExtraHint,
+                                    nsRestyleHint aRestyleHint);
 
-  void MediaFeatureValuesChanged(StyleRebuildType aShouldRebuild,
+  /**
+   * Handle changes in the values of media features (used in media
+   * queries).
+   *
+   * There are three sensible values to use for aRestyleHint:
+   *  * nsRestyleHint(0) to rebuild style data, with rerunning of
+   *    selector matching, only if media features have changed
+   *  * eRestyle_ForceDescendants to force rebuilding of style data (but
+   *    still only rerun selector matching if media query results have
+   *    changed).  (RebuildAllStyleData always adds
+   *    eRestyle_ForceDescendants internally, so here we're only using
+   *    it to distinguish from nsRestyleHint(0) whether we need to call
+   *    RebuildAllStyleData at all.)
+   *  * eRestyle_Subtree to force rebuilding of style data with
+   *    rerunning of selector matching
+   *
+   * For aChangeHint, see RestyleManager::RebuildAllStyleData.  (Passing
+   * a nonzero aChangeHint forces rebuilding style data even if
+   * nsRestyleHint(0) is passed.)
+   */
+  void MediaFeatureValuesChanged(nsRestyleHint aRestyleHint,
                                  nsChangeHint aChangeHint = nsChangeHint(0));
   void PostMediaFeatureValuesChangedEvent();
-  NS_HIDDEN_(void) HandleMediaFeatureValuesChangedEvent();
+  void HandleMediaFeatureValuesChangedEvent();
   void FlushPendingMediaFeatureValuesChanged() {
     if (mPendingMediaFeatureValuesChanged)
-      MediaFeatureValuesChanged(eRebuildStyleIfNeeded);
+      MediaFeatureValuesChanged(nsRestyleHint(0));
   }
 
   /**
    * Support for window.matchMedia()
    */
-  already_AddRefed<nsIDOMMediaQueryList>
+  already_AddRefed<mozilla::dom::MediaQueryList>
     MatchMedia(const nsAString& aMediaQueryList);
 
   /**
@@ -281,14 +304,14 @@ public:
   /**
    * Notify the context that the document's compatibility mode has changed
    */
-  NS_HIDDEN_(void) CompatibilityModeChanged();
+  void CompatibilityModeChanged();
 
   /**
    * Access the image animation mode for this context
    */
   uint16_t     ImageAnimationMode() const { return mImageAnimationMode; }
-  virtual NS_HIDDEN_(void) SetImageAnimationModeExternal(uint16_t aMode);
-  NS_HIDDEN_(void) SetImageAnimationModeInternal(uint16_t aMode);
+  virtual void SetImageAnimationModeExternal(uint16_t aMode);
+  void SetImageAnimationModeInternal(uint16_t aMode);
 #ifdef MOZILLA_INTERNAL_API
   void SetImageAnimationMode(uint16_t aMode)
   { SetImageAnimationModeInternal(aMode); }
@@ -297,7 +320,7 @@ public:
   { SetImageAnimationModeExternal(aMode); }
 #endif
 
-  /** 
+  /**
    * Get medium of presentation
    */
   nsIAtom* Medium() {
@@ -336,7 +359,7 @@ public:
    * If aLanguage is nullptr, the document's language is used.
    *
    * This object is read-only, you must copy the font to modify it.
-   * 
+   *
    * When aFontID is kPresContext_DefaultVariableFontID or
    * kPresContext_DefaultFixedFontID (which equals
    * kGenericFont_moz_fixed, which is used for the -moz-fixed generic),
@@ -350,7 +373,7 @@ public:
    * the user's preference for font size for that generic and the
    * given language.
    */
-  NS_HIDDEN_(const nsFont*) GetDefaultFont(uint8_t aFontID,
+  const nsFont* GetDefaultFont(uint8_t aFontID,
                                            nsIAtom *aLanguage) const;
 
   /** Get a cached boolean pref, by its type */
@@ -391,7 +414,7 @@ public:
     return false;
   }
 
-  /** 
+  /**
    * Get the default colors
    */
   const nscolor DefaultColor() const { return mDefaultColor; }
@@ -413,7 +436,7 @@ public:
   bool GetFocusRingOnAnything() const { return mFocusRingOnAnything; }
   uint8_t GetFocusRingStyle() const { return mFocusRingStyle; }
 
-  NS_HIDDEN_(void) SetContainer(nsIDocShell* aContainer);
+  void SetContainer(nsIDocShell* aContainer);
 
   virtual nsISupports* GetContainerWeakExternal() const;
   nsISupports* GetContainerWeakInternal() const;
@@ -430,6 +453,13 @@ public:
   // XXX this are going to be replaced with set/get container
   void SetLinkHandler(nsILinkHandler* aHandler) { mLinkHandler = aHandler; }
   nsILinkHandler* GetLinkHandler() { return mLinkHandler; }
+
+  /**
+   * Detach this pres context - i.e. cancel relevant timers,
+   * SetLinkHandler(null), SetContainer(null) etc.
+   * Only to be used by the DocumentViewer.
+   */
+  virtual void Detach();
 
   /**
    * Get the visible area associated with this presentation context.
@@ -459,12 +489,12 @@ public:
    * context.
    */
   bool IsPaginated() const { return mPaginated; }
-  
+
   /**
    * Sets whether the presentation context can scroll for a paginated
    * context.
    */
-  NS_HIDDEN_(void) SetPaginatedScrolling(bool aResult);
+  void SetPaginatedScrolling(bool aResult);
 
   /**
    * Return true if this presentation context can scroll for paginated
@@ -508,7 +538,7 @@ public:
   void SetPrintPreviewScale(float aScale) { mPPScale = aScale; }
 
   nsDeviceContext* DeviceContext() { return mDeviceContext; }
-  nsEventStateManager* EventStateManager() { return mEventManager; }
+  mozilla::EventStateManager* EventStateManager() { return mEventManager; }
   nsIAtom* GetLanguageFromCharset() { return mLanguage; }
 
   float TextZoom() { return mTextZoom; }
@@ -520,28 +550,44 @@ public:
     if (HasCachedStyleData()) {
       // Media queries could have changed, since we changed the meaning
       // of 'em' units in them.
-      MediaFeatureValuesChanged(eAlwaysRebuildStyle, NS_STYLE_HINT_REFLOW);
+      MediaFeatureValuesChanged(eRestyle_ForceDescendants,
+                                NS_STYLE_HINT_REFLOW);
     }
   }
 
   /**
    * Get the minimum font size for the specified language. If aLanguage
-   * is nullptr, then the document's language is used.
+   * is nullptr, then the document's language is used.  This combines
+   * the language-specific global preference with the per-presentation
+   * base minimum font size.
    */
   int32_t MinFontSize(nsIAtom *aLanguage) const {
     const LangGroupFontPrefs *prefs = GetFontPrefsForLang(aLanguage);
-    return std::max(mMinFontSize, prefs->mMinimumFontSize);
+    return std::max(mBaseMinFontSize, prefs->mMinimumFontSize);
   }
 
-  void SetMinFontSize(int32_t aMinFontSize) {
-    if (aMinFontSize == mMinFontSize)
+  /**
+   * Get the per-presentation base minimum font size.  This size is
+   * independent of the language-specific global preference.
+   */
+  int32_t BaseMinFontSize() const {
+    return mBaseMinFontSize;
+  }
+
+  /**
+   * Set the per-presentation base minimum font size.  This size is
+   * independent of the language-specific global preference.
+   */
+  void SetBaseMinFontSize(int32_t aMinFontSize) {
+    if (aMinFontSize == mBaseMinFontSize)
       return;
 
-    mMinFontSize = aMinFontSize;
+    mBaseMinFontSize = aMinFontSize;
     if (HasCachedStyleData()) {
       // Media queries could have changed, since we changed the meaning
       // of 'em' units in them.
-      MediaFeatureValuesChanged(eAlwaysRebuildStyle, NS_STYLE_HINT_REFLOW);
+      MediaFeatureValuesChanged(eRestyle_ForceDescendants,
+                                NS_STYLE_HINT_REFLOW);
     }
   }
 
@@ -634,14 +680,13 @@ public:
   nscoord RoundAppUnitsToNearestDevPixels(nscoord aAppUnits) const
   { return DevPixelsToAppUnits(AppUnitsToDevPixels(aAppUnits)); }
 
-  void SetViewportOverflowOverride(uint8_t aX, uint8_t aY)
+  void SetViewportScrollbarStylesOverride(const ScrollbarStyles& aScrollbarStyle)
   {
-    mViewportStyleOverflow.mHorizontal = aX;
-    mViewportStyleOverflow.mVertical = aY;
+    mViewportStyleScrollbar = aScrollbarStyle;
   }
-  mozilla::ScrollbarStyles GetViewportOverflowOverride()
+  ScrollbarStyles GetViewportScrollbarStylesOverride()
   {
-    return mViewportStyleOverflow;
+    return mViewportStyleScrollbar;
   }
 
   /**
@@ -658,16 +703,13 @@ public:
   {
     mDrawColorBackground = aCanDraw;
   }
-  
+
   /**
    * Getter and setter for OMTA time counters
    */
-  bool ThrottledStyleIsUpToDate() const;
-  void TickLastUpdateThrottledStyle();
   bool StyleUpdateForAllAnimationsIsUpToDate();
   void TickLastStyleUpdateForAllAnimations();
 
-#ifdef IBMBIDI
   /**
    *  Check if bidi enabled (set depending on the presence of RTL
    *  characters or when default directionality is RTL).
@@ -688,14 +730,14 @@ public:
    *
    *  @lina 07/12/2000
    */
-  NS_HIDDEN_(void) SetBidiEnabled() const;
+  void SetBidiEnabled() const;
 
   /**
    *  Set visual or implicit mode into the pres context.
    *
    *  Visual directionality is a presentation method that displays text
    *  as if it were a uni-directional, according to the primary display
-   *  direction only. 
+   *  direction only.
    *
    *  Implicit directionality is a presentation method in which the
    *  direction is determined by the Bidi algorithm according to the
@@ -720,8 +762,8 @@ public:
 
   /**
    * Set the Bidi options for the presentation context
-   */  
-  NS_HIDDEN_(void) SetBidi(uint32_t aBidiOptions,
+   */
+  void SetBidi(uint32_t aBidiOptions,
                            bool aForceRestyle = false);
 
   /**
@@ -729,8 +771,7 @@ public:
    * Not inline so consumers of nsPresContext are not forced to
    * include nsIDocument.
    */
-  NS_HIDDEN_(uint32_t) GetBidi() const;
-#endif // IBMBIDI
+  uint32_t GetBidi() const;
 
   /**
    * Render only Selection
@@ -742,12 +783,12 @@ public:
 
   bool IsRenderingOnlySelection() const { return mIsRenderingOnlySelection; }
 
-  NS_HIDDEN_(bool) IsTopLevelWindowInactive();
+  bool IsTopLevelWindowInactive();
 
   /*
    * Obtain a native them for rendering our widgets (both form controls and html)
    */
-  NS_HIDDEN_(nsITheme*) GetTheme();
+  nsITheme* GetTheme();
 
   /*
    * Notify the pres context that the theme has changed.  An internal switch
@@ -755,22 +796,28 @@ public:
    * Otherwise, the OS is telling us that the native theme for the platform
    * has changed.
    */
-  NS_HIDDEN_(void) ThemeChanged();
+  void ThemeChanged();
 
   /*
    * Notify the pres context that the resolution of the user interface has
    * changed. This happens if a window is moved between HiDPI and non-HiDPI
    * displays, so that the ratio of points to device pixels changes.
    */
-  NS_HIDDEN_(void) UIResolutionChanged();
+  void UIResolutionChanged();
+
+  /**
+   * Recursively notify all remote leaf descendants of a given message manager
+   * that the resolution of the user interface has changed.
+   */
+  void NotifyUIResolutionChanged(nsIMessageBroadcaster* aManager);
 
   /*
    * Notify the pres context that a system color has changed
    */
-  NS_HIDDEN_(void) SysColorChanged();
+  void SysColorChanged();
 
   /** Printing methods below should only be used for Medium() == print **/
-  NS_HIDDEN_(void) SetPrintSettings(nsIPrintSettings *aPrintSettings);
+  void SetPrintSettings(nsIPrintSettings *aPrintSettings);
 
   nsIPrintSettings* GetPrintSettings() { return mPrintSettings; }
 
@@ -781,10 +828,10 @@ public:
      docshell if it's the most recent prescontext for the docshell.  Returns
      whether the prescontext is now being shown.
   */
-  NS_HIDDEN_(bool) EnsureVisible();
-  
+  bool EnsureVisible();
+
 #ifdef MOZ_REFLOW_PERF
-  NS_HIDDEN_(void) CountReflows(const char * aName,
+  void CountReflows(const char * aName,
                                 nsIFrame * aFrame);
 #endif
 
@@ -802,27 +849,16 @@ public:
                               mType == eContext_PrintPreview); }
 
   // Is this presentation in a chrome docshell?
-  bool IsChrome() const
-  {
-    return mIsChromeIsCached ? mIsChrome : IsChromeSlow();
-  }
-
-  virtual void InvalidateIsChromeCacheExternal();
-  void InvalidateIsChromeCacheInternal() { mIsChromeIsCached = false; }
-#ifdef MOZILLA_INTERNAL_API
-  void InvalidateIsChromeCache()
-  { InvalidateIsChromeCacheInternal(); }
-#else
-  void InvalidateIsChromeCache()
-  { InvalidateIsChromeCacheExternal(); }
-#endif
+  bool IsChrome() const { return mIsChrome; }
+  bool IsChromeOriginImage() const { return mIsChromeOriginImage; }
+  void UpdateIsChrome();
 
   // Public API for native theme code to get style internals.
   virtual bool HasAuthorSpecifiedRules(nsIFrame *aFrame, uint32_t ruleTypeMask) const;
 
   // Is it OK to let the page specify colors and backgrounds?
   bool UseDocumentColors() const {
-    return GetCachedBoolPref(kPresContext_UseDocumentColors) || IsChrome();
+    return GetCachedBoolPref(kPresContext_UseDocumentColors) || IsChrome() || IsChromeOriginImage();
   }
 
   // Explicitly enable and disable paint flashing.
@@ -836,9 +872,9 @@ public:
   bool GetPaintFlashing() const;
 
   bool             SupressingResizeReflow() const { return mSupressResizeReflow; }
-  
-  virtual NS_HIDDEN_(gfxUserFontSet*) GetUserFontSetExternal();
-  NS_HIDDEN_(gfxUserFontSet*) GetUserFontSetInternal();
+
+  virtual gfxUserFontSet* GetUserFontSetExternal();
+  gfxUserFontSet* GetUserFontSetInternal();
 #ifdef MOZILLA_INTERNAL_API
   gfxUserFontSet* GetUserFontSet() { return GetUserFontSetInternal(); }
 #else
@@ -852,6 +888,11 @@ public:
   // font set changes (e.g., because a new font loads, or because the
   // user font set is changed and fonts become unavailable).
   void UserFontSetUpdated();
+
+  mozilla::dom::FontFaceSet* Fonts();
+
+  void FlushCounterStyles();
+  void RebuildCounterStyles(); // asynchronously
 
   // Ensure that it is safe to hand out CSS rules outside the layout
   // engine by ensuring that all CSS style sheets have unique inners
@@ -879,25 +920,16 @@ public:
     mAllInvalidated = false;
   }
 
-  bool IsProcessingRestyles() const {
-    return mProcessingRestyles;
-  }
+  /**
+   * Returns whether there are any pending restyles or reflows.
+   */
+  bool HasPendingRestyleOrReflow();
 
-  void SetProcessingRestyles(bool aProcessing) {
-    NS_ASSERTION(aProcessing != bool(mProcessingRestyles),
-                 "should never nest");
-    mProcessingRestyles = aProcessing;
-  }
-
-  bool IsProcessingAnimationStyleChange() const {
-    return mProcessingAnimationStyleChange;
-  }
-
-  void SetProcessingAnimationStyleChange(bool aProcessing) {
-    NS_ASSERTION(aProcessing != bool(mProcessingAnimationStyleChange),
-                 "should never nest");
-    mProcessingAnimationStyleChange = aProcessing;
-  }
+  /**
+   * Informs the document's FontFaceSet that the refresh driver ticked,
+   * flushing style and layout.
+   */
+  void NotifyFontFaceSetOnRefresh();
 
   /**
    * Notify the prescontext that the presshell is about to reflow a reflow root.
@@ -917,7 +949,7 @@ public:
   friend class InterruptPreventer;
   class MOZ_STACK_CLASS InterruptPreventer {
   public:
-    InterruptPreventer(nsPresContext* aCtx) :
+    explicit InterruptPreventer(nsPresContext* aCtx) :
       mCtx(aCtx),
       mInterruptsEnabled(aCtx->mInterruptsEnabled),
       mHasPendingInterrupt(aCtx->mHasPendingInterrupt)
@@ -935,7 +967,7 @@ public:
     bool mInterruptsEnabled;
     bool mHasPendingInterrupt;
   };
-    
+
   /**
    * Check for interrupts. This may return true if a pending event is
    * detected. Once it has returned true, it will keep returning true
@@ -1009,27 +1041,35 @@ public:
 
   bool IsDeviceSizePageSize();
 
+  bool HasWarnedAboutPositionedTableParts() const {
+    return mHasWarnedAboutPositionedTableParts;
+  }
+
+  void SetHasWarnedAboutPositionedTableParts() {
+    mHasWarnedAboutPositionedTableParts = true;
+  }
+
 protected:
   friend class nsRunnableMethod<nsPresContext>;
-  NS_HIDDEN_(void) ThemeChangedInternal();
-  NS_HIDDEN_(void) SysColorChangedInternal();
-  NS_HIDDEN_(void) UIResolutionChangedInternal();
+  void ThemeChangedInternal();
+  void SysColorChangedInternal();
+  void UIResolutionChangedInternal();
 
-  static NS_HIDDEN_(bool)
+  static bool
   UIResolutionChangedSubdocumentCallback(nsIDocument* aDocument, void* aData);
 
-  NS_HIDDEN_(void) SetImgAnimations(nsIContent *aParent, uint16_t aMode);
-  NS_HIDDEN_(void) SetSMILAnimations(nsIDocument *aDoc, uint16_t aNewMode,
+  void SetImgAnimations(nsIContent *aParent, uint16_t aMode);
+  void SetSMILAnimations(nsIDocument *aDoc, uint16_t aNewMode,
                                      uint16_t aOldMode);
-  NS_HIDDEN_(void) GetDocumentColorPreferences();
+  void GetDocumentColorPreferences();
 
-  NS_HIDDEN_(void) PreferenceChanged(const char* aPrefName);
-  static NS_HIDDEN_(void) PrefChangedCallback(const char*, void*);
+  void PreferenceChanged(const char* aPrefName);
+  static void PrefChangedCallback(const char*, void*);
 
-  NS_HIDDEN_(void) UpdateAfterPreferencesChanged();
-  static NS_HIDDEN_(void) PrefChangedUpdateTimerCallback(nsITimer *aTimer, void *aClosure);
+  void UpdateAfterPreferencesChanged();
+  static void PrefChangedUpdateTimerCallback(nsITimer *aTimer, void *aClosure);
 
-  NS_HIDDEN_(void) GetUserPreferences();
+  void GetUserPreferences();
 
   // Allow nsAutoPtr<LangGroupFontPrefs> dtor to access this protected struct's
   // dtor:
@@ -1040,24 +1080,27 @@ protected:
     LangGroupFontPrefs()
       : mLangGroup(nullptr)
       , mMinimumFontSize(0)
-      , mDefaultVariableFont("serif", NS_FONT_STYLE_NORMAL, NS_FONT_VARIANT_NORMAL,
-                             NS_FONT_WEIGHT_NORMAL, NS_FONT_STRETCH_NORMAL, 0, 0)
-      , mDefaultFixedFont("monospace", NS_FONT_STYLE_NORMAL,
-                          NS_FONT_VARIANT_NORMAL, NS_FONT_WEIGHT_NORMAL,
+      , mDefaultVariableFont(mozilla::eFamily_serif, NS_FONT_STYLE_NORMAL,
+                             NS_FONT_WEIGHT_NORMAL,
+                             NS_FONT_STRETCH_NORMAL, 0, 0)
+      , mDefaultFixedFont(mozilla::eFamily_monospace, NS_FONT_STYLE_NORMAL,
+                          NS_FONT_WEIGHT_NORMAL,
                           NS_FONT_STRETCH_NORMAL, 0, 0)
-      , mDefaultSerifFont("serif", NS_FONT_STYLE_NORMAL, NS_FONT_VARIANT_NORMAL,
-                        NS_FONT_WEIGHT_NORMAL, NS_FONT_STRETCH_NORMAL, 0, 0)
-      , mDefaultSansSerifFont("sans-serif", NS_FONT_STYLE_NORMAL,
-                              NS_FONT_VARIANT_NORMAL, NS_FONT_WEIGHT_NORMAL,
+      , mDefaultSerifFont(mozilla::eFamily_serif, NS_FONT_STYLE_NORMAL,
+                          NS_FONT_WEIGHT_NORMAL,
+                          NS_FONT_STRETCH_NORMAL, 0, 0)
+      , mDefaultSansSerifFont(mozilla::eFamily_sans_serif,
+                              NS_FONT_STYLE_NORMAL,
+                              NS_FONT_WEIGHT_NORMAL,
                               NS_FONT_STRETCH_NORMAL, 0, 0)
-      , mDefaultMonospaceFont("monospace", NS_FONT_STYLE_NORMAL,
-                              NS_FONT_VARIANT_NORMAL, NS_FONT_WEIGHT_NORMAL,
+      , mDefaultMonospaceFont(mozilla::eFamily_monospace, NS_FONT_STYLE_NORMAL,
+                              NS_FONT_WEIGHT_NORMAL,
                               NS_FONT_STRETCH_NORMAL, 0, 0)
-      , mDefaultCursiveFont("cursive", NS_FONT_STYLE_NORMAL,
-                            NS_FONT_VARIANT_NORMAL, NS_FONT_WEIGHT_NORMAL,
+      , mDefaultCursiveFont(mozilla::eFamily_cursive, NS_FONT_STYLE_NORMAL,
+                            NS_FONT_WEIGHT_NORMAL,
                             NS_FONT_STRETCH_NORMAL, 0, 0)
-      , mDefaultFantasyFont("fantasy", NS_FONT_STYLE_NORMAL,
-                            NS_FONT_VARIANT_NORMAL, NS_FONT_WEIGHT_NORMAL,
+      , mDefaultFantasyFont(mozilla::eFamily_fantasy, NS_FONT_STYLE_NORMAL,
+                            NS_FONT_WEIGHT_NORMAL,
                             NS_FONT_STRETCH_NORMAL, 0, 0)
     {}
 
@@ -1103,7 +1146,7 @@ protected:
     mLangGroupFontPrefs.mLangGroup = nullptr;
   }
 
-  NS_HIDDEN_(void) UpdateCharSet(const nsCString& aCharSet);
+  void UpdateCharSet(const nsCString& aCharSet);
 
 public:
   void DoChangeCharSet(const nsCString& aCharSet);
@@ -1114,19 +1157,32 @@ public:
   bool MayHavePaintEventListener();
 
   /**
-   * Checks for MozAfterPaint listeners on the document and 
+   * Checks for MozAfterPaint listeners on the document and
    * any subdocuments, except for subdocuments that are non-top-level
    * content documents.
    */
   bool MayHavePaintEventListenerInSubDocument();
 
+#ifdef RESTYLE_LOGGING
+  // Controls for whether debug information about restyling in this
+  // document should be output.
+  bool RestyleLoggingEnabled() const { return mRestyleLoggingEnabled; }
+  void StartRestyleLogging() { mRestyleLoggingEnabled = true; }
+  void StopRestyleLogging() { mRestyleLoggingEnabled = false; }
+#endif
+
 protected:
-  void InvalidateThebesLayers();
+  void InvalidatePaintedLayers();
   void AppUnitsPerDevPixelChanged();
 
   void HandleRebuildUserFontSet() {
     mPostedFlushUserFontSet = false;
     FlushUserFontSet();
+  }
+
+  void HandleRebuildCounterStyles() {
+    mPostedFlushCounterStyles = false;
+    FlushCounterStyles();
   }
 
   bool HavePendingInputEvent();
@@ -1148,11 +1204,12 @@ protected:
                                             // Cannot reintroduce cycles
                                             // since there is no dependency
                                             // from gfx back to layout.
-  nsRefPtr<nsEventStateManager> mEventManager;
+  nsRefPtr<mozilla::EventStateManager> mEventManager;
   nsRefPtr<nsRefreshDriver> mRefreshDriver;
   nsRefPtr<nsTransitionManager> mTransitionManager;
   nsRefPtr<nsAnimationManager> mAnimationManager;
   nsRefPtr<mozilla::RestyleManager> mRestyleManager;
+  nsRefPtr<mozilla::CounterStyleManager> mCounterStyleManager;
   nsIAtom*              mMedium;        // initialized by subclass ctors;
                                         // weak pointer to static atom
   nsCOMPtr<nsIAtom> mMediaEmulated;
@@ -1180,7 +1237,8 @@ protected:
 
   PRCList               mDOMMediaQueryLists;
 
-  int32_t               mMinFontSize;   // Min font size, defaults to 0
+  // Base minimum font size, independent of the language-specific global preference. Defaults to 0
+  int32_t               mBaseMinFontSize;
   float                 mTextZoom;      // Text zoom, defaults to 1.0
   float                 mFullZoom;      // Page zoom, defaults to 1.0
 
@@ -1200,7 +1258,7 @@ protected:
   nsInvalidateRequestList mUndeliveredInvalidateRequestsBeforeLastPaint;
 
   // container for per-context fonts (downloadable, SVG, etc.)
-  nsUserFontSet*        mUserFontSet;
+  nsRefPtr<mozilla::dom::FontFaceSet> mFontFaceSet;
 
   // text performance metrics
   nsAutoPtr<gfxTextPerfMetrics>   mTextPerf;
@@ -1222,7 +1280,7 @@ protected:
 
   nscolor               mBodyTextColor;
 
-  mozilla::ScrollbarStyles mViewportStyleOverflow;
+  ScrollbarStyles       mViewportStyleScrollbar;
   uint8_t               mFocusRingWidth;
 
   bool mExistThrottledUpdates;
@@ -1238,8 +1296,6 @@ protected:
 
   mozilla::TimeStamp    mReflowStartTime;
 
-  // last time animations/transition styles were flushed to their primary frames
-  mozilla::TimeStamp    mLastUpdateThrottledStyle;
   // last time we did a full style flush
   mozilla::TimeStamp    mLastStyleUpdateForAllAnimations;
 
@@ -1283,12 +1339,17 @@ protected:
   // Has there been a change to the viewport's dimensions?
   unsigned              mPendingViewportChange : 1;
 
-  // Is the current mUserFontSet valid?
-  unsigned              mUserFontSetDirty : 1;
+  // Is the current mFontFaceSet valid?
+  unsigned              mFontFaceSetDirty : 1;
   // Has GetUserFontSet() been called?
   unsigned              mGetUserFontSetCalled : 1;
   // Do we currently have an event posted to call FlushUserFontSet?
   unsigned              mPostedFlushUserFontSet : 1;
+
+  // Is the current mCounterStyleManager valid?
+  unsigned              mCounterStylesDirty : 1;
+  // Do we currently have an event posted to call FlushCounterStyles?
+  unsigned              mPostedFlushCounterStyles: 1;
 
   // resize reflow is suppressed when the only change has been to zoom
   // the document rather than to change the document's dimensions
@@ -1296,21 +1357,22 @@ protected:
 
   unsigned              mIsVisual : 1;
 
-  unsigned              mProcessingRestyles : 1;
-  unsigned              mProcessingAnimationStyleChange : 1;
-
   unsigned              mFireAfterPaintEvents : 1;
 
-  // Cache whether we are chrome or not because it is expensive.  
-  // mIsChromeIsCached tells us if mIsChrome is valid or we need to get the
-  // value the slow way.
-  mutable unsigned      mIsChromeIsCached : 1;
-  mutable unsigned      mIsChrome : 1;
+  unsigned              mIsChrome : 1;
+  unsigned              mIsChromeOriginImage : 1;
 
   // Should we paint flash in this context? Do not use this variable directly.
   // Use GetPaintFlashing() method instead.
   mutable unsigned mPaintFlashing : 1;
   mutable unsigned mPaintFlashingInitialized : 1;
+
+  unsigned mHasWarnedAboutPositionedTableParts : 1;
+
+#ifdef RESTYLE_LOGGING
+  // Should we output debug information about restyling for this document?
+  bool                  mRestyleLoggingEnabled;
+#endif
 
 #ifdef DEBUG
   bool                  mInitialized;
@@ -1319,7 +1381,7 @@ protected:
 
 protected:
 
-  virtual ~nsPresContext() NS_HIDDEN;
+  virtual ~nsPresContext();
 
   // these are private, use the list in nsFont.h if you want a public list
   enum {
@@ -1349,10 +1411,11 @@ public:
 
 };
 
-class nsRootPresContext : public nsPresContext {
+class nsRootPresContext MOZ_FINAL : public nsPresContext {
 public:
-  nsRootPresContext(nsIDocument* aDocument, nsPresContextType aType) NS_HIDDEN;
+  nsRootPresContext(nsIDocument* aDocument, nsPresContextType aType);
   virtual ~nsRootPresContext();
+  virtual void Detach() MOZ_OVERRIDE;
 
   /**
    * Ensure that NotifyDidPaintForSubtree is eventually called on this
@@ -1390,7 +1453,7 @@ public:
    * Compute geometry updates for each plugin given that aList is the display
    * list for aFrame. The updates are not yet applied;
    * ApplyPluginGeometryUpdates is responsible for that. In the meantime they
-   * are stored on each nsObjectFrame.
+   * are stored on each nsPluginFrame.
    * This needs to be called even when aFrame is a popup, since although
    * windowed plugins aren't allowed in popups, windowless plugins are
    * and ComputePluginGeometryUpdates needs to be called for them.
@@ -1449,7 +1512,7 @@ protected:
 
   class RunWillPaintObservers : public nsRunnable {
   public:
-    RunWillPaintObservers(nsRootPresContext* aPresContext) : mPresContext(aPresContext) {}
+    explicit RunWillPaintObservers(nsRootPresContext* aPresContext) : mPresContext(aPresContext) {}
     void Revoke() { mPresContext = nullptr; }
     NS_IMETHOD Run() MOZ_OVERRIDE
     {
@@ -1474,7 +1537,7 @@ protected:
 #ifdef MOZ_REFLOW_PERF
 
 #define DO_GLOBAL_REFLOW_COUNT(_name) \
-  aPresContext->CountReflows((_name), (nsIFrame*)this); 
+  aPresContext->CountReflows((_name), (nsIFrame*)this);
 #else
 #define DO_GLOBAL_REFLOW_COUNT(_name)
 #endif // MOZ_REFLOW_PERF

@@ -1,4 +1,4 @@
-// -*- Mode: js2; tab-width: 2; indent-tabs-mode: nil; js2-basic-offset: 2; js2-skip-preprocessor-directives: t; -*-
+// -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,9 +8,9 @@ let Ci = Components.interfaces;
 let Cu = Components.utils;
 
 Cu.import("resource://gre/modules/Services.jsm");
-
-XPCOMUtils.defineLazyServiceGetter(this, "gUUIDGenerator",
-                                   "@mozilla.org/uuid-generator;1", "nsIUUIDGenerator");
+Cu.import("resource://gre/modules/FormData.jsm");
+Cu.import("resource://gre/modules/ScrollPosition.jsm");
+Cu.import("resource://gre/modules/Timer.jsm", this);
 
 let WebProgressListener = {
   _lastLocation: null,
@@ -263,7 +263,7 @@ let WebNavigation =  {
       // start might already be in use)
       let id = aIdMap[aEntry.ID] || 0;
       if (!id) {
-        id = gUUIDGenerator.generateUUID();
+        for (id = Date.now(); id in aIdMap.used; id++);
         aIdMap[aEntry.ID] = id;
         aIdMap.used[id] = true;
       }
@@ -298,7 +298,7 @@ let WebNavigation =  {
         matchingEntry = {shEntry: shEntry, childDocIdents: childDocIdents};
         aDocIdentMap[aEntry.docIdentifier] = matchingEntry;
       } else {
-        shEntry.adoptBFCacheEntry(matchingEntry);
+        shEntry.adoptBFCacheEntry(matchingEntry.shEntry);
         childDocIdents = matchingEntry.childDocIdents;
       }
     }
@@ -444,6 +444,11 @@ WebNavigation.init();
 
 
 let DOMEvents =  {
+  _timeout: null,
+  _sessionEvents: new Set(),
+  _sessionEventMap: {"SessionStore:collectFormdata" : FormData.collect,
+                     "SessionStore:collectScrollPosition" : ScrollPosition.collect},
+
   init: function() {
     addEventListener("DOMContentLoaded", this, false);
     addEventListener("DOMTitleChanged", this, false);
@@ -454,6 +459,22 @@ let DOMEvents =  {
     addEventListener("DOMPopupBlocked", this, false);
     addEventListener("pageshow", this, false);
     addEventListener("pagehide", this, false);
+
+    addEventListener("input", this, true);
+    addEventListener("change", this, true);
+    addEventListener("scroll", this, true);
+    addMessageListener("SessionStore:restoreSessionTabData", this);
+  },
+
+  receiveMessage: function(message) {
+    switch (message.name) {
+      case "SessionStore:restoreSessionTabData":
+        if (message.json.formdata)
+          FormData.restore(content, message.json.formdata);
+        if (message.json.scroll)
+          ScrollPosition.restore(content, message.json.scroll.scroll);
+        break;
+    }
   },
 
   handleEvent: function(aEvent) {
@@ -550,6 +571,31 @@ let DOMEvents =  {
           }
         }
         break;
+      case "input":
+      case "change":
+        this._sessionEvents.add("SessionStore:collectFormdata");
+        this._sendUpdates();
+        break;
+      case "scroll":
+        this._sessionEvents.add("SessionStore:collectScrollPosition");
+        this._sendUpdates();
+        break;
+    }
+  },
+
+  _sendUpdates: function() {
+    if (!this._timeout) {
+      // Wait a little before sending the message to batch multiple changes.
+      this._timeout = setTimeout(function() {
+        for (let eventType of this._sessionEvents) {
+          sendAsyncMessage(eventType, {
+            data: this._sessionEventMap[eventType](content)
+          });
+        }
+        this._sessionEvents.clear();
+        clearTimeout(this._timeout);
+        this._timeout = null;
+      }.bind(this), 1000);
     }
   }
 };
@@ -563,9 +609,6 @@ let ContentScroll =  {
   init: function() {
     addMessageListener("Content:SetWindowSize", this);
 
-    if (Services.prefs.getBoolPref("layers.async-pan-zoom.enabled")) {
-      addEventListener("scroll", this, true);
-    }
     addEventListener("pagehide", this, false);
     addEventListener("MozScrolledAreaChanged", this, false);
   },
@@ -601,11 +644,6 @@ let ContentScroll =  {
         this._scrollOffset = { x: 0, y: 0 };
         break;
 
-      case "scroll": {
-        this.notifyChromeAboutContentScroll(aEvent.target);
-        break;
-      }
-
       case "MozScrolledAreaChanged": {
         let doc = aEvent.originalTarget;
         if (content != doc.defaultView) // We are only interested in root scroll pane changes
@@ -627,49 +665,9 @@ let ContentScroll =  {
         break;
       }
     }
-  },
-
-  /*
-  * DOM scroll handler - if we receive this, content or the dom scrolled
-  * content without going through the apz. This can happen in a lot of
-  * cases, keyboard shortcuts, scroll wheel, or content script. Messages
-  * chrome via a sync call which messages the apz about the update.
-  */
-  notifyChromeAboutContentScroll: function (target) {
-    let isRoot = false;
-    if (target instanceof Ci.nsIDOMDocument) {
-      var window = target.defaultView;
-      var scrollOffset = this.getScrollOffset(window);
-      var element = target.documentElement;
-
-      if (target == content.document) {
-        if (this._scrollOffset.x == scrollOffset.x && this._scrollOffset.y == scrollOffset.y) {
-          // Don't send a scroll message back to APZC if it's the same as the
-          // last one.
-          return;
-        }
-        this._scrollOffset = scrollOffset;
-        isRoot = true;
-      }
-    } else {
-      var window = target.currentDoc.defaultView;
-      var scrollOffset = this.getScrollOffsetForElement(target);
-      var element = target;
-    }
-
-    let utils = window.QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIDOMWindowUtils);
-    let presShellId = {};
-    utils.getPresShellId(presShellId);
-    let viewId = utils.getViewId(element);
-    // Must be synchronous to prevent redraw getting out of sync from
-    // composition.
-    sendSyncMessage("Browser:ContentScroll",
-      { presShellId: presShellId.value,
-        viewId: viewId,
-        scrollOffset: scrollOffset,
-        isRoot: isRoot });
   }
 };
+this.ContentScroll = ContentScroll;
 
 ContentScroll.init();
 
@@ -687,7 +685,7 @@ let ContentActive =  {
         let cwu = content.QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIDOMWindowUtils);
         if (json.keepviewport)
           break;
-        cwu.setDisplayPortForElement(0, 0, 0, 0, content.document.documentElement);
+        cwu.setDisplayPortForElement(0, 0, 0, 0, content.document.documentElement, 0);
         break;
 
       case "Content:Activate":

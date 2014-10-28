@@ -6,7 +6,6 @@
   <link rel="stylesheet" type="text/css" href="/tests/SimpleTest/test.css" />
 </head>
 
-<body onload="doUpdate(testUpdate);">
 <p id="display"></p>
 <div id="content" style="display: none">
 </div>
@@ -29,14 +28,14 @@ var dbService = Cc["@mozilla.org/url-classifier/dbservice;1"]
 
 function doUpdate(update) {
   var listener = {
-    QueryInterface: function(iid)
+    QueryInterface: SpecialPowers.wrapCallback(function(iid)
     {
       if (iid.equals(Ci.nsISupports) ||
           iid.equals(Ci.nsIUrlClassifierUpdateObserver))
         return this;
 
       throw Cr.NS_ERROR_NO_INTERFACE;
-    },
+    }),
     updateUrlRequested: function(url) { },
     streamFinished: function(status) { },
     updateError: function(errorCode) {
@@ -72,6 +71,11 @@ function onmessage(event)
 
   is(pieces[0], "success", pieces[1]);
 }
+
+SpecialPowers.pushPrefEnv(
+  {"set" : [["urlclassifier.malwareTable", "test-malware-simple"],
+            ["urlclassifier.phishTable", "test-phish-simple"]]},
+  function() { doUpdate(testUpdate); });
 
 window.addEventListener("message", onmessage, false);
 

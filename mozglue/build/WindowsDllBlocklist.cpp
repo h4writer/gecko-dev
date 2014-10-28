@@ -47,11 +47,16 @@ struct DllBlockInfo {
   // Note that the version is usually 4 components, which is A.B.C.D
   // encoded as 0x AAAA BBBB CCCC DDDD ULL (spaces added for clarity),
   // but it's not required to be of that format.
+  //
+  // If the USE_TIMESTAMP flag is set, then we use the timestamp from
+  // the IMAGE_FILE_HEADER in lieu of a version number.
   unsigned long long maxVersion;
 
   enum {
     FLAGS_DEFAULT = 0,
-    BLOCK_WIN8PLUS_ONLY = 1
+    BLOCK_WIN8PLUS_ONLY = 1,
+    BLOCK_XP_ONLY = 2,
+    USE_TIMESTAMP = 4,
   } flags;
 };
 
@@ -107,7 +112,8 @@ static DllBlockInfo sWindowsDllBlocklist[] = {
   // Topcrash with Babylon Toolbar on FF16+ (bug 721264)
   {"babyfox.dll", ALL_VERSIONS},
 
-  {"sprotector.dll", ALL_VERSIONS, DllBlockInfo::BLOCK_WIN8PLUS_ONLY },
+  // sprotector.dll crashes, bug 957258
+  {"sprotector.dll", ALL_VERSIONS},
 
   // Topcrash with Websense Endpoint, bug 828184
   {"qipcap.dll", MAKE_VERSION(7, 6, 815, 1)},
@@ -136,6 +142,23 @@ static DllBlockInfo sWindowsDllBlocklist[] = {
   // Software is discontinued/unsupported
   { "atkdx11disp.dll", ALL_VERSIONS },
 
+  // Topcrash with Conduit SearchProtect, bug 944542
+  { "spvc32.dll", ALL_VERSIONS },
+
+  // XP topcrash with F-Secure, bug 970362
+  { "fs_ccf_ni_umh32.dll", MAKE_VERSION(1, 42, 101, 0), DllBlockInfo::BLOCK_XP_ONLY },
+
+  // Topcrash with V-bates, bug 1002748 and bug 1023239
+  { "libinject.dll", UNVERSIONED },
+  { "libinject2.dll", 0x537DDC93, DllBlockInfo::USE_TIMESTAMP },
+  { "libredir2.dll", 0x5385B7ED, DllBlockInfo::USE_TIMESTAMP },
+
+  // Crashes with RoboForm2Go written against old SDK, bug 988311
+  { "rf-firefox-22.dll", ALL_VERSIONS },
+
+  // Crashes with DesktopTemperature, bug 1046382
+  { "dtwxsvc.dll", 0x53153234, DllBlockInfo::USE_TIMESTAMP },
+
   { nullptr, 0 }
 };
 
@@ -163,7 +186,7 @@ static bool sBlocklistInitFailed;
 static bool sUser32BeforeBlocklist;
 
 // Duplicated from xpcom glue. Ideally this should be shared.
-static void
+void
 printf_stderr(const char *fmt, ...)
 {
   if (IsDebuggerPresent()) {
@@ -256,6 +279,33 @@ CheckASLR(const wchar_t* path)
   }
 
   return retval;
+}
+
+DWORD
+GetTimestamp(const wchar_t* path)
+{
+  DWORD timestamp = 0;
+
+  HANDLE file = ::CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+  if (file != INVALID_HANDLE_VALUE) {
+    HANDLE map = ::CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0,
+                                      nullptr);
+    if (map) {
+      RVAMap<IMAGE_DOS_HEADER> peHeader(map, 0);
+      if (peHeader) {
+        RVAMap<IMAGE_NT_HEADERS> ntHeader(map, peHeader->e_lfanew);
+        if (ntHeader) {
+          timestamp = ntHeader->FileHeader.TimeDateStamp;
+        }
+      }
+      ::CloseHandle(map);
+    }
+    ::CloseHandle(file);
+  }
+
+  return timestamp;
 }
 
 // This lock protects both the reentrancy sentinel and the crash reporter
@@ -368,7 +418,7 @@ DllBlockSet::Write(HANDLE file)
 
   // Because this method is called after a crash occurs, and uses heap memory,
   // protect this entire block with a structured exception handler.
-  __try {
+  MOZ_SEH_TRY {
     for (DllBlockSet* b = gFirst; b; b = b->mNext) {
       // write name[,v.v.v.v];
       WriteFile(file, b->mName, strlen(b->mName), &nBytes, nullptr);
@@ -391,7 +441,7 @@ DllBlockSet::Write(HANDLE file)
       WriteFile(file, ";", 1, &nBytes, nullptr);
     }
   }
-  __except (EXCEPTION_EXECUTE_HANDLER) { }
+  MOZ_SEH_EXCEPT (EXCEPTION_EXECUTE_HANDLER) { }
 }
 
 static
@@ -440,6 +490,7 @@ patched_LdrLoadDll (PWCHAR filePath, PULONG flags, PUNICODE_STRING moduleFileNam
 #define DLLNAME_MAX 128
   char dllName[DLLNAME_MAX+1];
   wchar_t *dll_part;
+  char *dot;
   DllBlockInfo *info;
 
   int len = moduleFileName->Length / 2;
@@ -504,6 +555,17 @@ patched_LdrLoadDll (PWCHAR filePath, PULONG flags, PUNICODE_STRING moduleFileNam
   printf_stderr("LdrLoadDll: dll name '%s'\n", dllName);
 #endif
 
+  // Block a suspicious binary that uses various 12-digit hex strings
+  // e.g. MovieMode.48CA2AEFA22D.dll (bug 973138)
+  dot = strchr(dllName, '.');
+  if (dot && (strchr(dot+1, '.') == dot+13)) {
+    char * end = nullptr;
+    _strtoui64(dot+1, &end, 16);
+    if (end == dot+13) {
+      return STATUS_DLL_NOT_FOUND;
+    }
+  }
+
   // then compare to everything on the blocklist
   info = &sWindowsDllBlocklist[0];
   while (info->name) {
@@ -525,6 +587,11 @@ patched_LdrLoadDll (PWCHAR filePath, PULONG flags, PUNICODE_STRING moduleFileNam
       goto continue_loading;
     }
 
+    if ((info->flags == DllBlockInfo::BLOCK_XP_ONLY) &&
+        IsWin2003OrLater()) {
+      goto continue_loading;
+    }
+
     unsigned long long fVersion = ALL_VERSIONS;
 
     if (info->maxVersion != ALL_VERSIONS) {
@@ -540,27 +607,34 @@ patched_LdrLoadDll (PWCHAR filePath, PULONG flags, PUNICODE_STRING moduleFileNam
         return STATUS_DLL_NOT_FOUND;
       }
 
-      DWORD zero;
-      DWORD infoSize = GetFileVersionInfoSizeW(full_fname, &zero);
+      if (info->flags & DllBlockInfo::USE_TIMESTAMP) {
+        fVersion = GetTimestamp(full_fname);
+        if (fVersion > info->maxVersion) {
+          load_ok = true;
+        }
+      } else {
+        DWORD zero;
+        DWORD infoSize = GetFileVersionInfoSizeW(full_fname, &zero);
 
-      // If we failed to get the version information, we block.
+        // If we failed to get the version information, we block.
 
-      if (infoSize != 0) {
-        nsAutoArrayPtr<unsigned char> infoData(new unsigned char[infoSize]);
-        VS_FIXEDFILEINFO *vInfo;
-        UINT vInfoLen;
+        if (infoSize != 0) {
+          nsAutoArrayPtr<unsigned char> infoData(new unsigned char[infoSize]);
+          VS_FIXEDFILEINFO *vInfo;
+          UINT vInfoLen;
 
-        if (GetFileVersionInfoW(full_fname, 0, infoSize, infoData) &&
-            VerQueryValueW(infoData, L"\\", (LPVOID*) &vInfo, &vInfoLen))
-        {
-          fVersion =
-            ((unsigned long long)vInfo->dwFileVersionMS) << 32 |
-            ((unsigned long long)vInfo->dwFileVersionLS);
+          if (GetFileVersionInfoW(full_fname, 0, infoSize, infoData) &&
+              VerQueryValueW(infoData, L"\\", (LPVOID*) &vInfo, &vInfoLen))
+          {
+            fVersion =
+              ((unsigned long long)vInfo->dwFileVersionMS) << 32 |
+              ((unsigned long long)vInfo->dwFileVersionLS);
 
-          // finally do the version check, and if it's greater than our block
-          // version, keep loading
-          if (fVersion > info->maxVersion)
-            load_ok = true;
+            // finally do the version check, and if it's greater than our block
+            // version, keep loading
+            if (fVersion > info->maxVersion)
+              load_ok = true;
+          }
         }
       }
     }
@@ -610,7 +684,10 @@ DllBlocklist_Initialize()
 
   ReentrancySentinel::InitializeStatics();
 
-  bool ok = NtDllIntercept.AddHook("LdrLoadDll", reinterpret_cast<intptr_t>(patched_LdrLoadDll), (void**) &stub_LdrLoadDll);
+  // We specifically use a detour, because there are cases where external
+  // code also tries to hook LdrLoadDll, and doesn't know how to relocate our
+  // nop space patches. (Bug 951827)
+  bool ok = NtDllIntercept.AddDetour("LdrLoadDll", reinterpret_cast<intptr_t>(patched_LdrLoadDll), (void**) &stub_LdrLoadDll);
 
   if (!ok) {
     sBlocklistInitFailed = true;

@@ -11,7 +11,7 @@
 
 TARGET='.'
 
-STATIC_FILES="COPYING"
+STATIC_FILES="COPYING celt/arm/arm2gnu.pl"
 MK_FILES="opus_sources.mk celt_sources.mk silk_sources.mk \
           opus_headers.mk celt_headers.mk silk_headers.mk"
 
@@ -43,11 +43,17 @@ for file in ${SRC_FILES}; do
 done
  
 # copy files into the target directory
-for file in ${STATIC_FILES} ${MK_FILES} ${SRC_FILES} ${HDR_FILES}; do
+for file in ${STATIC_FILES} ${SRC_FILES} ${HDR_FILES}; do
   cmd="cp $1/${file} ${TARGET}/${file}"
   echo ${cmd}
   ${cmd}
 done
+
+sed \
+ -e s/@OPUS_ARM_MAY_HAVE_EDSP@/1/g \
+ -e s/@OPUS_ARM_MAY_HAVE_MEDIA@/1/g \
+ -e s/@OPUS_ARM_MAY_HAVE_NEON@/1/g \
+ $1/celt/arm/armopts.s.in > ${TARGET}/celt/arm/armopts.s
 
 # query git for the revision we're copying from
 if test -d $1/.git; then
@@ -64,6 +70,8 @@ sed -e "s/^The git tag\/revision used was .*/The git tag\/revision used was ${ve
 sed -e "s/DEFINES\['OPUS_VERSION'\][ \t]*=[ \t]*'\".*\"'/DEFINES['OPUS_VERSION'] = '\"${version}-mozilla\"'/" \
     ${TARGET}/moz.build > ${TARGET}/moz.build+ && \
     mv ${TARGET}/moz.build+ ${TARGET}/moz.build
+
+python gen-sources.py $1
 
 # apply outstanding local patches
 # ... no patches to apply ...

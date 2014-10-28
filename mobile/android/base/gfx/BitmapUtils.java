@@ -5,31 +5,32 @@
 
 package org.mozilla.gecko.gfx;
 
-import org.mozilla.gecko.util.ThreadUtils;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.Field;
+import java.net.MalformedURLException;
+import java.net.URL;
+
+import org.mozilla.gecko.R;
 import org.mozilla.gecko.util.GeckoJarReader;
-import org.mozilla.gecko.util.UiAsyncTask;
+import org.mozilla.gecko.util.ThreadUtils;
+import org.mozilla.gecko.util.UIAsyncTask;
+import org.mozilla.gecko.Tab;
+import org.mozilla.gecko.Tabs;
+import org.mozilla.gecko.ThumbnailHelper;
 
 import android.content.Context;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.drawable.Drawable;
 import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
-import android.os.AsyncTask;
+import android.text.TextUtils;
 import android.util.Base64;
 import android.util.Log;
-import android.text.TextUtils;
-
-import org.mozilla.gecko.R;
-
-import java.io.IOException;
-import java.io.InputStream;
-import java.lang.reflect.Field;
-import java.lang.NoSuchFieldException;
-import java.net.MalformedURLException;
-import java.net.URL;
 
 public final class BitmapUtils {
     private static final String LOGTAG = "GeckoBitmapUtils";
@@ -40,22 +41,48 @@ public final class BitmapUtils {
         public void onBitmapFound(Drawable d);
     }
 
-    public static void getDrawable(final Context context, final String data, final BitmapLoader loader) {
-        if (TextUtils.isEmpty(data)) {
-            loader.onBitmapFound(null);
-            return;
-        }
-
-        if (data.startsWith("data")) {
-            BitmapDrawable d = new BitmapDrawable(getBitmapFromDataURI(data));
+    private static void runOnBitmapFoundOnUiThread(final BitmapLoader loader, final Drawable d) {
+        if (ThreadUtils.isOnUiThread()) {
             loader.onBitmapFound(d);
             return;
         }
 
+        ThreadUtils.postToUiThread(new Runnable() {
+            @Override
+            public void run() {
+                loader.onBitmapFound(d);
+            }
+        });
+    }
+
+    /**
+     * Attempts to find a drawable associated with a given string, using its URI scheme to determine
+     * how to load the drawable. The BitmapLoader's `onBitmapFound` method is always called, and
+     * will be called with `null` if no drawable is found.
+     *
+     * The BitmapLoader `onBitmapFound` method always runs on the UI thread.
+     */
+    public static void getDrawable(final Context context, final String data, final BitmapLoader loader) {
+        if (TextUtils.isEmpty(data)) {
+            runOnBitmapFoundOnUiThread(loader, null);
+            return;
+        }
+
+        if (data.startsWith("data")) {
+            final BitmapDrawable d = new BitmapDrawable(context.getResources(), getBitmapFromDataURI(data));
+            runOnBitmapFoundOnUiThread(loader, d);
+            return;
+        }
+
+        if (data.startsWith("thumbnail:")) {
+            getThumbnailDrawable(context, data, loader);
+            return;
+        }
+
         if (data.startsWith("jar:") || data.startsWith("file://")) {
-            (new UiAsyncTask<Void, Void, Drawable>(ThreadUtils.getBackgroundHandler()) {
+            (new UIAsyncTask.WithoutParams<Drawable>(ThreadUtils.getBackgroundHandler()) {
                 @Override
-                public Drawable doInBackground(Void... params) {
+                public Drawable doInBackground() {
                     try {
                         if (data.startsWith("jar:jar")) {
                             return GeckoJarReader.getBitmapDrawable(context.getResources(), data);
@@ -66,8 +93,8 @@ public final class BitmapUtils {
                             return GeckoJarReader.getBitmapDrawable(context.getResources(), Uri.decode(data));
                         }
 
-                        URL url = new URL(data);
-                        InputStream is = (InputStream) url.getContent();
+                        final URL url = new URL(data);
+                        final InputStream is = (InputStream) url.getContent();
                         try {
                             return Drawable.createFromStream(is, "src");
                         } finally {
@@ -87,29 +114,45 @@ public final class BitmapUtils {
             return;
         }
 
-        if(data.startsWith("-moz-icon://")) {
-            Uri imageUri = Uri.parse(data);
-            String resource = imageUri.getSchemeSpecificPart();
-            resource = resource.substring(resource.lastIndexOf('/') + 1);
+        if (data.startsWith("-moz-icon://")) {
+            final Uri imageUri = Uri.parse(data);
+            final String ssp = imageUri.getSchemeSpecificPart();
+            final String resource = ssp.substring(ssp.lastIndexOf('/') + 1);
 
             try {
-                Drawable d = context.getPackageManager().getApplicationIcon(resource);
-                loader.onBitmapFound(d);
-            } catch(Exception ex) { }
+                final Drawable d = context.getPackageManager().getApplicationIcon(resource);
+                runOnBitmapFoundOnUiThread(loader, d);
+            } catch (Exception ex) { }
 
             return;
         }
 
-        if(data.startsWith("drawable://")) {
-            Uri imageUri = Uri.parse(data);
-            int id = getResource(imageUri, R.drawable.ic_status_logo);
-            Drawable d = context.getResources().getDrawable(id);
+        if (data.startsWith("drawable://")) {
+            final Uri imageUri = Uri.parse(data);
+            final int id = getResource(imageUri, R.drawable.ic_status_logo);
+            final Drawable d = context.getResources().getDrawable(id);
 
-            loader.onBitmapFound(d);
+            runOnBitmapFoundOnUiThread(loader, d);
             return;
         }
 
-        loader.onBitmapFound(null);
+        runOnBitmapFoundOnUiThread(loader, null);
+    }
+
+    public static void getThumbnailDrawable(final Context context, final String data, final BitmapLoader loader) {
+         int id = Integer.parseInt(data.substring(10), 10);
+         final Tab tab = Tabs.getInstance().getTab(id);
+         runOnBitmapFoundOnUiThread(loader, tab.getThumbnail());
+         Tabs.registerOnTabsChangedListener(new Tabs.OnTabsChangedListener() {
+                 @Override
+                 public void onTabChanged(Tab t, Tabs.TabEvents msg, Object data) {
+                     if (tab == t && msg == Tabs.TabEvents.THUMBNAIL) {
+                         Tabs.unregisterOnTabsChangedListener(this);
+                         runOnBitmapFoundOnUiThread(loader, t.getThumbnail());
+                     }
+                 }
+             });
+         ThumbnailHelper.getInstance().getAndProcessThumbnailFor(tab);
     }
 
     public static Bitmap decodeByteArray(byte[] bytes) {
@@ -117,6 +160,14 @@ public final class BitmapUtils {
     }
 
     public static Bitmap decodeByteArray(byte[] bytes, BitmapFactory.Options options) {
+        return decodeByteArray(bytes, 0, bytes.length, options);
+    }
+
+    public static Bitmap decodeByteArray(byte[] bytes, int offset, int length) {
+        return decodeByteArray(bytes, offset, length, null);
+    }
+
+    public static Bitmap decodeByteArray(byte[] bytes, int offset, int length, BitmapFactory.Options options) {
         if (bytes.length <= 0) {
             throw new IllegalArgumentException("bytes.length " + bytes.length
                                                + " must be a positive number");
@@ -124,7 +175,7 @@ public final class BitmapUtils {
 
         Bitmap bitmap = null;
         try {
-            bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+            bitmap = BitmapFactory.decodeByteArray(bytes, offset, length, options);
         } catch (OutOfMemoryError e) {
             Log.e(LOGTAG, "decodeByteArray(bytes.length=" + bytes.length
                           + ", options= " + options + ") OOM!", e);
@@ -233,15 +284,19 @@ public final class BitmapUtils {
       float[] sumHue = new float[36];
       float[] sumSat = new float[36];
       float[] sumVal = new float[36];
+      float[] hsv = new float[3];
 
-      for (int row = 0; row < source.getHeight(); row++) {
-        for (int col = 0; col < source.getWidth(); col++) {
-          int c = source.getPixel(col, row);
+      int height = source.getHeight();
+      int width = source.getWidth();
+      int[] pixels = new int[width * height];
+      source.getPixels(pixels, 0, width, 0, 0, width, height);
+      for (int row = 0; row < height; row++) {
+        for (int col = 0; col < width; col++) {
+          int c = pixels[col + row * width];
           // Ignore pixels with a certain transparency.
           if (Color.alpha(c) < 128)
             continue;
 
-          float[] hsv = new float[3];
           Color.colorToHSV(c, hsv);
 
           // If a threshold is applied, ignore arbitrarily chosen values for "white" and "black".
@@ -270,7 +325,6 @@ public final class BitmapUtils {
         return Color.argb(255,255,255,255);
 
       // Return a color with the average hue/saturation/value of the bin with the most colors.
-      float[] hsv = new float[3];
       hsv[0] = sumHue[maxBin]/colorBins[maxBin];
       hsv[1] = sumSat[maxBin]/colorBins[maxBin];
       hsv[2] = sumVal[maxBin]/colorBins[maxBin];
@@ -284,14 +338,53 @@ public final class BitmapUtils {
      * @return        the decoded bitmap, or null if the data URI is invalid
      */
     public static Bitmap getBitmapFromDataURI(String dataURI) {
-        String base64 = dataURI.substring(dataURI.indexOf(',') + 1);
-        try {
-            byte[] raw = Base64.decode(base64, Base64.DEFAULT);
-            return BitmapUtils.decodeByteArray(raw);
-        } catch (Exception e) {
-            Log.e(LOGTAG, "exception decoding bitmap from data URI: " + dataURI, e);
+        if (dataURI == null) {
+            return null;
         }
+
+        byte[] raw = getBytesFromDataURI(dataURI);
+        if (raw == null || raw.length == 0) {
+            return null;
+        }
+
+        return decodeByteArray(raw);
+    }
+
+    /**
+     * Return a byte[] containing the bytes in a given base64 string, or null if this is not a valid
+     * base64 string.
+     */
+    public static byte[] getBytesFromBase64(String base64) {
+        try {
+            return Base64.decode(base64, Base64.DEFAULT);
+        } catch (Exception e) {
+            Log.e(LOGTAG, "exception decoding bitmap from data URI: " + base64, e);
+        }
+
         return null;
+    }
+
+    public static byte[] getBytesFromDataURI(String dataURI) {
+        final String base64 = dataURI.substring(dataURI.indexOf(',') + 1);
+        return getBytesFromBase64(base64);
+    }
+
+    public static Bitmap getBitmapFromDrawable(Drawable drawable) {
+        if (drawable instanceof BitmapDrawable) {
+            return ((BitmapDrawable) drawable).getBitmap();
+        }
+
+        int width = drawable.getIntrinsicWidth();
+        width = width > 0 ? width : 1;
+        int height = drawable.getIntrinsicHeight();
+        height = height > 0 ? height : 1;
+
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        drawable.setBounds(0, 0, canvas.getWidth(), canvas.getHeight());
+        drawable.draw(canvas);
+
+        return bitmap;
     }
 
     public static int getResource(Uri resourceUrl, int defaultIcon) {

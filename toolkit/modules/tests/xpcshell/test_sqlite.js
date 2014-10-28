@@ -7,7 +7,7 @@ const {classes: Cc, interfaces: Ci, utils: Cu} = Components;
 
 do_get_profile();
 
-Cu.import("resource://gre/modules/commonjs/sdk/core/promise.js");
+Cu.import("resource://gre/modules/Promise.jsm");
 Cu.import("resource://gre/modules/osfile.jsm");
 Cu.import("resource://gre/modules/FileUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
@@ -31,6 +31,12 @@ function sleep(ms) {
   }, ms, timer.TYPE_ONE_SHOT);
 
   return deferred.promise;
+}
+
+// When testing finalization, use this to tell Sqlite.jsm to not throw
+// an uncatchable `Promise.reject`
+function failTestsOnAutoClose(enabled)  {
+  Cu.getGlobalForObject(Sqlite).Debugging.failTestsOnAutoClose = enabled;
 }
 
 function getConnection(dbName, extraOptions={}) {
@@ -78,7 +84,7 @@ function getDummyTempDatabase(name, extraOptions={}) {
 }
 
 function run_test() {
-  Cu.import("resource://testing-common/services-common/logging.js");
+  Cu.import("resource://testing-common/services/common/logging.js");
   initTestLogging("Trace");
 
   run_next_test();
@@ -254,7 +260,7 @@ add_task(function test_execute_invalid_statement() {
 
   let deferred = Promise.defer();
 
-  do_check_eq(c._anonymousStatements.size, 0);
+  do_check_eq(c._connectionData._anonymousStatements.size, 0);
 
   c.execute("SELECT invalid FROM unknown").then(do_throw, function onError(error) {
     deferred.resolve();
@@ -263,7 +269,7 @@ add_task(function test_execute_invalid_statement() {
   yield deferred.promise;
 
   // Ensure we don't leak the statement instance.
-  do_check_eq(c._anonymousStatements.size, 0);
+  do_check_eq(c._connectionData._anonymousStatements.size, 0);
 
   yield c.close();
 });
@@ -277,12 +283,13 @@ add_task(function test_on_row_exception_ignored() {
   }
 
   let i = 0;
-  yield c.execute("SELECT * FROM DIRS", null, function onRow(row) {
+  let hasResult = yield c.execute("SELECT * FROM DIRS", null, function onRow(row) {
     i++;
 
     throw new Error("Some silly error.");
   });
 
+  do_check_eq(hasResult, true);
   do_check_eq(i, 10);
 
   yield c.close();
@@ -298,7 +305,7 @@ add_task(function test_on_row_stop_iteration() {
   }
 
   let i = 0;
-  let result = yield c.execute("SELECT * FROM dirs", null, function onRow(row) {
+  let hasResult = yield c.execute("SELECT * FROM dirs", null, function onRow(row) {
     i++;
 
     if (i == 5) {
@@ -306,8 +313,23 @@ add_task(function test_on_row_stop_iteration() {
     }
   });
 
-  do_check_null(result);
+  do_check_eq(hasResult, true);
   do_check_eq(i, 5);
+
+  yield c.close();
+});
+
+// Ensure execute resolves to false when no rows are selected.
+add_task(function test_on_row_stop_iteration() {
+  let c = yield getDummyDatabase("no_on_row");
+
+  let i = 0;
+  let hasResult = yield c.execute(`SELECT * FROM dirs WHERE path="nonexistent"`, null, function onRow(row) {
+    i++;
+  });
+
+  do_check_eq(hasResult, false);
+  do_check_eq(i, 0);
 
   yield c.close();
 });
@@ -436,9 +458,9 @@ add_task(function test_no_shrink_on_init() {
   let c = yield getConnection("no_shrink_on_init",
                               {shrinkMemoryOnConnectionIdleMS: 200});
 
-  let oldShrink = c.shrinkMemory;
+  let oldShrink = c._connectionData.shrinkMemory;
   let count = 0;
-  Object.defineProperty(c, "shrinkMemory", {
+  Object.defineProperty(c._connectionData, "shrinkMemory", {
     value: function () {
       count++;
     },
@@ -458,16 +480,16 @@ add_task(function test_no_shrink_on_init() {
 add_task(function test_idle_shrink_fires() {
   let c = yield getDummyDatabase("idle_shrink_fires",
                                  {shrinkMemoryOnConnectionIdleMS: 200});
-  c._clearIdleShrinkTimer();
+  c._connectionData._clearIdleShrinkTimer();
 
-  let oldShrink = c.shrinkMemory;
+  let oldShrink = c._connectionData.shrinkMemory;
   let shrinkPromises = [];
 
   let count = 0;
-  Object.defineProperty(c, "shrinkMemory", {
+  Object.defineProperty(c._connectionData, "shrinkMemory", {
     value: function () {
       count++;
-      let promise = oldShrink.call(c);
+      let promise = oldShrink.call(c._connectionData);
       shrinkPromises.push(promise);
       return promise;
     },
@@ -475,7 +497,7 @@ add_task(function test_idle_shrink_fires() {
 
   // We reset the idle shrink timer after monkeypatching because otherwise the
   // installed timer callback will reference the non-monkeypatched function.
-  c._startIdleShrinkTimer();
+  c._connectionData._startIdleShrinkTimer();
 
   yield sleep(220);
   do_check_eq(count, 1);
@@ -502,23 +524,23 @@ add_task(function test_idle_shrink_reset_on_operation() {
   let c = yield getDummyDatabase("idle_shrink_reset_on_operation",
                                  {shrinkMemoryOnConnectionIdleMS: INTERVAL});
 
-  c._clearIdleShrinkTimer();
+  c._connectionData._clearIdleShrinkTimer();
 
-  let oldShrink = c.shrinkMemory;
+  let oldShrink = c._connectionData.shrinkMemory;
   let shrinkPromises = [];
   let count = 0;
 
-  Object.defineProperty(c, "shrinkMemory", {
+  Object.defineProperty(c._connectionData, "shrinkMemory", {
     value: function () {
       count++;
-      let promise = oldShrink.call(c);
+      let promise = oldShrink.call(c._connectionData);
       shrinkPromises.push(promise);
       return promise;
     },
   });
 
   let now = new Date();
-  c._startIdleShrinkTimer();
+  c._connectionData._startIdleShrinkTimer();
 
   let initialIdle = new Date(now.getTime() + INTERVAL);
 
@@ -547,11 +569,11 @@ add_task(function test_idle_shrink_reset_on_operation() {
 
 add_task(function test_in_progress_counts() {
   let c = yield getDummyDatabase("in_progress_counts");
-  do_check_eq(c._statementCounter, c._initialStatementCount);
-  do_check_eq(c._pendingStatements.size, 0);
+  do_check_eq(c._connectionData._statementCounter, c._initialStatementCount);
+  do_check_eq(c._connectionData._pendingStatements.size, 0);
   yield c.executeCached("INSERT INTO dirs (path) VALUES ('foo')");
-  do_check_eq(c._statementCounter, c._initialStatementCount + 1);
-  do_check_eq(c._pendingStatements.size, 0);
+  do_check_eq(c._connectionData._statementCounter, c._initialStatementCount + 1);
+  do_check_eq(c._connectionData._pendingStatements.size, 0);
 
   let expectOne;
   let expectTwo;
@@ -569,12 +591,12 @@ add_task(function test_in_progress_counts() {
   yield c.executeCached("SELECT * from dirs", null, function onRow() {
     // In the onRow handler, we're still an outstanding query.
     // Expect a single in-progress entry.
-    expectOne = c._pendingStatements.size;
+    expectOne = c._connectionData._pendingStatements.size;
 
     // Start another query, checking that after its statement has been created
     // there are two statements in progress.
     let p = c.executeCached("SELECT 10, path from dirs");
-    expectTwo = c._pendingStatements.size;
+    expectTwo = c._connectionData._pendingStatements.size;
 
     // Now wait for it to be done before we return from the row handler …
     p.then(function onInner() {
@@ -592,8 +614,8 @@ add_task(function test_in_progress_counts() {
 
   do_check_eq(expectOne, 1);
   do_check_eq(expectTwo, 2);
-  do_check_eq(c._statementCounter, c._initialStatementCount + 3);
-  do_check_eq(c._pendingStatements.size, 0);
+  do_check_eq(c._connectionData._statementCounter, c._initialStatementCount + 3);
+  do_check_eq(c._connectionData._pendingStatements.size, 0);
 
   yield c.close();
 });
@@ -628,16 +650,16 @@ add_task(function test_discard_cached() {
   let c = yield getDummyDatabase("discard_cached");
 
   yield c.executeCached("SELECT * from dirs");
-  do_check_eq(1, c._cachedStatements.size);
+  do_check_eq(1, c._connectionData._cachedStatements.size);
 
   yield c.executeCached("SELECT * from files");
-  do_check_eq(2, c._cachedStatements.size);
+  do_check_eq(2, c._connectionData._cachedStatements.size);
 
   yield c.executeCached("SELECT * from dirs");
-  do_check_eq(2, c._cachedStatements.size);
+  do_check_eq(2, c._connectionData._cachedStatements.size);
 
   c.discardCachedStatements();
-  do_check_eq(0, c._cachedStatements.size);
+  do_check_eq(0, c._connectionData._cachedStatements.size);
 
   yield c.close();
 });
@@ -705,7 +727,7 @@ add_task(function test_programmatic_binding_transaction_partial_rollback() {
 
       // Insert multiple rows. mozStorage will want to start a transaction.
       // One of the inserts will fail, so the transaction should be rolled back.
-      let result = yield c.execute(sql, bindings);
+      result = yield c.execute(sql, bindings);
       secondSucceeded = true;
     });
   } catch (ex) {
@@ -833,3 +855,209 @@ add_task(function test_direct() {
   yield deferred.promise;
 });
 
+/**
+ * Test Sqlite.cloneStorageConnection.
+ */
+add_task(function* test_cloneStorageConnection() {
+  let file = new FileUtils.File(OS.Path.join(OS.Constants.Path.profileDir,
+                                             "test_cloneStorageConnection.sqlite"));
+  let c = yield new Promise((resolve, reject) => {
+    Services.storage.openAsyncDatabase(file, null, (status, db) => {
+      if (Components.isSuccessCode(status)) {
+        resolve(db.QueryInterface(Ci.mozIStorageAsyncConnection));
+      } else {
+        reject(new Error(status));
+      }
+    });
+  });
+
+  let clone = yield Sqlite.cloneStorageConnection({ connection: c, readOnly: true });
+  // Just check that it works.
+  yield clone.execute("SELECT 1");
+
+  let clone2 = yield Sqlite.cloneStorageConnection({ connection: c, readOnly: false });
+  // Just check that it works.
+  yield clone2.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)");
+
+  // Closing order should not matter.
+  yield c.asyncClose();
+  yield clone2.close();
+  yield clone.close();
+});
+
+/**
+ * Test Sqlite.cloneStorageConnection invalid argument.
+ */
+add_task(function* test_cloneStorageConnection() {
+  try {
+    let clone = yield Sqlite.cloneStorageConnection({ connection: null });
+    do_throw(new Error("Should throw on invalid connection"));
+  } catch (ex if ex.name == "TypeError") {}
+});
+
+/**
+ * Test clone() method.
+ */
+add_task(function* test_clone() {
+  let c = yield getDummyDatabase("clone");
+
+  let clone = yield c.clone();
+  // Just check that it works.
+  yield clone.execute("SELECT 1");
+  // Closing order should not matter.
+  yield c.close();
+  yield clone.close();
+});
+
+/**
+ * Test clone(readOnly) method.
+ */
+add_task(function* test_readOnly_clone() {
+  let path = OS.Path.join(OS.Constants.Path.profileDir, "test_readOnly_clone.sqlite");
+  let c = yield Sqlite.openConnection({path: path, sharedMemoryCache: false});
+
+  let clone = yield c.clone(true);
+  // Just check that it works.
+  yield clone.execute("SELECT 1");
+  // But should not be able to write.
+  try {
+    yield clone.execute("CREATE TABLE test (id INTEGER PRIMARY KEY)");
+    do_throw(new Error("Should not be able to write to a read-only clone."));
+  } catch (ex) {}
+  // Closing order should not matter.
+  yield c.close();
+  yield clone.close();
+});
+
+/**
+ * Test Sqlite.wrapStorageConnection.
+ */
+add_task(function* test_wrapStorageConnection() {
+  let file = new FileUtils.File(OS.Path.join(OS.Constants.Path.profileDir,
+                                             "test_wrapStorageConnection.sqlite"));
+  let c = yield new Promise((resolve, reject) => {
+    Services.storage.openAsyncDatabase(file, null, (status, db) => {
+      if (Components.isSuccessCode(status)) {
+        resolve(db.QueryInterface(Ci.mozIStorageAsyncConnection));
+      } else {
+        reject(new Error(status));
+      }
+    });
+  });
+
+  let wrapper = yield Sqlite.wrapStorageConnection({ connection: c });
+  // Just check that it works.
+  yield wrapper.execute("SELECT 1");
+  yield wrapper.executeCached("SELECT 1");
+
+  // Closing the wrapper should just finalize statements but not close the
+  // database.
+  yield wrapper.close();
+  yield c.asyncClose();
+});
+
+/**
+ * Test finalization
+ */
+add_task(function* test_closed_by_witness() {
+  failTestsOnAutoClose(false);
+  let c = yield getDummyDatabase("closed_by_witness");
+
+  Services.obs.notifyObservers(null, "sqlite-finalization-witness",
+                               c._connectionData._identifier);
+  // Since we triggered finalization ourselves, tell the witness to
+  // forget the connection so it does not trigger a finalization again
+  c._witness.forget();
+  yield c._connectionData._deferredClose.promise;
+  do_check_false(c._connectionData._open);
+  failTestsOnAutoClose(true);
+});
+
+add_task(function* test_warning_message_on_finalization() {
+  failTestsOnAutoClose(false);
+  let c = yield getDummyDatabase("warning_message_on_finalization");
+  let identifier = c._connectionData._identifier;
+  let deferred = Promise.defer();
+
+  let listener = {
+    observe: function(msg) {
+      let messageText = msg.message;
+      // Make sure the message starts with a warning containing the
+      // connection identifier
+      if (messageText.indexOf("Warning: Sqlite connection '" + identifier + "'") !== -1) {
+        deferred.resolve();
+      }
+    }
+  };
+  Services.console.registerListener(listener);
+
+  Services.obs.notifyObservers(null, "sqlite-finalization-witness", identifier);
+  // Since we triggered finalization ourselves, tell the witness to
+  // forget the connection so it does not trigger a finalization again
+  c._witness.forget();
+
+  yield deferred.promise;
+  Services.console.unregisterListener(listener);
+  failTestsOnAutoClose(true);
+});
+
+add_task(function* test_error_message_on_unknown_finalization() {
+  failTestsOnAutoClose(false);
+  let deferred = Promise.defer();
+
+  let listener = {
+    observe: function(msg) {
+      let messageText = msg.message;
+      if (messageText.indexOf("Error: Attempt to finalize unknown " +
+                              "Sqlite connection: foo") !== -1) {
+        deferred.resolve();
+      }
+    }
+  };
+  Services.console.registerListener(listener);
+  Services.obs.notifyObservers(null, "sqlite-finalization-witness", "foo");
+
+  yield deferred.promise;
+  Services.console.unregisterListener(listener);
+  failTestsOnAutoClose(true);
+});
+
+add_task(function* test_forget_witness_on_close() {
+  let c = yield getDummyDatabase("forget_witness_on_close");
+
+  let forgetCalled = false;
+  let oldWitness = c._witness;
+  c._witness = {
+    forget: function () {
+      forgetCalled = true;
+      oldWitness.forget();
+    },
+  };
+
+  yield c.close();
+  // After close, witness should have forgotten the connection
+  do_check_true(forgetCalled);
+});
+
+add_task(function* test_close_database_on_gc() {
+  failTestsOnAutoClose(false);
+  let deferred = Promise.defer();
+
+  for (let i = 0; i < 100; ++i) {
+    let c = yield getDummyDatabase("gc_" + i);
+    c._connectionData._deferredClose.promise.then(deferred.resolve);
+  }
+
+  // Call getDummyDatabase once more to clear any remaining
+  // references. This is needed at the moment, otherwise
+  // garbage-collection takes place after the shutdown barrier and the
+  // test will timeout. Once that is fixed, we can remove this line
+  // and be fine as long as at least one connection is
+  // garbage-collected.
+  let last = yield getDummyDatabase("gc_last");
+  yield last.close();
+
+  Components.utils.forceGC();
+  yield deferred.promise;
+  failTestsOnAutoClose(true);
+});

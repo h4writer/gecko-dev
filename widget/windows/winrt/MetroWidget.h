@@ -40,6 +40,7 @@ namespace mozilla {
 namespace widget {
 namespace winrt {
 
+class APZPendingResponseFlusher;
 class FrameworkView;
 
 } } }
@@ -49,6 +50,8 @@ class DispatchMsg;
 class MetroWidget : public nsWindowBase,
                     public nsIObserver
 {
+  typedef uint32_t TouchBehaviorFlags;
+
   typedef mozilla::widget::WindowHook WindowHook;
   typedef mozilla::widget::TaskbarWindowPreview TaskbarWindowPreview;
   typedef ABI::Windows::UI::Input::IPointerPoint IPointerPoint;
@@ -57,6 +60,7 @@ class MetroWidget : public nsWindowBase,
   typedef ABI::Windows::UI::Core::ICharacterReceivedEventArgs ICharacterReceivedEventArgs;
   typedef mozilla::widget::winrt::FrameworkView FrameworkView;
   typedef mozilla::widget::winrt::APZController APZController;
+  typedef mozilla::widget::winrt::APZPendingResponseFlusher APZPendingResponseFlusher;
   typedef mozilla::layers::ScrollableLayerGuid ScrollableLayerGuid;
 
   static LRESULT CALLBACK
@@ -140,6 +144,7 @@ public:
   float         GetDPI();
   mozilla::LayoutDeviceIntPoint CSSIntPointToLayoutDeviceIntPoint(const mozilla::CSSIntPoint &aCSSPoint);
   void          ChangedDPI();
+  virtual uint32_t GetMaxTouchPoints() const MOZ_OVERRIDE;
   virtual bool  IsVisible() const;
   virtual bool  IsEnabled() const;
   // ShouldUseOffMainThreadCompositing is defined in base widget
@@ -148,32 +153,31 @@ public:
   bool          ShouldUseBasicManager();
   bool          ShouldUseAPZC();
   virtual LayerManager* GetLayerManager(PLayerTransactionChild* aShadowManager = nullptr,
-                                        LayersBackend aBackendHint = mozilla::layers::LAYERS_NONE,
+                                        LayersBackend aBackendHint = mozilla::layers::LayersBackend::LAYERS_NONE,
                                         LayerManagerPersistence aPersistence = LAYER_MANAGER_CURRENT,
                                         bool* aAllowRetaining = nullptr);
-  virtual void GetPreferredCompositorBackends(nsTArray<mozilla::layers::LayersBackend>& aHints) { aHints.AppendElement(mozilla::layers::LAYERS_D3D11); }
+  virtual void GetPreferredCompositorBackends(nsTArray<mozilla::layers::LayersBackend>& aHints) { aHints.AppendElement(mozilla::layers::LayersBackend::LAYERS_D3D11); }
 
   // IME related interfaces
   NS_IMETHOD_(void) SetInputContext(const InputContext& aContext,
                                     const InputContextAction& aAction);
   NS_IMETHOD_(nsIWidget::InputContext) GetInputContext();
-  NS_IMETHOD    NotifyIME(NotificationToIME aNotification) MOZ_OVERRIDE;
+  NS_IMETHOD    NotifyIME(const IMENotification& aIMENotification) MOZ_OVERRIDE;
   NS_IMETHOD    GetToggledKeyState(uint32_t aKeyCode, bool* aLEDState);
-  NS_IMETHOD    NotifyIMEOfTextChange(uint32_t aStart,
-                                      uint32_t aOldEnd,
-                                      uint32_t aNewEnd) MOZ_OVERRIDE;
   virtual nsIMEUpdatePreference GetIMEUpdatePreference() MOZ_OVERRIDE;
 
   // FrameworkView helpers
   void SizeModeChanged();
   void Activated(bool aActiveated);
-  void Paint(const nsIntRegion& aInvalidRegion); 
+  void Paint(const nsIntRegion& aInvalidRegion);
 
   MetroWidget* MetroWidget::GetTopLevelWindow(bool aStopOnDialogOrPopup) { return this; }
   virtual nsresult ConfigureChildren(const nsTArray<Configuration>& aConfigurations);
   virtual void* GetNativeData(uint32_t aDataType);
   virtual void  FreeNativeData(void * data, uint32_t aDataType);
   virtual nsIntPoint WidgetToScreenOffset();
+
+  already_AddRefed<nsIPresShell> GetPresShell();
 
   void UserActivity();
 
@@ -201,7 +205,11 @@ public:
   virtual void SetTransparencyMode(nsTransparencyMode aMode);
   virtual nsTransparencyMode GetTransparencyMode();
 
+  TouchBehaviorFlags ContentGetAllowedTouchBehavior(const nsIntPoint& aPoint);
+
   // apzc controller related api
+  void ApzcGetAllowedTouchBehavior(mozilla::WidgetInputEvent* aTransformedEvent, nsTArray<TouchBehaviorFlags>& aOutBehaviors);
+  void ApzcSetAllowedTouchBehavior(uint64_t aInputBlockId, nsTArray<TouchBehaviorFlags>& aBehaviors);
 
   // Hit test a point to see if an apzc would consume input there
   bool ApzHitTest(mozilla::ScreenIntPoint& pt);
@@ -210,14 +218,14 @@ public:
   void ApzTransformGeckoCoordinate(const mozilla::ScreenIntPoint& pt,
                                    mozilla::LayoutDeviceIntPoint* aRefPointOut);
   // send ContentRecievedTouch calls to the apz with appropriate preventDefault params
-  void ApzContentConsumingTouch(const ScrollableLayerGuid& aGuid);
-  void ApzContentIgnoringTouch(const ScrollableLayerGuid& aGuid);
+  void ApzContentConsumingTouch(uint64_t aInputBlockId);
+  void ApzContentIgnoringTouch(uint64_t aInputBlockId);
   // Input handling
   nsEventStatus ApzReceiveInputEvent(mozilla::WidgetInputEvent* aEvent,
-                                     ScrollableLayerGuid* aOutTargetGuid);
-  nsEventStatus ApzReceiveInputEvent(mozilla::WidgetInputEvent* aInEvent,
                                      ScrollableLayerGuid* aOutTargetGuid,
-                                     mozilla::WidgetInputEvent* aOutEvent);
+                                     uint64_t* aOutInputBlockId);
+  // Callback for the APZController
+  void SetApzPendingResponseFlusher(APZPendingResponseFlusher* aFlusher);
 
 protected:
   friend class FrameworkView;
@@ -253,7 +261,7 @@ protected:
   Microsoft::WRL::ComPtr<FrameworkView> mView;
   nsTransparencyMode mTransparencyMode;
   nsIntRegion mInvalidatedRegion;
-  nsCOMPtr<nsIdleService> mIdleService;
+  nsCOMPtr<nsIIdleServiceInternal> mIdleService;
   HWND mWnd;
   static HWND sICoreHwnd;
   WNDPROC mMetroWndProc;

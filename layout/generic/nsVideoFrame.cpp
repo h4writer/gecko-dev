@@ -12,7 +12,6 @@
 #include "nsGkAtoms.h"
 
 #include "mozilla/dom/HTMLVideoElement.h"
-#include "nsIDOMHTMLVideoElement.h"
 #include "nsIDOMHTMLImageElement.h"
 #include "nsDisplayList.h"
 #include "nsGenericHTMLElement.h"
@@ -31,6 +30,7 @@
 using namespace mozilla;
 using namespace mozilla::layers;
 using namespace mozilla::dom;
+using namespace mozilla::gfx;
 
 nsIFrame*
 NS_NewHTMLVideoFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
@@ -57,8 +57,8 @@ NS_QUERYFRAME_TAIL_INHERITING(nsContainerFrame)
 nsresult
 nsVideoFrame::CreateAnonymousContent(nsTArray<ContentInfo>& aElements)
 {
-  nsNodeInfoManager *nodeInfoManager = GetContent()->GetCurrentDoc()->NodeInfoManager();
-  nsCOMPtr<nsINodeInfo> nodeInfo;
+  nsNodeInfoManager *nodeInfoManager = GetContent()->GetComposedDoc()->NodeInfoManager();
+  nsRefPtr<NodeInfo> nodeInfo;
   Element *element;
 
   if (HasVideoElement()) {
@@ -121,12 +121,20 @@ nsVideoFrame::CreateAnonymousContent(nsTArray<ContentInfo>& aElements)
 }
 
 void
-nsVideoFrame::AppendAnonymousContentTo(nsBaseContentList& aElements,
+nsVideoFrame::AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
                                        uint32_t aFliter)
 {
-  aElements.MaybeAppendElement(mPosterImage);
-  aElements.MaybeAppendElement(mVideoControls);
-  aElements.MaybeAppendElement(mCaptionDiv);
+  if (mPosterImage) {
+    aElements.AppendElement(mPosterImage);
+  }
+
+  if (mVideoControls) {
+    aElements.AppendElement(mVideoControls);
+  }
+
+  if (mCaptionDiv) {
+    aElements.AppendElement(mCaptionDiv);
+  }
 }
 
 void
@@ -166,7 +174,7 @@ nsVideoFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
                          nsDisplayItem* aItem,
                          const ContainerLayerParameters& aContainerParameters)
 {
-  nsRect area = GetContentRect() - GetPosition() + aItem->ToReferenceFrame();
+  nsRect area = GetContentRectRelativeToSelf() + aItem->ToReferenceFrame();
   HTMLVideoElement* element = static_cast<HTMLVideoElement*>(GetContent());
   nsIntSize videoSize;
   if (NS_FAILED(element->GetVideoSize(&videoSize)) || area.IsEmpty()) {
@@ -179,7 +187,7 @@ nsVideoFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
   
   // Retrieve the size of the decoded video frame, before being scaled
   // by pixel aspect ratio.
-  gfxIntSize frameSize = container->GetCurrentSize();
+  mozilla::gfx::IntSize frameSize = container->GetCurrentSize();
   if (frameSize.width == 0 || frameSize.height == 0) {
     // No image, or zero-sized image. No point creating a layer.
     return nullptr;
@@ -198,8 +206,8 @@ nsVideoFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
   if (r.IsEmpty()) {
     return nullptr;
   }
-  gfxIntSize scaleHint(static_cast<int32_t>(r.Width()),
-                       static_cast<int32_t>(r.Height()));
+  IntSize scaleHint(static_cast<int32_t>(r.Width()),
+                    static_cast<int32_t>(r.Height()));
   container->SetScaleHint(scaleHint);
 
   nsRefPtr<ImageLayer> layer = static_cast<ImageLayer*>
@@ -212,13 +220,12 @@ nsVideoFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
 
   layer->SetContainer(container);
   layer->SetFilter(nsLayoutUtils::GetGraphicsFilterForFrame(this));
-  layer->SetContentFlags(Layer::CONTENT_OPAQUE);
   // Set a transform on the layer to draw the video in the right place
-  gfxMatrix transform;
-  transform.Translate(r.TopLeft() + aContainerParameters.mOffset);
-  transform.Scale(r.Width()/frameSize.width, r.Height()/frameSize.height);
-  layer->SetBaseTransform(gfx3DMatrix::From2D(transform));
-  layer->SetVisibleRegion(nsIntRect(0, 0, frameSize.width, frameSize.height));
+  gfxPoint p = r.TopLeft() + aContainerParameters.mOffset;
+  Matrix transform = Matrix::Translation(p.x, p.y);
+  transform.PreScale(r.Width() / frameSize.width,
+                     r.Height() / frameSize.height);
+  layer->SetBaseTransform(gfx::Matrix4x4::From2D(transform));
   nsRefPtr<Layer> result = layer.forget();
   return result.forget();
 }
@@ -226,9 +233,9 @@ nsVideoFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
 class DispatchResizeToControls : public nsRunnable
 {
 public:
-  DispatchResizeToControls(nsIContent* aContent)
+  explicit DispatchResizeToControls(nsIContent* aContent)
     : mContent(aContent) {}
-  NS_IMETHOD Run() {
+  NS_IMETHOD Run() MOZ_OVERRIDE {
     nsContentUtils::DispatchTrustedEvent(mContent->OwnerDoc(), mContent,
                                          NS_LITERAL_STRING("resizevideocontrols"),
                                          false, false);
@@ -237,7 +244,7 @@ public:
   nsCOMPtr<nsIContent> mContent;
 };
 
-NS_IMETHODIMP
+void
 nsVideoFrame::Reflow(nsPresContext*           aPresContext,
                      nsHTMLReflowMetrics&     aMetrics,
                      const nsHTMLReflowState& aReflowState,
@@ -247,20 +254,20 @@ nsVideoFrame::Reflow(nsPresContext*           aPresContext,
   DISPLAY_REFLOW(aPresContext, this, aReflowState, aMetrics, aStatus);
   NS_FRAME_TRACE(NS_FRAME_TRACE_CALLS,
                   ("enter nsVideoFrame::Reflow: availSize=%d,%d",
-                  aReflowState.availableWidth, aReflowState.availableHeight));
+                  aReflowState.AvailableWidth(), aReflowState.AvailableHeight()));
 
   NS_PRECONDITION(mState & NS_FRAME_IN_REFLOW, "frame is not in reflow");
 
   aStatus = NS_FRAME_COMPLETE;
 
-  aMetrics.width = aReflowState.ComputedWidth();
-  aMetrics.height = aReflowState.ComputedHeight();
+  aMetrics.Width() = aReflowState.ComputedWidth();
+  aMetrics.Height() = aReflowState.ComputedHeight();
 
   // stash this away so we can compute our inner area later
-  mBorderPadding   = aReflowState.mComputedBorderPadding;
+  mBorderPadding   = aReflowState.ComputedPhysicalBorderPadding();
 
-  aMetrics.width += mBorderPadding.left + mBorderPadding.right;
-  aMetrics.height += mBorderPadding.top + mBorderPadding.bottom;
+  aMetrics.Width() += mBorderPadding.left + mBorderPadding.right;
+  aMetrics.Height() += mBorderPadding.top + mBorderPadding.bottom;
 
   // Reflow the child frames. We may have up to two, an image frame
   // which is the poster, and a box frame, which is the video controls.
@@ -270,15 +277,15 @@ nsVideoFrame::Reflow(nsPresContext*           aPresContext,
     if (child->GetContent() == mPosterImage) {
       // Reflow the poster frame.
       nsImageFrame* imageFrame = static_cast<nsImageFrame*>(child);
-      nsHTMLReflowMetrics kidDesiredSize;
-      nsSize availableSize = nsSize(aReflowState.availableWidth,
-                                    aReflowState.availableHeight);
+      nsHTMLReflowMetrics kidDesiredSize(aReflowState);
+      WritingMode wm = imageFrame->GetWritingMode();
+      LogicalSize availableSize = aReflowState.AvailableSize(wm);
       nsHTMLReflowState kidReflowState(aPresContext,
                                        aReflowState,
                                        imageFrame,
                                        availableSize,
-                                       aMetrics.width,
-                                       aMetrics.height);
+                                       aMetrics.Width(),
+                                       aMetrics.Height());
 
       uint32_t posterHeight, posterWidth;
       nsSize scaledPosterSize(0, 0);
@@ -286,7 +293,9 @@ nsVideoFrame::Reflow(nsPresContext*           aPresContext,
       nsPoint posterTopLeft(0, 0);
 
       nsCOMPtr<nsIDOMHTMLImageElement> posterImage = do_QueryInterface(mPosterImage);
-      NS_ENSURE_TRUE(posterImage, NS_ERROR_FAILURE);
+      if (!posterImage) {
+        return;
+      }
       posterImage->GetNaturalHeight(&posterHeight);
       posterImage->GetNaturalWidth(&posterWidth);
 
@@ -305,7 +314,7 @@ nsVideoFrame::Reflow(nsPresContext*           aPresContext,
 
       ReflowChild(imageFrame, aPresContext, kidDesiredSize, kidReflowState,
                         posterTopLeft.x, posterTopLeft.y, 0, aStatus);
-      FinishReflowChild(imageFrame, aPresContext, &kidReflowState, kidDesiredSize,
+      FinishReflowChild(imageFrame, aPresContext, kidDesiredSize, &kidReflowState,
                         posterTopLeft.x, posterTopLeft.y, 0);
     } else if (child->GetContent() == mVideoControls) {
       // Reflow the video controls frame.
@@ -323,18 +332,18 @@ nsVideoFrame::Reflow(nsPresContext*           aPresContext,
       }
     } else if (child->GetContent() == mCaptionDiv) {
       // Reflow to caption div
-      nsHTMLReflowMetrics kidDesiredSize;
-      nsSize availableSize = nsSize(aReflowState.availableWidth,
-                                    aReflowState.availableHeight);
+      nsHTMLReflowMetrics kidDesiredSize(aReflowState);
+      WritingMode wm = child->GetWritingMode();
+      LogicalSize availableSize = aReflowState.AvailableSize(wm);
       nsHTMLReflowState kidReflowState(aPresContext,
                                        aReflowState,
                                        child,
                                        availableSize,
-                                       aMetrics.width,
-                                       aMetrics.height);
+                                       aMetrics.Width(),
+                                       aMetrics.Height());
       nsSize size(aReflowState.ComputedWidth(), aReflowState.ComputedHeight());
-      size.width -= kidReflowState.mComputedBorderPadding.LeftRight();
-      size.height -= kidReflowState.mComputedBorderPadding.TopBottom();
+      size.width -= kidReflowState.ComputedPhysicalBorderPadding().LeftRight();
+      size.height -= kidReflowState.ComputedPhysicalBorderPadding().TopBottom();
 
       kidReflowState.SetComputedWidth(std::max(size.width, 0));
       kidReflowState.SetComputedHeight(std::max(size.height, 0));
@@ -342,7 +351,7 @@ nsVideoFrame::Reflow(nsPresContext*           aPresContext,
       ReflowChild(child, aPresContext, kidDesiredSize, kidReflowState,
                   mBorderPadding.left, mBorderPadding.top, 0, aStatus);
       FinishReflowChild(child, aPresContext,
-                        &kidReflowState, kidDesiredSize,
+                        kidDesiredSize, &kidReflowState,
                         mBorderPadding.left, mBorderPadding.top, 0);
     }
   }
@@ -352,10 +361,8 @@ nsVideoFrame::Reflow(nsPresContext*           aPresContext,
 
   NS_FRAME_TRACE(NS_FRAME_TRACE_CALLS,
                   ("exit nsVideoFrame::Reflow: size=%d,%d",
-                  aMetrics.width, aMetrics.height));
+                  aMetrics.Width(), aMetrics.Height()));
   NS_FRAME_SET_TRUNCATION(aStatus, aReflowState, aMetrics);
-
-  return NS_OK;
 }
 
 class nsDisplayVideo : public nsDisplayItem {
@@ -381,23 +388,23 @@ public:
   // away completely (e.g. because of a decoder error). The problem would
   // be especially acute if we have off-main-thread rendering.
 
-  virtual nsRect GetBounds(nsDisplayListBuilder* aBuilder, bool* aSnap)
+  virtual nsRect GetBounds(nsDisplayListBuilder* aBuilder, bool* aSnap) MOZ_OVERRIDE
   {
     *aSnap = true;
     nsIFrame* f = Frame();
-    return f->GetContentRect() - f->GetPosition() + ToReferenceFrame();
+    return f->GetContentRectRelativeToSelf() + ToReferenceFrame();
   }
 
   virtual already_AddRefed<Layer> BuildLayer(nsDisplayListBuilder* aBuilder,
                                              LayerManager* aManager,
-                                             const ContainerLayerParameters& aContainerParameters)
+                                             const ContainerLayerParameters& aContainerParameters) MOZ_OVERRIDE
   {
     return static_cast<nsVideoFrame*>(mFrame)->BuildLayer(aBuilder, aManager, this, aContainerParameters);
   }
 
   virtual LayerState GetLayerState(nsDisplayListBuilder* aBuilder,
                                    LayerManager* aManager,
-                                   const ContainerLayerParameters& aParameters)
+                                   const ContainerLayerParameters& aParameters) MOZ_OVERRIDE
   {
     if (aManager->IsCompositingCheap()) {
       // Since ImageLayers don't require additional memory of the
@@ -466,21 +473,23 @@ nsVideoFrame::AccessibleType()
 }
 #endif
 
-#ifdef DEBUG
-NS_IMETHODIMP
+#ifdef DEBUG_FRAME_DUMP
+nsresult
 nsVideoFrame::GetFrameName(nsAString& aResult) const
 {
   return MakeFrameName(NS_LITERAL_STRING("HTMLVideo"), aResult);
 }
 #endif
 
-nsSize nsVideoFrame::ComputeSize(nsRenderingContext *aRenderingContext,
-                                     nsSize aCBSize,
-                                     nscoord aAvailableWidth,
-                                     nsSize aMargin,
-                                     nsSize aBorder,
-                                     nsSize aPadding,
-                                     uint32_t aFlags)
+LogicalSize
+nsVideoFrame::ComputeSize(nsRenderingContext *aRenderingContext,
+                          WritingMode aWM,
+                          const LogicalSize& aCBSize,
+                          nscoord aAvailableISize,
+                          const LogicalSize& aMargin,
+                          const LogicalSize& aBorder,
+                          const LogicalSize& aPadding,
+                          uint32_t aFlags)
 {
   nsSize size = GetVideoIntrinsicSize(aRenderingContext);
 
@@ -491,7 +500,7 @@ nsSize nsVideoFrame::ComputeSize(nsRenderingContext *aRenderingContext,
   // Only video elements have an intrinsic ratio.
   nsSize intrinsicRatio = HasVideoElement() ? size : nsSize(0, 0);
 
-  return nsLayoutUtils::ComputeSizeWithIntrinsicDimensions(aRenderingContext,
+  return nsLayoutUtils::ComputeSizeWithIntrinsicDimensions(aWM, aRenderingContext,
                                                            this,
                                                            intrinsicSize,
                                                            intrinsicRatio,
@@ -501,14 +510,14 @@ nsSize nsVideoFrame::ComputeSize(nsRenderingContext *aRenderingContext,
                                                            aPadding);
 }
 
-nscoord nsVideoFrame::GetMinWidth(nsRenderingContext *aRenderingContext)
+nscoord nsVideoFrame::GetMinISize(nsRenderingContext *aRenderingContext)
 {
   nscoord result = GetVideoIntrinsicSize(aRenderingContext).width;
   DISPLAY_MIN_WIDTH(this, result);
   return result;
 }
 
-nscoord nsVideoFrame::GetPrefWidth(nsRenderingContext *aRenderingContext)
+nscoord nsVideoFrame::GetPrefISize(nsRenderingContext *aRenderingContext)
 {
   nscoord result = GetVideoIntrinsicSize(aRenderingContext).width;
   DISPLAY_PREF_WIDTH(this, result);
@@ -602,7 +611,7 @@ nsVideoFrame::UpdatePosterSource(bool aNotify)
   }
 }
 
-NS_IMETHODIMP
+nsresult
 nsVideoFrame::AttributeChanged(int32_t aNameSpaceID,
                                nsIAtom* aAttribute,
                                int32_t aModType)
@@ -616,8 +625,8 @@ nsVideoFrame::AttributeChanged(int32_t aNameSpaceID,
 }
 
 bool nsVideoFrame::HasVideoElement() {
-  nsCOMPtr<nsIDOMHTMLVideoElement> videoDomElement = do_QueryInterface(mContent);
-  return videoDomElement != nullptr;
+  nsCOMPtr<nsIDOMHTMLMediaElement> mediaDomElement = do_QueryInterface(mContent);
+  return mediaDomElement->IsVideo();
 }
 
 bool nsVideoFrame::HasVideoData()

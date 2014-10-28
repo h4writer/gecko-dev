@@ -893,7 +893,7 @@ calltree(void **stack, size_t num_stack_entries, tm_thread *t)
  * reverse it in calltree.
  */
 static void
-stack_callback(void *pc, void *sp, void *closure)
+stack_callback(uint32_t frameNumber, void *pc, void *sp, void *closure)
 {
     stack_buffer_info *info = (stack_buffer_info*) closure;
 
@@ -1722,6 +1722,11 @@ print_stack(FILE *ofp, callsite *site)
     }
 }
 
+static const char *allocation_format =
+  (sizeof(void*) == 4) ? "\t0x%08zX\n" :
+  (sizeof(void*) == 8) ? "\t0x%016zX\n" :
+  "UNEXPECTED sizeof(void*)";
+
 static int
 allocation_enumerator(PLHashEntry *he, int i, void *arg)
 {
@@ -1729,17 +1734,17 @@ allocation_enumerator(PLHashEntry *he, int i, void *arg)
     FILE *ofp = (FILE*) arg;
     callsite *site = (callsite*) he->value;
 
-    unsigned long *p, *end;
+    size_t *p, *end;
 
     fprintf(ofp, "%p <%s> (%lu)\n",
             he->key,
             nsGetTypeName(he->key),
             (unsigned long) alloc->size);
 
-    for (p   = (unsigned long*) he->key,
-         end = (unsigned long*) ((char*)he->key + alloc->size);
+    for (p   = (size_t*) he->key,
+         end = (size_t*) ((char*)he->key + alloc->size);
          p < end; ++p) {
-        fprintf(ofp, "\t0x%08lX\n", *p);
+        fprintf(ofp, allocation_format, *p);
     }
 
     print_stack(ofp, site);

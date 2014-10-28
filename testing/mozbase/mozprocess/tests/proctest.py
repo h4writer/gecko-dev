@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import unittest
+from mozprocess.pid import get_pids
 
 here = os.path.dirname(os.path.abspath(__file__))
 
@@ -12,36 +13,14 @@ def check_for_process(processName):
 
         Returns:
         detected -- True if process is detected to exist, False otherwise
-        output -- if process exists, stdout of the process, '' otherwise
+        output -- if process exists, stdout of the process, [] otherwise
     """
-    # TODO: replace with
-    # https://github.com/mozilla/mozbase/blob/master/mozprocess/mozprocess/pid.py
-    # which should be augmented from talos
-    # see https://bugzilla.mozilla.org/show_bug.cgi?id=705864
-    output = ''
-    if mozinfo.isWin:
-        # On windows we use tasklist
-        p1 = subprocess.Popen(["tasklist"], stdout=subprocess.PIPE)
-        output = p1.communicate()[0]
-        detected = False
-        for line in output.splitlines():
-            if processName in line:
-                detected = True
-                break
-    else:
-        p1 = subprocess.Popen(["ps", "-ef"], stdout=subprocess.PIPE)
-        p2 = subprocess.Popen(["grep", processName], stdin=p1.stdout, stdout=subprocess.PIPE)
-        p1.stdout.close()
-        output = p2.communicate()[0]
-        detected = False
-        for line in output.splitlines():
-            if "grep %s" % processName in line:
-                continue
-            elif processName in line and not 'defunct' in line:
-                detected = True
-                break
+    name = os.path.basename(processName)
+    process = get_pids(name)
 
-    return detected, output
+    if process:
+        return True, process
+    return False, []
 
 class ProcTest(unittest.TestCase):
 
@@ -70,8 +49,10 @@ class ProcTest(unittest.TestCase):
         """
         if 'returncode' in expectedfail:
             self.assertTrue(returncode, "Detected an unexpected return code of: %s" % returncode)
-        elif not isalive:
-            self.assertTrue(returncode == 0, "Detected non-zero return code of: %d" % returncode)
+        elif isalive:
+            self.assertEqual(returncode, None, "Detected not None return code of: %s" % returncode)
+        else:
+            self.assertNotEqual(returncode, None, "Detected unexpected None return code of")
 
         if 'didtimeout' in expectedfail:
             self.assertTrue(didtimeout, "Detected that process didn't time out")

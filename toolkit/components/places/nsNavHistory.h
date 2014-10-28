@@ -190,8 +190,8 @@ public:
   nsIStringBundle* GetBundle();
   nsIStringBundle* GetDateFormatBundle();
   nsICollation* GetCollation();
-  void GetStringFromName(const PRUnichar* aName, nsACString& aResult);
-  void GetAgeInDaysString(int32_t aInt, const PRUnichar *aName,
+  void GetStringFromName(const char16_t* aName, nsACString& aResult);
+  void GetAgeInDaysString(int32_t aInt, const char16_t *aName,
                           nsACString& aResult);
   void GetMonthName(int32_t aIndex, nsACString& aResult);
   void GetMonthYear(int32_t aMonth, int32_t aYear, nsACString& aResult);
@@ -418,6 +418,29 @@ public:
                          const nsString& title,
                          const nsACString& aGUID);
 
+  /**
+   * Fires onFrecencyChanged event to nsINavHistoryService observers
+   */
+  void NotifyFrecencyChanged(nsIURI* aURI,
+                             int32_t aNewFrecency,
+                             const nsACString& aGUID,
+                             bool aHidden,
+                             PRTime aLastVisitDate);
+
+  /**
+   * Fires onManyFrecenciesChanged event to nsINavHistoryService observers
+   */
+  void NotifyManyFrecenciesChanged();
+
+  /**
+   * Posts a runnable to the main thread that calls NotifyFrecencyChanged.
+   */
+  void DispatchFrecencyChangedNotification(const nsACString& aSpec,
+                                           int32_t aNewFrecency,
+                                           const nsACString& aGUID,
+                                           bool aHidden,
+                                           PRTime aLastVisitDate) const;
+
   bool isBatching() {
     return mBatchLevel > 0;
   }
@@ -514,7 +537,7 @@ protected:
   class VisitHashKey : public nsURIHashKey
   {
   public:
-    VisitHashKey(const nsIURI* aURI)
+    explicit VisitHashKey(const nsIURI* aURI)
     : nsURIHashKey(aURI)
     {
     }

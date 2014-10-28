@@ -5,29 +5,28 @@
 
 package org.mozilla.gecko.prompts;
 
-import org.mozilla.gecko.util.GeckoEventResponder;
-import org.mozilla.gecko.util.ThreadUtils;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.GregorianCalendar;
+
+import org.json.JSONObject;
+import org.mozilla.gecko.AppConstants.Versions;
 import org.mozilla.gecko.widget.AllCapsTextView;
 import org.mozilla.gecko.widget.DateTimePicker;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
+import org.mozilla.gecko.widget.FloatingHintEditText;
 
 import android.content.Context;
 import android.content.res.Configuration;
-import android.graphics.Color;
-import android.os.Build;
-import android.text.format.DateFormat;
 import android.text.Html;
 import android.text.InputType;
 import android.text.TextUtils;
+import android.text.format.DateFormat;
 import android.util.Log;
-import android.view.inputmethod.InputMethodManager;
 import android.view.View;
 import android.view.ViewGroup.LayoutParams;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.ArrayAdapter;
 import android.widget.CheckBox;
-import android.widget.CheckedTextView;
 import android.widget.DatePicker;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -35,19 +34,22 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.TimePicker;
 
-import java.text.SimpleDateFormat;
-import java.util.Calendar;
-import java.util.GregorianCalendar;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.TimeUnit;
-
 public class PromptInput {
     protected final String mLabel;
     protected final String mType;
     protected final String mId;
     protected final String mValue;
+    protected OnChangeListener mListener;
     protected View mView;
     public static final String LOGTAG = "GeckoPromptInput";
+
+    public interface OnChangeListener {
+        public void onChange(PromptInput input);
+    }
+
+    public void setListener(OnChangeListener listener) {
+        mListener = listener;
+    }
 
     public static class EditInput extends PromptInput {
         protected final String mHint;
@@ -60,8 +62,9 @@ public class PromptInput {
             mAutofocus = object.optBoolean("autofocus");
         }
 
+        @Override
         public View getView(final Context context) throws UnsupportedOperationException {
-            EditText input = new EditText(context);
+            EditText input = new FloatingHintEditText(context);
             input.setInputType(InputType.TYPE_CLASS_TEXT);
             input.setText(mValue);
 
@@ -85,9 +88,10 @@ public class PromptInput {
             return mView;
         }
 
-        public String getValue() {
+        @Override
+        public Object getValue() {
             EditText edit = (EditText)mView;
-            return edit.getText().toString();
+            return edit.getText();
         }
     }
 
@@ -97,6 +101,7 @@ public class PromptInput {
             super(obj);
         }
 
+        @Override
         public View getView(final Context context) throws UnsupportedOperationException {
             EditText input = (EditText) super.getView(context);
             input.setRawInputType(Configuration.KEYBOARD_12KEY);
@@ -112,6 +117,7 @@ public class PromptInput {
             super(obj);
         }
 
+        @Override
         public View getView(Context context) throws UnsupportedOperationException {
             EditText input = (EditText) super.getView(context);
             input.setInputType(InputType.TYPE_CLASS_TEXT |
@@ -120,33 +126,36 @@ public class PromptInput {
             return input;
         }
 
-        public String getValue() {
+        @Override
+        public Object getValue() {
             EditText edit = (EditText)mView;
-            return edit.getText().toString();
+            return edit.getText();
         }
     }
 
     public static class CheckboxInput extends PromptInput {
         public static final String INPUT_TYPE = "checkbox";
-        private boolean mChecked;
+        private final boolean mChecked;
 
         public CheckboxInput(JSONObject obj) {
             super(obj);
             mChecked = obj.optBoolean("checked");
         }
 
+        @Override
         public View getView(Context context) throws UnsupportedOperationException {
             CheckBox checkbox = new CheckBox(context);
-            checkbox.setLayoutParams(new LayoutParams(LayoutParams.FILL_PARENT, LayoutParams.WRAP_CONTENT));
+            checkbox.setLayoutParams(new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
             checkbox.setText(mLabel);
             checkbox.setChecked(mChecked);
             mView = (View)checkbox;
             return mView;
         }
 
-        public String getValue() {
+        @Override
+        public Object getValue() {
             CheckBox checkbox = (CheckBox)mView;
-            return checkbox.isChecked() ? "true" : "false";
+            return checkbox.isChecked() ? Boolean.TRUE : Boolean.FALSE;
         }
     }
 
@@ -164,6 +173,7 @@ public class PromptInput {
             super(obj);
         }
 
+        @Override
         public View getView(Context context) throws UnsupportedOperationException {
             if (mType.equals("date")) {
                 try {
@@ -222,8 +232,9 @@ public class PromptInput {
             return new SimpleDateFormat(dateFormat).format(calendar.getTime());
         }
 
-        public String getValue() {
-            if (Build.VERSION.SDK_INT < 11 && mType.equals("date")) {
+        @Override
+        public Object getValue() {
+            if (Versions.preHC && mType.equals("date")) {
                 // We can't use the custom DateTimePicker with a sdk older than 11.
                 // Fallback on the native DatePicker.
                 DatePicker dp = (DatePicker)mView;
@@ -271,8 +282,9 @@ public class PromptInput {
             mSelected = obj.optInt("selected");
         }
 
+        @Override
         public View getView(final Context context) throws UnsupportedOperationException {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.HONEYCOMB) {
+            if (Versions.preHC) {
                 spinner = new Spinner(context);
             } else {
                 spinner = new Spinner(context, Spinner.MODE_DIALOG);
@@ -285,7 +297,8 @@ public class PromptInput {
                     spinner.setAdapter(adapter);
                     spinner.setSelection(mSelected);
                 }
-            } catch(Exception ex) { }
+            } catch (Exception ex) {
+            }
 
             if (!TextUtils.isEmpty(mLabel)) {
                 LinearLayout container = new LinearLayout(context);
@@ -302,8 +315,9 @@ public class PromptInput {
             return spinner;
         }
 
-        public String getValue() {
-            return Integer.toString(spinner.getSelectedItemPosition());
+        @Override
+        public Object getValue() {
+            return spinner.getSelectedItemPosition();
         }
     }
 
@@ -313,16 +327,13 @@ public class PromptInput {
             super(obj);
         }
 
+        @Override
         public View getView(Context context) throws UnsupportedOperationException {
             // not really an input, but a way to add labels and such to the dialog
             TextView view = new TextView(context);
             view.setText(Html.fromHtml(mLabel));
             mView = view;
             return mView;
-        }
-
-        public String getValue() {
-            return "";
         }
     }
 
@@ -336,29 +347,35 @@ public class PromptInput {
 
     public static PromptInput getInput(JSONObject obj) {
         String type = obj.optString("type");
-        if (EditInput.INPUT_TYPE.equals(type)) {
-            return new EditInput(obj);
-        } else if (NumberInput.INPUT_TYPE.equals(type)) {
-            return new NumberInput(obj);
-        } else if (PasswordInput.INPUT_TYPE.equals(type)) {
-            return new PasswordInput(obj);
-        } else if (CheckboxInput.INPUT_TYPE.equals(type)) {
-            return new CheckboxInput(obj);
-        } else if (MenulistInput.INPUT_TYPE.equals(type)) {
-            return new MenulistInput(obj);
-        } else if (LabelInput.INPUT_TYPE.equals(type)) {
-            return new LabelInput(obj);
-        } else if (IconGridInput.INPUT_TYPE.equals(type)) {
-            return new IconGridInput(obj);
-        } else if (ColorPickerInput.INPUT_TYPE.equals(type)) {
-            return new ColorPickerInput(obj);
-        } else {
-            for (String dtType : DateTimeInput.INPUT_TYPES) {
-                if (dtType.equals(type)) {
-                    return new DateTimeInput(obj);
+        switch (type) {
+            case EditInput.INPUT_TYPE:
+                return new EditInput(obj);
+            case NumberInput.INPUT_TYPE:
+                return new NumberInput(obj);
+            case PasswordInput.INPUT_TYPE:
+                return new PasswordInput(obj);
+            case CheckboxInput.INPUT_TYPE:
+                return new CheckboxInput(obj);
+            case MenulistInput.INPUT_TYPE:
+                return new MenulistInput(obj);
+            case LabelInput.INPUT_TYPE:
+                return new LabelInput(obj);
+            case IconGridInput.INPUT_TYPE:
+                return new IconGridInput(obj);
+            case ColorPickerInput.INPUT_TYPE:
+                return new ColorPickerInput(obj);
+            case TabInput.INPUT_TYPE:
+                return new TabInput(obj);
+            default:
+                for (String dtType : DateTimeInput.INPUT_TYPES) {
+                    if (dtType.equals(type)) {
+                        return new DateTimeInput(obj);
+                    }
                 }
-            }
+
+                break;
         }
+
         return null;
     }
 
@@ -370,8 +387,8 @@ public class PromptInput {
         return mId;
     }
 
-    public String getValue() {
-        return "";
+    public Object getValue() {
+        return null;
     }
 
     public boolean getScrollable() {
@@ -379,6 +396,12 @@ public class PromptInput {
     }
 
     public boolean canApplyInputStyle() {
-	return true;
+        return true;
+    }
+
+    protected void notifyListeners(String val) {
+        if (mListener != null) {
+            mListener.onChange(this);
+        }
     }
 }

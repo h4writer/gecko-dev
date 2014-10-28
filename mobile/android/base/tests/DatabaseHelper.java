@@ -1,19 +1,21 @@
 package org.mozilla.gecko.tests;
 
-import org.mozilla.gecko.*;
+import java.util.ArrayList;
+
+import org.mozilla.gecko.AppConstants;
+import org.mozilla.gecko.Assert;
+import org.mozilla.gecko.GeckoProfile;
 import org.mozilla.gecko.db.BrowserDB;
 
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.database.Cursor;
 import android.net.Uri;
-import android.test.ActivityInstrumentationTestCase2;
-import java.util.ArrayList;
 
 class DatabaseHelper {
     protected enum BrowserDataType {BOOKMARKS, HISTORY};
-    private Activity mActivity;
-    private Assert mAsserter;
+    private final Activity mActivity;
+    private final Assert mAsserter;
 
     public DatabaseHelper(Activity activity, Assert asserter) {
         mActivity = activity;
@@ -30,11 +32,11 @@ class DatabaseHelper {
     protected Uri buildUri(BrowserDataType dataType) {
         Uri uri = null;
         if (dataType == BrowserDataType.BOOKMARKS || dataType == BrowserDataType.HISTORY) {
-            uri = Uri.parse("content://" + TestConstants.ANDROID_PACKAGE_NAME + ".db.browser/" + dataType.toString().toLowerCase());
+            uri = Uri.parse("content://" + AppConstants.ANDROID_PACKAGE_NAME + ".db.browser/" + dataType.toString().toLowerCase());
         } else {
            mAsserter.ok(false, "The wrong data type has been provided = " + dataType.toString(), "Please provide the correct data type");
         }
-        uri = uri.buildUpon().appendQueryParameter("profile", "default")
+        uri = uri.buildUpon().appendQueryParameter("profile", GeckoProfile.DEFAULT_PROFILE)
                              .appendQueryParameter("sync", "true").build();
         return uri;
     }
@@ -90,7 +92,7 @@ class DatabaseHelper {
     // About the same implementation as getFolderIdFromGuid from LocalBrowserDB because it is declared private and we can't use reflections to access it
     protected long getFolderIdFromGuid(String guid) {
         ContentResolver resolver = mActivity.getContentResolver();
-        long folderId = Long.valueOf(-1);
+        long folderId = -1L;
         Uri bookmarksUri = buildUri(BrowserDataType.BOOKMARKS);
         Cursor c = null;
         try {

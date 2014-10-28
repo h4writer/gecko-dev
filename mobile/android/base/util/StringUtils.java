@@ -5,7 +5,17 @@
 
 package org.mozilla.gecko.util;
 
+import android.content.Intent;
+import android.net.Uri;
+import android.text.TextUtils;
+import android.util.Log;
+
 public class StringUtils {
+    private static final String LOGTAG = "GeckoStringUtils";
+
+    private static final String FILTER_URL_PREFIX = "filter://";
+    private static final String USER_ENTERED_URL_PREFIX = "user-entered:";
+
     /*
      * This method tries to guess if the given string could be a search query or URL,
      * and returns a previous result if there is ambiguity
@@ -95,5 +105,100 @@ public class StringUtils {
         }
 
         return host.substring(start);
+    }
+
+    /**
+     * Searches the url query string for the first value with the given key.
+     */
+    public static String getQueryParameter(String url, String desiredKey) {
+        if (TextUtils.isEmpty(url) || TextUtils.isEmpty(desiredKey)) {
+            return null;
+        }
+
+        final String[] urlParts = url.split("\\?");
+        if (urlParts.length < 2) {
+            return null;
+        }
+
+        final String query = urlParts[1];
+        for (final String param : query.split("&")) {
+            final String pair[] = param.split("=");
+            final String key = Uri.decode(pair[0]);
+
+            // Key is empty or does not match the key we're looking for, discard
+            if (TextUtils.isEmpty(key) || !key.equals(desiredKey)) {
+                continue;
+            }
+            // No value associated with key, discard
+            if (pair.length < 2) {
+                continue;
+            }
+            final String value = Uri.decode(pair[1]);
+            if (TextUtils.isEmpty(value)) {
+                return null;
+            }
+            return value;
+        }
+
+        return null;
+    }
+
+    public static boolean isFilterUrl(String url) {
+        if (TextUtils.isEmpty(url)) {
+            return false;
+        }
+
+        return url.startsWith(FILTER_URL_PREFIX);
+    }
+
+    public static String getFilterFromUrl(String url) {
+        if (TextUtils.isEmpty(url)) {
+            return null;
+        }
+
+        return url.substring(FILTER_URL_PREFIX.length());
+    }
+
+    public static boolean isShareableUrl(final String url) {
+        final String scheme = Uri.parse(url).getScheme();
+        return !("about".equals(scheme) || "chrome".equals(scheme) ||
+                "file".equals(scheme) || "resource".equals(scheme));
+    }
+
+    public static boolean isUserEnteredUrl(String url) {
+        return (url != null && url.startsWith(USER_ENTERED_URL_PREFIX));
+    }
+
+    /**
+     * Given a url with a user-entered scheme, extract the
+     * scheme-specific component. For e.g, given "user-entered://www.google.com",
+     * this method returns "//www.google.com". If the passed url
+     * does not have a user-entered scheme, the same url will be returned.
+     *
+     * @param  url to be decoded
+     * @return url component entered by user
+     */
+    public static String decodeUserEnteredUrl(String url) {
+        Uri uri = Uri.parse(url);
+        if ("user-entered".equals(uri.getScheme())) {
+            return uri.getSchemeSpecificPart();
+        }
+        return url;
+    }
+
+    public static String encodeUserEnteredUrl(String url) {
+        return Uri.fromParts("user-entered", url, null).toString();
+    }
+
+    public static String getStringExtra(Intent intent, String name) {
+        try {
+            return intent.getStringExtra(name);
+        } catch (android.os.BadParcelableException ex) {
+            Log.w(LOGTAG, "Couldn't get string extra: malformed intent.");
+            return null;
+        } catch (RuntimeException re) {
+            Log.w(LOGTAG, "Couldn't get string extra.", re);
+            return null;
+        }
     }
 }

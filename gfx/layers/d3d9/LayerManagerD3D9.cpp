@@ -5,7 +5,7 @@
 
 #include "LayerManagerD3D9.h"
 
-#include "ThebesLayerD3D9.h"
+#include "PaintedLayerD3D9.h"
 #include "ContainerLayerD3D9.h"
 #include "ImageLayerD3D9.h"
 #include "ColorLayerD3D9.h"
@@ -15,14 +15,12 @@
 #include "nsIGfxInfo.h"
 #include "nsServiceManagerUtils.h"
 #include "gfxFailure.h"
-#include "mozilla/Preferences.h"
+#include "gfxPrefs.h"
 
 #include "gfxCrashReporterUtils.h"
 
 namespace mozilla {
 namespace layers {
-
-DeviceManagerD3D9 *LayerManagerD3D9::mDefaultDeviceManager = nullptr;
 
 LayerManagerD3D9::LayerManagerD3D9(nsIWidget *aWidget)
   : mWidget(aWidget)
@@ -43,13 +41,13 @@ LayerManagerD3D9::Initialize(bool force)
   ScopedGfxFeatureReporter reporter("D3D9 Layers", force);
 
   /* XXX: this preference and blacklist code should move out of the layer manager */
-  bool forceAccelerate = gfxPlatform::GetPrefLayersAccelerationForceEnabled();
+  bool forceAccelerate = gfxPrefs::LayersAccelerationForceEnabled();
 
   nsCOMPtr<nsIGfxInfo> gfxInfo = do_GetService("@mozilla.org/gfx/info;1");
   if (gfxInfo) {
     int32_t status;
     if (NS_SUCCEEDED(gfxInfo->GetFeatureStatus(nsIGfxInfo::FEATURE_DIRECT3D_9_LAYERS, &status))) {
-      if (status != nsIGfxInfo::FEATURE_NO_INFO && !forceAccelerate)
+      if (status != nsIGfxInfo::FEATURE_STATUS_OK && !forceAccelerate)
       {
         NS_WARNING("Direct3D 9-accelerated layers are not supported on this system.");
         return false;
@@ -57,15 +55,9 @@ LayerManagerD3D9::Initialize(bool force)
     }
   }
 
-  if (!mDefaultDeviceManager) {
-    mDeviceManager = gfxWindowsPlatform::GetPlatform()->GetD3D9DeviceManager();
-    if (!mDeviceManager) {
-      return false;
-    }
-
-    mDefaultDeviceManager = mDeviceManager;
-  } else {
-    mDeviceManager = mDefaultDeviceManager;
+  mDeviceManager = gfxWindowsPlatform::GetPlatform()->GetD3D9DeviceManager();
+  if (!mDeviceManager) {
+    return false;
   }
 
   mSwapChain = mDeviceManager->
@@ -136,7 +128,7 @@ LayerManagerD3D9::EndEmptyTransaction(EndTransactionFlags aFlags)
 }
 
 void
-LayerManagerD3D9::EndTransaction(DrawThebesLayerCallback aCallback,
+LayerManagerD3D9::EndTransaction(DrawPaintedLayerCallback aCallback,
                                  void* aCallbackData,
                                  EndTransactionFlags aFlags)
 {
@@ -156,7 +148,7 @@ LayerManagerD3D9::EndTransaction(DrawThebesLayerCallback aCallback,
 
     // The results of our drawing always go directly into a pixel buffer,
     // so we don't need to pass any global transform here.
-    mRoot->ComputeEffectiveTransforms(gfx3DMatrix());
+    mRoot->ComputeEffectiveTransforms(gfx::Matrix4x4());
 
     SetCompositingDisabled(aFlags & END_NO_COMPOSITE);
     Render();
@@ -175,10 +167,10 @@ LayerManagerD3D9::SetRoot(Layer *aLayer)
   mRoot = aLayer;
 }
 
-already_AddRefed<ThebesLayer>
-LayerManagerD3D9::CreateThebesLayer()
+already_AddRefed<PaintedLayer>
+LayerManagerD3D9::CreatePaintedLayer()
 {
-  nsRefPtr<ThebesLayer> layer = new ThebesLayerD3D9(this);
+  nsRefPtr<PaintedLayer> layer = new PaintedLayerD3D9(this);
   return layer.forget();
 }
 
@@ -233,10 +225,10 @@ LayerManagerD3D9::ReportFailure(const nsACString &aMsg, HRESULT aCode)
 void
 LayerManagerD3D9::Render()
 {
-  DeviceManagerState state = mSwapChain->PrepareForRendering();
-  if (state != DeviceOK) {
+  if (mSwapChain->PrepareForRendering() != DeviceOK) {
     return;
   }
+
   deviceManager()->SetupRenderState();
 
   SetupPipeline();
@@ -268,6 +260,25 @@ LayerManagerD3D9::Render()
   device()->SetScissorRect(&r);
 
   static_cast<LayerD3D9*>(mRoot->ImplData())->RenderLayer();
+
+  if (!mRegionToClear.IsEmpty()) {
+    D3DRECT* rects = new D3DRECT[mRegionToClear.GetNumRects()];
+    nsIntRegionRectIterator iter(mRegionToClear);
+    const nsIntRect *r;
+    size_t i = 0;
+    while ((r = iter.Next())) {
+      rects[i].x1 = r->x;
+      rects[i].y1 = r->y;
+      rects[i].x2 = r->x + r->width;
+      rects[i].y2 = r->y + r->height;
+      i++;
+    }
+
+    device()->Clear(i, rects, D3DCLEAR_TARGET,
+                    0x00000000, 0, 0);
+
+    delete [] rects;
+  }
 
   device()->EndScene();
 
@@ -347,7 +358,7 @@ LayerManagerD3D9::PaintToTarget()
     new gfxImageSurface((unsigned char*)rect.pBits,
                         gfxIntSize(desc.Width, desc.Height),
                         rect.Pitch,
-                        gfxImageFormatARGB32);
+                        gfxImageFormat::ARGB32);
 
   mTarget->SetSource(imageSurface);
   mTarget->SetOperator(gfxContext::OPERATOR_OVER);

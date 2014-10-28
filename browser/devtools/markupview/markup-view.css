@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+:root {
+  -moz-control-character-visibility: visible;
+}
+
 /* Force height and width (possibly overflowing) from inline elements.
  * This allows long overflows of text or input fields to still be styled with
  * the container, rather than the background disappearing when scrolling */
@@ -31,7 +35,10 @@
 
 .html-editor-inner {
   border: solid .1px;
-  flex: 1 1 auto;
+  flex: 1 1 main-size;
+
+  /* Keep the editor away from the markup view floating scrollbars */
+  -moz-margin-end: 12px;
 }
 
 .html-editor iframe {
@@ -70,7 +77,7 @@
 /* This extra element placed in each tag is positioned absolutely to cover the
  * whole tag line and is used for background styling (when a selection is made
  * or when the tag is flashing) */
-.tag-line .highlighter {
+.tag-line .tag-state {
   position: absolute;
   left: -1000em;
   right: 0;
@@ -120,44 +127,15 @@
   margin-right: 0;
 }
 
-.highlighter.flash-out {
+.tag-state.flash-out {
   transition: background .5s;
 }
 
-/* Preview */
-
-#previewbar {
-  position: fixed;
-  top: 0;
-  right: 0;
-  width: 90px;
-  background: black;
-  border-left: 1px solid #333;
-  border-bottom: 1px solid #333;
-  overflow: hidden;
+.tag-line {
+  cursor: default;
 }
 
-#preview {
-  position: absolute;
-  top: 0;
-  right: 5px;
-  width: 80px;
-  height: 100%;
-  background-image: -moz-element(#root);
-  background-repeat: no-repeat;
-}
-
-#previewbar.hide,
-#previewbar.disabled {
+.markupview-events {
   display: none;
-}
-
-#viewbox {
-  position: absolute;
-  top: 0;
-  right: 5px;
-  width: 80px;
-  border: 1px dashed #888;
-  background: rgba(205,205,255,0.2);
-  outline: 1px solid transparent;
+  cursor: pointer;
 }

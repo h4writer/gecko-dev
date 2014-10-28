@@ -8,10 +8,10 @@
 
 #include "mozilla/Attributes.h"
 #include "mozilla/MemoryReporting.h"
-#include "gfxFont.h"
+#include "gfxTextRun.h"
+#include "nsStyleContext.h"
 
 class nsTransformedTextRun;
-class nsStyleContext;
 
 class nsTransformingTextRunFactory {
 public:
@@ -22,21 +22,12 @@ public:
                                     const gfxFontGroup::Parameters* aParams,
                                     gfxFontGroup* aFontGroup, uint32_t aFlags,
                                     nsStyleContext** aStyles, bool aOwnsFactory = true);
-  nsTransformedTextRun* MakeTextRun(const PRUnichar* aString, uint32_t aLength,
+  nsTransformedTextRun* MakeTextRun(const char16_t* aString, uint32_t aLength,
                                     const gfxFontGroup::Parameters* aParams,
                                     gfxFontGroup* aFontGroup, uint32_t aFlags,
                                     nsStyleContext** aStyles, bool aOwnsFactory = true);
 
   virtual void RebuildTextRun(nsTransformedTextRun* aTextRun, gfxContext* aRefContext) = 0;
-};
-
-/**
- * Builds textruns that render their text using a font-variant (i.e.,
- * smallcaps).
- */
-class nsFontVariantTextRunFactory : public nsTransformingTextRunFactory {
-public:
-  virtual void RebuildTextRun(nsTransformedTextRun* aTextRun, gfxContext* aRefContext) MOZ_OVERRIDE;
 };
 
 /**
@@ -52,12 +43,32 @@ public:
   // via the fontgroup.
   
   // Takes ownership of aInnerTransformTextRunFactory
-  nsCaseTransformTextRunFactory(nsTransformingTextRunFactory* aInnerTransformingTextRunFactory,
-                                bool aAllUppercase = false)
+  explicit nsCaseTransformTextRunFactory(nsTransformingTextRunFactory* aInnerTransformingTextRunFactory,
+                                         bool aAllUppercase = false)
     : mInnerTransformingTextRunFactory(aInnerTransformingTextRunFactory),
       mAllUppercase(aAllUppercase) {}
 
   virtual void RebuildTextRun(nsTransformedTextRun* aTextRun, gfxContext* aRefContext) MOZ_OVERRIDE;
+
+  // Perform a transformation on the given string, writing the result into
+  // aConvertedString. If aAllUppercase is true, the transform is (global)
+  // upper-casing, and aLanguage is used to determine any language-specific
+  // behavior; otherwise, an nsTransformedTextRun should be passed in
+  // as aTextRun and its styles will be used to determine the transform(s)
+  // to be applied.
+  // If such an input textrun is provided, then its line-breaks and styles
+  // will be copied to the output arrays, which must also be provided by
+  // the caller. For the global upper-casing usage (no input textrun),
+  // these are ignored.
+  static bool TransformString(const nsAString& aString,
+                              nsString& aConvertedString,
+                              bool aAllUppercase,
+                              const nsIAtom* aLanguage,
+                              nsTArray<bool>& aCharsToMergeArray,
+                              nsTArray<bool>& aDeletedCharsArray,
+                              nsTransformedTextRun* aTextRun = nullptr,
+                              nsTArray<uint8_t>* aCanBreakBeforeArray = nullptr,
+                              nsTArray<nsStyleContext*>* aStyleArray = nullptr);
 
 protected:
   nsAutoPtr<nsTransformingTextRunFactory> mInnerTransformingTextRunFactory;
@@ -68,12 +79,12 @@ protected:
  * So that we can reshape as necessary, we store enough information
  * to fully rebuild the textrun contents.
  */
-class nsTransformedTextRun : public gfxTextRun {
+class nsTransformedTextRun MOZ_FINAL : public gfxTextRun {
 public:
   static nsTransformedTextRun *Create(const gfxTextRunFactory::Parameters* aParams,
                                       nsTransformingTextRunFactory* aFactory,
                                       gfxFontGroup* aFontGroup,
-                                      const PRUnichar* aString, uint32_t aLength,
+                                      const char16_t* aString, uint32_t aLength,
                                       const uint32_t aFlags, nsStyleContext** aStyles,
                                       bool aOwnsFactory);
 
@@ -117,7 +128,7 @@ private:
   nsTransformedTextRun(const gfxTextRunFactory::Parameters* aParams,
                        nsTransformingTextRunFactory* aFactory,
                        gfxFontGroup* aFontGroup,
-                       const PRUnichar* aString, uint32_t aLength,
+                       const char16_t* aString, uint32_t aLength,
                        const uint32_t aFlags, nsStyleContext** aStyles,
                        bool aOwnsFactory)
     : gfxTextRun(aParams, aLength, aFontGroup, aFlags),

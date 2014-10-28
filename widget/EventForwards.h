@@ -8,6 +8,8 @@
 
 #include <stdint.h>
 
+#include "mozilla/TypedEnum.h"
+
 /**
  * XXX Following enums should be in BasicEvents.h.  However, currently, it's
  *     impossible to use foward delearation for enum.
@@ -28,6 +30,22 @@ enum nsEventStatus
 
 namespace mozilla {
 
+typedef uint8_t EventClassIDType;
+
+enum EventClassID MOZ_ENUM_TYPE(EventClassIDType)
+{
+  // The event class name will be:
+  //   eBasicEventClass for WidgetEvent
+  //   eFooEventClass for WidgetFooEvent or InternalFooEvent
+#define NS_ROOT_EVENT_CLASS(aPrefix, aName)   eBasic##aName##Class
+#define NS_EVENT_CLASS(aPrefix, aName)      , e##aName##Class
+
+#include "mozilla/EventClassList.h"
+
+#undef NS_EVENT_CLASS
+#undef NS_ROOT_EVENT_CLASS
+};
+
 typedef uint16_t Modifiers;
 
 #define NS_DEFINE_KEYNAME(aCPPName, aDOMKeyName) \
@@ -35,13 +53,37 @@ typedef uint16_t Modifiers;
 
 enum KeyNameIndex
 {
-#include "nsDOMKeyNameList.h"
+#include "mozilla/KeyNameList.h"
   // If a DOM keyboard event is synthesized by script, this is used.  Then,
   // specified key name should be stored and use it as .key value.
   KEY_NAME_INDEX_USE_STRING
 };
 
 #undef NS_DEFINE_KEYNAME
+
+#define NS_DEFINE_PHYSICAL_KEY_CODE_NAME(aCPPName, aDOMCodeName) \
+  CODE_NAME_INDEX_##aCPPName,
+
+enum CodeNameIndex
+{
+#include "mozilla/PhysicalKeyCodeNameList.h"
+  // If a DOM keyboard event is synthesized by script, this is used.  Then,
+  // specified code name should be stored and use it as .code value.
+  CODE_NAME_INDEX_USE_STRING
+};
+
+#undef NS_DEFINE_PHYSICAL_KEY_CODE_NAME
+
+#define NS_DEFINE_COMMAND(aName, aCommandStr) , Command##aName
+
+typedef int8_t CommandInt;
+enum Command MOZ_ENUM_TYPE(CommandInt)
+{
+  CommandDoNothing
+
+#include "mozilla/CommandList.h"
+};
+#undef NS_DEFINE_COMMAND
 
 } // namespace mozilla
 
@@ -69,7 +111,7 @@ struct AlternativeCharCode;
 struct TextRangeStyle;
 struct TextRange;
 
-typedef TextRange* TextRangeArray;
+class TextRangeArray;
 
 } // namespace mozilla
 

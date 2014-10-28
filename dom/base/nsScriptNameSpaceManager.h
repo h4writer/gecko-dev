@@ -49,8 +49,6 @@ struct nsGlobalNameStruct
     eTypeProperty,
     eTypeNavigatorProperty,
     eTypeExternalConstructor,
-    eTypeStaticNameSet,
-    eTypeDynamicNameSet,
     eTypeClassConstructor,
     eTypeClassProto,
     eTypeExternalClassInfoCreator,
@@ -63,7 +61,6 @@ struct nsGlobalNameStruct
   // initialized for eTypeNewDOMBinding structs.
   bool mChromeOnly : 1;
   bool mAllowXBL : 1;
-  bool mDisabled : 1;
 
   union {
     int32_t mDOMClassInfoID; // eTypeClassConstructor
@@ -88,19 +85,18 @@ class nsICategoryManager;
 class GlobalNameMapEntry;
 
 
-class nsScriptNameSpaceManager : public mozilla::MemoryUniReporter,
-                                 public nsIObserver,
-                                 public nsSupportsWeakReference
+class nsScriptNameSpaceManager : public nsIObserver,
+                                 public nsSupportsWeakReference,
+                                 public nsIMemoryReporter
 {
 public:
   NS_DECL_ISUPPORTS
   NS_DECL_NSIOBSERVER
+  NS_DECL_NSIMEMORYREPORTER
 
   nsScriptNameSpaceManager();
-  virtual ~nsScriptNameSpaceManager();
 
   nsresult Init();
-  nsresult InitForContext(nsIScriptContext *aContext);
 
   // Returns a nsGlobalNameStruct for aName, or null if one is not
   // found. The returned nsGlobalNameStruct is only guaranteed to be
@@ -108,7 +104,7 @@ public:
   // It also returns a pointer to the string buffer of the classname
   // in the nsGlobalNameStruct.
   const nsGlobalNameStruct* LookupName(const nsAString& aName,
-                                       const PRUnichar **aClassName = nullptr)
+                                       const char16_t **aClassName = nullptr)
   {
     return LookupNameInternal(aName, aClassName);
   }
@@ -123,8 +119,7 @@ public:
                              int32_t aDOMClassInfoID,
                              bool aPrivileged,
                              bool aXBLAllowed,
-                             bool aDisabled,
-                             const PRUnichar **aResult);
+                             const char16_t **aResult);
 
   nsresult RegisterClassProto(const char *aClassName,
                               const nsIID *aConstructorProtoIID,
@@ -150,31 +145,52 @@ public:
   void RegisterDefineDOMInterface(const nsAFlatString& aName,
     mozilla::dom::DefineInterface aDefineDOMInterface,
     mozilla::dom::ConstructorEnabled* aConstructorEnabled);
+  template<size_t N>
+  void RegisterDefineDOMInterface(const char16_t (&aKey)[N],
+    mozilla::dom::DefineInterface aDefineDOMInterface,
+    mozilla::dom::ConstructorEnabled* aConstructorEnabled)
+  {
+    nsLiteralString key(aKey);
+    return RegisterDefineDOMInterface(key, aDefineDOMInterface,
+                                      aConstructorEnabled);
+  }
 
   void RegisterNavigatorDOMConstructor(const nsAFlatString& aName,
     mozilla::dom::ConstructNavigatorProperty aNavConstructor,
     mozilla::dom::ConstructorEnabled* aConstructorEnabled);
+  template<size_t N>
+  void RegisterNavigatorDOMConstructor(const char16_t (&aKey)[N],
+    mozilla::dom::ConstructNavigatorProperty aNavConstructor,
+    mozilla::dom::ConstructorEnabled* aConstructorEnabled)
+  {
+    nsLiteralString key(aKey);
+    return RegisterNavigatorDOMConstructor(key, aNavConstructor,
+                                           aConstructorEnabled);
+  }
 
   typedef PLDHashOperator
-  (* NameEnumerator)(const nsAString& aGlobalName, void* aClosure);
+  (* NameEnumerator)(const nsAString& aGlobalName,
+                     const nsGlobalNameStruct& aGlobalNameStruct,
+                     void* aClosure);
 
   void EnumerateGlobalNames(NameEnumerator aEnumerator,
                             void* aClosure);
   void EnumerateNavigatorNames(NameEnumerator aEnumerator,
                                void* aClosure);
 
-  int64_t Amount() MOZ_OVERRIDE;
   size_t SizeOfIncludingThis(mozilla::MallocSizeOf aMallocSizeOf);
 
 private:
+  virtual ~nsScriptNameSpaceManager();
+
   // Adds a new entry to the hash and returns the nsGlobalNameStruct
   // that aKey will be mapped to. If mType in the returned
   // nsGlobalNameStruct is != eTypeNotInitialized, an entry for aKey
   // already existed.
   nsGlobalNameStruct *AddToHash(PLDHashTable *aTable, const nsAString *aKey,
-                                const PRUnichar **aClassName = nullptr);
+                                const char16_t **aClassName = nullptr);
   nsGlobalNameStruct *AddToHash(PLDHashTable *aTable, const char *aKey,
-                                const PRUnichar **aClassName = nullptr)
+                                const char16_t **aClassName = nullptr)
   {
     NS_ConvertASCIItoUTF16 key(aKey);
     return AddToHash(aTable, &key, aClassName);
@@ -220,7 +236,7 @@ private:
                                     bool aRemove);
 
   nsGlobalNameStruct* LookupNameInternal(const nsAString& aName,
-                                         const PRUnichar **aClassName = nullptr);
+                                         const char16_t **aClassName = nullptr);
 
   PLDHashTable mGlobalNames;
   PLDHashTable mNavigatorNames;

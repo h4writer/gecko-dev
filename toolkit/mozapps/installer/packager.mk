@@ -10,7 +10,7 @@ ifndef MOZ_PKG_FORMAT
 ifeq (cocoa,$(MOZ_WIDGET_TOOLKIT))
 MOZ_PKG_FORMAT  = DMG
 else
-ifeq (,$(filter-out OS2 WINNT, $(OS_ARCH)))
+ifeq (,$(filter-out WINNT, $(OS_ARCH)))
 MOZ_PKG_FORMAT  = ZIP
 else
 ifeq (,$(filter-out SunOS, $(OS_ARCH)))
@@ -39,7 +39,7 @@ ifndef _APPNAME
 _APPNAME = $(MOZ_MACBUNDLE_NAME)
 endif
 ifndef _BINPATH
-_BINPATH = /$(_APPNAME)/Contents/MacOS
+_BINPATH = /$(_APPNAME)/Contents/Resources
 endif # _BINPATH
 ifdef UNIVERSAL_BINARY
 STAGEPATH = universal/
@@ -103,39 +103,29 @@ JSSHELL_BINS += \
 endif # MOZ_FOLD_LIBS
 endif # MOZ_NATIVE_NSPR
 ifdef MOZ_SHARED_ICU
-ifdef XP_WIN
-ifdef MOZ_DEBUG
+ifeq ($(OS_TARGET), WINNT)
 JSSHELL_BINS += \
-  $(DIST)/bin/icudtd$(MOZ_ICU_VERSION).dll \
-  $(DIST)/bin/icuind$(MOZ_ICU_VERSION).dll \
-  $(DIST)/bin/icuucd$(MOZ_ICU_VERSION).dll \
+  $(DIST)/bin/icudt$(MOZ_ICU_DBG_SUFFIX)$(MOZ_ICU_VERSION).dll \
+  $(DIST)/bin/icuin$(MOZ_ICU_DBG_SUFFIX)$(MOZ_ICU_VERSION).dll \
+  $(DIST)/bin/icuuc$(MOZ_ICU_DBG_SUFFIX)$(MOZ_ICU_VERSION).dll \
   $(NULL)
 else
-JSSHELL_BINS += \
-  $(DIST)/bin/icudt$(MOZ_ICU_VERSION).dll \
-  $(DIST)/bin/icuin$(MOZ_ICU_VERSION).dll \
-  $(DIST)/bin/icuuc$(MOZ_ICU_VERSION).dll \
-  $(NULL)
-endif # MOZ_DEBUG
-else
-ifdef XP_MACOSX
+ifeq ($(OS_TARGET), Darwin)
 JSSHELL_BINS += \
   $(DIST)/bin/libicudata.$(MOZ_ICU_VERSION).dylib \
   $(DIST)/bin/libicui18n.$(MOZ_ICU_VERSION).dylib \
   $(DIST)/bin/libicuuc.$(MOZ_ICU_VERSION).dylib \
   $(NULL)
 else
-ifdef XP_UNIX
 JSSHELL_BINS += \
   $(DIST)/bin/libicudata.so.$(MOZ_ICU_VERSION) \
   $(DIST)/bin/libicui18n.so.$(MOZ_ICU_VERSION) \
   $(DIST)/bin/libicuuc.so.$(MOZ_ICU_VERSION) \
   $(NULL)
-endif # XP_UNIX
-endif # XP_MACOSX
-endif # XP_WIN
+endif # Darwin
+endif # WINNT
 endif # MOZ_STATIC_JS
-MAKE_JSSHELL  = $(ZIP) -9j $(PKG_JSSHELL) $(JSSHELL_BINS)
+MAKE_JSSHELL  = $(PYTHON) $(MOZILLA_DIR)/toolkit/mozapps/installer/dozip.py $(PKG_JSSHELL) $(abspath $(JSSHELL_BINS))
 endif # LIBXUL_SDK
 
 _ABS_DIST = $(abspath $(DIST))
@@ -172,7 +162,7 @@ endif
 ifeq ($(MOZ_PKG_FORMAT),ZIP)
 ifdef MOZ_EXTERNAL_SIGNING_FORMAT
 # We can't use signcode on zip files
-MOZ_EXTERNAL_SIGNING_FORMAT := $(filter-out signcode,$(MOZ_EXTERNAL_SIGNING_FORMAT))
+MOZ_EXTERNAL_SIGNING_FORMAT := $(filter-out osslsigncode signcode,$(MOZ_EXTERNAL_SIGNING_FORMAT))
 endif
 PKG_SUFFIX	= .zip
 INNER_MAKE_PACKAGE	= $(ZIP) -r9D $(PACKAGE) $(MOZ_PKG_DIR) \
@@ -227,7 +217,7 @@ RPM_CMD = \
   --define 'moz_numeric_app_version $(MOZ_NUMERIC_APP_VERSION)' \
   --define 'moz_rpm_release $(MOZ_RPM_RELEASE)' \
   --define 'buildid $(BUILDID)' \
-  --define 'moz_source_repo $(MOZ_SOURCE_REPO)' \
+  $(if $(MOZ_SOURCE_REPO),--define 'moz_source_repo $(MOZ_SOURCE_REPO)') \
   --define 'moz_source_stamp $(MOZ_SOURCE_STAMP)' \
   --define 'moz_branding_directory $(topsrcdir)/$(MOZ_BRANDING_DIRECTORY)' \
   --define '_topdir $(RPMBUILD_TOPDIR)' \
@@ -287,14 +277,6 @@ ifeq ($(MOZ_PKG_FORMAT),APK)
 JAVA_CLASSPATH = $(ANDROID_SDK)/android.jar
 include $(MOZILLA_DIR)/config/android-common.mk
 
-# DEBUG_JARSIGNER is defined by android-common.mk and always debug
-# signs.  We want to release sign if possible.
-ifdef MOZ_SIGN_CMD
-RELEASE_JARSIGNER := $(MOZ_SIGN_CMD) -f jar
-else
-RELEASE_JARSIGNER := $(DEBUG_JARSIGNER)
-endif
-
 DIST_FILES =
 
 # Place the files in the order they are going to be opened by the linker
@@ -339,7 +321,6 @@ DIST_FILES += \
   chrome.manifest \
   update.locale \
   removed-files \
-  recommended-addons.json \
   distribution \
   $(NULL)
 
@@ -351,66 +332,51 @@ UPLOAD_EXTRA_FILES += gecko-unsigned-unaligned.apk
 
 DIST_FILES += $(MOZ_CHILD_PROCESS_NAME)
 
-ifeq ($(CPU_ARCH),x86)
-ABI_DIR = x86
-else
-ifdef MOZ_THUMB2
-ABI_DIR = armeabi-v7a
-else
-ABI_DIR = armeabi
-endif
-endif
-
 GECKO_APP_AP_PATH = $(abspath $(DEPTH)/mobile/android/base)
 
 ifdef ENABLE_TESTS
 INNER_ROBOCOP_PACKAGE=echo
-INNER_BACKGROUND_TESTS_PACKAGE=echo
 ifeq ($(MOZ_BUILD_APP),mobile/android)
 UPLOAD_EXTRA_FILES += robocop.apk
 UPLOAD_EXTRA_FILES += fennec_ids.txt
 UPLOAD_EXTRA_FILES += geckoview_library/geckoview_library.zip
 UPLOAD_EXTRA_FILES += geckoview_library/geckoview_assets.zip
+UPLOAD_EXTRA_FILES += ../embedding/android/geckoview_example/geckoview_example.apk
 
 # Robocop/Robotium tests, Android Background tests, and Fennec need to
 # be signed with the same key, which means release signing them all.
 
-# $(1) is the full path to input:  foo-debug-unsigned-unaligned.apk.
-# $(2) is the full path to output: foo.apk.
-RELEASE_SIGN_ANDROID_APK = \
-  cp $(1) $(2)-unaligned.apk && \
-  $(RELEASE_JARSIGNER) $(2)-unaligned.apk && \
-  $(ZIPALIGN) -f -v 4 $(2)-unaligned.apk $(2) && \
-  $(RM) $(2)-unaligned.apk
-
 ROBOCOP_PATH = $(abspath $(_ABS_DIST)/../build/mobile/robocop)
+# Normally, $(NSINSTALL) would be used instead of cp, but INNER_ROBOCOP_PACKAGE
+# is used in a series of commands that run under a "cd something", while
+# $(NSINSTALL) is relative.
 INNER_ROBOCOP_PACKAGE= \
-  $(NSINSTALL) $(GECKO_APP_AP_PATH)/fennec_ids.txt $(_ABS_DIST) && \
+  cp $(GECKO_APP_AP_PATH)/fennec_ids.txt $(_ABS_DIST) && \
   $(call RELEASE_SIGN_ANDROID_APK,$(ROBOCOP_PATH)/robocop-debug-unsigned-unaligned.apk,$(_ABS_DIST)/robocop.apk)
-
-BACKGROUND_TESTS_PATH = $(abspath $(_ABS_DIST)/../mobile/android/tests/background/junit3)
-INNER_BACKGROUND_TESTS_PACKAGE= \
-  $(call RELEASE_SIGN_ANDROID_APK,$(BACKGROUND_TESTS_PATH)/background-debug-unsigned-unaligned.apk,$(_ABS_DIST)/background.apk)
 endif
 else
 INNER_ROBOCOP_PACKAGE=echo 'Testing is disabled - No Android Robocop for you'
-INNER_BACKGROUND_TESTS_PACKAGE=echo 'Testing is disabled - No Android Background tests for you'
 endif
 
 # Create geckoview_library/geckoview_{assets,library}.zip for third-party GeckoView consumers.
 ifdef NIGHTLY_BUILD
 ifndef MOZ_DISABLE_GECKOVIEW
 INNER_MAKE_GECKOVIEW_LIBRARY= \
-  $(MAKE) -C ../mobile/android/geckoview_library package ABI_DIR=$(ABI_DIR)
+  $(MAKE) -C ../mobile/android/geckoview_library package
+INNER_MAKE_GECKOVIEW_EXAMPLE= \
+	$(MAKE) -C ../embedding/android/geckoview_example package
 else
 INNER_MAKE_GECKOVIEW_LIBRARY=echo 'GeckoView library packaging is disabled'
+INNER_MAKE_GECKOVIEW_EXAMPLE=echo 'GeckoView example packaging is disabled'
 endif
 else
 INNER_MAKE_GECKOVIEW_LIBRARY=echo 'GeckoView library packaging is only enabled on Nightly'
+INNER_MAKE_GECKOVIEW_EXAMPLE=echo 'GeckoView example packaging is only enabled on Nightly'
 endif
 
 ifdef MOZ_OMX_PLUGIN
-DIST_FILES += libomxplugin.so libomxplugingb.so libomxplugingb235.so libomxpluginhc.so libomxpluginfroyo.so
+DIST_FILES += libomxplugin.so libomxplugingb.so libomxplugingb235.so \
+              libomxpluginhc.so libomxpluginkk.so
 endif
 
 SO_LIBRARIES := $(filter %.so,$(DIST_FILES))
@@ -445,18 +411,30 @@ OMNIJAR_NAME := $(notdir $(OMNIJAR_NAME))
 # thing if there are resource changes in between build time and
 # package time.  We try to prevent mismatched resources by erroring
 # out if the compiled resource IDs are not the same as the resource
-# IDs being packaged.
+# IDs being packaged.  If we're doing a single locale repack, however,
+# we don't have a complete object directory, so we can't compare
+# resource IDs.
+
+# A note on the res/ directory.  We unzip the ap_ during packaging,
+# which produces the res/ directory.  This directory is then included
+# in the final package.  When we unpack (during locale repacks), we
+# need to remove the res/ directory because these resources confuse
+# the l10n packaging script that updates omni.ja: the script tries to
+# localize the contents of the res/ directory, which fails.  Instead,
+# after the l10n packaging script completes, we build the ap_
+# described above (which includes freshly localized Android resources)
+# and the res/ directory is taken from the ap_ as part of the regular
+# packaging.
 
 PKG_SUFFIX      = .apk
 INNER_MAKE_PACKAGE	= \
   $(if $(ALREADY_SZIPPED),,$(foreach lib,$(SZIP_LIBRARIES),host/bin/szip $(MOZ_SZIP_FLAGS) $(STAGEPATH)$(MOZ_PKG_DIR)$(_BINPATH)/$(lib) && )) \
   make -C $(GECKO_APP_AP_PATH) gecko-nodeps.ap_ && \
   cp $(GECKO_APP_AP_PATH)/gecko-nodeps.ap_ $(_ABS_DIST)/gecko.ap_ && \
-  ( diff $(GECKO_APP_AP_PATH)/R.txt $(GECKO_APP_AP_PATH)/gecko-nodeps/R.txt >/dev/null || \
+  ( (test ! -f $(GECKO_APP_AP_PATH)/R.txt && echo "*** Warning: The R.txt that is being packaged might not agree with the R.txt that was built. This is normal during l10n repacks.") || \
+    diff $(GECKO_APP_AP_PATH)/R.txt $(GECKO_APP_AP_PATH)/gecko-nodeps/R.txt >/dev/null || \
     (echo "*** Error: The R.txt that was built and the R.txt that is being packaged are not the same. Rebuild mobile/android/base and re-package." && exit 1)) && \
   ( cd $(STAGEPATH)$(MOZ_PKG_DIR)$(_BINPATH) && \
-    mkdir -p lib/$(ABI_DIR) && \
-    mv libmozglue.so $(MOZ_CHILD_PROCESS_NAME) lib/$(ABI_DIR) && \
     unzip -o $(_ABS_DIST)/gecko.ap_ && \
     rm $(_ABS_DIST)/gecko.ap_ && \
     $(ZIP) $(if $(MOZ_ENABLE_SZIP),-0 )$(_ABS_DIST)/gecko.ap_ $(ASSET_SO_LIBRARIES) && \
@@ -471,8 +449,8 @@ INNER_MAKE_PACKAGE	= \
   $(RELEASE_JARSIGNER) $(_ABS_DIST)/gecko.apk && \
   $(ZIPALIGN) -f -v 4 $(_ABS_DIST)/gecko.apk $(PACKAGE) && \
   $(INNER_ROBOCOP_PACKAGE) && \
-  $(INNER_BACKGROUND_TESTS_PACKAGE) && \
-  $(INNER_MAKE_GECKOVIEW_LIBRARY)
+  $(INNER_MAKE_GECKOVIEW_LIBRARY) && \
+  $(INNER_MAKE_GECKOVIEW_EXAMPLE)
 
 # Language repacks root the resources contained in assets/omni.ja
 # under assets/, but the repacks expect them to be rooted at /.
@@ -484,9 +462,7 @@ INNER_UNMAKE_PACKAGE	= \
   mkdir $(MOZ_PKG_DIR) && \
   ( cd $(MOZ_PKG_DIR) && \
     $(UNZIP) $(UNPACKAGE) && \
-    mv lib/$(ABI_DIR)/libmozglue.so . && \
-    mv lib/$(ABI_DIR)/*plugin-container* $(MOZ_CHILD_PROCESS_NAME) && \
-    rm -rf lib/$(ABI_DIR) \
+    rm -rf res \
     $(if $(filter-out ./,$(OMNIJAR_DIR)), \
       && mv $(OMNIJAR_DIR)$(OMNIJAR_NAME) $(OMNIJAR_NAME)) )
 endif
@@ -560,8 +536,6 @@ endif
 ifdef MOZ_SIGN_PREPARED_PACKAGE_CMD
 ifeq (Darwin, $(OS_ARCH))
 MAKE_PACKAGE    = cd ./$(PKG_DMG_SOURCE) && $(MOZ_SIGN_PREPARED_PACKAGE_CMD) $(MOZ_MACBUNDLE_NAME) \
-                  && rm $(MOZ_MACBUNDLE_NAME)/Contents/CodeResources \
-                  && cp $(MOZ_MACBUNDLE_NAME)/Contents/_CodeSignature/CodeResources $(MOZ_MACBUNDLE_NAME)/Contents \
                   && cd $(PACKAGE_BASE_DIR) \
                   && $(INNER_MAKE_PACKAGE)
 else
@@ -602,9 +576,10 @@ NO_PKG_FILES += \
 	res/samples \
 	res/throbber \
 	shlibsign* \
-	ssltunnel* \
 	certutil* \
 	pk12util* \
+	BadCertServer* \
+	ClientAuthServer* \
 	OCSPStaplingServer* \
 	GenerateOCSPResponse* \
 	winEmbed.exe \
@@ -618,6 +593,16 @@ NO_PKG_FILES += \
 	*.dSYM \
 	$(NULL)
 
+# If a manifest has not been supplied, the following
+# files should be excluded from the package too
+ifndef MOZ_PKG_MANIFEST
+NO_PKG_FILES += ssltunnel*
+endif
+
+ifdef MOZ_DMD
+NO_PKG_FILES += SmokeDMD
+endif
+
 # browser/locales/Makefile uses this makefile for its variable defs, but
 # doesn't want the libs:: rule.
 ifndef PACKAGER_NO_LIBS
@@ -625,6 +610,12 @@ libs:: make-package
 endif
 
 DEFINES += -DDLL_PREFIX=$(DLL_PREFIX) -DDLL_SUFFIX=$(DLL_SUFFIX) -DBIN_SUFFIX=$(BIN_SUFFIX)
+
+ifeq (cocoa,$(MOZ_WIDGET_TOOLKIT))
+DEFINES += -DDIR_MACOS=Contents/MacOS/ -DDIR_RESOURCES=Contents/Resources/
+else
+DEFINES += -DDIR_MACOS= -DDIR_RESOURCES=
+endif
 
 ifdef MOZ_FOLD_LIBS
 DEFINES += -DMOZ_FOLD_LIBS=1
@@ -686,6 +677,16 @@ endif
 
 export NO_PKG_FILES USE_ELF_HACK ELF_HACK_FLAGS
 
+# A js binary is needed to perform verification of JavaScript minification.
+# We can only use the built binary when not cross-compiling. Environments
+# (such as release automation) can provide their own js binary to enable
+# verification when cross-compiling.
+ifndef JS_BINARY
+ifndef CROSS_COMPILE
+JS_BINARY = $(wildcard $(DIST)/bin/js)
+endif
+endif
+
 # Override the value of OMNIJAR_NAME from config.status with the value
 # set earlier in this file.
 
@@ -697,6 +698,9 @@ stage-package: $(MOZ_PKG_MANIFEST)
 		$(addprefix --removals ,$(MOZ_PKG_REMOVALS)) \
 		$(if $(filter-out 0,$(MOZ_PKG_FATAL_WARNINGS)),,--ignore-errors) \
 		$(if $(MOZ_PACKAGER_MINIFY),--minify) \
+		$(if $(MOZ_PACKAGER_MINIFY_JS),--minify-js \
+		  $(addprefix --js-binary ,$(JS_BINARY)) \
+		) \
 		$(if $(JARLOG_DIR),$(addprefix --jarlog ,$(wildcard $(JARLOG_FILE_AB_CD)))) \
 		$(if $(OPTIMIZEJARS),--optimizejars) \
 		$(addprefix --unify ,$(UNIFY_DIST)) \
@@ -711,10 +715,23 @@ ifdef MOZ_PACKAGE_JSSHELL
 	$(MAKE_JSSHELL)
 endif # MOZ_PACKAGE_JSSHELL
 endif # LIBXUL_SDK
+ifdef MOZ_CODE_COVERAGE
+	# Package code coverage gcno tree
+	@echo 'Packaging code coverage data...'
+	$(RM) $(CODE_COVERAGE_ARCHIVE_BASENAME).zip
+	$(PYTHON) -mmozbuild.codecoverage.packager \
+		--output-file='$(DIST)/$(PKG_PATH)$(CODE_COVERAGE_ARCHIVE_BASENAME).zip'
+endif
+ifeq (Darwin, $(OS_ARCH))
+ifdef MOZ_ASAN
+	@echo "Rewriting ASan runtime dylib paths for all binaries in $(DIST)/$(STAGEPATH)$(MOZ_PKG_DIR)$(_BINPATH) ..."
+	$(PYTHON) $(MOZILLA_DIR)/build/unix/rewrite_asan_dylib.py $(DIST)/$(STAGEPATH)$(MOZ_PKG_DIR)$(_BINPATH)
+endif # MOZ_ASAN
+endif # Darwin
 
 prepare-package: stage-package
 
-make-package-internal: prepare-package make-sourcestamp-file make-buildinfo-file
+make-package-internal: prepare-package make-sourcestamp-file make-buildinfo-file make-mozinfo-file
 	@echo 'Compressing...'
 	cd $(DIST) && $(MAKE_PACKAGE)
 
@@ -727,16 +744,22 @@ GARBAGE += make-package
 make-sourcestamp-file::
 	$(NSINSTALL) -D $(DIST)/$(PKG_PATH)
 	@echo '$(BUILDID)' > $(MOZ_SOURCESTAMP_FILE)
+ifdef MOZ_SOURCE_REPO
 	@echo '$(MOZ_SOURCE_REPO)/rev/$(MOZ_SOURCE_STAMP)' >> $(MOZ_SOURCESTAMP_FILE)
+endif
 
 .PHONY: make-buildinfo-file
 make-buildinfo-file:
 	$(PYTHON) $(MOZILLA_DIR)/toolkit/mozapps/installer/informulate.py \
 		$(MOZ_BUILDINFO_FILE) \
 		BUILDID=$(BUILDID) \
-		MOZ_SOURCE_REPO=$(MOZ_SOURCE_REPO) \
+		$(addprefix MOZ_SOURCE_REPO=,MOZ_SOURCE_REPO=$(MOZ_SOURCE_REPO)) \
 		MOZ_SOURCE_STAMP=$(MOZ_SOURCE_STAMP) \
 		MOZ_PKG_PLATFORM=$(MOZ_PKG_PLATFORM)
+
+.PHONY: make-mozinfo-file
+make-mozinfo-file:
+	cp $(DEPTH)/mozinfo.json $(MOZ_MOZINFO_FILE)
 
 # The install target will install the application to prefix/lib/appname-version
 # In addition if INSTALL_SDK is set, it will install the development headers,
@@ -851,12 +874,18 @@ UPLOAD_FILES= \
   $(call QUOTED_WILDCARD,$(DIST)/$(SDK)) \
   $(call QUOTED_WILDCARD,$(MOZ_SOURCESTAMP_FILE)) \
   $(call QUOTED_WILDCARD,$(MOZ_BUILDINFO_FILE)) \
+  $(call QUOTED_WILDCARD,$(MOZ_MOZINFO_FILE)) \
   $(call QUOTED_WILDCARD,$(PKG_JSSHELL)) \
   $(if $(UPLOAD_EXTRA_FILES), $(foreach f, $(UPLOAD_EXTRA_FILES), $(wildcard $(DIST)/$(f))))
 
 ifdef MOZ_CRASHREPORTER_UPLOAD_FULL_SYMBOLS
 UPLOAD_FILES += \
   $(call QUOTED_WILDCARD,$(DIST)/$(PKG_PATH)$(SYMBOL_FULL_ARCHIVE_BASENAME).zip)
+endif
+
+ifdef MOZ_CODE_COVERAGE
+UPLOAD_FILES += \
+  $(call QUOTED_WILDCARD,$(DIST)/$(PKG_PATH)$(CODE_COVERAGE_ARCHIVE_BASENAME).zip)
 endif
 
 SIGN_CHECKSUM_CMD=

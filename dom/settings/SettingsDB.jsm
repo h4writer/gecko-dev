@@ -8,8 +8,8 @@ let Cc = Components.classes;
 let Ci = Components.interfaces;
 let Cu = Components.utils;
 
+Cu.importGlobalProperties(['Blob']);
 Cu.import("resource://gre/modules/Services.jsm");
-Cu.import("resource://gre/modules/ObjectWrapper.jsm");
 
 this.EXPORTED_SYMBOLS = ["SettingsDB", "SETTINGSDB_NAME", "SETTINGSSTORE_NAME"];
 
@@ -18,8 +18,20 @@ function debug(s) {
   if (DEBUG) dump("-*- SettingsDB: " + s + "\n");
 }
 
+const TYPED_ARRAY_THINGS = new Set([
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+]);
+
 this.SETTINGSDB_NAME = "settings";
-this.SETTINGSDB_VERSION = 2;
+this.SETTINGSDB_VERSION = 5;
 this.SETTINGSSTORE_NAME = "settings";
 
 Cu.import("resource://gre/modules/IndexedDBHelper.jsm");
@@ -176,9 +188,29 @@ SettingsDB.prototype = {
     return aValue
   },
 
+  getObjectKind: function(aObject) {
+    if (aObject === null || aObject === undefined) {
+      return "primitive";
+    } else if (Array.isArray(aObject)) {
+      return "array";
+    } else if (aObject instanceof Ci.nsIDOMFile) {
+      return "file";
+    } else if (aObject instanceof Ci.nsIDOMBlob) {
+      return "blob";
+    } else if (aObject.constructor.name == "Date") {
+      return "date";
+    } else if (TYPED_ARRAY_THINGS.has(aObject.constructor.name)) {
+      return aObject.constructor.name;
+    } else if (typeof aObject == "object") {
+      return "object";
+    } else {
+      return "primitive";
+    }
+  },
+
   // Makes sure any property that is a data: uri gets converted to a Blob.
   prepareValue: function(aObject) {
-    let kind = ObjectWrapper.getObjectKind(aObject);
+    let kind = this.getObjectKind(aObject);
     if (kind == "array") {
       let res = [];
       aObject.forEach(function(aObj) {
@@ -192,10 +224,11 @@ SettingsDB.prototype = {
     }
 
     // Fall-through, we now have a dictionary object.
+    let res = {};
     for (let prop in aObject) {
-      aObject[prop] = this.prepareValue(aObject[prop]);
+      res[prop] = this.prepareValue(aObject[prop]);
     }
-    return aObject;
+    return res;
   },
 
   init: function init() {

@@ -26,6 +26,8 @@ const appInfo = Cc["@mozilla.org/xre/app-info;1"].
 const vc = Cc["@mozilla.org/xpcom/version-comparator;1"].
            getService(Ci.nsIVersionComparator);
 
+const Startup = Cu.import("resource://gre/modules/sdk/system/Startup.js", {}).exports;
+
 
 const REASON = [ 'unknown', 'startup', 'shutdown', 'enable', 'disable',
                  'install', 'uninstall', 'upgrade', 'downgrade' ];
@@ -36,6 +38,12 @@ let loader = null;
 let unload = null;
 let cuddlefishSandbox = null;
 let nukeTimer = null;
+
+let resourceDomains = [];
+function setResourceSubstitution(domain, uri) {
+  resourceDomains.push(domain);
+  resourceHandler.setSubstitution(domain, uri);
+}
 
 // Utility function that synchronously reads local resource from the given
 // `uri` and returns content string.
@@ -105,7 +113,7 @@ function startup(data, reasonCode) {
 
     let prefixURI = 'resource://' + domain + '/';
     let resourcesURI = ioService.newURI(rootURI + '/resources/', null, null);
-    resourceHandler.setSubstitution(domain, resourcesURI);
+    setResourceSubstitution(domain, resourcesURI);
 
     // Create path to URLs mapping supported by loader.
     let paths = {
@@ -169,7 +177,7 @@ function startup(data, reasonCode) {
       // failure that happens with file:// URI and be close to production env
       let resourcesURI = ioService.newURI(fileURI, null, null);
       let resName = 'extensions.modules.' + domain + '.commonjs.path' + name;
-      resourceHandler.setSubstitution(resName, resourcesURI);
+      setResourceSubstitution(resName, resourcesURI);
 
       result[path] = 'resource://' + resName + '/';
       return result;
@@ -222,10 +230,15 @@ function startup(data, reasonCode) {
       // Arguments passed as --static-args
       staticArgs: options.staticArgs,
 
+      // Option to prevent automatic kill of firefox during tests
+      noQuit: options.no_quit,
+
+      // Add-on preferences branch name
+      preferencesBranch: options.preferencesBranch,
+
       // Arguments related to test runner.
       modules: {
         '@test/options': {
-          allTestModules: options.allTestModules,
           iterations: options.iterations,
           filter: options.filter,
           profileMemory: options.profileMemory,
@@ -303,6 +316,11 @@ function shutdown(data, reasonCode) {
       // We need to keep a reference to the timer, otherwise it is collected
       // and won't ever fire.
       nukeTimer = setTimeout(nukeModules, 1000);
+
+      // Bug 944951 - bootstrap.js must remove the added resource: URIs on unload
+      resourceDomains.forEach(domain => {
+        resourceHandler.setSubstitution(domain, null);
+      })
     }
   }
 };

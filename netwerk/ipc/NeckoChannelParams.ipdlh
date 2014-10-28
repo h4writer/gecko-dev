@@ -5,8 +5,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+include protocol PHttpChannel;
+include protocol PFTPChannel;
+include protocol PRtspChannel;
 include URIParams;
 include InputStreamParams;
+include PBackgroundSharedTypes;
 
 using struct mozilla::void_t from "ipc/IPCMessageUtils.h";
 using RequestHeaderTuples from "mozilla/net/PHttpChannelParams.h";
@@ -31,12 +35,13 @@ struct HttpChannelOpenArgs
   OptionalURIParams           apiRedirectTo;
   uint32_t                    loadFlags;
   RequestHeaderTuples         requestHeaders;
-  nsHttpAtom                  requestMethod;
+  nsCString                   requestMethod;
   OptionalInputStreamParams   uploadStream;
   bool                        uploadStreamHasHeaders;
   uint16_t                    priority;
   uint8_t                     redirectionLimit;
   bool                        allowPipelining;
+  bool                        allowSTS;
   bool                        forceAllowThirdPartyCookie;
   bool                        resumeAt;
   uint64_t                    startPos;
@@ -44,6 +49,10 @@ struct HttpChannelOpenArgs
   bool                        chooseApplicationCache;
   nsCString                   appCacheClientID;
   bool                        allowSpdy;
+  OptionalFileDescriptorSet   fds;
+  PrincipalInfo               requestingPrincipalInfo;
+  uint32_t                    securityFlags;
+  uint32_t                    contentPolicyType;
 };
 
 struct HttpChannelConnectArgs
@@ -63,10 +72,13 @@ union HttpChannelCreationArgs
 
 struct FTPChannelOpenArgs
 {
-  URIParams uri;
-  uint64_t startPos;
-  nsCString entityID;
+  URIParams                 uri;
+  uint64_t                  startPos;
+  nsCString                 entityID;
   OptionalInputStreamParams uploadStream;
+  PrincipalInfo             requestingPrincipalInfo;
+  uint32_t                  securityFlags;
+  uint32_t                  contentPolicyType;
 };
 
 struct FTPChannelConnectArgs
@@ -78,6 +90,28 @@ union FTPChannelCreationArgs
 {
   FTPChannelOpenArgs;      // For AsyncOpen: the common case.
   FTPChannelConnectArgs;   // Used for redirected-to channels
+};
+
+struct HttpChannelDiverterArgs
+{
+  PHttpChannel mChannel;
+  bool mApplyConversion;
+};
+
+union ChannelDiverterArgs
+{
+  HttpChannelDiverterArgs;
+  PFTPChannel;
+};
+
+//-----------------------------------------------------------------------------
+// RTSP IPDL structs
+//-----------------------------------------------------------------------------
+
+struct RtspChannelConnectArgs
+{
+  URIParams uri;
+  uint32_t channelId;
 };
 
 } // namespace ipc

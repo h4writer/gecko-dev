@@ -57,7 +57,7 @@ nsresult TransportLayerLoopback::Init() {
 void TransportLayerLoopback::Connect(TransportLayerLoopback* peer) {
   peer_ = peer;
 
-  SetState(TS_OPEN);
+  TL_SET_STATE(TS_OPEN);
 }
 
 TransportResult
@@ -108,7 +108,7 @@ void TransportLayerLoopback::DeliverPackets() {
   }
 }
 
-NS_IMPL_ISUPPORTS1(TransportLayerLoopback::Deliverer, nsITimerCallback)
+NS_IMPL_ISUPPORTS(TransportLayerLoopback::Deliverer, nsITimerCallback)
 
 NS_IMETHODIMP TransportLayerLoopback::Deliverer::Notify(nsITimer *timer) {
   if (!layer_)

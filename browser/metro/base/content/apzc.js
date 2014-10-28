@@ -1,4 +1,4 @@
-// -*- Mode: js2; tab-width: 2; indent-tabs-mode: nil; js2-basic-offset: 2; js2-skip-preprocessor-directives: t; -*-
+// -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -30,11 +30,8 @@ var APZCObserver = {
     let os = Services.obs;
     os.addObserver(this, "apzc-transform-begin", false);
 
-    // Fired by ContentAreaObserver
-    window.addEventListener("SizeChanged", this, true);
     Elements.tabList.addEventListener("TabSelect", this, true);
     Elements.browsers.addEventListener("pageshow", this, true);
-    messageManager.addMessageListener("Browser:ContentScroll", this);
     messageManager.addMessageListener("Content:ZoomToRect", this);
   },
 
@@ -46,16 +43,13 @@ var APZCObserver = {
     let os = Services.obs;
     os.removeObserver(this, "apzc-transform-begin");
 
-    window.removeEventListener("SizeChanged", this, true);
     Elements.tabList.removeEventListener("TabSelect", this, true);
     Elements.browsers.removeEventListener("pageshow", this, true);
-    messageManager.removeMessageListener("Browser:ContentScroll", this);
     messageManager.removeMessageListener("Content:ZoomToRect", this);
   },
 
   handleEvent: function APZC_handleEvent(aEvent) {
     switch (aEvent.type) {
-      case "SizeChanged":
       case 'TabSelect':
         this._resetDisplayPort();
         break;
@@ -85,16 +79,6 @@ var APZCObserver = {
     let json = aMessage.json;
     let browser = aMessage.target;
     switch (aMessage.name) {
-       // Content notifies us here (syncronously) if it has scrolled
-       // independent of the apz. This can happen in a lot of
-       // cases: keyboard shortcuts, scroll wheel, or content script.
-       // Let the apz know about this change so that it can update
-       // its scroll offset data.
-      case "Browser:ContentScroll": {
-        let data = json.viewId + " " + json.presShellId + " (" + json.scrollOffset.x + ", " + json.scrollOffset.y + ")";
-        Services.obs.notifyObservers(null, "apzc-scroll-offset-changed", data);
-        break;
-      }
       case "Content:ZoomToRect": {
         let { presShellId, viewId } = json;
         let rect = Rect.fromRect(json.rect);
@@ -163,6 +147,7 @@ var APZCObserver = {
                       .getInterface(Ci.nsIDOMWindowUtils);
     cwu.setDisplayPortForElement(portX, portY,
                                  portWidth, portHeight,
-                                 Browser.selectedBrowser.contentDocument.documentElement);
+                                 Browser.selectedBrowser.contentDocument.documentElement,
+                                 0);
   }
 };

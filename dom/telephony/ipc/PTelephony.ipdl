@@ -12,6 +12,37 @@ namespace mozilla {
 namespace dom {
 namespace telephony {
 
+struct EnumerateCallsRequest
+{
+  // empty.
+};
+
+struct DialRequest
+{
+  uint32_t clientId;
+  nsString number;
+  bool isEmergency;
+};
+
+struct USSDRequest
+{
+  uint32_t clientId;
+  nsString ussd;
+};
+
+struct HangUpConferenceRequest
+{
+  uint32_t clientId;
+};
+
+union IPCTelephonyRequest
+{
+  EnumerateCallsRequest;
+  DialRequest;
+  USSDRequest;
+  HangUpConferenceRequest;
+};
+
 sync protocol PTelephony {
   manager PContent;
   manages PTelephonyRequest;
@@ -21,7 +52,7 @@ child:
 
   NotifyCallStateChanged(uint32_t aClientId, IPCCallStateData aData);
 
-  NotifyCdmaCallWaiting(uint32_t aClientId, nsString aNumber);
+  NotifyCdmaCallWaiting(uint32_t aClientId, IPCCdmaWaitingCallData aData);
 
   NotifyConferenceCallStateChanged(uint16_t aCallState);
 
@@ -37,16 +68,13 @@ parent:
   __delete__();
 
   /**
-   * Sent when the child makes an asynchronous request to the parent.  It's
-   * currently only for request call enumeration.
+   * Sent when the child makes an asynchronous request to the parent.
    */
-  PTelephonyRequest();
+  PTelephonyRequest(IPCTelephonyRequest request);
 
   RegisterListener();
 
   UnregisterListener();
-
-  DialCall(uint32_t aClientId, nsString aNumber, bool aIsEmergency);
 
   HangUpCall(uint32_t aClientId, uint32_t aCallIndex);
 

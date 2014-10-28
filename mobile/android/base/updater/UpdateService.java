@@ -27,6 +27,7 @@ import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.net.Uri;
 import android.os.Environment;
+import android.support.v4.net.ConnectivityManagerCompat;
 import android.support.v4.app.NotificationCompat;
 import android.support.v4.app.NotificationCompat.Builder;
 import android.util.Log;
@@ -76,6 +77,7 @@ public class UpdateService extends IntentService {
     private Builder mBuilder;
 
     private boolean mDownloading;
+    private boolean mCancelDownload;
     private boolean mApplyImmediately;
 
     public UpdateService() {
@@ -85,10 +87,11 @@ public class UpdateService extends IntentService {
     @Override
     public void onCreate () {
         super.onCreate();
-        
+
         mPrefs = getSharedPreferences(PREFS_NAME, 0);
         mNotificationManager = (NotificationManager)getSystemService(Context.NOTIFICATION_SERVICE);
         mConnectivityManager = (ConnectivityManager)getSystemService(Context.CONNECTIVITY_SERVICE);
+        mCancelDownload = false;
     }
 
     @Override
@@ -101,7 +104,14 @@ public class UpdateService extends IntentService {
 
             mApplyImmediately = true;
             showDownloadNotification();
+        } else if (UpdateServiceHelper.ACTION_CANCEL_DOWNLOAD.equals(intent.getAction())) {
+            mCancelDownload = true;
         } else {
+            if (!UpdateServiceHelper.ACTION_APPLY_UPDATE.equals(intent.getAction())) {
+                // Delete the update package used to install the current version.
+                deleteUpdatePackage(getLastFileName());
+            }
+
             super.onStartCommand(intent, flags, startId);
         }
 
@@ -203,8 +213,7 @@ public class UpdateService extends IntentService {
         }
 
         Log.i(LOGTAG, "update available, buildID = " + info.buildID);
-        
-        int connectionType = netInfo.getType();
+
         int autoDownloadPolicy = getAutoDownloadPolicy();
 
 
@@ -213,12 +222,12 @@ public class UpdateService extends IntentService {
          *
          * - We have a FORCE_DOWNLOAD flag passed in
          * - The preference is set to 'always'
-         * - The preference is set to 'wifi' and we are actually using wifi (or regular ethernet)
+         * - The preference is set to 'wifi' and we are using a non-metered network (i.e. the user
+         *   is OK with large data transfers occurring)
          */
         boolean shouldStartDownload = hasFlag(flags, UpdateServiceHelper.FLAG_FORCE_DOWNLOAD) ||
             autoDownloadPolicy == UpdateServiceHelper.AUTODOWNLOAD_ENABLED ||
-            (autoDownloadPolicy == UpdateServiceHelper.AUTODOWNLOAD_WIFI &&
-             (connectionType == ConnectivityManager.TYPE_WIFI || connectionType == ConnectivityManager.TYPE_ETHERNET));
+            (autoDownloadPolicy == UpdateServiceHelper.AUTODOWNLOAD_WIFI && !ConnectivityManagerCompat.isActiveNetworkMetered(mConnectivityManager));
 
         if (!shouldStartDownload) {
             Log.i(LOGTAG, "not initiating automatic update download due to policy " + autoDownloadPolicy);
@@ -374,16 +383,21 @@ public class UpdateService extends IntentService {
         Intent notificationIntent = new Intent(UpdateServiceHelper.ACTION_APPLY_UPDATE);
         notificationIntent.setClass(this, UpdateService.class);
 
+        Intent cancelIntent = new Intent(UpdateServiceHelper.ACTION_CANCEL_DOWNLOAD);
+        cancelIntent.setClass(this, UpdateService.class);
+
         if (downloadFile != null)
             notificationIntent.putExtra(UpdateServiceHelper.EXTRA_PACKAGE_PATH_NAME, downloadFile.getAbsolutePath());
 
         PendingIntent contentIntent = PendingIntent.getService(this, 0, notificationIntent, PendingIntent.FLAG_UPDATE_CURRENT);
+        PendingIntent deleteIntent = PendingIntent.getService(this, 0, cancelIntent, PendingIntent.FLAG_CANCEL_CURRENT);
 
         mBuilder = new NotificationCompat.Builder(this);
         mBuilder.setContentTitle(getResources().getString(R.string.updater_downloading_title))
-    	    .setContentText(mApplyImmediately ? "" : getResources().getString(R.string.updater_downloading_select))
-    	    .setSmallIcon(android.R.drawable.stat_sys_download)
-    	    .setContentIntent(contentIntent);
+                .setContentText(mApplyImmediately ? "" : getResources().getString(R.string.updater_downloading_select))
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentIntent(contentIntent)
+                .setDeleteIntent(deleteIntent);
 
         mBuilder.setProgress(100, 0, true);
         mNotificationManager.notify(NOTIFICATION_ID, mBuilder.build());
@@ -400,12 +414,31 @@ public class UpdateService extends IntentService {
         notification.setLatestEventInfo(this, getResources().getString(R.string.updater_downloading_title_failed),
                                         getResources().getString(R.string.updater_downloading_retry),
                                         contentIntent);
-        
+
         mNotificationManager.notify(NOTIFICATION_ID, notification);
     }
 
+    private boolean deleteUpdatePackage(String path) {
+        if (path == null) {
+            return false;
+        }
+
+        File pkg = new File(path);
+        if (!pkg.exists()) {
+            return false;
+        }
+
+        pkg.delete();
+        Log.i(LOGTAG, "deleted update package: " + path);
+
+        return true;
+    }
+
     private File downloadUpdatePackage(UpdateInfo info, boolean overwriteExisting) {
-        File downloadFile = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), new File(info.url.getFile()).getName());
+        File path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        path.mkdirs();
+        String fileName = new File(info.url.getFile()).getName();
+        File downloadFile = new File(path, fileName);
 
         if (!overwriteExisting && info.buildID.equals(getLastBuildID()) && downloadFile.exists()) {
             // The last saved buildID is the same as the one for the current update. We also have a file
@@ -428,6 +461,7 @@ public class UpdateService extends IntentService {
         InputStream input = null;
 
         mDownloading = true;
+        mCancelDownload = false;
         showDownloadNotification(downloadFile);
 
         try {
@@ -443,22 +477,30 @@ public class UpdateService extends IntentService {
             int bytesRead = 0;
             int lastNotify = 0;
 
-            while ((len = input.read(buf, 0, BUFSIZE)) > 0) {
+            while ((len = input.read(buf, 0, BUFSIZE)) > 0 && !mCancelDownload) {
                 output.write(buf, 0, len);
                 bytesRead += len;
                 // Updating the notification takes time so only do it every 1MB
-                if(bytesRead - lastNotify > 1048576) {
-	                mBuilder.setProgress(length, bytesRead, false);
-	                mNotificationManager.notify(NOTIFICATION_ID, mBuilder.build());
-	                lastNotify = bytesRead;
+                if (bytesRead - lastNotify > 1048576) {
+                    mBuilder.setProgress(length, bytesRead, false);
+                    mNotificationManager.notify(NOTIFICATION_ID, mBuilder.build());
+                    lastNotify = bytesRead;
                 }
             }
 
-            Log.i(LOGTAG, "completed update download!");
-
             mNotificationManager.cancel(NOTIFICATION_ID);
 
-            return downloadFile;
+            // if the download was canceled by the user
+            // delete the update package
+            if (mCancelDownload) {
+                Log.i(LOGTAG, "download canceled by user!");
+                downloadFile.delete();
+
+                return null;
+            } else {
+                Log.i(LOGTAG, "completed update download!");
+                return downloadFile;
+            }
         } catch (Exception e) {
             downloadFile.delete();
             showDownloadFailure();
@@ -516,7 +558,7 @@ public class UpdateService extends IntentService {
 
     private void applyUpdate(String updatePath) {
         if (updatePath == null) {
-            updatePath = mPrefs.getString(KEY_LAST_FILE_NAME, null);
+            updatePath = getLastFileName();
         }
         applyUpdate(new File(updatePath));
     }
@@ -550,6 +592,10 @@ public class UpdateService extends IntentService {
 
     private String getLastHashValue() {
         return mPrefs.getString(KEY_LAST_HASH_VALUE, null);
+    }
+
+    private String getLastFileName() {
+        return mPrefs.getString(KEY_LAST_FILE_NAME, null);
     }
 
     private Calendar getLastAttemptDate() {

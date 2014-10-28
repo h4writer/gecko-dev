@@ -13,6 +13,19 @@
   -moz-user-focus: normal;
 }
 
+/* SimpleListWidget */
+
+.simple-list-widget-container {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* FastListWidget */
+
+.fast-list-widget-container {
+  overflow: auto;
+}
+
 /* SideMenuWidget */
 
 .side-menu-widget-container {
@@ -64,20 +77,33 @@
   display: none;
 }
 
-.variable-or-property[pseudo-item] > tooltip {
+.variable-or-property[pseudo-item] > tooltip,
+.variable-or-property[pseudo-item] > .title > .variables-view-edit,
+.variable-or-property[pseudo-item] > .title > .variables-view-delete,
+.variable-or-property[pseudo-item] > .title > .variables-view-add-property,
+.variable-or-property[pseudo-item] > .title > .variables-view-open-inspector,
+.variable-or-property[pseudo-item] > .title > .variable-or-property-frozen-label,
+.variable-or-property[pseudo-item] > .title > .variable-or-property-sealed-label,
+.variable-or-property[pseudo-item] > .title > .variable-or-property-non-extensible-label,
+.variable-or-property[pseudo-item] > .title > .variable-or-property-non-writable-icon {
+  display: none;
+}
+
+.variable-or-property > .title .toolbarbutton-text {
   display: none;
 }
 
 *:not(:hover) .variables-view-delete,
-*:not(:hover) .variables-view-add-property {
+*:not(:hover) .variables-view-add-property,
+*:not(:hover) .variables-view-open-inspector {
   visibility: hidden;
 }
 
-.variables-view-delete > .toolbarbutton-text,
-.variables-view-add-property > .toolbarbutton-text {
+.variables-view-container[aligned-values] [optional-visibility] {
   display: none;
 }
 
-.variables-view-container[aligned-values] [optional-visibility] {
+/* Table Widget */
+.table-widget-body > .devtools-side-splitter:last-child {
   display: none;
 }

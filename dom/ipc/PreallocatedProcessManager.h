@@ -11,6 +11,8 @@
 #include "nsCOMPtr.h"
 #include "nsIObserver.h"
 
+class nsIRunnable;
+
 namespace mozilla {
 namespace dom {
 class ContentParent;
@@ -81,7 +83,9 @@ public:
 #ifdef MOZ_NUWA_PROCESS
   static void PublishSpareProcess(ContentParent* aContent);
   static void MaybeForgetSpare(ContentParent* aContent);
+  static bool IsNuwaReady();
   static void OnNuwaReady();
+  static bool PreallocatedProcessReady();
 #endif
 
 private:

@@ -31,19 +31,24 @@ SEARCH_PATHS = [
     'python/mozversioncontrol',
     'python/blessings',
     'python/configobj',
+    'python/jsmin',
     'python/psutil',
     'python/which',
     'build/pymake',
     'config',
     'dom/bindings',
     'dom/bindings/parser',
+    'layout/tools/reftest',
     'other-licenses/ply',
     'xpcom/idl-parser',
     'testing',
     'testing/xpcshell',
-    'testing/marionette/client',
+    'testing/web-platform',
+    'testing/web-platform/harness',
     'testing/marionette/client/marionette',
+    'testing/marionette/transport',
     'testing/mozbase/mozcrash',
+    'testing/mozbase/mozdebug',
     'testing/mozbase/mozdevice',
     'testing/mozbase/mozfile',
     'testing/mozbase/mozhttpd',
@@ -55,25 +60,30 @@ SEARCH_PATHS = [
     'testing/mozbase/mozsystemmonitor',
     'testing/mozbase/mozinfo',
     'testing/mozbase/moztest',
-    'testing/mozbase/manifestdestiny',
+    'testing/mozbase/mozversion',
+    'testing/mozbase/manifestparser',
     'xpcom/idl-parser',
 ]
 
 # Individual files providing mach commands.
 MACH_MODULES = [
     'addon-sdk/mach_commands.py',
+    'build/valgrind/mach_commands.py',
     'dom/bindings/mach_commands.py',
     'layout/tools/reftest/mach_commands.py',
     'python/mach_commands.py',
     'python/mach/mach/commands/commandinfo.py',
     'python/mozboot/mozboot/mach_commands.py',
     'python/mozbuild/mozbuild/mach_commands.py',
+    'python/mozbuild/mozbuild/backend/mach_commands.py',
     'python/mozbuild/mozbuild/frontend/mach_commands.py',
+    'services/common/tests/mach_commands.py',
     'testing/mach_commands.py',
     'testing/marionette/mach_commands.py',
     'testing/mochitest/mach_commands.py',
     'testing/xpcshell/mach_commands.py',
     'testing/talos/mach_commands.py',
+    'testing/web-platform/mach_commands.py',
     'testing/xpcshell/mach_commands.py',
     'tools/docs/mach_commands.py',
     'tools/mercurial/mach_commands.py',
@@ -114,7 +124,7 @@ CATEGORIES = {
     },
     'disabled': {
         'short': 'Disabled',
-        'long': 'These commands are unavailable for your current context, run "mach <command>" to see why.',
+        'long': 'The disabled commands are hidden by default. Use -v to display them. These commands are unavailable for your current context, run "mach <command>" to see why.',
         'priority': 0,
     }
 }
@@ -140,42 +150,47 @@ def bootstrap(topsrcdir, mozilla_dir=None):
     # case. For default behavior, we educate users and give them an opportunity
     # to react. We always exit after creating the directory because users don't
     # like surprises.
-    state_user_dir = os.path.expanduser('~/.mozbuild')
-    state_env_dir = os.environ.get('MOZBUILD_STATE_PATH', None)
-    if state_env_dir:
-        if not os.path.exists(state_env_dir):
-            print('Creating global state directory from environment variable: %s'
-                % state_env_dir)
-            os.makedirs(state_env_dir, mode=0o770)
-            print('Please re-run mach.')
-            sys.exit(1)
-        state_dir = state_env_dir
-    else:
-        if not os.path.exists(state_user_dir):
-            print(STATE_DIR_FIRST_RUN.format(userdir=state_user_dir))
-            try:
-                for i in range(20, -1, -1):
-                    time.sleep(1)
-                    sys.stdout.write('%d ' % i)
-                    sys.stdout.flush()
-            except KeyboardInterrupt:
-                sys.exit(1)
-
-            print('\nCreating default state directory: %s' % state_user_dir)
-            os.mkdir(state_user_dir)
-            print('Please re-run mach.')
-            sys.exit(1)
-        state_dir = state_user_dir
-
     try:
         import mach.main
     except ImportError:
         sys.path[0:0] = [os.path.join(mozilla_dir, path) for path in SEARCH_PATHS]
         import mach.main
 
-    def populate_context(context):
-        context.state_dir = state_dir
-        context.topdir = topsrcdir
+    def populate_context(context, key=None):
+        if key is None:
+            return
+        if key == 'state_dir':
+            state_user_dir = os.path.expanduser('~/.mozbuild')
+            state_env_dir = os.environ.get('MOZBUILD_STATE_PATH', None)
+            if state_env_dir:
+                if not os.path.exists(state_env_dir):
+                    print('Creating global state directory from environment variable: %s'
+                        % state_env_dir)
+                    os.makedirs(state_env_dir, mode=0o770)
+                    print('Please re-run mach.')
+                    sys.exit(1)
+                state_dir = state_env_dir
+            else:
+                if not os.path.exists(state_user_dir):
+                    print(STATE_DIR_FIRST_RUN.format(userdir=state_user_dir))
+                    try:
+                        for i in range(20, -1, -1):
+                            time.sleep(1)
+                            sys.stdout.write('%d ' % i)
+                            sys.stdout.flush()
+                    except KeyboardInterrupt:
+                        sys.exit(1)
+
+                    print('\nCreating default state directory: %s' % state_user_dir)
+                    os.mkdir(state_user_dir)
+                    print('Please re-run mach.')
+                    sys.exit(1)
+                state_dir = state_user_dir
+
+            return state_dir
+        if key == 'topdir':
+            return topsrcdir
+        raise AttributeError(key)
 
     mach = mach.main.Mach(os.getcwd())
     mach.populate_context_handler = populate_context

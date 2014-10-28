@@ -20,11 +20,12 @@
 #include "FramebufferSurface.h"
 #include "hardware/hwcomposer.h"
 #include "hardware/power.h"
+#include "ui/Fence.h"
 #include "utils/RefBase.h"
 
 namespace mozilla {
 
-class GonkDisplayJB : public GonkDisplay {
+class MOZ_EXPORT GonkDisplayJB : public GonkDisplay {
 public:
     GonkDisplayJB();
     ~GonkDisplayJB();
@@ -49,6 +50,8 @@ public:
 
     virtual void SetFBReleaseFd(int fd);
 
+    virtual int GetPrevFBAcquireFd();
+
     bool Post(buffer_handle_t buf, int fence);
 
 private:
@@ -60,7 +63,7 @@ private:
     android::sp<android::FramebufferSurface> mFBSurface;
     android::sp<ANativeWindow> mSTClient;
     android::sp<android::IGraphicBufferAlloc> mAlloc;
-    android::sp<android::GraphicBuffer> mBootAnimBuffer;
+    int mFence;
     hwc_display_contents_1_t* mList;
     uint32_t mWidth;
     uint32_t mHeight;

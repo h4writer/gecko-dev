@@ -4,8 +4,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef nsPNGDecoder_h__
-#define nsPNGDecoder_h__
+#ifndef nsPNGDecoder_h
+#define nsPNGDecoder_h
 
 #include "Decoder.h"
 
@@ -24,16 +24,16 @@ class RasterImage;
 class nsPNGDecoder : public Decoder
 {
 public:
-  nsPNGDecoder(RasterImage &aImage);
+  explicit nsPNGDecoder(RasterImage &aImage);
   virtual ~nsPNGDecoder();
 
   virtual void InitInternal();
-  virtual void WriteInternal(const char* aBuffer, uint32_t aCount);
+  virtual void WriteInternal(const char* aBuffer, uint32_t aCount, DecodeStrategy aStrategy);
   virtual Telemetry::ID SpeedHistogram();
 
   void CreateFrame(png_uint_32 x_offset, png_uint_32 y_offset,
                    int32_t width, int32_t height,
-                   gfxImageFormat format);
+                   gfx::SurfaceFormat format);
   void EndImageFrame();
 
   // Check if PNG is valid ICO (32bpp RGBA)
@@ -76,7 +76,7 @@ public:
   qcms_profile *mInProfile;
   qcms_transform *mTransform;
 
-  gfxImageFormat format;
+  gfx::SurfaceFormat format;
 
   // For size decodes
   uint8_t mSizeBytes[8]; // Space for width and height, both 4 bytes
@@ -133,4 +133,4 @@ public:
 } // namespace image
 } // namespace mozilla
 
-#endif // nsPNGDecoder_h__
+#endif // nsPNGDecoder_h

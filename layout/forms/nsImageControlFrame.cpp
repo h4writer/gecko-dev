@@ -2,6 +2,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 #include "nsImageFrame.h"
 #include "nsIFormControlFrame.h"
 #include "nsPresContext.h"
@@ -10,60 +11,53 @@
 #include "nsFormControlFrame.h"
 #include "nsLayoutUtils.h"
 #include "mozilla/MouseEvents.h"
+#include "nsIContent.h"
 
 using namespace mozilla;
 
-void
-IntPointDtorFunc(void *aObject, nsIAtom *aPropertyName,
-                 void *aPropertyValue, void *aData)
-{
-  nsIntPoint *propertyValue = static_cast<nsIntPoint*>(aPropertyValue);
-  delete propertyValue;
-}
-
-
-#define nsImageControlFrameSuper nsImageFrame
+typedef nsImageFrame nsImageControlFrameSuper;
 class nsImageControlFrame : public nsImageControlFrameSuper,
                             public nsIFormControlFrame
 {
 public:
-  nsImageControlFrame(nsStyleContext* aContext);
+  explicit nsImageControlFrame(nsStyleContext* aContext);
   ~nsImageControlFrame();
 
-  virtual void DestroyFrom(nsIFrame* aDestructRoot);
-  virtual void Init(nsIContent*      aContent,
-                    nsIFrame*        aParent,
-                    nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  virtual void DestroyFrom(nsIFrame* aDestructRoot) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 
   NS_DECL_QUERYFRAME
   NS_DECL_FRAMEARENA_HELPERS
 
-  NS_IMETHOD Reflow(nsPresContext*          aPresContext,
-                    nsHTMLReflowMetrics&     aDesiredSize,
-                    const nsHTMLReflowState& aReflowState,
-                    nsReflowStatus&          aStatus);
+  virtual void Reflow(nsPresContext*           aPresContext,
+                          nsHTMLReflowMetrics&     aDesiredSize,
+                          const nsHTMLReflowState& aReflowState,
+                          nsReflowStatus&          aStatus) MOZ_OVERRIDE;
 
-  NS_IMETHOD HandleEvent(nsPresContext* aPresContext,
-                         WidgetGUIEvent* aEvent,
-                         nsEventStatus* aEventStatus);
+  virtual nsresult HandleEvent(nsPresContext* aPresContext,
+                               WidgetGUIEvent* aEvent,
+                               nsEventStatus* aEventStatus) MOZ_OVERRIDE;
 
-  virtual nsIAtom* GetType() const;
+  virtual nsIAtom* GetType() const MOZ_OVERRIDE;
 
 #ifdef ACCESSIBILITY
   virtual mozilla::a11y::AccType AccessibleType() MOZ_OVERRIDE;
 #endif
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const {
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE {
     return MakeFrameName(NS_LITERAL_STRING("ImageControl"), aResult);
   }
 #endif
 
-  NS_IMETHOD GetCursor(const nsPoint&    aPoint,
-                       nsIFrame::Cursor& aCursor);
+  virtual nsresult GetCursor(const nsPoint&    aPoint,
+                             nsIFrame::Cursor& aCursor) MOZ_OVERRIDE;
   // nsIFormContromFrame
-  virtual void SetFocus(bool aOn, bool aRepaint);
-  virtual nsresult SetFormProperty(nsIAtom* aName, const nsAString& aValue);
+  virtual void SetFocus(bool aOn, bool aRepaint) MOZ_OVERRIDE;
+  virtual nsresult SetFormProperty(nsIAtom* aName, 
+                                   const nsAString& aValue) MOZ_OVERRIDE;
 };
 
 
@@ -94,9 +88,9 @@ NS_NewImageControlFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
 NS_IMPL_FRAMEARENA_HELPERS(nsImageControlFrame)
 
 void
-nsImageControlFrame::Init(nsIContent*      aContent,
-                          nsIFrame*        aParent,
-                          nsIFrame*        aPrevInFlow)
+nsImageControlFrame::Init(nsIContent*       aContent,
+                          nsContainerFrame* aParent,
+                          nsIFrame*         aPrevInFlow)
 {
   nsImageControlFrameSuper::Init(aContent, aParent, aPrevInFlow);
 
@@ -106,7 +100,7 @@ nsImageControlFrame::Init(nsIContent*      aContent,
   
   mContent->SetProperty(nsGkAtoms::imageClickedPoint,
                         new nsIntPoint(0, 0),
-                        IntPointDtorFunc);
+                        nsINode::DeleteProperty<nsIntPoint>);
 }
 
 NS_QUERYFRAME_HEAD(nsImageControlFrame)
@@ -132,7 +126,7 @@ nsImageControlFrame::GetType() const
   return nsGkAtoms::imageControlFrame; 
 }
 
-NS_METHOD
+void
 nsImageControlFrame::Reflow(nsPresContext*         aPresContext,
                            nsHTMLReflowMetrics&     aDesiredSize,
                            const nsHTMLReflowState& aReflowState,
@@ -146,7 +140,7 @@ nsImageControlFrame::Reflow(nsPresContext*         aPresContext,
   return nsImageControlFrameSuper::Reflow(aPresContext, aDesiredSize, aReflowState, aStatus);
 }
 
-NS_METHOD 
+nsresult 
 nsImageControlFrame::HandleEvent(nsPresContext* aPresContext,
                                  WidgetGUIEvent* aEvent,
                                  nsEventStatus* aEventStatus)
@@ -191,7 +185,7 @@ nsImageControlFrame::SetFocus(bool aOn, bool aRepaint)
 {
 }
 
-NS_IMETHODIMP
+nsresult
 nsImageControlFrame::GetCursor(const nsPoint&    aPoint,
                                nsIFrame::Cursor& aCursor)
 {

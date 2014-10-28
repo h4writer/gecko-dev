@@ -11,11 +11,11 @@ const {Services} = Cu.import("resource://gre/modules/Services.jsm", {});
 const HTML_NS = "http://www.w3.org/1999/xhtml";
 
 const MAX_ITERATIONS = 100;
-const REGEX_QUOTES = /^".*?"|^".*/;
-const REGEX_URL = /^url\(["']?(.+?)(?::(\d+))?["']?\)/;
+const REGEX_QUOTES = /^".*?"|^".*|^'.*?'|^'.*/;
 const REGEX_WHITESPACE = /^\s+/;
 const REGEX_FIRST_WORD_OR_CHAR = /^\w+|^./;
 const REGEX_CSS_PROPERTY_VALUE = /(^[^;]+)/;
+const REGEX_CUBIC_BEZIER = /^linear|^ease-in-out|^ease-in|^ease-out|^ease|^cubic-bezier\(([0-9.\- ]+,){3}[0-9.\- ]+\)/;
 
 /**
  * This regex matches:
@@ -93,6 +93,11 @@ OutputParser.prototype = {
   parseCssProperty: function(name, value, options={}) {
     options = this._mergeOptions(options);
 
+    // XXX: This is a quick fix that should stay until bug 977063 gets fixed.
+    // It avoids parsing "linear" as a timing-function in "linear-gradient(...)"
+    options.expectCubicBezier = ["transition", "transition-timing-function",
+      "animation", "animation-timing-function"].indexOf(name) !== -1;
+
     if (this._cssPropertySupportsValue(name, value)) {
       return this._parse(value, options);
     }
@@ -117,6 +122,32 @@ OutputParser.prototype = {
     options = this._mergeOptions(options);
 
     return this._parse(value, options);
+  },
+
+  /**
+   * Matches the beginning of the provided string to a css background-image url
+   * and return both the whole url(...) match and the url itself.
+   * This isn't handled via a regular expression to make sure we can match urls
+   * that contain parenthesis easily
+   */
+  _matchBackgroundUrl: function(text) {
+    let startToken = "url(";
+    if (text.indexOf(startToken) !== 0) {
+      return null;
+    }
+
+    let uri = text.substring(startToken.length).trim();
+    let quote = uri.substring(0, 1);
+    if (quote === "'" || quote === '"') {
+      uri = uri.substring(1, uri.search(new RegExp(quote + "\\s*\\)")));
+    } else {
+      uri = uri.substring(0, uri.indexOf(")"));
+      quote = "";
+    }
+    let end = startToken + quote + uri;
+    text = text.substring(0, text.indexOf(")", end.length) + 1);
+
+    return [text, uri.trim()];
   },
 
   /**
@@ -166,13 +197,24 @@ OutputParser.prototype = {
         continue;
       }
 
-      matched = text.match(REGEX_URL);
+      matched = this._matchBackgroundUrl(text);
       if (matched) {
         let [match, url] = matched;
-
         text = this._trimMatchFromStart(text, match);
+
         this._appendURL(match, url, options);
         continue;
+      }
+
+      if (options.expectCubicBezier) {
+        matched = text.match(REGEX_CUBIC_BEZIER);
+        if (matched) {
+          let match = matched[0];
+          text = this._trimMatchFromStart(text, match);
+
+          this._appendCubicBezier(match, options);
+          continue;
+        }
       }
 
       matched = text.match(REGEX_ALL_CSS_PROPERTIES);
@@ -258,6 +300,35 @@ OutputParser.prototype = {
   },
 
   /**
+   * Append a cubic-bezier timing function value to the output
+   *
+   * @param {String} bezier
+   *        The cubic-bezier timing function
+   * @param {Object} options
+   *        Options object. For valid options and default values see
+   *        _mergeOptions()
+   */
+  _appendCubicBezier: function(bezier, options) {
+    let container = this._createNode("span", {
+       "data-bezier": bezier
+    });
+
+    if (options.bezierSwatchClass) {
+      let swatch = this._createNode("span", {
+        class: options.bezierSwatchClass
+      });
+      container.appendChild(swatch);
+    }
+
+    let value = this._createNode("span", {
+      class: options.bezierClass
+    }, bezier);
+
+    container.appendChild(value);
+    this.parsed.push(container);
+  },
+
+  /**
    * Check if a CSS property supports a specific value.
    *
    * @param  {String} name
@@ -269,14 +340,22 @@ OutputParser.prototype = {
     let win = Services.appShell.hiddenDOMWindow;
     let doc = win.document;
 
-    name = name.replace(/-\w{1}/g, function(match) {
-      return match.charAt(1).toUpperCase();
-    });
+    value = value.replace("!important", "");
 
     let div = doc.createElement("div");
-    div.style[name] = value;
+    div.style.setProperty(name, value);
 
-    return !!div.style[name];
+    return !!div.style.getPropertyValue(name);
+  },
+
+  /**
+   * Tests if a given colorObject output by CssColor is valid for parsing.
+   * Valid means it's really a color, not any of the CssColor SPECIAL_VALUES
+   * except transparent
+   */
+  _isValidColor: function(colorObj) {
+    return colorObj.valid &&
+      (!colorObj.specialValue || colorObj.specialValue === "transparent");
   },
 
   /**
@@ -294,19 +373,30 @@ OutputParser.prototype = {
   _appendColor: function(color, options={}) {
     let colorObj = new colorUtils.CssColor(color);
 
-    if (colorObj.valid && !colorObj.specialValue) {
+    if (this._isValidColor(colorObj)) {
+      let container = this._createNode("span", {
+         "data-color": color
+      });
+
       if (options.colorSwatchClass) {
-        this._appendNode("span", {
+        let swatch = this._createNode("span", {
           class: options.colorSwatchClass,
           style: "background-color:" + color
         });
+        container.appendChild(swatch);
       }
+
       if (options.defaultColorType) {
         color = colorObj.toString();
+        container.dataset["color"] = color;
       }
-      this._appendNode("span", {
+
+      let value = this._createNode("span", {
         class: options.colorClass
       }, color);
+
+      container.appendChild(value);
+      this.parsed.push(container);
       return true;
     }
     return false;
@@ -325,9 +415,7 @@ OutputParser.prototype = {
     */
   _appendURL: function(match, url, options={}) {
     if (options.urlClass) {
-      // We use single quotes as this works inside html attributes (e.g. the
-      // markup view).
-      this._appendTextNode("url('");
+      this._appendTextNode("url(\"");
 
       let href = url;
       if (options.baseURI) {
@@ -340,14 +428,14 @@ OutputParser.prototype = {
         href: href
       }, url);
 
-      this._appendTextNode("')");
+      this._appendTextNode("\")");
     } else {
-      this._appendTextNode("url('" + url + "')");
+      this._appendTextNode("url(\"" + url + "\")");
     }
   },
 
   /**
-   * Append a node to the output.
+   * Create a node.
    *
    * @param  {String} tagName
    *         Tag type e.g. "div"
@@ -356,8 +444,9 @@ OutputParser.prototype = {
    * @param  {String} [value]
    *         If a value is included it will be appended as a text node inside
    *         the tag. This is useful e.g. for span tags.
+   * @return {Node} Newly created Node.
    */
-  _appendNode: function(tagName, attributes, value="") {
+  _createNode: function(tagName, attributes, value="") {
     let win = Services.appShell.hiddenDOMWindow;
     let doc = win.document;
     let node = doc.createElementNS(HTML_NS, tagName);
@@ -374,6 +463,22 @@ OutputParser.prototype = {
       node.appendChild(textNode);
     }
 
+    return node;
+  },
+
+  /**
+   * Append a node to the output.
+   *
+   * @param  {String} tagName
+   *         Tag type e.g. "div"
+   * @param  {Object} attributes
+   *         e.g. {class: "someClass", style: "cursor:pointer"};
+   * @param  {String} [value]
+   *         If a value is included it will be appended as a text node inside
+   *         the tag. This is useful e.g. for span tags.
+   */
+  _appendNode: function(tagName, attributes, value="") {
+    let node = this._createNode(tagName, attributes, value);
     this.parsed.push(node);
   },
 
@@ -428,6 +533,9 @@ OutputParser.prototype = {
    *           - colorSwatchClass: ""   // The class to use for color swatches.
    *           - colorClass: ""         // The class to use for the color value
    *                                    // that follows the swatch.
+   *           - bezierSwatchClass: ""  // The class to use for bezier swatches.
+   *           - bezierClass: ""        // The class to use for the bezier value
+   *                                    // that follows the swatch.
    *           - isHTMLAttribute: false // This property indicates whether we
    *                                    // are parsing an HTML attribute value.
    *                                    // When the value is passed in from an
@@ -446,6 +554,8 @@ OutputParser.prototype = {
       defaultColorType: true,
       colorSwatchClass: "",
       colorClass: "",
+      bezierSwatchClass: "",
+      bezierClass: "",
       isHTMLAttribute: false,
       urlClass: "",
       baseURI: ""
@@ -459,5 +569,5 @@ OutputParser.prototype = {
       defaults[item] = overrides[item];
     }
     return defaults;
-  },
+  }
 };

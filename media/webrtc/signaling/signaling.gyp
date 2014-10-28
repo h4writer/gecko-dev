@@ -50,21 +50,22 @@
         './include',
         './src/sipcc/include',
         './src/sipcc/cpr/include',
-        '../../../ipc/chromium/src',
-        '../../../ipc/chromium/src/base/third_party/nspr',
+        './src/sipcc/core/includes',
+        './src/sipcc/core/gsm/h',
+        './src/sipcc/core/common',
+        './src/sipcc/core/sipstack/h',
+        './src/sipcc/core/sdp',
         '../../../xpcom/base',
         '../../../dom/base',
-        '../../../content/media',
+        '../../../dom/media',
         '../../../media/mtransport',
         '../trunk',
+        '../trunk/webrtc',
         '../trunk/webrtc/video_engine/include',
         '../trunk/webrtc/voice_engine/include',
         '../trunk/webrtc/modules/interface',
-        '../trunk/webrtc/peerconnection',
-        '../trunk/third_party/libyuv/include/',
-        '../../../netwerk/srtp/src/include',
-        '../../../netwerk/srtp/src/crypto/include',
-        '../../../ipc/chromium/src',
+        '../../libyuv/include',
+        '../../mtransport/third_party/nrappkit/src/util/libekr',
       ],
 
       #
@@ -86,15 +87,23 @@
         './src/media-conduit/AudioConduit.cpp',
         './src/media-conduit/VideoConduit.h',
         './src/media-conduit/VideoConduit.cpp',
+        './src/media-conduit/CodecStatistics.h',
+        './src/media-conduit/CodecStatistics.cpp',
+        './src/media-conduit/RunningStat.h',
+        './src/media-conduit/GmpVideoCodec.cpp',
+        './src/media-conduit/WebrtcGmpVideoCodec.cpp',
         # Common
         './src/common/CommonTypes.h',
         './src/common/csf_common.h',
         './src/common/NullDeleter.h',
         './src/common/Wrapper.h',
         './src/common/NullTransport.h',
+        './src/common/YuvStamper.cpp',
         # Browser Logging
         './src/common/browser_logging/CSFLog.cpp',
         './src/common/browser_logging/CSFLog.h',
+        './src/common/browser_logging/WebRtcLog.cpp',
+        './src/common/browser_logging/WebRtcLog.h',
         # Browser Logging
         './src/common/time_profiling/timecard.c',
         './src/common/time_profiling/timecard.h',
@@ -155,8 +164,8 @@
         # Media pipeline
         './src/mediapipeline/MediaPipeline.h',
         './src/mediapipeline/MediaPipeline.cpp',
-        './src/mediapipeline/SrtpFlow.h',
-        './src/mediapipeline/SrtpFlow.cpp',
+        './src/mediapipeline/MediaPipelineFilter.h',
+        './src/mediapipeline/MediaPipelineFilter.cpp',
       ],
 
       #
@@ -189,9 +198,49 @@
       # Conditionals
       #
       'conditions': [
+        # hack so I can change the include flow for SrtpFlow
+        ['build_with_mozilla==1', {
+          'sources': [
+            './src/mediapipeline/SrtpFlow.h',
+            './src/mediapipeline/SrtpFlow.cpp',
+          ],
+          'include_dirs!': [
+            '../trunk/webrtc',
+          ],
+          'include_dirs': [
+            '../../../netwerk/srtp/src/include',
+            '../../../netwerk/srtp/src/crypto/include',
+          ],
+        }],
+        ['moz_webrtc_omx==1', {
+          'sources': [
+            './src/media-conduit/WebrtcOMXH264VideoCodec.cpp',
+            './src/media-conduit/OMXVideoCodec.cpp',
+          ],
+          'include_dirs': [
+            # hack on hack to re-add it after SrtpFlow removes it
+            '../../webrtc/trunk/webrtc',
+            '../../../dom/media/omx',
+            '../../../gfx/layers/client',
+          ],
+          'cflags_mozilla': [
+            '-I$(ANDROID_SOURCE)/frameworks/av/include/media/stagefright',
+            '-I$(ANDROID_SOURCE)/frameworks/av/include',
+            '-I$(ANDROID_SOURCE)/frameworks/native/include/media/openmax',
+            '-I$(ANDROID_SOURCE)/frameworks/native/include',
+            '-I$(ANDROID_SOURCE)/frameworks/native/opengl/include',
+          ],
+          'defines' : [
+            'MOZ_WEBRTC_OMX'
+          ],
+        }],
         ['build_for_test==0', {
           'defines' : [
             'MOZILLA_INTERNAL_API'
+          ],
+          'sources': [
+            './src/peerconnection/WebrtcGlobalInformation.cpp',
+            './src/peerconnection/WebrtcGlobalInformation.h',
           ],
         }],
         ['build_for_test!=0', {
@@ -209,6 +258,7 @@
           ],
 
           'defines': [
+            'OS_LINUX',
             'SIP_OS_LINUX',
             '_GNU_SOURCE',
             'LINUX',
@@ -223,6 +273,7 @@
           'include_dirs': [
           ],
           'defines': [
+            'OS_WIN',
             'SIP_OS_WINDOWS',
             'WIN32',
             'GIPS_VER=3480',
@@ -250,6 +301,7 @@
           'include_dirs': [
           ],
           'defines': [
+            'OS_MACOSX',
             'SIP_OS_OSX',
             'OSX',
             '_FORTIFY_SOURCE=2',
@@ -285,10 +337,6 @@
         './src/sipcc/plat/common',
         '../../../media/mtransport',
         '../../../dom/base',
-        '../trunk/third_party/libsrtp/srtp/include',
-        '../trunk/third_party/libsrtp/srtp/crypto/include',
-        # Danger: this is to include config.h. This could be bad.
-        '../trunk/third_party/libsrtp/config',
         '../../../netwerk/sctp/datachannel',
       ],
 
@@ -362,8 +410,6 @@
         './src/sipcc/core/common/subscription_handler.h',
         './src/sipcc/core/common/text_strings.c',
         './src/sipcc/core/common/text_strings.h',
-        './src/sipcc/core/common/thread_monitor.h',
-        './src/sipcc/core/common/thread_monitor.c',
         './src/sipcc/core/common/ui.c',
         # GSM
         './src/sipcc/core/gsm/ccapi.c',
@@ -558,6 +604,7 @@
         './src/sipcc/cpr/include/cpr_time.h',
         './src/sipcc/cpr/include/cpr_timers.h',
         './src/sipcc/cpr/include/cpr_types.h',
+        './src/sipcc/cpr/common/cpr_ipc.c',
         './src/sipcc/cpr/common/cpr_string.c',
         # INCLUDE
         './src/sipcc/include/cc_blf.h',
@@ -659,7 +706,6 @@
             # CPR
             './src/sipcc/cpr/android/cpr_android_errno.c',
             './src/sipcc/cpr/android/cpr_android_init.c',
-            './src/sipcc/cpr/android/cpr_android_ipc.c',
             './src/sipcc/cpr/android/cpr_android_socket.c',
             './src/sipcc/cpr/android/cpr_android_stdio.c',
             './src/sipcc/cpr/android/cpr_android_string.c',
@@ -671,7 +717,6 @@
             './src/sipcc/cpr/android/cpr_android_assert.h',
             './src/sipcc/cpr/android/cpr_android_errno.h',
             './src/sipcc/cpr/android/cpr_android_in.h',
-            './src/sipcc/cpr/android/cpr_darwin_ipc.h',
             './src/sipcc/cpr/android/cpr_android_private.h',
             './src/sipcc/cpr/android/cpr_android_rand.h',
             './src/sipcc/cpr/android/cpr_android_socket.h',
@@ -695,7 +740,6 @@
             # CPR
             './src/sipcc/cpr/linux/cpr_linux_errno.c',
             './src/sipcc/cpr/linux/cpr_linux_init.c',
-            './src/sipcc/cpr/linux/cpr_linux_ipc.c',
             './src/sipcc/cpr/linux/cpr_linux_socket.c',
             './src/sipcc/cpr/linux/cpr_linux_stdio.c',
             './src/sipcc/cpr/linux/cpr_linux_string.c',
@@ -707,7 +751,6 @@
             './src/sipcc/cpr/linux/cpr_linux_assert.h',
             './src/sipcc/cpr/linux/cpr_linux_errno.h',
             './src/sipcc/cpr/linux/cpr_linux_in.h',
-            './src/sipcc/cpr/linux/cpr_linux_ipc.h',
             './src/sipcc/cpr/linux/cpr_linux_private.h',
             './src/sipcc/cpr/linux/cpr_linux_rand.h',
             './src/sipcc/cpr/linux/cpr_linux_socket.h',
@@ -745,8 +788,6 @@
             './src/sipcc/cpr/win32/cpr_win_errno.h',
             './src/sipcc/cpr/win32/cpr_win_in.h',
             './src/sipcc/cpr/win32/cpr_win_init.c',
-            './src/sipcc/cpr/win32/cpr_win_ipc.c',
-            './src/sipcc/cpr/win32/cpr_win_ipc.h',
             './src/sipcc/cpr/win32/cpr_win_locks.c',
             './src/sipcc/cpr/win32/cpr_win_locks.h',
             './src/sipcc/cpr/win32/cpr_win_rand.c',
@@ -801,8 +842,6 @@
             './src/sipcc/cpr/darwin/cpr_darwin_errno.h',
             './src/sipcc/cpr/darwin/cpr_darwin_in.h',
             './src/sipcc/cpr/darwin/cpr_darwin_init.c',
-            './src/sipcc/cpr/darwin/cpr_darwin_ipc.c',
-            './src/sipcc/cpr/darwin/cpr_darwin_ipc.h',
             './src/sipcc/cpr/darwin/cpr_darwin_private.h',
             './src/sipcc/cpr/darwin/cpr_darwin_rand.h',
             './src/sipcc/cpr/darwin/cpr_darwin_socket.c',

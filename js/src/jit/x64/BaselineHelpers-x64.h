@@ -7,7 +7,6 @@
 #ifndef jit_x64_BaselineHelpers_x64_h
 #define jit_x64_BaselineHelpers_x64_h
 
-#ifdef JS_ION
 #include "jit/BaselineFrame.h"
 #include "jit/BaselineIC.h"
 #include "jit/BaselineRegisters.h"
@@ -71,7 +70,7 @@ EmitChangeICReturnAddress(MacroAssembler &masm, Register reg)
 }
 
 inline void
-EmitTailCallVM(IonCode *target, MacroAssembler &masm, uint32_t argSize)
+EmitTailCallVM(JitCode *target, MacroAssembler &masm, uint32_t argSize)
 {
     // We an assume during this that R0 and R1 have been pushed.
     masm.movq(BaselineFrameReg, ScratchReg);
@@ -84,7 +83,7 @@ EmitTailCallVM(IonCode *target, MacroAssembler &masm, uint32_t argSize)
     masm.store32(rdx, Address(BaselineFrameReg, BaselineFrame::reverseOffsetOfFrameSize()));
 
     // Push frame descriptor and perform the tail call.
-    masm.makeFrameDescriptor(ScratchReg, IonFrame_BaselineJS);
+    masm.makeFrameDescriptor(ScratchReg, JitFrame_BaselineJS);
     masm.push(ScratchReg);
     masm.push(BaselineTailCallReg);
     masm.jmp(target);
@@ -99,11 +98,11 @@ EmitCreateStubFrameDescriptor(MacroAssembler &masm, Register reg)
     masm.addq(Imm32(sizeof(void *) * 2), reg);
     masm.subq(BaselineStackReg, reg);
 
-    masm.makeFrameDescriptor(reg, IonFrame_BaselineStub);
+    masm.makeFrameDescriptor(reg, JitFrame_BaselineStub);
 }
 
 inline void
-EmitCallVM(IonCode *target, MacroAssembler &masm)
+EmitCallVM(JitCode *target, MacroAssembler &masm)
 {
     EmitCreateStubFrameDescriptor(masm, ScratchReg);
     masm.push(ScratchReg);
@@ -130,7 +129,7 @@ EmitEnterStubFrame(MacroAssembler &masm, Register)
     // if needed.
 
     // Push frame descriptor and return address.
-    masm.makeFrameDescriptor(ScratchReg, IonFrame_BaselineJS);
+    masm.makeFrameDescriptor(ScratchReg, JitFrame_BaselineJS);
     masm.push(ScratchReg);
     masm.push(BaselineTailCallReg);
 
@@ -169,7 +168,7 @@ EmitLeaveStubFrame(MacroAssembler &masm, bool calledIntoIon = false)
 inline void
 EmitStowICValues(MacroAssembler &masm, int values)
 {
-    JS_ASSERT(values >= 0 && values <= 2);
+    MOZ_ASSERT(values >= 0 && values <= 2);
     switch(values) {
       case 1:
         // Stow R0
@@ -190,7 +189,7 @@ EmitStowICValues(MacroAssembler &masm, int values)
 inline void
 EmitUnstowICValues(MacroAssembler &masm, int values, bool discard = false)
 {
-    JS_ASSERT(values >= 0 && values <= 2);
+    MOZ_ASSERT(values >= 0 && values <= 2);
     switch(values) {
       case 1:
         // Unstow R0
@@ -216,7 +215,7 @@ EmitUnstowICValues(MacroAssembler &masm, int values, bool discard = false)
 }
 
 inline void
-EmitCallTypeUpdateIC(MacroAssembler &masm, IonCode *code, uint32_t objectOffset)
+EmitCallTypeUpdateIC(MacroAssembler &masm, JitCode *code, uint32_t objectOffset)
 {
     // R0 contains the value that needs to be typechecked.
     // The object we're updating is a boxed Value on the stack, at offset
@@ -284,10 +283,7 @@ EmitStubGuardFailure(MacroAssembler &masm)
     masm.jmp(Operand(BaselineStubReg, ICStub::offsetOfStubCode()));
 }
 
-
 } // namespace jit
 } // namespace js
-
-#endif // JS_ION
 
 #endif /* jit_x64_BaselineHelpers_x64_h */

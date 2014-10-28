@@ -23,10 +23,13 @@
 // deriving from nsISupports will throw ambiguous base class errors.
 class nsDownloadProxy : public nsITransfer
 {
+protected:
+
+  virtual ~nsDownloadProxy() { }
+
 public:
 
   nsDownloadProxy() { }
-  virtual ~nsDownloadProxy() { }
 
   NS_DECL_ISUPPORTS
 
@@ -87,7 +90,7 @@ public:
   
   NS_IMETHODIMP OnStatusChange(nsIWebProgress *aWebProgress,
                                nsIRequest *aRequest, nsresult aStatus,
-                               const PRUnichar *aMessage)
+                               const char16_t *aMessage)
   {
     NS_ENSURE_TRUE(mInner, NS_ERROR_NOT_INITIALIZED);
     return mInner->OnStatusChange(aWebProgress, aRequest, aStatus, aMessage);
@@ -154,11 +157,23 @@ public:
     return mInner->SetSha256Hash(aHash);
   }
 
+  NS_IMETHODIMP SetSignatureInfo(nsIArray* aSignatureInfo)
+  {
+    NS_ENSURE_TRUE(mInner, NS_ERROR_NOT_INITIALIZED);
+    return mInner->SetSignatureInfo(aSignatureInfo);
+  }
+
+  NS_IMETHODIMP SetRedirects(nsIArray* aRedirects)
+  {
+    NS_ENSURE_TRUE(mInner, NS_ERROR_NOT_INITIALIZED);
+    return mInner->SetRedirects(aRedirects);
+  }
+
 private:
   nsCOMPtr<nsIDownload> mInner;
 };
 
-NS_IMPL_ISUPPORTS3(nsDownloadProxy, nsITransfer,
-                   nsIWebProgressListener, nsIWebProgressListener2)
+NS_IMPL_ISUPPORTS(nsDownloadProxy, nsITransfer,
+                  nsIWebProgressListener, nsIWebProgressListener2)
 
 #endif

@@ -3,7 +3,7 @@
     //
     (function(){
         var g = {};
-        x = Float32Array()
+        x = new Float32Array()
         Function('g', "g.o = x[1]")(g);
     })();
     //
@@ -33,9 +33,9 @@
     //
     (function() {
         x = y = {};
-        z = Float32Array(6)
+        z = new Float32Array(6)
         for (c in this) {
-            Array.prototype.unshift.call(x, ArrayBuffer())
+            Array.prototype.unshift.call(x, new ArrayBuffer())
         }
         Array.prototype.sort.call(x, (function (j) {
             y.s = z[2]
@@ -51,8 +51,9 @@
 // not inlined and the compiler will consider the return value to be a double, not a float32, making the
 // assertions fail. Note that as assertFloat32 is declared unsafe for fuzzing, this can't happen in fuzzed code.
 //
-// To be able to test it, we still need ion compilation though. A nice solution is to manually lower the ion usecount.
-setJitCompilerOption("ion.usecount.trigger", 50);
+// To be able to test it, we still need ion compilation though. A nice solution
+// is to manually lower the ion warm-up trigger.
+setJitCompilerOption("ion.warmup.trigger", 50);
 
 function test(f) {
     f32[0] = .5;
@@ -60,8 +61,8 @@ function test(f) {
         f();
 }
 
-var f32 = new Float32Array(2);
-var f64 = new Float64Array(2);
+var f32 = new Float32Array(4);
+var f64 = new Float64Array(4);
 
 function acceptAdd() {
     var use = f32[0] + 1;
@@ -150,6 +151,79 @@ function refuseSqrt() {
 }
 test(refuseSqrt);
 
+function acceptMin() {
+    var res = Math.min(f32[0], f32[1]);
+    assertFloat32(res, true);
+    f64[0] = res;
+}
+test(acceptMin);
+
+// In theory, we could do it, as Math.min/max actually behave as a Phi (it's a
+// float32 producer iff its inputs are producers, it's a consumer iff its uses
+// are consumers). In practice, this would involve some overhead for big chains
+// of min/max.
+function refuseMinAdd() {
+    var res = Math.min(f32[0], f32[1]) + f32[2];
+    assertFloat32(res, false);
+    f32[3] = res;
+}
+test(refuseMinAdd);
+
+function acceptSeveralMinMax() {
+    var x = Math.min(f32[0], f32[1]);
+    var y = Math.max(f32[2], f32[3]);
+    var res = Math.min(x, y);
+    assertFloat32(res, true);
+    f64[0] = res;
+}
+test(acceptSeveralMinMax);
+
+function acceptSeveralMinMax2() {
+    var res = Math.min(f32[0], f32[1], f32[2], f32[3]);
+    assertFloat32(res, true);
+    f64[0] = res;
+}
+test(acceptSeveralMinMax2);
+
+function partialMinMax() {
+    var x = Math.min(f32[0], f32[1]);
+    var y = Math.min(f64[0], f32[1]);
+    var res  = Math.min(x, y);
+    assertFloat32(x, true);
+    assertFloat32(y, false);
+    assertFloat32(res, false);
+    f64[0] = res;
+}
+test(partialMinMax);
+
+function refuseSeveralMinMax() {
+    var res = Math.min(f32[0], f32[1] + f32[2], f32[2], f32[3]);
+    assertFloat32(res, false);
+    f64[0] = res;
+}
+test(refuseSeveralMinMax);
+
+function refuseMin() {
+    var res = Math.min(f32[0], 42.13 + f32[1]);
+    assertFloat32(res, false);
+    f64[0] = res;
+}
+test(refuseMin);
+
+function acceptMax() {
+    var res = Math.max(f32[0], f32[1]);
+    assertFloat32(res, true);
+    f64[0] = res;
+}
+test(acceptMax);
+
+function refuseMax() {
+    var res = Math.max(f32[0], 42.13 + f32[1]);
+    assertFloat32(res, false);
+    f64[0] = res;
+}
+test(refuseMax);
+
 function acceptAbs() {
     var res = Math.abs(f32[0]);
     assertFloat32(res, true);
@@ -164,32 +238,32 @@ function refuseAbs() {
 }
 test(refuseAbs);
 
-function acceptTrigo() {
+function refuseTrigo() {
     var res = Math.cos(f32[0]);
     f32[0] = res;
-    assertFloat32(res, true);
+    assertFloat32(res, false);
 
     var res = Math.sin(f32[0]);
     f32[0] = res;
-    assertFloat32(res, true);
+    assertFloat32(res, false);
 
     var res = Math.tan(f32[0]);
     f32[0] = res;
-    assertFloat32(res, true);
+    assertFloat32(res, false);
 
     var res = Math.acos(f32[0]);
     f32[0] = res;
-    assertFloat32(res, true);
+    assertFloat32(res, false);
 
     var res = Math.asin(f32[0]);
     f32[0] = res;
-    assertFloat32(res, true);
+    assertFloat32(res, false);
 
     res = Math.atan(f32[0]);
     f32[0] = res;
-    assertFloat32(res, true);
+    assertFloat32(res, false);
 }
-test(acceptTrigo);
+test(refuseTrigo);
 
 function refuseMath() {
     var res = Math.log10(f32[0]);
@@ -298,7 +372,7 @@ function phiTest(n) {
         assertFloat32(x, true);
     } else {
         if (n < -10) {
-            x = Math.fround(Math.cos(y));
+            x = Math.fround(Math.sqrt(y));
             assertFloat32(x, true);
         } else {
             x = x - 1;
@@ -323,7 +397,7 @@ function mixedPhiTest(n) {
         assertFloat32(x, false);
     } else {
         if (n < -10) {
-            x = Math.fround(Math.cos(y)); // new producer
+            x = Math.fround(Math.sqrt(y)); // new producer
             assertFloat32(x, true);
         } else {
             x = x - 1; // non consumer because of (1)

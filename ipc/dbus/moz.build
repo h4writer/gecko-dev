@@ -5,13 +5,11 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 EXPORTS.mozilla.ipc += [
-    'DBusThread.h',
     'DBusUtils.h',
     'RawDBusConnection.h',
 ]
 
 SOURCES += [
-    'DBusThread.cpp',
     'DBusUtils.cpp',
     'RawDBusConnection.cpp',
 ]
@@ -19,3 +17,11 @@ SOURCES += [
 include('/ipc/chromium/chromium-config.mozbuild')
 
 FINAL_LIBRARY = 'xul'
+
+FAIL_ON_WARNINGS = True
+
+if CONFIG['MOZ_ENABLE_DBUS']:
+    CFLAGS += CONFIG['MOZ_DBUS_CFLAGS']
+    CFLAGS += CONFIG['MOZ_DBUS_GLIB_CFLAGS']
+    CXXFLAGS += CONFIG['MOZ_DBUS_CFLAGS']
+    CXXFLAGS += CONFIG['MOZ_DBUS_GLIB_CFLAGS']

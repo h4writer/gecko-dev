@@ -122,6 +122,7 @@ SetWindowAppUserModelProp(nsIDOMWindow *aParent,
 
 class DefaultController MOZ_FINAL : public nsITaskbarPreviewController
 {
+  ~DefaultController() {}
   HWND mWnd;
 public:
   DefaultController(HWND hWnd) 
@@ -193,7 +194,7 @@ DefaultController::OnClick(nsITaskbarPreviewButton *button) {
   return NS_OK;
 }
 
-NS_IMPL_ISUPPORTS1(DefaultController, nsITaskbarPreviewController)
+NS_IMPL_ISUPPORTS(DefaultController, nsITaskbarPreviewController)
 }
 
 namespace mozilla {
@@ -202,7 +203,7 @@ namespace widget {
 ///////////////////////////////////////////////////////////////////////////////
 // nsIWinTaskbar
 
-NS_IMPL_ISUPPORTS1(WinTaskbar, nsIWinTaskbar)
+NS_IMPL_ISUPPORTS(WinTaskbar, nsIWinTaskbar)
 
 bool
 WinTaskbar::Initialize() {
@@ -220,6 +221,7 @@ WinTaskbar::Initialize() {
 
   hr = mTaskbar->HrInit();
   if (FAILED(hr)) {
+    // This may fail with shell extensions like blackbox installed.
     NS_WARNING("Unable to initialize taskbar");
     NS_RELEASE(mTaskbar);
     return false;
@@ -366,7 +368,9 @@ WinTaskbar::RegisterAppUserModelID() {
 
 NS_IMETHODIMP
 WinTaskbar::GetAvailable(bool *aAvailable) {
-  *aAvailable = IsWin7OrLater();
+  // ITaskbarList4::HrInit() may fail with shell extensions like blackbox
+  // installed. Initialize early to return available=false in those cases.
+  *aAvailable = IsWin7OrLater() && Initialize();
 
   return NS_OK;
 }

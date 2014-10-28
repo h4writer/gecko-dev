@@ -19,7 +19,7 @@ function sendSmsToEmulator(from, text) {
   ++pendingEmulatorCmdCount;
 
   let cmd = "sms send " + from + " " + text;
-  runEmulatorCmd(cmd, function (result) {
+  runEmulatorCmd(cmd, function(result) {
     --pendingEmulatorCmdCount;
 
     is(result[0], "OK", "Emulator response");
@@ -32,11 +32,11 @@ let tasks = {
   _tasks: [],
   _nextTaskIndex: 0,
 
-  push: function push(func) {
+  push: function(func) {
     this._tasks.push(func);
   },
 
-  next: function next() {
+  next: function() {
     let index = this._nextTaskIndex++;
     let task = this._tasks[index];
     try {
@@ -50,19 +50,16 @@ let tasks = {
     }
   },
 
-  finish: function finish() {
+  finish: function() {
     this._tasks[this._tasks.length - 1]();
   },
 
-  run: function run() {
+  run: function() {
     this.next();
   }
 };
 
 function getAllMessages(callback, filter, reverse) {
-  if (!filter) {
-    filter = new MozSmsFilter;
-  }
   let messages = [];
   let cursor = manager.getMessages(filter, reverse || false);
   cursor.onsuccess = function(event) {
@@ -101,7 +98,7 @@ function deleteAllMessages() {
 
     let request = manager.delete(message.id);
     request.onsuccess = deleteAll.bind(null, messages);
-    request.onerror = function (event) {
+    request.onerror = function(event) {
       ok(false, "failed to delete all messages");
       tasks.finish();
     }
@@ -114,25 +111,25 @@ function checkThread(thread, id, body, unreadCount, timestamp)
   is(thread.body, body, "Thread subject is set to last message body");
   is(thread.unreadCount, unreadCount, "Thread unread count");
   is(JSON.stringify(thread.participants), JSON.stringify([FROM]), "Thread participants");
-  is(thread.timestamp.getTime(), timestamp.getTime(), "Thread timestamp is set");
+  is(thread.timestamp, timestamp, "Thread timestamp is set");
 }
 
 tasks.push(deleteAllMessages);
 
-tasks.push(getAllThreads.bind(null, function (threads) {
+tasks.push(getAllThreads.bind(null, function(threads) {
   is(threads.length, 0, "Threads are cleared");
   tasks.next();
 }));
 
 let gotMessagesCount = 0;
-tasks.push(function () {
-  manager.onreceived = function () {
+tasks.push(function() {
+  manager.onreceived = function() {
     ++gotMessagesCount;
   };
   tasks.next();
 });
 
-tasks.push(function () {
+tasks.push(function() {
   for (let i = 1; i <= MSGS; i++) {
     sendSmsToEmulator(FROM, PREFIX + i);
   }
@@ -146,7 +143,7 @@ tasks.push(function waitAllMessageReceived() {
     return;
   }
 
-  getAllMessages(function (messages) {
+  getAllMessages(function(messages) {
     allMessages = messages;
     tasks.next();
   });
@@ -154,7 +151,7 @@ tasks.push(function waitAllMessageReceived() {
 
 
 let originalThread;
-tasks.push(getAllThreads.bind(null, function (threads) {
+tasks.push(getAllThreads.bind(null, function(threads) {
   is(threads.length, 1, "Should have only one thread");
 
   let lastMessage = allMessages[allMessages.length - 1];
@@ -171,8 +168,8 @@ tasks.push(getAllThreads.bind(null, function (threads) {
 
 tasks.push(function DeleteFirstMessage() {
   let request = manager.delete(allMessages[0].id);
-  request.onsuccess = function () {
-    getAllThreads(function (threads) {
+  request.onsuccess = function() {
+    getAllThreads(function(threads) {
       is(threads.length, 1, "Should have only one thread");
 
       allMessages = allMessages.slice(1);
@@ -191,8 +188,8 @@ tasks.push(function DeleteFirstMessage() {
 
 tasks.push(function DeleteLastMessage() {
   let request = manager.delete(allMessages[allMessages.length - 1].id);
-  request.onsuccess = function () {
-    getAllThreads(function (threads) {
+  request.onsuccess = function() {
+    getAllThreads(function(threads) {
       is(threads.length, 1, "Should have only one thread");
 
       allMessages = allMessages.slice(0, -1);
@@ -211,7 +208,7 @@ tasks.push(function DeleteLastMessage() {
 
 tasks.push(deleteAllMessages);
 
-tasks.push(getAllThreads.bind(null, function (threads) {
+tasks.push(getAllThreads.bind(null, function(threads) {
   is(threads.length, 0, "Should have deleted all threads");
   tasks.next();
 }));

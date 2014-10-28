@@ -5,7 +5,6 @@
 // This verifies that add-on update checks work correctly when compatibility
 // check is disabled.
 
-const PREF_GETADDONS_BYIDS_PERFORMANCE = "extensions.getAddons.getWithPerformance.url";
 const PREF_GETADDONS_CACHE_ENABLED = "extensions.getAddons.cache.enabled";
 
 // The test extension uses an insecure update url.
@@ -59,8 +58,8 @@ function run_test_1() {
   Services.prefs.setCharPref(PREF_GETADDONS_BYIDS_PERFORMANCE,
                              "http://localhost:" + gPort + "/data/test_update.xml");
   Services.prefs.setBoolPref(PREF_GETADDONS_CACHE_ENABLED, true);
-  // Fake a timer event
-  gInternalManager.notify(null);
+
+  AddonManagerInternal.backgroundUpdateCheck();
 }
 
 // Test that the update check correctly observes when an addon opts-in to

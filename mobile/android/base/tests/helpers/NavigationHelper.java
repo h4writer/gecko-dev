@@ -4,15 +4,14 @@
 
 package org.mozilla.gecko.tests.helpers;
 
-import static org.mozilla.gecko.tests.helpers.AssertionHelper.*;
+import static org.mozilla.gecko.tests.helpers.AssertionHelper.fAssertNotNull;
 
-import org.mozilla.gecko.tests.components.ToolbarComponent;
 import org.mozilla.gecko.tests.UITestContext;
 import org.mozilla.gecko.tests.UITestContext.ComponentType;
+import org.mozilla.gecko.tests.components.AppMenuComponent;
+import org.mozilla.gecko.tests.components.ToolbarComponent;
 
 import com.jayway.android.robotium.solo.Solo;
-
-import android.text.TextUtils;
 
 /**
  * Provides helper functionality for navigating around the Firefox UI. These functions will often
@@ -22,17 +21,19 @@ final public class NavigationHelper {
     private static UITestContext sContext;
     private static Solo sSolo;
 
+    private static AppMenuComponent sAppMenu;
     private static ToolbarComponent sToolbar;
 
-    public static void init(final UITestContext context) {
+    protected static void init(final UITestContext context) {
         sContext = context;
         sSolo = context.getSolo();
 
+        sAppMenu = (AppMenuComponent) context.getComponent(ComponentType.APPMENU);
         sToolbar = (ToolbarComponent) context.getComponent(ComponentType.TOOLBAR);
     }
 
     public static void enterAndLoadUrl(String url) {
-        assertNotNull("url is not null", url);
+        fAssertNotNull("url is not null", url);
 
         url = adjustUrl(url);
         sToolbar.enterEditingMode()
@@ -43,14 +44,14 @@ final public class NavigationHelper {
     /**
      * Returns a new URL with the docshell HTTP server host prefix.
      */
-    private static String adjustUrl(final String url) {
-        assertNotNull("url is not null", url);
+    public static String adjustUrl(final String url) {
+        fAssertNotNull("url is not null", url);
 
-        if (!url.startsWith("about:")) {
-            return sContext.getAbsoluteHostnameUrl(url);
+        if (url.startsWith("about:") || url.startsWith("chrome:")) {
+            return url;
         }
 
-        return url;
+        return sContext.getAbsoluteHostnameUrl(url);
     }
 
     public static void goBack() {
@@ -81,16 +82,23 @@ final public class NavigationHelper {
         WaitHelper.waitForPageLoad(new Runnable() {
             @Override
             public void run() {
-                // TODO: Press forward with APPMENU component
-                throw new UnsupportedOperationException("Not yet implemented.");
+                sAppMenu.pressMenuItem(AppMenuComponent.MenuItem.FORWARD);
             }
         });
     }
 
     public static void reload() {
-        // TODO: On tablets, press reload in TOOLBAR. Note that this is technically
-        // an app menu item so tread carefully.
-        //       On phones, press reload in APPMENU.
-        throw new UnsupportedOperationException("Not yet implemented.");
+        if (DeviceHelper.isTablet()) {
+            sToolbar.pressReloadButton(); // Waits for page load & asserts isNotEditing.
+            return;
+        }
+
+        sToolbar.assertIsNotEditing();
+        WaitHelper.waitForPageLoad(new Runnable() {
+            @Override
+            public void run() {
+                sAppMenu.pressMenuItem(AppMenuComponent.MenuItem.RELOAD);
+            }
+        });
     }
 }

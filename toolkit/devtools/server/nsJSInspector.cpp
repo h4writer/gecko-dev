@@ -7,7 +7,6 @@
 #include "nsIXPConnect.h"
 #include "nsThreadUtils.h"
 #include "jsfriendapi.h"
-#include "js/OldDebugAPI.h"
 #include "mozilla/HoldDropJSObjects.h"
 #include "mozilla/ModuleUtils.h"
 #include "mozilla/dom/ScriptSettings.h"
@@ -65,7 +64,7 @@ nsJSInspector::~nsJSInspector()
 }
 
 NS_IMETHODIMP
-nsJSInspector::EnterNestedEventLoop(const JS::Value& requestor, uint32_t *out)
+nsJSInspector::EnterNestedEventLoop(JS::Handle<JS::Value> requestor, uint32_t *out)
 {
   nsresult rv = NS_OK;
 
@@ -73,7 +72,7 @@ nsJSInspector::EnterNestedEventLoop(const JS::Value& requestor, uint32_t *out)
   mRequestors.AppendElement(requestor);
   mozilla::HoldJSObjects(this);
 
-  mozilla::dom::AutoSystemCaller asc;
+  mozilla::dom::AutoNoJSAPI nojsapi;
 
   uint32_t nestLevel = ++mNestedLoopLevel;
   while (NS_SUCCEEDED(rv) && mNestedLoopLevel >= nestLevel) {
@@ -118,9 +117,9 @@ nsJSInspector::GetEventLoopNestLevel(uint32_t *out)
 }
 
 NS_IMETHODIMP
-nsJSInspector::GetLastNestRequestor(JS::Value *out)
+nsJSInspector::GetLastNestRequestor(JS::MutableHandle<JS::Value> out)
 {
-  *out = mLastRequestor;
+  out.set(mLastRequestor);
   return NS_OK;
 }
 

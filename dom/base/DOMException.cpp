@@ -6,7 +6,6 @@
 #include "mozilla/dom/DOMException.h"
 
 #include "jsprf.h"
-#include "js/OldDebugAPI.h"
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/HoldDropJSObjects.h"
 #include "mozilla/dom/Exceptions.h"
@@ -22,6 +21,7 @@
 #include "xpcprivate.h"
 
 #include "mozilla/dom/DOMExceptionBinding.h"
+#include "mozilla/ErrorResult.h"
 
 using namespace mozilla;
 
@@ -50,6 +50,7 @@ enum DOM4ErrorTypeCodeMap {
   TimeoutError               = nsIDOMDOMException::TIMEOUT_ERR,
   InvalidNodeTypeError       = nsIDOMDOMException::INVALID_NODE_TYPE_ERR,
   DataCloneError             = nsIDOMDOMException::DATA_CLONE_ERR,
+  InvalidPointerId           = nsIDOMDOMException::INVALID_POINTER_ERR,
   EncodingError              = 0,
 
   /* XXX Should be JavaScript native errors */
@@ -68,7 +69,23 @@ enum DOM4ErrorTypeCodeMap {
   NotReadableError         = 0,
 
   /* FileHandle API errors */
-  LockedFileInactiveError = 0,
+  FileHandleInactiveError = 0,
+
+  /* WebCrypto errors https://dvcs.w3.org/hg/webcrypto-api/raw-file/tip/spec/Overview.html#dfn-DataError */
+  OperationError           = 0,
+
+  /* Bluetooth API errors */
+  BtFailError              = 0,
+  BtNotReadyError          = 0,
+  BtNoMemError             = 0,
+  BtBusyError              = 0,
+  BtDoneError              = 0,
+  BtUnsupportedError       = 0,
+  BtParmInvalidError       = 0,
+  BtUnhandledError         = 0,
+  BtAuthFailureError       = 0,
+  BtRmtDevDownError        = 0,
+  BtAuthRejectedError      = 0,
 };
 
 #define DOM4_MSG_DEF(name, message, nsresult) {(nsresult), name, #name, message},
@@ -89,17 +106,19 @@ static const struct ResultStruct
 
 static void
 NSResultToNameAndMessage(nsresult aNSResult,
-                         const char** aName,
-                         const char** aMessage,
+                         nsCString& aName,
+                         nsCString& aMessage,
                          uint16_t* aCode)
 {
-  *aName = nullptr;
-  *aMessage = nullptr;
+  aName.Truncate();
+  aMessage.Truncate();
   *aCode = 0;
   for (uint32_t idx = 0; idx < ArrayLength(sDOMErrorMsgMap); idx++) {
     if (aNSResult == sDOMErrorMsgMap[idx].mNSResult) {
-      *aName = sDOMErrorMsgMap[idx].mName;
-      *aMessage = sDOMErrorMsgMap[idx].mMessage;
+      aName.Rebind(sDOMErrorMsgMap[idx].mName,
+                   strlen(sDOMErrorMsgMap[idx].mName));
+      aMessage.Rebind(sDOMErrorMsgMap[idx].mMessage,
+                   strlen(sDOMErrorMsgMap[idx].mMessage));
       *aCode = sDOMErrorMsgMap[idx].mCode;
       return;
     }
@@ -111,17 +130,17 @@ NSResultToNameAndMessage(nsresult aNSResult,
 }
 
 nsresult
-NS_GetNameAndMessageForDOMNSResult(nsresult aNSResult, const char** aName,
-                                   const char** aMessage, uint16_t* aCode)
+NS_GetNameAndMessageForDOMNSResult(nsresult aNSResult, nsACString& aName,
+                                   nsACString& aMessage, uint16_t* aCode)
 {
-  const char* name = nullptr;
-  const char* message = nullptr;
+  nsCString name;
+  nsCString message;
   uint16_t code = 0;
-  NSResultToNameAndMessage(aNSResult, &name, &message, &code);
+  NSResultToNameAndMessage(aNSResult, name, message, &code);
 
-  if (name && message) {
-    *aName = name;
-    *aMessage = message;
+  if (!name.IsEmpty() && !message.IsEmpty()) {
+    aName = name;
+    aMessage = message;
     if (aCode) {
       *aCode = code;
     }
@@ -151,6 +170,8 @@ NS_IMPL_CYCLE_COLLECTING_RELEASE(Exception)
 NS_IMPL_CYCLE_COLLECTION_CLASS(Exception)
 
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(Exception)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLocation)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mInner)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE_SCRIPT_OBJECTS
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
@@ -160,30 +181,24 @@ NS_IMPL_CYCLE_COLLECTION_TRACE_BEGIN(Exception)
 NS_IMPL_CYCLE_COLLECTION_TRACE_END
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN(Exception)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mLocation)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mInner)
   NS_IMPL_CYCLE_COLLECTION_UNLINK_PRESERVED_WRAPPER
   tmp->mThrownJSVal.setNull();
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
-NS_IMPL_CI_INTERFACE_GETTER1(Exception, nsIXPCException)
+NS_IMPL_CI_INTERFACE_GETTER(Exception, nsIXPCException)
 
-Exception::Exception(const char *aMessage,
+Exception::Exception(const nsACString& aMessage,
                      nsresult aResult,
-                     const char *aName,
+                     const nsACString& aName,
                      nsIStackFrame *aLocation,
                      nsISupports *aData)
-: mMessage(nullptr),
-  mResult(NS_OK),
-  mName(nullptr),
-  mLocation(nullptr),
-  mData(nullptr),
-  mFilename(nullptr),
+: mResult(NS_OK),
   mLineNumber(0),
-  mInner(nullptr),
   mInitialized(false),
   mHoldingJSVal(false)
 {
-  SetIsDOMBinding();
-
   // A little hack... The nsIGenericModule nsIClassInfo scheme relies on there
   // having been at least one instance made via the factory. Otherwise, the
   // shared factory/classinsance object never gets created and our QI getter
@@ -231,10 +246,7 @@ Exception::Exception(const char *aMessage,
 }
 
 Exception::Exception()
-  : mMessage(nullptr),
-    mResult(NS_OK),
-    mName(nullptr),
-    mFilename(nullptr),
+  : mResult(NS_OK),
     mLineNumber(-1),
     mInitialized(false),
     mHoldingJSVal(false)
@@ -243,19 +255,6 @@ Exception::Exception()
 
 Exception::~Exception()
 {
-  if (mMessage) {
-    nsMemory::Free(mMessage);
-    mMessage = nullptr;
-  }
-  if (mName) {
-    nsMemory::Free(mName);
-    mName = nullptr;
-  }
-  if (mFilename) {
-    nsMemory::Free(mFilename);
-    mFilename = nullptr;
-  }
-
   if (mHoldingJSVal) {
     MOZ_ASSERT(NS_IsMainThread());
 
@@ -292,20 +291,13 @@ Exception::StowJSVal(JS::Value& aVp)
   }
 }
 
-/* readonly attribute string message; */
+/* readonly attribute AUTF8String message; */
 NS_IMETHODIMP
-Exception::GetMessageMoz(char** aMessage)
+Exception::GetMessageMoz(nsACString& aMessage)
 {
-  NS_ENSURE_ARG_POINTER(aMessage);
   NS_ENSURE_TRUE(mInitialized, NS_ERROR_NOT_INITIALIZED);
 
-  if (mMessage) {
-    *aMessage =
-      (char*) nsMemory::Clone(mMessage, sizeof(char)*(strlen(mMessage)+1));
-  } else {
-    *aMessage = nullptr;
-  }
-
+  aMessage.Assign(mMessage);
   return NS_OK;
 }
 
@@ -320,33 +312,40 @@ Exception::GetResult(nsresult* aResult)
   return NS_OK;
 }
 
-/* readonly attribute string name; */
+/* readonly attribute AUTF8String name; */
 NS_IMETHODIMP
-Exception::GetName(char** aName)
+Exception::GetName(nsACString& aName)
 {
-  NS_ENSURE_ARG_POINTER(aName);
   NS_ENSURE_TRUE(mInitialized, NS_ERROR_NOT_INITIALIZED);
 
-  const char* name = mName;
-  if (!name) {
-    nsXPCException::NameAndFormatForNSResult(mResult, &name, nullptr);
-  }
-
-  if (name) {
-    *aName = (char*) nsMemory::Clone(name, sizeof(char)*(strlen(name)+1));
+  if (!mName.IsEmpty()) {
+    aName.Assign(mName);
   } else {
-    *aName = nullptr;
+    aName.Truncate();
+
+    const char* name = nullptr;
+    nsXPCException::NameAndFormatForNSResult(mResult, &name, nullptr);
+
+    if (name) {
+      aName.Assign(name);
+    }
   }
 
   return NS_OK;
 }
 
-/* readonly attribute string filename; */
+/* readonly attribute AString filename; */
 NS_IMETHODIMP
-Exception::GetFilename(char** aFilename)
+Exception::GetFilename(nsAString& aFilename)
 {
   NS_ENSURE_TRUE(mInitialized, NS_ERROR_NOT_INITIALIZED);
-    XPC_STRING_GETTER_BODY(aFilename, mFilename);
+
+  if (mLocation) {
+    return mLocation->GetFilename(aFilename);
+  }
+
+  aFilename.Assign(mFilename);
+  return NS_OK;
 }
 
 /* readonly attribute uint32_t lineNumber; */
@@ -355,6 +354,13 @@ Exception::GetLineNumber(uint32_t *aLineNumber)
 {
   NS_ENSURE_ARG_POINTER(aLineNumber);
   NS_ENSURE_TRUE(mInitialized, NS_ERROR_NOT_INITIALIZED);
+
+  if (mLocation) {
+    int32_t lineno;
+    nsresult rv = mLocation->GetLineNumber(&lineno);
+    *aLineNumber = lineno;
+    return rv;
+  }
 
   *aLineNumber = mLineNumber;
   return NS_OK;
@@ -407,11 +413,10 @@ Exception::GetInner(nsIException** aException)
   return NS_OK;
 }
 
-/* string toString (); */
+/* AUTF8String toString (); */
 NS_IMETHODIMP
-Exception::ToString(char **_retval)
+Exception::ToString(nsACString& _retval)
 {
-  NS_ENSURE_ARG_POINTER(_retval);
   NS_ENSURE_TRUE(mInitialized, NS_ERROR_NOT_INITIALIZED);
 
   static const char defaultMsg[] = "<no message>";
@@ -419,18 +424,21 @@ Exception::ToString(char **_retval)
   static const char format[] =
 "[Exception... \"%s\"  nsresult: \"0x%x (%s)\"  location: \"%s\"  data: %s]";
 
-  char* indicatedLocation = nullptr;
+  nsCString location;
 
   if (mLocation) {
     // we need to free this if it does not fail
-    nsresult rv = mLocation->ToString(&indicatedLocation);
+    nsresult rv = mLocation->ToString(location);
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
-  const char* msg = mMessage ? mMessage : nullptr;
-  const char* location = indicatedLocation ?
-                              indicatedLocation : defaultLocation;
-  const char* resultName = mName;
+  if (location.IsEmpty()) {
+    location.Assign(defaultLocation);
+  }
+
+  const char* msg = mMessage.IsEmpty() ? nullptr : mMessage.get();
+
+  const char* resultName = mName.IsEmpty() ? nullptr: mName.get();
   if (!resultName &&
       !nsXPCException::NameAndFormatForNSResult(mResult, &resultName,
                                                 (!msg) ? &msg : nullptr)) {
@@ -441,49 +449,28 @@ Exception::ToString(char **_retval)
   }
   const char* data = mData ? "yes" : "no";
 
-  char* temp = JS_smprintf(format, msg, mResult, resultName, location, data);
-  if (indicatedLocation) {
-    nsMemory::Free(indicatedLocation);
-  }
-
-  char* final = nullptr;
-  if (temp) {
-    final = (char*) nsMemory::Clone(temp, sizeof(char)*(strlen(temp)+1));
-    JS_smprintf_free(temp);
-  }
-
-  *_retval = final;
-  return final ? NS_OK : NS_ERROR_OUT_OF_MEMORY;
+  _retval.Truncate();
+  _retval.AppendPrintf(format, msg, mResult, resultName,
+                       location.get(), data);
+  return NS_OK;
 }
 
-/* void initialize (in string aMessage, in nsresult aResult, in string aName, in nsIStackFrame aLocation, in nsISupports aData, in nsIException aInner); */
+/* void initialize (in AUTF8String aMessage, in nsresult aResult,
+ *                  in AUTF8String aName, in nsIStackFrame aLocation,
+ *                  in nsISupports aData, in nsIException aInner); */
 NS_IMETHODIMP
-Exception::Initialize(const char *aMessage, nsresult aResult, const char *aName, nsIStackFrame *aLocation, nsISupports *aData, nsIException *aInner)
+Exception::Initialize(const nsACString& aMessage, nsresult aResult,
+                      const nsACString& aName, nsIStackFrame *aLocation,
+                      nsISupports *aData, nsIException *aInner)
 {
   NS_ENSURE_FALSE(mInitialized, NS_ERROR_ALREADY_INITIALIZED);
 
-  if (aMessage) {
-    mMessage =
-      (char*) nsMemory::Clone(aMessage, sizeof(char)*(strlen(aMessage)+1));
-  }
-
-  if (aName) {
-    mName = (char*) nsMemory::Clone(aName, sizeof(char)*(strlen(aName)+1));
-  }
-
+  mMessage = aMessage;
+  mName = aName;
   mResult = aResult;
 
   if (aLocation) {
     mLocation = aLocation;
-    // For now, fill in our location details from our stack frame.
-    // Later we may allow other locations?
-    nsresult rc;
-    if (NS_FAILED(rc = aLocation->GetFilename(&mFilename))) {
-      return rc;
-    }
-    if (NS_FAILED(rc = aLocation->GetLineNumber(&mLineNumber))) {
-      return rc;
-    }
   } else {
     nsresult rv;
     nsXPConnect* xpc = nsXPConnect::XPConnect();
@@ -501,22 +488,21 @@ Exception::Initialize(const char *aMessage, nsresult aResult, const char *aName,
 }
 
 JSObject*
-Exception::WrapObject(JSContext* cx, JS::Handle<JSObject*> scope)
+Exception::WrapObject(JSContext* cx)
 {
-  return ExceptionBinding::Wrap(cx, scope, this);
+  return ExceptionBinding::Wrap(cx, this);
 }
 
 void
 Exception::GetMessageMoz(nsString& retval)
 {
-  char* str = nullptr;
+  nsCString str;
 #ifdef DEBUG
-  DebugOnly<nsresult> rv = 
+  DebugOnly<nsresult> rv =
 #endif
-  GetMessageMoz(&str);
+  GetMessageMoz(str);
   MOZ_ASSERT(NS_SUCCEEDED(rv));
   CopyUTF8toUTF16(str, retval);
-  nsMemory::Free(str);
 }
 
 uint32_t
@@ -528,32 +514,26 @@ Exception::Result() const
 void
 Exception::GetName(nsString& retval)
 {
-  char* str = nullptr;
+  nsCString str;
 #ifdef DEBUG
   DebugOnly<nsresult> rv =
 #endif
-  GetName(&str);
+  GetName(str);
   MOZ_ASSERT(NS_SUCCEEDED(rv));
   CopyUTF8toUTF16(str, retval);
-  nsMemory::Free(str);
-}
-
-void
-Exception::GetFilename(nsString& retval)
-{
-  char* str = nullptr;
-#ifdef DEBUG
-  DebugOnly<nsresult> rv =
-#endif
-  GetFilename(&str);
-  MOZ_ASSERT(NS_SUCCEEDED(rv));
-  CopyUTF8toUTF16(str, retval);
-  nsMemory::Free(str);
 }
 
 uint32_t
 Exception::LineNumber() const
 {
+  if (mLocation) {
+    int32_t lineno;
+    if (NS_SUCCEEDED(mLocation->GetLineNumber(&lineno))) {
+      return lineno;
+    }
+    return 0;
+  }
+
   return mLineNumber;
 }
 
@@ -585,16 +565,23 @@ Exception::GetData() const
 }
 
 void
+Exception::GetStack(nsAString& aStack, ErrorResult& aRv) const
+{
+  if (mLocation) {
+    aRv = mLocation->GetFormattedStack(aStack);
+  }
+}
+
+void
 Exception::Stringify(nsString& retval)
 {
-  char* str = nullptr;
+  nsCString str;
 #ifdef DEBUG
   DebugOnly<nsresult> rv =
 #endif
-  ToString(&str);
+  ToString(str);
   MOZ_ASSERT(NS_SUCCEEDED(rv));
   CopyUTF8toUTF16(str, retval);
-  nsMemory::Free(str);
 }
 
 NS_IMPL_ADDREF_INHERITED(DOMException, Exception)
@@ -603,14 +590,13 @@ NS_INTERFACE_MAP_BEGIN(DOMException)
   NS_INTERFACE_MAP_ENTRY(nsIDOMDOMException)
 NS_INTERFACE_MAP_END_INHERITING(Exception)
 
-DOMException::DOMException(nsresult aRv, const char* aMessage,
-                           const char* aName, uint16_t aCode)
-  : Exception(nullptr, aRv, nullptr, nullptr, nullptr),
+DOMException::DOMException(nsresult aRv, const nsACString& aMessage,
+                           const nsACString& aName, uint16_t aCode)
+  : Exception(EmptyCString(), aRv, EmptyCString(), nullptr, nullptr),
     mName(aName),
     mMessage(aMessage),
     mCode(aCode)
 {
-  SetIsDOMBinding();
 }
 
 NS_IMETHODIMP
@@ -632,9 +618,9 @@ DOMException::GetCode(uint16_t* aCode)
 }
 
 NS_IMETHODIMP
-DOMException::ToString(char **aReturn)
+DOMException::ToString(nsACString& aReturn)
 {
-  *aReturn = nullptr;
+  aReturn.Truncate();
 
   static const char defaultMsg[] = "<no message>";
   static const char defaultLocation[] = "<unknown>";
@@ -645,16 +631,17 @@ DOMException::ToString(char **aReturn)
   nsAutoCString location;
 
   if (mInner) {
-    nsXPIDLCString filename;
-
-    mInner->GetFilename(getter_Copies(filename));
+    nsString filename;
+    mInner->GetFilename(filename);
 
     if (!filename.IsEmpty()) {
       uint32_t line_nr = 0;
 
       mInner->GetLineNumber(&line_nr);
 
-      char *temp = PR_smprintf("%s Line: %d", filename.get(), line_nr);
+      char *temp = PR_smprintf("%s Line: %d",
+                               NS_ConvertUTF16toUTF8(filename).get(),
+                               line_nr);
       if (temp) {
         location.Assign(temp);
         PR_smprintf_free(temp);
@@ -666,13 +653,13 @@ DOMException::ToString(char **aReturn)
     location = defaultLocation;
   }
 
-  const char* msg = mMessage ? mMessage : defaultMsg;
-  const char* resultName = mName ? mName : defaultName;
+  const char* msg = !mMessage.IsEmpty() ? mMessage.get() : defaultMsg;
+  const char* resultName = !mName.IsEmpty() ? mName.get() : defaultName;
 
-  *aReturn = PR_smprintf(format, msg, mCode, mResult, resultName,
-                         location.get());
+  aReturn.AppendPrintf(format, msg, mCode, mResult, resultName,
+                       location.get());
 
-  return *aReturn ? NS_OK : NS_ERROR_OUT_OF_MEMORY;
+  return NS_OK;
 }
 
 void
@@ -688,18 +675,18 @@ DOMException::GetMessageMoz(nsString& retval)
 }
 
 JSObject*
-DOMException::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope)
+DOMException::WrapObject(JSContext* aCx)
 {
-  return DOMExceptionBinding::Wrap(aCx, aScope, this);
+  return DOMExceptionBinding::Wrap(aCx, this);
 }
 
 /* static */already_AddRefed<DOMException>
 DOMException::Create(nsresult aRv)
 {
-  const char* name;
-  const char* message;
+  nsCString name;
+  nsCString message;
   uint16_t code;
-  NSResultToNameAndMessage(aRv, &name, &message, &code);
+  NSResultToNameAndMessage(aRv, name, message, &code);
   nsRefPtr<DOMException> inst =
     new DOMException(aRv, message, name, code);
   return inst.forget();

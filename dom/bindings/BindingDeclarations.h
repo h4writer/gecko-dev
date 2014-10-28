@@ -25,10 +25,6 @@
 
 class nsWrapperCache;
 
-// nsGlobalWindow implements nsWrapperCache, but doesn't always use it. Don't
-// try to use it without fixing that first.
-class nsGlobalWindow;
-
 namespace mozilla {
 namespace dom {
 
@@ -36,6 +32,18 @@ namespace dom {
 // so we can use IsBaseOf to detect dictionary template arguments.
 struct DictionaryBase
 {
+protected:
+  bool ParseJSON(JSContext* aCx, const nsAString& aJSON,
+                 JS::MutableHandle<JS::Value> aVal);
+
+  bool StringifyToJSON(JSContext* aCx,
+                       JS::MutableHandle<JS::Value> aValue,
+                       nsAString& aJSON) const;
+private:
+  // aString is expected to actually be an nsAString*.  Should only be
+  // called from StringifyToJSON.
+  static bool AppendJSONToString(const char16_t* aJSONData,
+                                 uint32_t aDataLength, void* aString);
 };
 
 // Struct that serves as a base class for all typed arrays and array buffers and
@@ -44,13 +52,12 @@ struct DictionaryBase
 struct AllTypedArraysBase {
 };
 
-
-struct MainThreadDictionaryBase : public DictionaryBase
-{
-protected:
-  bool ParseJSON(JSContext *aCx, const nsAString& aJSON,
-                 JS::MutableHandle<JS::Value> aVal);
+// Struct that serves as a base class for all owning unions.
+// Particularly useful so we can use IsBaseOf to detect owning union
+// template arguments.
+struct AllOwningUnionBase {
 };
+
 
 struct EnumEntry {
   const char* value;
@@ -72,7 +79,7 @@ public:
   // The context that this returns is not guaranteed to be in the compartment of
   // the object returned from Get(), in fact it's generally in the caller's
   // compartment.
-  JSContext* GetContext() const
+  JSContext* Context() const
   {
     return mCx;
   }
@@ -86,7 +93,6 @@ protected:
   JS::Rooted<JSObject*> mGlobalJSObject;
   JSContext* mCx;
   mutable nsISupports* mGlobalObject;
-  mutable nsCOMPtr<nsISupports> mGlobalObjectRef;
 };
 
 // Class for representing optional arguments.
@@ -99,59 +105,61 @@ public:
 
   explicit Optional_base(const T& aValue)
   {
-    mImpl.construct(aValue);
+    mImpl.emplace(aValue);
   }
 
   template<typename T1, typename T2>
   explicit Optional_base(const T1& aValue1, const T2& aValue2)
   {
-    mImpl.construct(aValue1, aValue2);
+    mImpl.emplace(aValue1, aValue2);
   }
 
   bool WasPassed() const
   {
-    return !mImpl.empty();
+    return mImpl.isSome();
   }
 
-  void Construct()
+  // Return InternalType here so we can work with it usefully.
+  InternalType& Construct()
   {
-    mImpl.construct();
+    mImpl.emplace();
+    return *mImpl;
   }
 
   template <class T1>
-  void Construct(const T1 &t1)
+  InternalType& Construct(const T1 &t1)
   {
-    mImpl.construct(t1);
+    mImpl.emplace(t1);
+    return *mImpl;
   }
 
   template <class T1, class T2>
-  void Construct(const T1 &t1, const T2 &t2)
+  InternalType& Construct(const T1 &t1, const T2 &t2)
   {
-    mImpl.construct(t1, t2);
+    mImpl.emplace(t1, t2);
+    return *mImpl;
   }
 
   void Reset()
   {
-    if (WasPassed()) {
-      mImpl.destroy();
-    }
+    mImpl.reset();
   }
 
   const T& Value() const
   {
-    return mImpl.ref();
+    return *mImpl;
   }
 
   // Return InternalType here so we can work with it usefully.
   InternalType& Value()
   {
-    return mImpl.ref();
+    return *mImpl;
   }
 
   // And an explicit way to get the InternalType even if we're const.
   const InternalType& InternalValue() const
   {
-    return mImpl.ref();
+    return *mImpl;
   }
 
   // If we ever decide to add conversion operators for optional arrays
@@ -189,7 +197,7 @@ public:
     Optional_base<JS::Handle<T>, JS::Rooted<T> >()
   {}
 
-  Optional(JSContext* cx) :
+  explicit Optional(JSContext* cx) :
     Optional_base<JS::Handle<T>, JS::Rooted<T> >()
   {
     this->Construct(cx);
@@ -203,14 +211,14 @@ public:
   // returning references to temporaries.
   JS::Handle<T> Value() const
   {
-    return this->mImpl.ref();
+    return *this->mImpl;
   }
 
   // And we have to override the non-const one too, since we're
   // shadowing the one on the superclass.
   JS::Rooted<T>& Value()
   {
-    return this->mImpl.ref();
+    return *this->mImpl;
   }
 };
 
@@ -230,47 +238,29 @@ public:
   {}
 
   // Don't allow us to have an uninitialized JSObject*
-  void Construct()
+  JSObject*& Construct()
   {
     // The Android compiler sucks and thinks we're trying to construct
     // a JSObject* from an int if we don't cast here.  :(
-    Optional_base<JSObject*, JSObject*>::Construct(
+    return Optional_base<JSObject*, JSObject*>::Construct(
       static_cast<JSObject*>(nullptr));
   }
 
   template <class T1>
-  void Construct(const T1& t1)
+  JSObject*& Construct(const T1& t1)
   {
-    Optional_base<JSObject*, JSObject*>::Construct(t1);
+    return Optional_base<JSObject*, JSObject*>::Construct(t1);
   }
 };
 
-// A specialization of Optional for JS::Value to make sure that when someone
-// calls Construct() on it we will pre-initialized the JS::Value to
-// JS::UndefinedValue() so it can be traced safely.
+// A specialization of Optional for JS::Value to make sure no one ever uses it.
 template<>
-class Optional<JS::Value> : public Optional_base<JS::Value, JS::Value>
+class Optional<JS::Value>
 {
-public:
-  Optional() :
-    Optional_base<JS::Value, JS::Value>()
-  {}
+private:
+  Optional() MOZ_DELETE;
 
-  explicit Optional(JS::Value aValue) :
-    Optional_base<JS::Value, JS::Value>(aValue)
-  {}
-
-  // Don't allow us to have an uninitialized JS::Value
-  void Construct()
-  {
-    Optional_base<JS::Value, JS::Value>::Construct(JS::UndefinedValue());
-  }
-
-  template <class T1>
-  void Construct(const T1& t1)
-  {
-    Optional_base<JS::Value, JS::Value>::Construct(t1);
-  }
+  explicit Optional(JS::Value aValue) MOZ_DELETE;
 };
 
 // A specialization of Optional for NonNull that lets us get a T& from Value()
@@ -284,14 +274,14 @@ public:
   // types...
   T& Value() const
   {
-    return *this->mImpl.ref().get();
+    return *this->mImpl->get();
   }
 
   // And we have to override the non-const one too, since we're
   // shadowing the one on the superclass.
   NonNull<T>& Value()
   {
-    return this->mImpl.ref();
+    return *this->mImpl;
   }
 };
 
@@ -306,23 +296,25 @@ public:
   // types...
   T& Value() const
   {
-    return *this->mImpl.ref().get();
+    return *this->mImpl->get();
   }
 
   // And we have to override the non-const one too, since we're
   // shadowing the one on the superclass.
   OwningNonNull<T>& Value()
   {
-    return this->mImpl.ref();
+    return *this->mImpl;
   }
 };
 
 // Specialization for strings.
-// XXXbz we can't pull in FakeDependentString here, because it depends on
-// internal strings.  So we just have to forward-declare it and reimplement its
+// XXXbz we can't pull in FakeString here, because it depends on internal
+// strings.  So we just have to forward-declare it and reimplement its
 // ToAStringPtr.
 
-struct FakeDependentString;
+namespace binding_detail {
+struct FakeString;
+} // namespace binding_detail
 
 template<>
 class Optional<nsAString>
@@ -343,11 +335,11 @@ public:
   }
 
   // If this code ever goes away, remove the comment pointing to it in the
-  // FakeDependentString class in BindingUtils.h.
-  void operator=(const FakeDependentString* str)
+  // FakeString class in BindingUtils.h.
+  void operator=(const binding_detail::FakeString* str)
   {
     MOZ_ASSERT(str);
-    mStr = reinterpret_cast<const nsDependentString*>(str);
+    mStr = reinterpret_cast<const nsString*>(str);
     mPassed = true;
   }
 
@@ -376,16 +368,17 @@ public:
 #endif
   {}
 
-  operator T&() {
+  // This is no worse than get() in terms of const handling.
+  operator T&() const {
     MOZ_ASSERT(inited);
     MOZ_ASSERT(ptr, "NonNull<T> was set to null");
     return *ptr;
   }
 
-  operator const T&() const {
+  operator T*() const {
     MOZ_ASSERT(inited);
     MOZ_ASSERT(ptr, "NonNull<T> was set to null");
-    return *ptr;
+    return ptr;
   }
 
   void operator=(T* t) {
@@ -451,12 +444,6 @@ GetWrapperCache(nsWrapperCache* cache)
 }
 
 inline nsWrapperCache*
-GetWrapperCache(nsGlobalWindow*)
-{
-  return nullptr;
-}
-
-inline nsWrapperCache*
 GetWrapperCache(void* p)
 {
   return nullptr;
@@ -475,22 +462,26 @@ struct ParentObject {
   template<class T>
   ParentObject(T* aObject) :
     mObject(aObject),
-    mWrapperCache(GetWrapperCache(aObject))
+    mWrapperCache(GetWrapperCache(aObject)),
+    mUseXBLScope(false)
   {}
 
   template<class T, template<typename> class SmartPtr>
   ParentObject(const SmartPtr<T>& aObject) :
     mObject(aObject.get()),
-    mWrapperCache(GetWrapperCache(aObject.get()))
+    mWrapperCache(GetWrapperCache(aObject.get())),
+    mUseXBLScope(false)
   {}
 
   ParentObject(nsISupports* aObject, nsWrapperCache* aCache) :
     mObject(aObject),
-    mWrapperCache(aCache)
+    mWrapperCache(aCache),
+    mUseXBLScope(false)
   {}
 
   nsISupports* const mObject;
   nsWrapperCache* const mWrapperCache;
+  bool mUseXBLScope;
 };
 
 } // namespace dom

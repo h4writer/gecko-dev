@@ -23,7 +23,7 @@ nsScriptableRegion::nsScriptableRegion()
 {
 }
 
-NS_IMPL_ISUPPORTS1(nsScriptableRegion, nsIScriptableRegion)
+NS_IMPL_ISUPPORTS(nsScriptableRegion, nsIScriptableRegion)
 
 NS_IMETHODIMP nsScriptableRegion::Init()
 {
@@ -127,31 +127,31 @@ NS_IMETHODIMP nsScriptableRegion::GetRegion(nsIntRegion* outRgn)
   return NS_OK;
 }
 
-NS_IMETHODIMP nsScriptableRegion::GetRects(JSContext* aCx, JS::Value* aRects)
+NS_IMETHODIMP nsScriptableRegion::GetRects(JSContext* aCx, JS::MutableHandle<JS::Value> aRects)
 {
   uint32_t numRects = mRegion.GetNumRects();
 
   if (!numRects) {
-    *aRects = JSVAL_NULL;
+    aRects.setNull();
     return NS_OK;
   }
 
-  JS::Rooted<JSObject*> destArray(aCx, JS_NewArrayObject(aCx, numRects * 4, nullptr));
+  JS::Rooted<JSObject*> destArray(aCx, JS_NewArrayObject(aCx, numRects * 4));
   if (!destArray) {
     return NS_ERROR_OUT_OF_MEMORY;
   }
 
-  *aRects = OBJECT_TO_JSVAL(destArray);
+  aRects.setObject(*destArray);
 
   uint32_t n = 0;
   nsIntRegionRectIterator iter(mRegion);
   const nsIntRect *rect;
 
   while ((rect = iter.Next())) {
-    if (!JS_DefineElement(aCx, destArray, n, INT_TO_JSVAL(rect->x), nullptr, nullptr, JSPROP_ENUMERATE) ||
-        !JS_DefineElement(aCx, destArray, n + 1, INT_TO_JSVAL(rect->y), nullptr, nullptr, JSPROP_ENUMERATE) ||
-        !JS_DefineElement(aCx, destArray, n + 2, INT_TO_JSVAL(rect->width), nullptr, nullptr, JSPROP_ENUMERATE) ||
-        !JS_DefineElement(aCx, destArray, n + 3, INT_TO_JSVAL(rect->height), nullptr, nullptr, JSPROP_ENUMERATE)) {
+    if (!JS_DefineElement(aCx, destArray, n, rect->x, JSPROP_ENUMERATE) ||
+        !JS_DefineElement(aCx, destArray, n + 1, rect->y, JSPROP_ENUMERATE) ||
+        !JS_DefineElement(aCx, destArray, n + 2, rect->width, JSPROP_ENUMERATE) ||
+        !JS_DefineElement(aCx, destArray, n + 3, rect->height, JSPROP_ENUMERATE)) {
       return NS_ERROR_FAILURE;
     }
     n += 4;

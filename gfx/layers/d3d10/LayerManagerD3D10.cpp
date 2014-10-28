@@ -8,13 +8,14 @@
 #include "LayerManagerD3D10.h"
 #include "LayerManagerD3D10Effect.h"
 #include "gfxWindowsPlatform.h"
+#include "gfx2DGlue.h"
 #include "gfxD2DSurface.h"
 #include "gfxFailure.h"
 #include "cairo-win32.h"
 #include "dxgi.h"
 
 #include "ContainerLayerD3D10.h"
-#include "ThebesLayerD3D10.h"
+#include "PaintedLayerD3D10.h"
 #include "ColorLayerD3D10.h"
 #include "CanvasLayerD3D10.h"
 #include "ReadbackLayerD3D10.h"
@@ -30,21 +31,11 @@
 #include "DXGI1_2.h"
 #endif
 
-using namespace std;
-using namespace mozilla::dom;
-using namespace mozilla::gfx;
-
 namespace mozilla {
 namespace layers {
 
-typedef HRESULT (WINAPI*D3D10CreateEffectFromMemoryFunc)(
-    void *pData,
-    SIZE_T DataLength,
-    UINT FXFlags,
-    ID3D10Device *pDevice, 
-    ID3D10EffectPool *pEffectPool,
-    ID3D10Effect **ppEffect
-);
+using namespace std;
+using namespace mozilla::gfx;
 
 struct Vertex
 {
@@ -57,8 +48,6 @@ static const GUID sDeviceAttachments =
 // {716AEDB1-C9C3-4B4D-8332-6F65D44AF6A8}
 static const GUID sLayerManagerCount = 
 { 0x716aedb1, 0xc9c3, 0x4b4d, { 0x83, 0x32, 0x6f, 0x65, 0xd4, 0x4a, 0xf6, 0xa8 } };
-
-cairo_user_data_key_t gKeyD3D10Texture;
 
 LayerManagerD3D10::LayerManagerD3D10(nsIWidget *aWidget)
   : mWidget(aWidget)
@@ -158,8 +147,9 @@ LayerManagerD3D10::Initialize(bool force, HRESULT* aHresultPtr)
     mDevice->SetPrivateData(sDeviceAttachments, sizeof(attachments), &attachments);
 
     SetLastError(0);
-    D3D10CreateEffectFromMemoryFunc createEffect = (D3D10CreateEffectFromMemoryFunc)
-      GetProcAddress(LoadLibraryA("d3d10_1.dll"), "D3D10CreateEffectFromMemory");
+    decltype(D3D10CreateEffectFromMemory)* createEffect =
+      (decltype(D3D10CreateEffectFromMemory)*)
+        GetProcAddress(LoadLibraryA("d3d10_1.dll"), "D3D10CreateEffectFromMemory");
     if (!createEffect) {
       SetHRESULT(aHresultPtr, HRESULT_FROM_WIN32(GetLastError()));
       return false;
@@ -364,7 +354,7 @@ LayerManagerD3D10::EndEmptyTransaction(EndTransactionFlags aFlags)
 }
 
 void
-LayerManagerD3D10::EndTransaction(DrawThebesLayerCallback aCallback,
+LayerManagerD3D10::EndTransaction(DrawPaintedLayerCallback aCallback,
                                   void* aCallbackData,
                                   EndTransactionFlags aFlags)
 {
@@ -382,7 +372,7 @@ LayerManagerD3D10::EndTransaction(DrawThebesLayerCallback aCallback,
 
     // The results of our drawing always go directly into a pixel buffer,
     // so we don't need to pass any global transform here.
-    mRoot->ComputeEffectiveTransforms(gfx3DMatrix());
+    mRoot->ComputeEffectiveTransforms(Matrix4x4());
 
 #ifdef MOZ_LAYERS_HAVE_LOG
     MOZ_LAYERS_LOG(("  ----- (beginning paint)"));
@@ -402,10 +392,10 @@ LayerManagerD3D10::EndTransaction(DrawThebesLayerCallback aCallback,
   mTarget = nullptr;
 }
 
-already_AddRefed<ThebesLayer>
-LayerManagerD3D10::CreateThebesLayer()
+already_AddRefed<PaintedLayer>
+LayerManagerD3D10::CreatePaintedLayer()
 {
-  nsRefPtr<ThebesLayer> layer = new ThebesLayerD3D10(this);
+  nsRefPtr<PaintedLayer> layer = new PaintedLayerD3D10(this);
   return layer.forget();
 }
 
@@ -444,18 +434,13 @@ LayerManagerD3D10::CreateReadbackLayer()
   return layer.forget();
 }
 
-static void ReleaseTexture(void *texture)
+TemporaryRef<DrawTarget>
+LayerManagerD3D10::CreateOptimalDrawTarget(const IntSize &aSize,
+                                           SurfaceFormat aFormat)
 {
-  static_cast<ID3D10Texture2D*>(texture)->Release();
-}
-
-already_AddRefed<gfxASurface>
-LayerManagerD3D10::CreateOptimalSurface(const gfxIntSize &aSize,
-                                   gfxImageFormat aFormat)
-{
-  if ((aFormat != gfxImageFormatRGB24 &&
-       aFormat != gfxImageFormatARGB32)) {
-    return LayerManager::CreateOptimalSurface(aSize, aFormat);
+  if ((aFormat != SurfaceFormat::B8G8R8X8 &&
+       aFormat != SurfaceFormat::B8G8R8A8)) {
+    return LayerManager::CreateOptimalDrawTarget(aSize, aFormat);
   }
 
   nsRefPtr<ID3D10Texture2D> texture;
@@ -467,30 +452,25 @@ LayerManagerD3D10::CreateOptimalSurface(const gfxIntSize &aSize,
   HRESULT hr = device()->CreateTexture2D(&desc, nullptr, getter_AddRefs(texture));
 
   if (FAILED(hr)) {
-    NS_WARNING("Failed to create new texture for CreateOptimalSurface!");
-    return LayerManager::CreateOptimalSurface(aSize, aFormat);
+    NS_WARNING("Failed to create new texture for CreateOptimalDrawTarget!");
+    return LayerManager::CreateOptimalDrawTarget(aSize, aFormat);
   }
 
-  nsRefPtr<gfxD2DSurface> surface =
-    new gfxD2DSurface(texture, aFormat == gfxImageFormatRGB24 ?
-      GFX_CONTENT_COLOR : GFX_CONTENT_COLOR_ALPHA);
+  RefPtr<DrawTarget> dt =
+    Factory::CreateDrawTargetForD3D10Texture(texture, aFormat);
 
-  if (!surface || surface->CairoStatus()) {
-    return LayerManager::CreateOptimalSurface(aSize, aFormat);
+  if (!dt) {
+    return LayerManager::CreateOptimalDrawTarget(aSize, aFormat);
   }
 
-  surface->SetData(&gKeyD3D10Texture,
-                   texture.forget().get(),
-                   ReleaseTexture);
-
-  return surface.forget();
+  return dt;
 }
 
 
-already_AddRefed<gfxASurface>
-LayerManagerD3D10::CreateOptimalMaskSurface(const gfxIntSize &aSize)
+TemporaryRef<DrawTarget>
+LayerManagerD3D10::CreateOptimalMaskDrawTarget(const IntSize &aSize)
 {
-  return CreateOptimalSurface(aSize, gfxImageFormatARGB32);
+  return CreateOptimalDrawTarget(aSize, SurfaceFormat::B8G8R8A8);
 }
 
 
@@ -498,9 +478,9 @@ TemporaryRef<DrawTarget>
 LayerManagerD3D10::CreateDrawTarget(const IntSize &aSize,
                                     SurfaceFormat aFormat)
 {
-  if ((aFormat != FORMAT_B8G8R8A8 &&
-       aFormat != FORMAT_B8G8R8X8) ||
-       gfxPlatform::GetPlatform()->GetPreferredCanvasBackend() != BACKEND_DIRECT2D) {
+  if ((aFormat != SurfaceFormat::B8G8R8A8 &&
+       aFormat != SurfaceFormat::B8G8R8X8) ||
+       gfxPlatform::GetPlatform()->GetPreferredCanvasBackend() != BackendType::DIRECT2D) {
     return LayerManager::CreateDrawTarget(aSize, aFormat);
   }
 
@@ -512,7 +492,7 @@ LayerManagerD3D10::CreateDrawTarget(const IntSize &aSize,
   HRESULT hr = device()->CreateTexture2D(&desc, nullptr, getter_AddRefs(texture));
 
   if (FAILED(hr)) {
-    NS_WARNING("Failed to create new texture for CreateOptimalSurface!");
+    NS_WARNING("Failed to create new texture for CreateOptimalDrawTarget!");
     return LayerManager::CreateDrawTarget(aSize, aFormat);
   }
 
@@ -716,6 +696,30 @@ LayerManagerD3D10::Render(EndTransactionFlags aFlags)
 
   static_cast<LayerD3D10*>(mRoot->ImplData())->RenderLayer();
 
+  if (!mRegionToClear.IsEmpty()) {
+    float color[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    gfx::Matrix4x4 transform;
+    effect()->GetVariableByName("mLayerTransform")->SetRawValue(&transform, 0, 64);
+    effect()->GetVariableByName("fLayerColor")->AsVector()->SetFloatVector(color);
+
+    ID3D10EffectTechnique *technique = effect()->GetTechniqueByName("RenderClearLayer");
+
+    nsIntRegionRectIterator iter(mRegionToClear);
+    const nsIntRect *r;
+    while ((r = iter.Next())) {
+      effect()->GetVariableByName("vLayerQuad")->AsVector()->SetFloatVector(
+        ShaderConstantRectD3D10(
+        (float)r->x,
+        (float)r->y,
+        (float)r->width,
+        (float)r->height)
+        );
+
+      technique->GetPassByIndex(0)->Apply(0);
+      device()->Draw(4, 0);
+    }
+  }
+
   // See bug 630197 - we have some reasons to believe if an earlier call
   // returned an error, the upcoming present call may raise an exception.
   // This will check if any of the calls done recently has returned an error
@@ -771,7 +775,7 @@ LayerManagerD3D10::PaintToTarget()
     new gfxImageSurface((unsigned char*)map.pData,
                         gfxIntSize(bbDesc.Width, bbDesc.Height),
                         map.RowPitch,
-                        gfxImageFormatARGB32);
+                        gfxImageFormat::ARGB32);
 
   mTarget->SetSource(tmpSurface);
   mTarget->SetOperator(gfxContext::OPERATOR_OVER);
@@ -850,7 +854,7 @@ uint8_t
 LayerD3D10::LoadMaskTexture()
 {
   if (Layer* maskLayer = GetLayer()->GetMaskLayer()) {
-    gfxIntSize size;
+    IntSize size;
     nsRefPtr<ID3D10ShaderResourceView> maskSRV =
       static_cast<LayerD3D10*>(maskLayer->ImplData())->GetAsTexture(&size);
   
@@ -858,10 +862,11 @@ LayerD3D10::LoadMaskTexture()
       return SHADER_NO_MASK;
     }
 
-    gfxMatrix maskTransform;
-    bool maskIs2D = maskLayer->GetEffectiveTransform().CanDraw2D(&maskTransform);
+    Matrix maskTransform;
+    Matrix4x4 effectiveTransform = maskLayer->GetEffectiveTransform();
+    bool maskIs2D = effectiveTransform.CanDraw2D(&maskTransform);
     NS_ASSERTION(maskIs2D, "How did we end up with a 3D transform here?!");
-    gfxRect bounds = gfxRect(gfxPoint(), size);
+    Rect bounds = Rect(Point(), Size(size));
     bounds = maskTransform.TransformBounds(bounds);
 
     effect()->GetVariableByName("vMaskQuad")->AsVector()->SetFloatVector(

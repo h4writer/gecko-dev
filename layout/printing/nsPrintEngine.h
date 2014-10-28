@@ -24,7 +24,7 @@
 
 // Classes
 class nsPagePrintTimer;
-class nsIDocShellTreeNode;
+class nsIDocShell;
 class nsDeviceContext;
 class nsIDocument;
 class nsIDocumentViewerPrint;
@@ -61,7 +61,7 @@ public:
   NS_IMETHOD GetIsRangeSelection(bool *aIsRangeSelection);
   NS_IMETHOD GetIsFramesetFrameSelected(bool *aIsFramesetFrameSelected);
   NS_IMETHOD GetPrintPreviewNumPages(int32_t *aPrintPreviewNumPages);
-  NS_IMETHOD EnumerateDocumentNames(uint32_t* aCount, PRUnichar*** aResult);
+  NS_IMETHOD EnumerateDocumentNames(uint32_t* aCount, char16_t*** aResult);
   static nsresult GetGlobalPrintSettings(nsIPrintSettings** aPrintSettings);
   NS_IMETHOD GetDoingPrint(bool *aDoingPrint);
   NS_IMETHOD GetDoingPrintPreview(bool *aDoingPrintPreview);
@@ -76,7 +76,6 @@ public:
   };
 
   nsPrintEngine();
-  ~nsPrintEngine();
 
   void Destroy();
   void DestroyPrintingData();
@@ -116,7 +115,7 @@ public:
   bool     DonePrintingPages(nsPrintObject* aPO, nsresult aResult);
 
   //---------------------------------------------------------------------
-  void BuildDocTree(nsIDocShellTreeNode *      aParentNode,
+  void BuildDocTree(nsIDocShell *      aParentNode,
                     nsTArray<nsPrintObject*> * aDocList,
                     nsPrintObject *            aPO);
   nsresult ReflowDocList(nsPrintObject * aPO, bool aSetPixelScale);
@@ -136,7 +135,7 @@ public:
                                 nsIPrintProgressParams* aParams);
   void EllipseLongString(nsAString& aStr, const uint32_t aLen, bool aDoFront);
   nsresult CheckForPrinters(nsIPrintSettings* aPrintSettings);
-  void CleanupDocTitleArray(PRUnichar**& aArray, int32_t& aCount);
+  void CleanupDocTitleArray(char16_t**& aArray, int32_t& aCount);
 
   bool IsThereARangeSelection(nsIDOMWindow * aDOMWin);
 
@@ -213,6 +212,7 @@ public:
   }
 
 protected:
+  ~nsPrintEngine();
 
   nsresult CommonPrint(bool aIsPrintPreview, nsIPrintSettings* aPrintSettings,
                        nsIWebProgressListener* aWebProgressListener,

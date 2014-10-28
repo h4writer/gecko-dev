@@ -60,6 +60,10 @@ const browserElementTestHelpers = {
     this._setPref('dom.mozBrowserFramesEnabled', value);
   },
 
+  setSelectionChangeEnabledPref: function(value) {
+    this._setPref('selectioncaret.enabled', value);
+  },
+
   getOOPByDefaultPref: function() {
     return this._getBoolPref("dom.ipc.browser_frames.oop_by_default");
   },
@@ -170,7 +174,7 @@ function expectPriorityChange(childID, expectedPriority,
         return;
       }
 
-      [id, priority, cpuPriority] = data.split(":");
+      var [id, priority, cpuPriority] = data.split(":");
       if (id != childID) {
         return;
       }
@@ -212,10 +216,8 @@ function expectPriorityWithBackgroundLRUSet(childID, expectedBackgroundLRU) {
     'process-priority-with-background-LRU-set',
     function(subject, topic, data) {
 
-      dump("browserElementTestHelpers got notify: topic "+ topic + ", data " + data +"\n");
-      [id, priority, cpuPriority, backgroundLRU] = data.split(":");
+      var [id, priority, cpuPriority, backgroundLRU] = data.split(":");
       if (id != childID) {
-        dump("id(" + id + ") != childID(" + childID + ")\n");
         return;
       }
 

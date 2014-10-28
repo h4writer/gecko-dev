@@ -25,7 +25,6 @@ loader.lazyImporter(this, "gDevTools", "resource:///modules/devtools/gDevTools.j
  *        - theme {String} String related to the theme of the popup.
  *        - autoSelect {Boolean} Boolean to allow the first entry of the popup
  *                     panel to be automatically selected when the popup shows.
- *        - fixedWidth {Boolean} Boolean to control dynamic width of the popup.
  *        - direction {String} The direction of the text in the panel. rtl or ltr
  *        - onSelect {String} The select event handler for the richlistbox
  *        - onClick {String} The click event handler for the richlistbox.
@@ -35,7 +34,6 @@ function AutocompletePopup(aDocument, aOptions = {})
 {
   this._document = aDocument;
 
-  this.fixedWidth = aOptions.fixedWidth || false;
   this.autoSelect = aOptions.autoSelect || false;
   this.position = aOptions.position || "after_start";
   this.direction = aOptions.direction || "ltr";
@@ -67,6 +65,8 @@ function AutocompletePopup(aDocument, aOptions = {})
     if (!aOptions.onKeypress) {
       this._panel.setAttribute("ignorekeys", "true");
     }
+    // Stop this appearing as an alert to accessibility.
+    this._panel.setAttribute("role", "presentation");
 
     let mainPopupSet = this._document.getElementById("mainPopupSet");
     if (mainPopupSet) {
@@ -75,7 +75,6 @@ function AutocompletePopup(aDocument, aOptions = {})
     else {
       this._document.documentElement.appendChild(this._panel);
     }
-    this._list = null;
   }
   else {
     this._list = this._panel.firstChild;
@@ -109,6 +108,7 @@ function AutocompletePopup(aDocument, aOptions = {})
   if (this.onKeypress) {
     this._list.addEventListener("keypress", this.onKeypress, false);
   }
+  this._itemIdCounter = 0;
 }
 exports.AutocompletePopup = AutocompletePopup;
 
@@ -137,13 +137,12 @@ AutocompletePopup.prototype = {
    */
   openPopup: function AP_openPopup(aAnchor, aXOffset = 0, aYOffset = 0)
   {
+    this.__maxLabelLength = -1;
+    this._updateSize();
     this._panel.openPopup(aAnchor, this.position, aXOffset, aYOffset);
 
     if (this.autoSelect) {
       this.selectFirstItem();
-    }
-    if (!this.fixedWidth) {
-      this._updateSize();
     }
   },
 
@@ -152,6 +151,8 @@ AutocompletePopup.prototype = {
    */
   hidePopup: function AP_hidePopup()
   {
+    // Return accessibility focus to the input.
+    this._document.activeElement.removeAttribute("aria-activedescendant");
     this._panel.hidePopup();
   },
 
@@ -159,7 +160,8 @@ AutocompletePopup.prototype = {
    * Check if the autocomplete popup is open.
    */
   get isOpen() {
-    return this._panel.state == "open";
+    return this._panel &&
+           (this._panel.state == "open" || this._panel.state == "showing");
   },
 
   /**
@@ -173,7 +175,6 @@ AutocompletePopup.prototype = {
     if (this.isOpen) {
       this.hidePopup();
     }
-    this.clearItems();
 
     if (this.onSelect) {
       this._list.removeEventListener("select", this.onSelect, false);
@@ -191,6 +192,8 @@ AutocompletePopup.prototype = {
       gDevTools.off("pref-changed", this._handleThemeChange);
     }
 
+    this._list.remove();
+    this._panel.remove();
     this._document = null;
     this._list = null;
     this._panel = null;
@@ -241,9 +244,7 @@ AutocompletePopup.prototype = {
       if (this.autoSelect) {
         this.selectFirstItem();
       }
-      if (!this.fixedWidth) {
-        this._updateSize();
-      }
+      this._updateSize();
     }
   },
 
@@ -260,6 +261,28 @@ AutocompletePopup.prototype = {
     else {
       this.selectedIndex = 0;
     }
+    this._list.ensureIndexIsVisible(this._list.selectedIndex);
+  },
+
+  __maxLabelLength: -1,
+
+  get _maxLabelLength() {
+    if (this.__maxLabelLength != -1) {
+      return this.__maxLabelLength;
+    }
+
+    let max = 0;
+    for (let i = 0; i < this._list.childNodes.length; i++) {
+      let item = this._list.childNodes[i]._autocompleteItem;
+      let str = item.label;
+      if (item.count) {
+        str += (item.count + "");
+      }
+      max = Math.max(str.length, max);
+    }
+
+    this.__maxLabelLength = max;
+    return this.__maxLabelLength;
   },
 
   /**
@@ -272,25 +295,26 @@ AutocompletePopup.prototype = {
     if (!this._panel) {
       return;
     }
-    // Flush the layout so that we get the latest height.
-    this._panel.boxObject.height;
-    let height = {};
-    this._list.scrollBoxObject.getScrolledSize({}, height);
-    // Change the width of the popup only if the scrollbar is visible.
-    if (height.value > this._panel.clientHeight) {
-      this._list.width = this._panel.clientWidth + this._scrollbarWidth;
-    }
-    // Height change is required, otherwise the panel is drawn at an offset
-    // the first time.
-    this._list.height = this._list.clientHeight;
-    // This brings the panel back at right position.
-    this._list.top = 0;
-    // Move the panel to -1,-1 to realign the popup with its anchor node when
-    // decreasing the panel height.
-    this._panel.moveTo(-1, -1);
-    // Changing panel height might make the selected item out of view, so
-    // bring it back to view.
+
+    this._list.style.width = (this._maxLabelLength + 3) +"ch";
     this._list.ensureIndexIsVisible(this._list.selectedIndex);
+  },
+
+  /**
+   * Update accessibility appropriately when the selected item is changed.
+   *
+   * @private
+   */
+  _updateAriaActiveDescendant: function AP__updateAriaActiveDescendant()
+  {
+    if (!this._list.selectedItem) {
+      // Return accessibility focus to the input.
+      this._document.activeElement.removeAttribute("aria-activedescendant");
+      return;
+    }
+    // Focus this for accessibility so users know about the selected item.
+    this._document.activeElement.setAttribute("aria-activedescendant",
+                                              this._list.selectedItem.id);
   },
 
   /**
@@ -305,16 +329,17 @@ AutocompletePopup.prototype = {
       this._list.removeChild(this._list.firstChild);
     }
 
-    if (!this.fixedWidth) {
-      // Reset the panel and list dimensions. New dimensions are calculated when
-      // a new set of items is added to the autocomplete popup.
-      this._list.width = "";
-      this._list.height = "";
-      this._panel.width = "";
-      this._panel.height = "";
-      this._panel.top = "";
-      this._panel.left = "";
-    }
+    this.__maxLabelLength = -1;
+
+    // Reset the panel and list dimensions. New dimensions are calculated when
+    // a new set of items is added to the autocomplete popup.
+    this._list.width = "";
+    this._list.style.width = "";
+    this._list.height = "";
+    this._panel.width = "";
+    this._panel.height = "";
+    this._panel.top = "";
+    this._panel.left = "";
   },
 
   /**
@@ -337,6 +362,7 @@ AutocompletePopup.prototype = {
     if (this.isOpen && this._list.ensureIndexIsVisible) {
       this._list.ensureIndexIsVisible(this._list.selectedIndex);
     }
+    this._updateAriaActiveDescendant();
   },
 
   /**
@@ -359,6 +385,7 @@ AutocompletePopup.prototype = {
     if (this.isOpen) {
       this._list.ensureIndexIsVisible(this._list.selectedIndex);
     }
+    this._updateAriaActiveDescendant();
   },
 
   /**
@@ -380,6 +407,8 @@ AutocompletePopup.prototype = {
   appendItem: function AP_appendItem(aItem)
   {
     let listItem = this._document.createElementNS(XUL_NS, "richlistitem");
+    // Items must have an id for accessibility.
+    listItem.id = this._panel.id + "_item_" + this._itemIdCounter++;
     if (this.direction) {
       listItem.setAttribute("dir", this.direction);
     }
@@ -453,6 +482,17 @@ AutocompletePopup.prototype = {
   },
 
   /**
+   * Getter for the height of each item in the list.
+   *
+   * @private
+   *
+   * @type number
+   */
+  get _itemHeight() {
+    return this._list.selectedItem.clientHeight;
+  },
+
+  /**
    * Select the next item in the list.
    *
    * @return object
@@ -474,7 +514,7 @@ AutocompletePopup.prototype = {
    * Select the previous item in the list.
    *
    * @return object
-   *         The newly selected item object.
+   *         The newly-selected item object.
    */
   selectPreviousItem: function AP_selectPreviousItem()
   {
@@ -489,43 +529,44 @@ AutocompletePopup.prototype = {
   },
 
   /**
+   * Select the top-most item in the next page of items or
+   * the last item in the list.
+   *
+   * @return object
+   *         The newly-selected item object.
+   */
+  selectNextPageItem: function AP_selectNextPageItem()
+  {
+    let itemsPerPane = Math.floor(this._list.scrollHeight / this._itemHeight);
+    let nextPageIndex = this.selectedIndex + itemsPerPane + 1;
+    this.selectedIndex = nextPageIndex > this.itemCount - 1 ?
+      this.itemCount - 1 : nextPageIndex;
+
+    return this.selectedItem;
+  },
+
+  /**
+   * Select the bottom-most item in the previous page of items,
+   * or the first item in the list.
+   *
+   * @return object
+   *         The newly-selected item object.
+   */
+  selectPreviousPageItem: function AP_selectPreviousPageItem()
+  {
+    let itemsPerPane = Math.floor(this._list.scrollHeight / this._itemHeight);
+    let prevPageIndex = this.selectedIndex - itemsPerPane - 1;
+    this.selectedIndex = prevPageIndex < 0 ? 0 : prevPageIndex;
+
+    return this.selectedItem;
+  },
+
+  /**
    * Focuses the richlistbox.
    */
   focus: function AP_focus()
   {
     this._list.focus();
-  },
-
-  /**
-   * Determine the scrollbar width in the current document.
-   *
-   * @private
-   */
-  get _scrollbarWidth()
-  {
-    if (this.__scrollbarWidth !== null) {
-      return this.__scrollbarWidth;
-    }
-
-    let doc = this._document;
-    if (doc.defaultView.matchMedia("(-moz-overlay-scrollbars)").matches) {
-      // This is for the Mac's floating scrollbar, which actually is drawn over
-      // the content, thus taking no extra width.
-      return (this.__scrollbarWidth = 0);
-    }
-
-    let hbox = doc.createElementNS(XUL_NS, "hbox");
-    hbox.setAttribute("style", "height: 0%; overflow: hidden");
-
-    let scrollbar = doc.createElementNS(XUL_NS, "scrollbar");
-    scrollbar.setAttribute("orient", "vertical");
-    hbox.appendChild(scrollbar);
-    doc.documentElement.appendChild(hbox);
-
-    this.__scrollbarWidth = scrollbar.clientWidth;
-    doc.documentElement.removeChild(hbox);
-
-    return this.__scrollbarWidth;
   },
 
   /**

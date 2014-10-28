@@ -10,6 +10,7 @@
 
 #include "mozilla/Assertions.h"
 #include "mozilla/dom/ContentChild.h"
+#include "mozilla/dom/ipc/BlobChild.h"
 
 #include "BluetoothChild.h"
 #include "MainThreadUtils.h"
@@ -18,7 +19,7 @@ USING_BLUETOOTH_NAMESPACE
 
 namespace {
 
-BluetoothChild* gBluetoothChild;
+BluetoothChild* sBluetoothChild;
 
 inline
 void
@@ -27,13 +28,13 @@ SendRequest(BluetoothReplyRunnable* aRunnable, const Request& aRequest)
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(aRunnable);
 
-  NS_WARN_IF_FALSE(gBluetoothChild,
+  NS_WARN_IF_FALSE(sBluetoothChild,
                    "Calling methods on BluetoothServiceChildProcess during "
                    "shutdown!");
 
-  if (gBluetoothChild) {
+  if (sBluetoothChild) {
     BluetoothRequestChild* actor = new BluetoothRequestChild(aRunnable);
-    gBluetoothChild->SendPBluetoothRequestConstructor(actor, aRequest);
+    sBluetoothChild->SendPBluetoothRequestConstructor(actor, aRequest);
   }
 }
 
@@ -43,7 +44,7 @@ SendRequest(BluetoothReplyRunnable* aRunnable, const Request& aRequest)
 BluetoothServiceChildProcess*
 BluetoothServiceChildProcess::Create()
 {
-  MOZ_ASSERT(!gBluetoothChild);
+  MOZ_ASSERT(!sBluetoothChild);
 
   mozilla::dom::ContentChild* contentChild =
     mozilla::dom::ContentChild::GetSingleton();
@@ -51,8 +52,8 @@ BluetoothServiceChildProcess::Create()
 
   BluetoothServiceChildProcess* btService = new BluetoothServiceChildProcess();
 
-  gBluetoothChild = new BluetoothChild(btService);
-  contentChild->SendPBluetoothConstructor(gBluetoothChild);
+  sBluetoothChild = new BluetoothChild(btService);
+  contentChild->SendPBluetoothConstructor(sBluetoothChild);
 
   return btService;
 }
@@ -63,14 +64,14 @@ BluetoothServiceChildProcess::BluetoothServiceChildProcess()
 
 BluetoothServiceChildProcess::~BluetoothServiceChildProcess()
 {
-  gBluetoothChild = nullptr;
+  sBluetoothChild = nullptr;
 }
 
 void
 BluetoothServiceChildProcess::NoteDeadActor()
 {
-  MOZ_ASSERT(gBluetoothChild);
-  gBluetoothChild = nullptr;
+  MOZ_ASSERT(sBluetoothChild);
+  sBluetoothChild = nullptr;
 }
 
 void
@@ -78,8 +79,8 @@ BluetoothServiceChildProcess::RegisterBluetoothSignalHandler(
                                               const nsAString& aNodeName,
                                               BluetoothSignalObserver* aHandler)
 {
-  if (gBluetoothChild && !IsSignalRegistered(aNodeName)) {
-    gBluetoothChild->SendRegisterSignalHandler(nsString(aNodeName));
+  if (sBluetoothChild && !IsSignalRegistered(aNodeName)) {
+    sBluetoothChild->SendRegisterSignalHandler(nsString(aNodeName));
   }
   BluetoothService::RegisterBluetoothSignalHandler(aNodeName, aHandler);
 }
@@ -90,8 +91,8 @@ BluetoothServiceChildProcess::UnregisterBluetoothSignalHandler(
                                               BluetoothSignalObserver* aHandler)
 {
   BluetoothService::UnregisterBluetoothSignalHandler(aNodeName, aHandler);
-  if (gBluetoothChild && !IsSignalRegistered(aNodeName)) {
-    gBluetoothChild->SendUnregisterSignalHandler(nsString(aNodeName));
+  if (sBluetoothChild && !IsSignalRegistered(aNodeName)) {
+    sBluetoothChild->SendUnregisterSignalHandler(nsString(aNodeName));
   }
 }
 
@@ -246,6 +247,14 @@ BluetoothServiceChildProcess::Disconnect(
 }
 
 void
+BluetoothServiceChildProcess::IsConnected(
+  const uint16_t aServiceUuid,
+  BluetoothReplyRunnable* aRunnable)
+{
+  SendRequest(aRunnable, IsConnectedRequest(aServiceUuid));
+}
+
+void
 BluetoothServiceChildProcess::SendFile(
   const nsAString& aDeviceAddress,
   BlobParent* aBlobParent,
@@ -254,6 +263,16 @@ BluetoothServiceChildProcess::SendFile(
 {
   SendRequest(aRunnable,
               SendFileRequest(nsString(aDeviceAddress), nullptr, aBlobChild));
+}
+
+void
+BluetoothServiceChildProcess::SendFile(
+  const nsAString& aDeviceAddress,
+  nsIDOMBlob* aBlobChild,
+  BluetoothReplyRunnable* aRunnable)
+{
+  // Parent-process-only method
+  MOZ_CRASH("This should never be called!");
 }
 
 void
@@ -361,8 +380,8 @@ BluetoothServiceChildProcess::HandleShutdown()
 {
   // If this process is shutting down then we need to disconnect ourselves from
   // the parent.
-  if (gBluetoothChild) {
-    gBluetoothChild->BeginShutdown();
+  if (sBluetoothChild) {
+    sBluetoothChild->BeginShutdown();
   }
   return NS_OK;
 }
@@ -375,18 +394,6 @@ BluetoothServiceChildProcess::StartInternal()
 
 nsresult
 BluetoothServiceChildProcess::StopInternal()
-{
-  MOZ_CRASH("This should never be called!");
-}
-
-bool
-BluetoothServiceChildProcess::IsEnabledInternal()
-{
-  MOZ_CRASH("This should never be called!");
-}
-
-bool
-BluetoothServiceChildProcess::IsConnected(uint16_t aServiceUuid)
 {
   MOZ_CRASH("This should never be called!");
 }

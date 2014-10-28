@@ -8,9 +8,10 @@
 #define mozilla_dom_telephony_telephony_h__
 
 #include "mozilla/dom/BindingDeclarations.h"
+#include "mozilla/dom/Promise.h"
 #include "mozilla/dom/telephony/TelephonyCommon.h"
 
-#include "nsITelephonyProvider.h"
+#include "nsITelephonyService.h"
 
 // Need to include TelephonyCall.h because we have inline methods that
 // assume they see the definition of TelephonyCall.
@@ -20,27 +21,33 @@ class nsPIDOMWindow;
 
 namespace mozilla {
 namespace dom {
+namespace telephony {
+
+class TelephonyDialCallback;
+
+} // namespace telephony
 
 class OwningTelephonyCallOrTelephonyCallGroup;
 
-class Telephony MOZ_FINAL : public nsDOMEventTargetHelper
+class Telephony MOZ_FINAL : public DOMEventTargetHelper,
+                            private nsITelephonyListener
 {
   /**
-   * Class Telephony doesn't actually inherit nsITelephonyListener.
+   * Class Telephony doesn't actually expose nsITelephonyListener.
    * Instead, it owns an nsITelephonyListener derived instance mListener
-   * and passes it to nsITelephonyProvider. The onreceived events are first
+   * and passes it to nsITelephonyService. The onreceived events are first
    * delivered to mListener and then forwarded to its owner, Telephony. See
    * also bug 775997 comment #51.
    */
   class Listener;
-
   class EnumerationAck;
-  friend class EnumerationAck;
 
-  nsCOMPtr<nsITelephonyProvider> mProvider;
+  friend class EnumerationAck;
+  friend class telephony::TelephonyDialCallback;
+
+  nsCOMPtr<nsITelephonyService> mService;
   nsRefPtr<Listener> mListener;
 
-  TelephonyCall* mActiveCall;
   nsTArray<nsRefPtr<TelephonyCall> > mCalls;
   nsRefPtr<CallsList> mCallsList;
 
@@ -51,9 +58,9 @@ class Telephony MOZ_FINAL : public nsDOMEventTargetHelper
 public:
   NS_DECL_ISUPPORTS_INHERITED
   NS_DECL_NSITELEPHONYLISTENER
-  NS_REALLY_FORWARD_NSIDOMEVENTTARGET(nsDOMEventTargetHelper)
+  NS_REALLY_FORWARD_NSIDOMEVENTTARGET(DOMEventTargetHelper)
   NS_DECL_CYCLE_COLLECTION_CLASS_INHERITED(Telephony,
-                                           nsDOMEventTargetHelper)
+                                           DOMEventTargetHelper)
 
   nsPIDOMWindow*
   GetParentObject() const
@@ -63,14 +70,14 @@ public:
 
   // WrapperCache
   virtual JSObject*
-  WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope) MOZ_OVERRIDE;
+  WrapObject(JSContext* aCx) MOZ_OVERRIDE;
 
   // WebIDL
-  already_AddRefed<TelephonyCall>
+  already_AddRefed<Promise>
   Dial(const nsAString& aNumber, const Optional<uint32_t>& aServiceId,
        ErrorResult& aRv);
 
-  already_AddRefed<TelephonyCall>
+  already_AddRefed<Promise>
   DialEmergency(const nsAString& aNumber, const Optional<uint32_t>& aServiceId,
                 ErrorResult& aRv);
 
@@ -102,6 +109,7 @@ public:
   already_AddRefed<TelephonyCallGroup>
   ConferenceGroup() const;
 
+  IMPL_EVENT_HANDLER(ready)
   IMPL_EVENT_HANDLER(incoming)
   IMPL_EVENT_HANDLER(callschanged)
   IMPL_EVENT_HANDLER(remoteheld)
@@ -115,7 +123,6 @@ public:
   {
     NS_ASSERTION(!mCalls.Contains(aCall), "Already know about this one!");
     mCalls.AppendElement(aCall);
-    UpdateActiveCall(aCall, IsActiveState(aCall->CallState()));
     NotifyCallsChanged(aCall);
   }
 
@@ -124,14 +131,13 @@ public:
   {
     NS_ASSERTION(mCalls.Contains(aCall), "Didn't know about this one!");
     mCalls.RemoveElement(aCall);
-    UpdateActiveCall(aCall, false);
     NotifyCallsChanged(aCall);
   }
 
-  nsITelephonyProvider*
-  Provider() const
+  nsITelephonyService*
+  Service() const
   {
-    return mProvider;
+    return mService;
   }
 
   const nsTArray<nsRefPtr<TelephonyCall> >&
@@ -143,7 +149,7 @@ public:
   virtual void EventListenerAdded(nsIAtom* aType) MOZ_OVERRIDE;
 
 private:
-  Telephony();
+  explicit Telephony(nsPIDOMWindow* aOwner);
   ~Telephony();
 
   void
@@ -167,19 +173,24 @@ private:
   bool
   HasDialingCall();
 
-  bool
-  MatchActiveCall(TelephonyCall* aCall);
+  already_AddRefed<Promise>
+  DialInternal(uint32_t aServiceId, const nsAString& aNumber, bool aEmergency,
+               ErrorResult& aRv);
+
+  already_AddRefed<TelephonyCallId>
+  CreateCallId(const nsAString& aNumber,
+               uint16_t aNumberPresentation = nsITelephonyService::CALL_PRESENTATION_ALLOWED,
+               const nsAString& aName = EmptyString(),
+               uint16_t aNamePresentation = nsITelephonyService::CALL_PRESENTATION_ALLOWED);
 
   already_AddRefed<TelephonyCall>
-  DialInternal(uint32_t aServiceId, const nsAString& aNumber,
-               bool isEmergency, ErrorResult& aRv);
+  CreateCall(TelephonyCallId* aId,
+             uint32_t aServiceId, uint32_t aCallIndex, uint16_t aCallState,
+             bool aEmergency = false, bool aConference = false,
+             bool aSwitchable = true, bool aMergeable = true);
 
-  already_AddRefed<TelephonyCall>
-  CreateNewDialingCall(uint32_t aServiceId, const nsAString& aNumber);
-
-  void
-  NoteDialedCallFromOtherInstance(uint32_t aServiceId,
-                                  const nsAString& aNumber);
+  nsresult
+  NotifyEvent(const nsAString& aType);
 
   nsresult
   NotifyCallsChanged(TelephonyCall* aCall);
@@ -190,14 +201,8 @@ private:
   void
   EnqueueEnumerationAck();
 
-  void
-  UpdateActiveCall(TelephonyCall* aCall, bool aIsActive);
-
   already_AddRefed<TelephonyCall>
   GetCall(uint32_t aServiceId, uint32_t aCallIndex);
-
-  already_AddRefed<TelephonyCall>
-  GetOutgoingCall();
 
   already_AddRefed<TelephonyCall>
   GetCallFromEverywhere(uint32_t aServiceId, uint32_t aCallIndex);

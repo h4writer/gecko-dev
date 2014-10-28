@@ -17,10 +17,8 @@
 #include "nsIDocShellLoadInfo.h"
 #include "nsISHContainer.h"
 #include "nsIDocShellTreeItem.h"
-#include "nsIDocShellTreeNode.h"
 #include "nsIURI.h"
 #include "nsIContentViewer.h"
-#include "nsICacheService.h"
 #include "nsIObserverService.h"
 #include "prclist.h"
 #include "mozilla/Services.h"
@@ -182,16 +180,16 @@ protected:
 
 static nsSHistoryObserver* gObserver = nullptr;
 
-NS_IMPL_ISUPPORTS1(nsSHistoryObserver, nsIObserver)
+NS_IMPL_ISUPPORTS(nsSHistoryObserver, nsIObserver)
 
 NS_IMETHODIMP
 nsSHistoryObserver::Observe(nsISupports *aSubject, const char *aTopic,
-                            const PRUnichar *aData)
+                            const char16_t *aData)
 {
   if (!strcmp(aTopic, NS_PREFBRANCH_PREFCHANGE_TOPIC_ID)) {
     nsSHistory::UpdatePrefs();
     nsSHistory::GloballyEvictContentViewers();
-  } else if (!strcmp(aTopic, NS_CACHESERVICE_EMPTYCACHE_TOPIC_ID) ||
+  } else if (!strcmp(aTopic, "cacheservice:empty-cache") ||
              !strcmp(aTopic, "memory-pressure")) {
     nsSHistory::GloballyEvictAllContentViewers();
   }
@@ -371,7 +369,7 @@ nsSHistory::Startup()
       // Observe empty-cache notifications so tahat clearing the disk/memory
       // cache will also evict all content viewers.
       obsSvc->AddObserver(gObserver,
-                          NS_CACHESERVICE_EMPTYCACHE_TOPIC_ID, false);
+                          "cacheservice:empty-cache", false);
 
       // Same for memory-pressure notifications
       obsSvc->AddObserver(gObserver, "memory-pressure", false);
@@ -392,7 +390,7 @@ nsSHistory::Shutdown()
     nsCOMPtr<nsIObserverService> obsSvc =
       mozilla::services::GetObserverService();
     if (obsSvc) {
-      obsSvc->RemoveObserver(gObserver, NS_CACHESERVICE_EMPTYCACHE_TOPIC_ID);
+      obsSvc->RemoveObserver(gObserver, "cacheservice:empty-cache");
       obsSvc->RemoveObserver(gObserver, "memory-pressure");
     }
     NS_RELEASE(gObserver);
@@ -416,8 +414,11 @@ nsSHistory::AddEntry(nsISHEntry * aSHEntry, bool aPersist)
   if(currentTxn)
     currentTxn->GetPersist(&currentPersist);
 
+  int32_t currentIndex = mIndex;
+
   if(!currentPersist)
   {
+    NOTIFY_LISTENERS(OnHistoryReplaceEntry, (currentIndex));
     NS_ENSURE_SUCCESS(currentTxn->SetSHEntry(aSHEntry),NS_ERROR_FAILURE);
     currentTxn->SetPersist(aPersist);
     return NS_OK;
@@ -427,7 +428,6 @@ nsSHistory::AddEntry(nsISHEntry * aSHEntry, bool aPersist)
   NS_ENSURE_TRUE(txn, NS_ERROR_FAILURE);
 
   nsCOMPtr<nsIURI> uri;
-  int32_t currentIndex = mIndex;
   aSHEntry->GetURI(getter_AddRefs(uri));
   NOTIFY_LISTENERS(OnHistoryNewEntry, (uri));
 
@@ -555,6 +555,50 @@ nsSHistory::GetTransactionAtIndex(int32_t aIndex, nsISHTransaction ** aResult)
   
   return NS_OK;
 }
+
+
+/* Get the index of a given entry */
+NS_IMETHODIMP
+nsSHistory::GetIndexOfEntry(nsISHEntry* aSHEntry, int32_t* aResult) {
+  NS_ENSURE_ARG(aSHEntry);
+  NS_ENSURE_ARG_POINTER(aResult);
+  *aResult = -1;
+
+  if (mLength <= 0) {
+    return NS_ERROR_FAILURE;
+  }
+
+  nsCOMPtr<nsISHTransaction> currentTxn;
+  int32_t cnt = 0;
+
+  nsresult rv = GetRootTransaction(getter_AddRefs(currentTxn));
+  if (NS_FAILED(rv) || !currentTxn) {
+    return NS_ERROR_FAILURE;
+  }
+
+  while (true) {
+    nsCOMPtr<nsISHEntry> entry;
+    rv = currentTxn->GetSHEntry(getter_AddRefs(entry));
+    if (NS_FAILED(rv) || !entry) {
+      return NS_ERROR_FAILURE;
+    }
+
+    if (aSHEntry == entry) {
+      *aResult = cnt;
+      break;
+    }
+
+    rv = currentTxn->GetNext(getter_AddRefs(currentTxn));
+    if (NS_FAILED(rv) || !currentTxn) {
+      return NS_ERROR_FAILURE;
+    }
+
+    cnt++;
+  }
+
+  return NS_OK;
+}
+
 
 #ifdef DEBUG
 nsresult
@@ -735,6 +779,8 @@ nsSHistory::ReplaceEntry(int32_t aIndex, nsISHEntry * aReplaceEntry)
 
   if(currentTxn)
   {
+    NOTIFY_LISTENERS(OnHistoryReplaceEntry, (aIndex));
+
     // Set the replacement entry in the transaction
     rv = currentTxn->SetSHEntry(aReplaceEntry);
     rv = currentTxn->SetPersist(true);
@@ -1465,9 +1511,19 @@ nsSHistory::GetSessionHistory(nsISHistory** aSessionHistory)
   return NS_OK;
 }
 
+NS_IMETHODIMP
+nsSHistory::LoadURIWithBase(const char16_t* aURI,
+                            uint32_t aLoadFlags,
+                            nsIURI* aReferringURI,
+                            nsIInputStream* aPostStream,
+                            nsIInputStream* aExtraHeaderStream,
+                            nsIURI* aBaseURI)
+{
+  return NS_OK;
+}
 
 NS_IMETHODIMP
-nsSHistory::LoadURI(const PRUnichar* aURI,
+nsSHistory::LoadURI(const char16_t* aURI,
                     uint32_t aLoadFlags,
                     nsIURI* aReferringURI,
                     nsIInputStream* aPostStream,
@@ -1636,22 +1692,21 @@ nsSHistory::CompareFrames(nsISHEntry * aPrevEntry, nsISHEntry * aNextEntry, nsID
   int32_t pcnt=0, ncnt=0, dsCount=0;
   nsCOMPtr<nsISHContainer>  prevContainer(do_QueryInterface(aPrevEntry));
   nsCOMPtr<nsISHContainer>  nextContainer(do_QueryInterface(aNextEntry));
-  nsCOMPtr<nsIDocShellTreeNode> dsTreeNode(do_QueryInterface(aParent));
 
-  if (!dsTreeNode)
+  if (!aParent)
     return NS_ERROR_FAILURE;
   if (!prevContainer || !nextContainer)
     return NS_ERROR_FAILURE;
 
   prevContainer->GetChildCount(&pcnt);
   nextContainer->GetChildCount(&ncnt);
-  dsTreeNode->GetChildCount(&dsCount);
+  aParent->GetChildCount(&dsCount);
 
   // Create an array for child docshells.
   nsCOMArray<nsIDocShell> docshells;
   for (int32_t i = 0; i < dsCount; ++i) {
     nsCOMPtr<nsIDocShellTreeItem> treeItem;
-    dsTreeNode->GetChildAt(i, getter_AddRefs(treeItem));
+    aParent->GetChildAt(i, getter_AddRefs(treeItem));
     nsCOMPtr<nsIDocShell> shell = do_QueryInterface(treeItem);
     if (shell) {
       docshells.AppendObject(shell);
@@ -1782,7 +1837,7 @@ nsSHEnumerator::~nsSHEnumerator()
   mSHistory = nullptr;
 }
 
-NS_IMPL_ISUPPORTS1(nsSHEnumerator, nsISimpleEnumerator)
+NS_IMPL_ISUPPORTS(nsSHEnumerator, nsISimpleEnumerator)
 
 NS_IMETHODIMP
 nsSHEnumerator::HasMoreElements(bool * aReturn)

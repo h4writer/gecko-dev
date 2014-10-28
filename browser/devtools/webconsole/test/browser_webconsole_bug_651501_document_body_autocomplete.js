@@ -57,20 +57,16 @@ function autocompletePopupHidden()
   popup._panel.removeEventListener("popuphidden", autocompletePopupHidden, false);
 
   ok(!popup.isOpen, "popup is not open");
+
+  jsterm.once("autocomplete-updated", function() {
+    is(completeNode.value, testStr + "dy", "autocomplete shows document.body");
+    testPropertyPanel();
+  });
+
   let inputStr = "document.b";
   jsterm.setInputValue(inputStr);
   EventUtils.synthesizeKey("o", {});
   let testStr = inputStr.replace(/./g, " ") + " ";
-
-  waitForSuccess({
-    name: "autocomplete shows document.body",
-    validatorFn: function()
-    {
-      return completeNode.value == testStr + "dy";
-    },
-    successFn: testPropertyPanel,
-    failureFn: finishTest,
-  });
 }
 
 function testPropertyPanel()
@@ -79,7 +75,7 @@ function testPropertyPanel()
   jsterm.clearOutput();
   jsterm.execute("document", (msg) => {
     jsterm.once("variablesview-fetched", onVariablesViewReady);
-    let anchor = msg.querySelector(".body a");
+    let anchor = msg.querySelector(".message-body a");
     EventUtils.synthesizeMouse(anchor, 2, 2, {}, gHUD.iframeWindow);
   });
 }
@@ -87,7 +83,11 @@ function testPropertyPanel()
 function onVariablesViewReady(aEvent, aView)
 {
   findVariableViewProperties(aView, [
-    { name: "body", value: "HTMLBodyElement" },
-  ], { webconsole: gHUD }).then(finishTest);
+    { name: "body", value: "<body>" },
+  ], { webconsole: gHUD }).then(finishUp);
 }
 
+function finishUp() {
+  gHUD = null;
+  finishTest();
+}

@@ -27,6 +27,7 @@
 #include "nsSVGEffects.h"
 #include "mozilla/dom/SVGAnimatedLength.h"
 #include "nsMimeTypes.h"
+#include "DOMSVGLength.h"
 
 // undef the GetCurrentTime macro defined in WinBase.h from the MS Platform SDK
 #undef GetCurrentTime
@@ -36,11 +37,11 @@ using namespace mozilla::dom;
 namespace mozilla {
 namespace image {
 
-NS_IMPL_ISUPPORTS4(SVGDocumentWrapper,
-                   nsIStreamListener,
-                   nsIRequestObserver,
-                   nsIObserver,
-                   nsISupportsWeakReference)
+NS_IMPL_ISUPPORTS(SVGDocumentWrapper,
+                  nsIStreamListener,
+                  nsIRequestObserver,
+                  nsIObserver,
+                  nsISupportsWeakReference)
 
 SVGDocumentWrapper::SVGDocumentWrapper()
   : mIgnoreInvalidation(false),
@@ -85,7 +86,7 @@ SVGDocumentWrapper::GetWidthOrHeight(Dimension aDimension,
   NS_ENSURE_TRUE(domAnimLength, false);
 
   // Get the animated value from the object
-  nsRefPtr<nsIDOMSVGLength> domLength = domAnimLength->AnimVal();
+  nsRefPtr<DOMSVGLength> domLength = domAnimLength->AnimVal();
   NS_ENSURE_TRUE(domLength, false);
 
   // Check if it's a percent value (and fail if so)
@@ -274,7 +275,7 @@ SVGDocumentWrapper::OnStopRequest(nsIRequest* aRequest, nsISupports* ctxt,
 NS_IMETHODIMP
 SVGDocumentWrapper::Observe(nsISupports* aSubject,
                             const char* aTopic,
-                            const PRUnichar *aData)
+                            const char16_t *aData)
 {
   if (!strcmp(aTopic, NS_XPCOM_SHUTDOWN_OBSERVER_ID)) {
     // Sever ties from rendering observers to helper-doc's root SVG node

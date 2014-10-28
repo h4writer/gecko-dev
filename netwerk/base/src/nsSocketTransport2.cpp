@@ -1,11 +1,8 @@
+/* -*- Mode: C++; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 /* vim:set ts=4 sw=4 et cindent: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-
-#ifdef MOZ_LOGGING
-#define FORCE_PR_LOG
-#endif
 
 #include "nsSocketTransport2.h"
 
@@ -23,12 +20,12 @@
 #include "plstr.h"
 #include "prerr.h"
 #include "NetworkActivityMonitor.h"
+#include "NSSErrorsService.h"
 #include "mozilla/VisualEventTracer.h"
 #include "nsThreadUtils.h"
 #include "nsISocketProviderService.h"
 #include "nsISocketProvider.h"
 #include "nsISSLSocketControl.h"
-#include "nsINSSErrorsService.h"
 #include "nsIPipe.h"
 #include "nsIProgrammingLanguage.h"
 #include "nsIClassInfoImpl.h"
@@ -38,9 +35,22 @@
 #include "nsICancelable.h"
 #include <algorithm>
 
+#include "nsPrintfCString.h"
+
 #if defined(XP_WIN)
 #include "nsNativeConnectionHelper.h"
 #endif
+
+/* Following inclusions required for keepalive config not supported by NSPR. */
+#include "private/pprio.h"
+#if defined(XP_WIN)
+#include <winsock2.h>
+#include <mstcpip.h>
+#elif defined(XP_UNIX)
+#include <errno.h>
+#include <netinet/tcp.h>
+#endif
+/* End keepalive config inclusions. */
 
 using namespace mozilla;
 using namespace mozilla::net;
@@ -118,28 +128,6 @@ static PRErrorCode RandomizeConnectError(PRErrorCode code)
 
 //-----------------------------------------------------------------------------
 
-static bool
-IsNSSErrorCode(PRErrorCode code)
-{
-  return 
-    ((code >= nsINSSErrorsService::NSS_SEC_ERROR_BASE) && 
-      (code < nsINSSErrorsService::NSS_SEC_ERROR_LIMIT))
-    ||
-    ((code >= nsINSSErrorsService::NSS_SSL_ERROR_BASE) && 
-      (code < nsINSSErrorsService::NSS_SSL_ERROR_LIMIT));
-}
-
-// this logic is duplicated from the implementation of
-// nsINSSErrorsService::getXPCOMFromNSSError
-// It might have been better to implement that interface here...
-static nsresult
-GetXPCOMFromNSSError(PRErrorCode code)
-{
-    // XXX Don't make up nsresults, it's supposed to be an enum (bug 778113)
-    return (nsresult)NS_ERROR_GENERATE_FAILURE(NS_ERROR_MODULE_SECURITY,
-                                               -1 * code);
-}
-
 nsresult
 ErrorAccordingToNSPR(PRErrorCode errorCode)
 {
@@ -211,8 +199,9 @@ ErrorAccordingToNSPR(PRErrorCode errorCode)
         rv = NS_ERROR_FILE_READ_ONLY;
         break;
     default:
-        if (IsNSSErrorCode(errorCode))
-            rv = GetXPCOMFromNSSError(errorCode);
+        if (mozilla::psm::IsNSSErrorCode(errorCode)) {
+            rv = mozilla::psm::GetXPCOMFromNSSError(errorCode);
+        }
         break;
 
     // NSPR's socket code can return these, but they're not worth breaking out
@@ -293,18 +282,18 @@ nsSocketInputStream::OnSocketReady(nsresult condition)
         callback->OnInputStreamReady(this);
 }
 
-NS_IMPL_QUERY_INTERFACE2(nsSocketInputStream,
-                         nsIInputStream,
-                         nsIAsyncInputStream)
+NS_IMPL_QUERY_INTERFACE(nsSocketInputStream,
+                        nsIInputStream,
+                        nsIAsyncInputStream)
 
-NS_IMETHODIMP_(nsrefcnt)
+NS_IMETHODIMP_(MozExternalRefCountType)
 nsSocketInputStream::AddRef()
 {
     ++mReaderRefCnt;
     return mTransport->AddRef();
 }
 
-NS_IMETHODIMP_(nsrefcnt)
+NS_IMETHODIMP_(MozExternalRefCountType)
 nsSocketInputStream::Release()
 {
     if (--mReaderRefCnt == 0)
@@ -556,18 +545,18 @@ nsSocketOutputStream::OnSocketReady(nsresult condition)
         callback->OnOutputStreamReady(this);
 }
 
-NS_IMPL_QUERY_INTERFACE2(nsSocketOutputStream,
-                         nsIOutputStream,
-                         nsIAsyncOutputStream)
+NS_IMPL_QUERY_INTERFACE(nsSocketOutputStream,
+                        nsIOutputStream,
+                        nsIAsyncOutputStream)
 
-NS_IMETHODIMP_(nsrefcnt)
+NS_IMETHODIMP_(MozExternalRefCountType)
 nsSocketOutputStream::AddRef()
 {
     ++mWriterRefCnt;
     return mTransport->AddRef();
 }
 
-NS_IMETHODIMP_(nsrefcnt)
+NS_IMETHODIMP_(MozExternalRefCountType)
 nsSocketOutputStream::Release()
 {
     if (--mWriterRefCnt == 0)
@@ -740,6 +729,7 @@ nsSocketTransport::nsSocketTransport()
     , mProxyPort(0)
     , mProxyTransparent(false)
     , mProxyTransparentResolvesHost(false)
+    , mHttpsProxy(false)
     , mConnectionFlags(0)
     , mState(STATE_CLOSED)
     , mAttached(false)
@@ -748,16 +738,19 @@ nsSocketTransport::nsSocketTransport()
     , mResolving(false)
     , mNetAddrIsSet(false)
     , mLock("nsSocketTransport.mLock")
-    , mFD(nullptr)
+    , mFD(MOZ_THIS_IN_INITIALIZER_LIST())
     , mFDref(0)
     , mFDconnected(false)
+    , mSocketTransportService(gSocketTransportService)
     , mInput(MOZ_THIS_IN_INITIALIZER_LIST())
     , mOutput(MOZ_THIS_IN_INITIALIZER_LIST())
     , mQoSBits(0x00)
+    , mKeepaliveEnabled(false)
+    , mKeepaliveIdleTimeS(-1)
+    , mKeepaliveRetryIntervalS(-1)
+    , mKeepaliveProbeCount(-1)
 {
     SOCKET_LOG(("creating nsSocketTransport @%p\n", this));
-
-    NS_ADDREF(gSocketTransportService);
 
     mTimeouts[TIMEOUT_CONNECT]    = UINT16_MAX; // no timeout
     mTimeouts[TIMEOUT_READ_WRITE] = UINT16_MAX; // no timeout
@@ -767,16 +760,21 @@ nsSocketTransport::~nsSocketTransport()
 {
     SOCKET_LOG(("destroying nsSocketTransport @%p\n", this));
 
+    CleanupTypes();
+}
+
+void
+nsSocketTransport::CleanupTypes()
+{
     // cleanup socket type info
     if (mTypes) {
-        uint32_t i;
-        for (i=0; i<mTypeCount; ++i)
+        for (uint32_t i = 0; i < mTypeCount; ++i) {
             PL_strfree(mTypes[i]);
+        }
         free(mTypes);
+        mTypes = nullptr;
     }
- 
-    nsSocketTransportService *serv = gSocketTransportService;
-    NS_RELEASE(serv); // nulls argument
+    mTypeCount = 0;
 }
 
 nsresult
@@ -797,16 +795,22 @@ nsSocketTransport::Init(const char **types, uint32_t typeCount,
     mPort = port;
     mHost = host;
 
+    if (proxyInfo) {
+        mHttpsProxy = proxyInfo->IsHTTPS();
+    }
+
     const char *proxyType = nullptr;
     if (proxyInfo) {
         mProxyPort = proxyInfo->Port();
         mProxyHost = proxyInfo->Host();
         // grab proxy type (looking for "socks" for example)
         proxyType = proxyInfo->Type();
-        if (proxyType && (strcmp(proxyType, "http") == 0 ||
-                          strcmp(proxyType, "direct") == 0 ||
-                          strcmp(proxyType, "unknown") == 0))
+        if (proxyType && (proxyInfo->IsHTTP() ||
+                          proxyInfo->IsHTTPS() ||
+                          proxyInfo->IsDirect() ||
+                          !strcmp(proxyType, "unknown"))) {
             proxyType = nullptr;
+        }
     }
 
     SOCKET_LOG(("nsSocketTransport::Init [this=%p host=%s:%hu proxy=%s:%hu]\n",
@@ -867,7 +871,7 @@ nsSocketTransport::Init(const char **types, uint32_t typeCount,
 nsresult
 nsSocketTransport::InitWithFilename(const char *filename)
 {
-#if defined(XP_UNIX) || defined(XP_OS2)
+#if defined(XP_UNIX)
     size_t filenameLength = strlen(filename);
 
     if (filenameLength > sizeof(mNetAddr.local.path) - 1)
@@ -891,7 +895,7 @@ nsSocketTransport::InitWithFilename(const char *filename)
 nsresult
 nsSocketTransport::InitWithConnectedSocket(PRFileDesc *fd, const NetAddr *addr)
 {
-    NS_ASSERTION(!mFD, "already initialized");
+    NS_ASSERTION(!mFD.IsInitialized(), "already initialized");
 
     char buf[kNetAddrMaxCStrBufSize];
     NetAddrToString(addr, buf, sizeof(buf));
@@ -913,21 +917,34 @@ nsSocketTransport::InitWithConnectedSocket(PRFileDesc *fd, const NetAddr *addr)
     mState = STATE_TRANSFERRING;
     mNetAddrIsSet = true;
 
-    mFD = fd;
-    mFDref = 1;
-    mFDconnected = 1;
+    {
+        MutexAutoLock lock(mLock);
+
+        mFD = fd;
+        mFDref = 1;
+        mFDconnected = 1;
+    }
 
     // make sure new socket is non-blocking
     PRSocketOptionData opt;
     opt.option = PR_SockOpt_Nonblocking;
     opt.value.non_blocking = true;
-    PR_SetSocketOption(mFD, &opt);
+    PR_SetSocketOption(fd, &opt);
 
     SOCKET_LOG(("nsSocketTransport::InitWithConnectedSocket [this=%p addr=%s:%hu]\n",
         this, mHost.get(), mPort));
 
     // jump to InitiateSocket to get ourselves attached to the STS poll list.
     return PostEvent(MSG_RETRY_INIT_SOCKET);
+}
+
+nsresult
+nsSocketTransport::InitWithConnectedSocket(PRFileDesc* aFD,
+                                           const NetAddr* aAddr,
+                                           nsISupports* aSecInfo)
+{
+    mSecInfo = aSecInfo;
+    return InitWithConnectedSocket(aFD, aAddr);
 }
 
 nsresult
@@ -940,7 +957,7 @@ nsSocketTransport::PostEvent(uint32_t type, nsresult status, nsISupports *param)
     if (!event)
         return NS_ERROR_OUT_OF_MEMORY;
 
-    return gSocketTransportService->Dispatch(event, NS_DISPATCH_NORMAL);
+    return mSocketTransportService->Dispatch(event, NS_DISPATCH_NORMAL);
 }
 
 void
@@ -981,14 +998,18 @@ nsSocketTransport::ResolveHost()
 
     if (!mProxyHost.IsEmpty()) {
         if (!mProxyTransparent || mProxyTransparentResolvesHost) {
-#if defined(XP_UNIX) || defined(XP_OS2)
+#if defined(XP_UNIX)
             NS_ABORT_IF_FALSE(!mNetAddrIsSet || mNetAddr.raw.family != AF_LOCAL,
                               "Unix domain sockets can't be used with proxies");
 #endif
             // When not resolving mHost locally, we still want to ensure that
             // it only contains valid characters.  See bug 304904 for details.
-            if (!net_IsValidHostName(mHost))
+            // Sometimes the end host is not yet known and mHost is *
+            if (!net_IsValidHostName(mHost) &&
+                !mHost.Equals(NS_LITERAL_CSTRING("*"))) {
+                SOCKET_LOG(("  invalid hostname %s\n", mHost.get()));
                 return NS_ERROR_UNKNOWN_HOST;
+            }
         }
         if (mProxyTransparentResolvesHost) {
             // Name resolution is done on the server side.  Just pretend
@@ -1048,7 +1069,7 @@ nsSocketTransport::BuildSocket(PRFileDesc *&fd, bool &proxyTransparent, bool &us
         rv = fd ? NS_OK : NS_ERROR_OUT_OF_MEMORY;
     }
     else {
-#if defined(XP_UNIX) || defined(XP_OS2)
+#if defined(XP_UNIX)
         NS_ABORT_IF_FALSE(!mNetAddrIsSet || mNetAddr.raw.family != AF_LOCAL,
                           "Unix domain sockets can't be used with socket types");
 #endif
@@ -1088,8 +1109,14 @@ nsSocketTransport::BuildSocket(PRFileDesc *&fd, bool &proxyTransparent, bool &us
             if (i == 0) {
                 // if this is the first type, we'll want the 
                 // service to allocate a new socket
+
+                // when https proxying we want to just connect to the proxy as if
+                // it were the end host (i.e. expect the proxy's cert)
+
                 rv = provider->NewSocket(mNetAddr.raw.family,
-                                         host, port, proxyHost, proxyPort,
+                                         mHttpsProxy ? proxyHost : host,
+                                         mHttpsProxy ? proxyPort : port,
+                                         proxyHost, proxyPort,
                                          proxyFlags, &fd,
                                          getter_AddRefs(secinfo));
 
@@ -1154,14 +1181,39 @@ nsSocketTransport::InitiateSocket()
 {
     SOCKET_LOG(("nsSocketTransport::InitiateSocket [this=%p]\n", this));
 
+    static int crashOnNonLocalConnections = -1;
+    if (crashOnNonLocalConnections == -1) {
+        const char *s = getenv("MOZ_DISABLE_NONLOCAL_CONNECTIONS");
+        if (s) {
+            crashOnNonLocalConnections = !!strncmp(s, "0", 1);
+        } else {
+            crashOnNonLocalConnections = 0;
+        }
+    }
+
     nsresult rv;
+    bool isLocal;
+    IsLocal(&isLocal);
 
     if (gIOService->IsOffline()) {
-        bool isLocal;
-
-        IsLocal(&isLocal);
         if (!isLocal)
             return NS_ERROR_OFFLINE;
+    } else if (!isLocal) {
+        if (NS_SUCCEEDED(mCondition) &&
+            crashOnNonLocalConnections &&
+            !(IsIPAddrAny(&mNetAddr) || IsIPAddrLocal(&mNetAddr))) {
+            nsAutoCString ipaddr;
+            nsRefPtr<nsNetAddr> netaddr = new nsNetAddr(&mNetAddr);
+            netaddr->GetAddress(ipaddr);
+            fprintf_stderr(stderr,
+                           "FATAL ERROR: Non-local network connections are disabled and a connection "
+                           "attempt to %s (%s) was made.\nYou should only access hostnames "
+                           "available via the test networking proxy (if running mochitests) "
+                           "or from a test-specific httpd.js server (if running xpcshell tests). "
+                           "Browser services should be disabled or redirected to a local server.\n",
+                           mHost.get(), ipaddr.get());
+            MOZ_CRASH("Attempting to connect to non-local address!");
+        }
     }
 
     // Hosts/Proxy Hosts that are Local IP Literals should not be speculatively
@@ -1183,7 +1235,9 @@ nsSocketTransport::InitiateSocket()
                         netAddrCString.get()));
         }
 #endif
-        return NS_ERROR_CONNECTION_REFUSED;
+        mCondition = NS_ERROR_CONNECTION_REFUSED;
+        OnSocketDetached(nullptr);
+        return mCondition;
     }
 
     //
@@ -1198,19 +1252,19 @@ nsSocketTransport::InitiateSocket()
     // FIFO ordering (which wouldn't even be that valuable IMO).  see bug
     // 194402 for more info.
     //
-    if (!gSocketTransportService->CanAttachSocket()) {
+    if (!mSocketTransportService->CanAttachSocket()) {
         nsCOMPtr<nsIRunnable> event =
                 new nsSocketEvent(this, MSG_RETRY_INIT_SOCKET);
         if (!event)
             return NS_ERROR_OUT_OF_MEMORY;
-        return gSocketTransportService->NotifyWhenCanAttachSocket(event);
+        return mSocketTransportService->NotifyWhenCanAttachSocket(event);
     }
 
     //
     // if we already have a connected socket, then just attach and return.
     //
-    if (mFD) {
-        rv = gSocketTransportService->AttachSocket(mFD, this);
+    if (mFD.IsInitialized()) {
+        rv = mSocketTransportService->AttachSocket(mFD, this);
         if (NS_SUCCEEDED(rv))
             mAttached = true;
         return rv;
@@ -1252,7 +1306,7 @@ nsSocketTransport::InitiateSocket()
     // The Windows default of 8KB is too small and as of vista sp1, autotuning
     // only applies to receive window
     int32_t sndBufferSize;
-    gSocketTransportService->GetSendBufferSize(&sndBufferSize);
+    mSocketTransportService->GetSendBufferSize(&sndBufferSize);
     if (sndBufferSize > 0) {
         opt.option = PR_SockOpt_SendBufferSize;
         opt.value.send_buffer_size = sndBufferSize;
@@ -1266,7 +1320,7 @@ nsSocketTransport::InitiateSocket()
     }
 
     // inform socket transport about this newly created socket...
-    rv = gSocketTransportService->AttachSocket(fd, this);
+    rv = mSocketTransportService->AttachSocket(fd, this);
     if (NS_FAILED(rv)) {
         PR_Close(fd);
         return rv;
@@ -1299,6 +1353,18 @@ nsSocketTransport::InitiateSocket()
     // Initiate the connect() to the host...
     //
     PRNetAddr prAddr;
+    {
+        if (mBindAddr) {
+            MutexAutoLock lock(mLock);
+            NetAddrToPRNetAddr(mBindAddr.get(), &prAddr);
+            status = PR_Bind(fd, &prAddr);
+            if (status != PR_SUCCESS) {
+                return NS_ERROR_FAILURE;
+            }
+            mBindAddr = nullptr;
+        }
+    }
+
     NetAddrToPRNetAddr(&mNetAddr, &prAddr);
 
     MOZ_EVENT_TRACER_EXEC(this, "net::tcp::connect");
@@ -1377,7 +1443,7 @@ nsSocketTransport::RecoverFromError()
     SOCKET_LOG(("nsSocketTransport::RecoverFromError [this=%p state=%x cond=%x]\n",
         this, mState, mCondition));
 
-#if defined(XP_UNIX) || defined(XP_OS2)
+#if defined(XP_UNIX)
     // Unix domain connections don't have multiple addresses to try,
     // so the recovery techniques here don't apply.
     if (mNetAddrIsSet && mNetAddr.raw.family == AF_LOCAL)
@@ -1443,7 +1509,7 @@ nsSocketTransport::RecoverFromError()
     // Retry if that connection is made.
     if (!tryAgain) {
         bool autodialEnabled;
-        gSocketTransportService->GetAutodialEnabled(&autodialEnabled);
+        mSocketTransportService->GetAutodialEnabled(&autodialEnabled);
         if (autodialEnabled) {
           tryAgain = nsNativeConnectionHelper::OnConnectionFailed(
                        NS_ConvertUTF8toUTF16(SocketHost()).get());
@@ -1533,9 +1599,17 @@ nsSocketTransport::OnSocketConnected()
     // to trample over mFDref if mFD is already set.
     {
         MutexAutoLock lock(mLock);
-        NS_ASSERTION(mFD, "no socket");
+        NS_ASSERTION(mFD.IsInitialized(), "no socket");
         NS_ASSERTION(mFDref == 1, "wrong socket ref count");
         mFDconnected = true;
+    }
+
+    // Ensure keepalive is configured correctly if previously enabled.
+    if (mKeepaliveEnabled) {
+        nsresult rv = SetKeepaliveEnabledInternal(true);
+        if (NS_WARN_IF(NS_FAILED(rv))) {
+            SOCKET_LOG(("  SetKeepaliveEnabledInternal failed rv[0x%x]", rv));
+        }
     }
 
     MOZ_EVENT_TRACER_DONE(this, "net::tcp::connect");
@@ -1546,11 +1620,13 @@ nsSocketTransport::OnSocketConnected()
 PRFileDesc *
 nsSocketTransport::GetFD_Locked()
 {
+    mLock.AssertCurrentThreadOwns();
+
     // mFD is not available to the streams while disconnected.
     if (!mFDconnected)
         return nullptr;
 
-    if (mFD)
+    if (mFD.IsInitialized())
         mFDref++;
 
     return mFD;
@@ -1559,7 +1635,7 @@ nsSocketTransport::GetFD_Locked()
 class ThunkPRClose : public nsRunnable
 {
 public:
-  ThunkPRClose(PRFileDesc *fd) : mFD(fd) {}
+  explicit ThunkPRClose(PRFileDesc *fd) : mFD(fd) {}
 
   NS_IMETHOD Run()
   {
@@ -1587,6 +1663,8 @@ STS_PRCloseOnSocketTransport(PRFileDesc *fd)
 void
 nsSocketTransport::ReleaseFD_Locked(PRFileDesc *fd)
 {
+    mLock.AssertCurrentThreadOwns();
+
     NS_ASSERTION(mFD == fd, "wrong fd");
     SOCKET_LOG(("JIMB: ReleaseFD_Locked: mFDref = %d\n", mFDref));
 
@@ -1633,7 +1711,7 @@ nsSocketTransport::OnSocketEvent(uint32_t type, nsresult status, nsISupports *pa
             // Unix domain sockets are ready to connect; mNetAddr is all we
             // need. Internet address families require a DNS lookup (or possibly
             // several) before we can connect.
-#if defined(XP_UNIX) || defined(XP_OS2)
+#if defined(XP_UNIX)
             if (mNetAddrIsSet && mNetAddr.raw.family == AF_LOCAL)
                 mCondition = InitiateSocket();
             else
@@ -1855,7 +1933,7 @@ nsSocketTransport::OnSocketDetached(PRFileDesc *fd)
     nsCOMPtr<nsITransportEventSink> ourEventSink;
     {
         MutexAutoLock lock(mLock);
-        if (mFD) {
+        if (mFD.IsInitialized()) {
             ReleaseFD_Locked(mFD);
             // flag mFD as unusable; this prevents other consumers from 
             // acquiring a reference to mFD.
@@ -1879,7 +1957,7 @@ nsSocketTransport::IsLocal(bool *aIsLocal)
     {
         MutexAutoLock lock(mLock);
 
-#if defined(XP_UNIX) || defined(XP_OS2)
+#if defined(XP_UNIX)
         // Unix-domain sockets are always local.
         if (mNetAddr.raw.family == PR_AF_LOCAL)
         {
@@ -1895,15 +1973,15 @@ nsSocketTransport::IsLocal(bool *aIsLocal)
 //-----------------------------------------------------------------------------
 // xpcom api
 
-NS_IMPL_ISUPPORTS4(nsSocketTransport,
-                   nsISocketTransport,
-                   nsITransport,
-                   nsIDNSListener,
-                   nsIClassInfo)
-NS_IMPL_CI_INTERFACE_GETTER3(nsSocketTransport,
-                             nsISocketTransport,
-                             nsITransport,
-                             nsIDNSListener)
+NS_IMPL_ISUPPORTS(nsSocketTransport,
+                  nsISocketTransport,
+                  nsITransport,
+                  nsIDNSListener,
+                  nsIClassInfo)
+NS_IMPL_CI_INTERFACE_GETTER(nsSocketTransport,
+                            nsISocketTransport,
+                            nsITransport,
+                            nsIDNSListener)
 
 NS_IMETHODIMP
 nsSocketTransport::OpenInputStream(uint32_t flags,
@@ -1933,7 +2011,7 @@ nsSocketTransport::OpenInputStream(uint32_t flags,
         if (NS_FAILED(rv)) return rv;
 
         // async copy from socket to pipe
-        rv = NS_AsyncCopy(&mInput, pipeOut, gSocketTransportService,
+        rv = NS_AsyncCopy(&mInput, pipeOut, mSocketTransportService,
                           NS_ASYNCCOPY_VIA_WRITESEGMENTS, segsize);
         if (NS_FAILED(rv)) return rv;
 
@@ -1979,7 +2057,7 @@ nsSocketTransport::OpenOutputStream(uint32_t flags,
         if (NS_FAILED(rv)) return rv;
 
         // async copy from socket to pipe
-        rv = NS_AsyncCopy(pipeIn, &mOutput, gSocketTransportService,
+        rv = NS_AsyncCopy(pipeIn, &mOutput, mSocketTransportService,
                           NS_ASYNCCOPY_VIA_READSEGMENTS, segsize);
         if (NS_FAILED(rv)) return rv;
 
@@ -2074,14 +2152,10 @@ nsSocketTransport::IsAlive(bool *result)
 {
     *result = false;
 
-    PRFileDesc* fd = nullptr;
-    {
-        MutexAutoLock lock(mLock);
-        if (NS_FAILED(mCondition))
-            return NS_OK;
-        fd = GetFD_Locked();
-        if (!fd)
-            return NS_OK;
+    nsresult conditionWhileLocked = NS_OK;
+    PRFileDescAutoLock fd(this, &conditionWhileLocked);
+    if (NS_FAILED(conditionWhileLocked) || !fd.IsInitialized()) {
+        return NS_OK;
     }
 
     // XXX do some idle-time based checks??
@@ -2092,10 +2166,6 @@ nsSocketTransport::IsAlive(bool *result)
     if ((rval > 0) || (rval < 0 && PR_GetError() == PR_WOULD_BLOCK_ERROR))
         *result = true;
 
-    {
-        MutexAutoLock lock(mLock);
-        ReleaseFD_Locked(fd);
-    }
     return NS_OK;
 }
 
@@ -2138,13 +2208,8 @@ nsSocketTransport::GetSelfAddr(NetAddr *addr)
     // while holding mLock since those methods might re-enter
     // socket transport code.
 
-    PRFileDesc *fd;
-    {
-        MutexAutoLock lock(mLock);
-        fd = GetFD_Locked();
-    }
-
-    if (!fd) {
+    PRFileDescAutoLock fd(this);
+    if (!fd.IsInitialized()) {
         return NS_ERROR_NOT_CONNECTED;
     }
 
@@ -2163,12 +2228,23 @@ nsSocketTransport::GetSelfAddr(NetAddr *addr)
         (PR_GetSockName(fd, &prAddr) == PR_SUCCESS) ? NS_OK : NS_ERROR_FAILURE;
     PRNetAddrToNetAddr(&prAddr, addr);
 
-    {
-        MutexAutoLock lock(mLock);
-        ReleaseFD_Locked(fd);
+    return rv;
+}
+
+NS_IMETHODIMP
+nsSocketTransport::Bind(NetAddr *aLocalAddr)
+{
+    NS_ENSURE_ARG(aLocalAddr);
+
+    MutexAutoLock lock(mLock);
+    if (mAttached) {
+        return NS_ERROR_FAILURE;
     }
 
-    return rv;
+    mBindAddr = new NetAddr();
+    memcpy(mBindAddr.get(), aLocalAddr, sizeof(NetAddr));
+
+    return NS_OK;
 }
 
 /* nsINetAddr getScriptablePeerAddr (); */
@@ -2244,106 +2320,70 @@ nsSocketTransport::GetQoSBits(uint8_t *aQoSBits)
 NS_IMETHODIMP
 nsSocketTransport::GetRecvBufferSize(uint32_t *aSize)
 {
-    PRFileDesc *fd;
-    {
-        MutexAutoLock lock(mLock);
-        fd = GetFD_Locked();
-    }
-
-    if (!fd)
+    PRFileDescAutoLock fd(this);
+    if (!fd.IsInitialized())
         return NS_ERROR_NOT_CONNECTED;
 
     nsresult rv = NS_OK;
     PRSocketOptionData opt;
     opt.option = PR_SockOpt_RecvBufferSize;
-    if (PR_GetSocketOption(mFD, &opt) == PR_SUCCESS)
+    if (PR_GetSocketOption(fd, &opt) == PR_SUCCESS)
         *aSize = opt.value.recv_buffer_size;
     else
         rv = NS_ERROR_FAILURE;
 
-    {
-        MutexAutoLock lock(mLock);
-        ReleaseFD_Locked(fd);
-    }
     return rv;
 }
 
 NS_IMETHODIMP
 nsSocketTransport::GetSendBufferSize(uint32_t *aSize)
 {
-    PRFileDesc *fd;
-    {
-        MutexAutoLock lock(mLock);
-        fd = GetFD_Locked();
-    }
-
-    if (!fd)
+    PRFileDescAutoLock fd(this);
+    if (!fd.IsInitialized())
         return NS_ERROR_NOT_CONNECTED;
 
     nsresult rv = NS_OK;
     PRSocketOptionData opt;
     opt.option = PR_SockOpt_SendBufferSize;
-    if (PR_GetSocketOption(mFD, &opt) == PR_SUCCESS)
+    if (PR_GetSocketOption(fd, &opt) == PR_SUCCESS)
         *aSize = opt.value.send_buffer_size;
     else
         rv = NS_ERROR_FAILURE;
 
-    {
-        MutexAutoLock lock(mLock);
-        ReleaseFD_Locked(fd);
-    }
     return rv;
 }
 
 NS_IMETHODIMP
 nsSocketTransport::SetRecvBufferSize(uint32_t aSize)
 {
-    PRFileDesc *fd;
-    {
-        MutexAutoLock lock(mLock);
-        fd = GetFD_Locked();
-    }
-
-    if (!fd)
+    PRFileDescAutoLock fd(this);
+    if (!fd.IsInitialized())
         return NS_ERROR_NOT_CONNECTED;
 
     nsresult rv = NS_OK;
     PRSocketOptionData opt;
     opt.option = PR_SockOpt_RecvBufferSize;
     opt.value.recv_buffer_size = aSize;
-    if (PR_SetSocketOption(mFD, &opt) != PR_SUCCESS)
+    if (PR_SetSocketOption(fd, &opt) != PR_SUCCESS)
         rv = NS_ERROR_FAILURE;
 
-    {
-        MutexAutoLock lock(mLock);
-        ReleaseFD_Locked(fd);
-    }
     return rv;
 }
 
 NS_IMETHODIMP
 nsSocketTransport::SetSendBufferSize(uint32_t aSize)
 {
-    PRFileDesc *fd;
-    {
-        MutexAutoLock lock(mLock);
-        fd = GetFD_Locked();
-    }
-
-    if (!fd)
+    PRFileDescAutoLock fd(this);
+    if (!fd.IsInitialized())
         return NS_ERROR_NOT_CONNECTED;
 
     nsresult rv = NS_OK;
     PRSocketOptionData opt;
     opt.option = PR_SockOpt_SendBufferSize;
     opt.value.send_buffer_size = aSize;
-    if (PR_SetSocketOption(mFD, &opt) != PR_SUCCESS)
+    if (PR_SetSocketOption(fd, &opt) != PR_SUCCESS)
         rv = NS_ERROR_FAILURE;
 
-    {
-        MutexAutoLock lock(mLock);
-        ReleaseFD_Locked(fd);
-    }
     return rv;
 }
 
@@ -2438,6 +2478,204 @@ nsSocketTransport::SetConnectionFlags(uint32_t value)
     return NS_OK;
 }
 
+void
+nsSocketTransport::OnKeepaliveEnabledPrefChange(bool aEnabled)
+{
+    MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread, "wrong thread");
+
+    // The global pref toggles keepalive as a system feature; it only affects
+    // an individual socket if keepalive has been specifically enabled for it.
+    // So, ensure keepalive is configured correctly if previously enabled.
+    if (mKeepaliveEnabled) {
+        nsresult rv = SetKeepaliveEnabledInternal(aEnabled);
+        if (NS_WARN_IF(NS_FAILED(rv))) {
+            SOCKET_LOG(("  SetKeepaliveEnabledInternal [%s] failed rv[0x%x]",
+                        aEnabled ? "enable" : "disable", rv));
+        }
+    }
+}
+
+nsresult
+nsSocketTransport::SetKeepaliveEnabledInternal(bool aEnable)
+{
+    MOZ_ASSERT(mKeepaliveIdleTimeS > 0 &&
+               mKeepaliveIdleTimeS <= kMaxTCPKeepIdle);
+    MOZ_ASSERT(mKeepaliveRetryIntervalS > 0 &&
+               mKeepaliveRetryIntervalS <= kMaxTCPKeepIntvl);
+    MOZ_ASSERT(mKeepaliveProbeCount > 0 &&
+               mKeepaliveProbeCount <= kMaxTCPKeepCount);
+
+    PRFileDescAutoLock fd(this);
+    if (NS_WARN_IF(!fd.IsInitialized())) {
+        return NS_ERROR_NOT_INITIALIZED;
+    }
+
+    // Only enable if keepalives are globally enabled, but ensure other
+    // options are set correctly on the fd.
+    bool enable = aEnable && mSocketTransportService->IsKeepaliveEnabled();
+    nsresult rv = fd.SetKeepaliveVals(enable,
+                                      mKeepaliveIdleTimeS,
+                                      mKeepaliveRetryIntervalS,
+                                      mKeepaliveProbeCount);
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+        SOCKET_LOG(("  SetKeepaliveVals failed rv[0x%x]", rv));
+        return rv;
+    }
+    rv = fd.SetKeepaliveEnabled(enable);
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+        SOCKET_LOG(("  SetKeepaliveEnabled failed rv[0x%x]", rv));
+        return rv;
+    }
+    return NS_OK;
+}
+
+NS_IMETHODIMP
+nsSocketTransport::GetKeepaliveEnabled(bool *aResult)
+{
+    MOZ_ASSERT(aResult);
+
+    *aResult = mKeepaliveEnabled;
+    return NS_OK;
+}
+
+nsresult
+nsSocketTransport::EnsureKeepaliveValsAreInitialized()
+{
+    nsresult rv = NS_OK;
+    int32_t val = -1;
+    if (mKeepaliveIdleTimeS == -1) {
+        rv = mSocketTransportService->GetKeepaliveIdleTime(&val);
+        if (NS_WARN_IF(NS_FAILED(rv))) {
+            return rv;
+        }
+        mKeepaliveIdleTimeS = val;
+    }
+    if (mKeepaliveRetryIntervalS == -1) {
+        rv = mSocketTransportService->GetKeepaliveRetryInterval(&val);
+        if (NS_WARN_IF(NS_FAILED(rv))) {
+            return rv;
+        }
+        mKeepaliveRetryIntervalS = val;
+    }
+    if (mKeepaliveProbeCount == -1) {
+        rv = mSocketTransportService->GetKeepaliveProbeCount(&val);
+        if (NS_WARN_IF(NS_FAILED(rv))) {
+            return rv;
+        }
+        mKeepaliveProbeCount = val;
+    }
+    return NS_OK;
+}
+
+NS_IMETHODIMP
+nsSocketTransport::SetKeepaliveEnabled(bool aEnable)
+{
+#if defined(XP_WIN) || defined(XP_UNIX) || defined(XP_MACOSX)
+    MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread, "wrong thread");
+
+    if (aEnable == mKeepaliveEnabled) {
+        SOCKET_LOG(("nsSocketTransport::SetKeepaliveEnabled [%p] already %s.",
+                    this, aEnable ? "enabled" : "disabled"));
+        return NS_OK;
+    }
+
+    nsresult rv = NS_OK;
+    if (aEnable) {
+        rv = EnsureKeepaliveValsAreInitialized();
+        if (NS_WARN_IF(NS_FAILED(rv))) {
+            SOCKET_LOG(("  SetKeepaliveEnabled [%p] "
+                        "error [0x%x] initializing keepalive vals",
+                        this, rv));
+            return rv;
+        }
+    }
+    SOCKET_LOG(("nsSocketTransport::SetKeepaliveEnabled [%p] "
+                "%s, idle time[%ds] retry interval[%ds] packet count[%d]: "
+                "globally %s.",
+                this, aEnable ? "enabled" : "disabled",
+                mKeepaliveIdleTimeS, mKeepaliveRetryIntervalS,
+                mKeepaliveProbeCount,
+                mSocketTransportService->IsKeepaliveEnabled() ?
+                "enabled" : "disabled"));
+
+    // Set mKeepaliveEnabled here so that state is maintained; it is possible
+    // that we're in between fds, e.g. the 1st IP address failed, so we're about
+    // to retry on a 2nd from the DNS record.
+    mKeepaliveEnabled = aEnable;
+
+    rv = SetKeepaliveEnabledInternal(aEnable);
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+        SOCKET_LOG(("  SetKeepaliveEnabledInternal failed rv[0x%x]", rv));
+        return rv;
+    }
+
+    return NS_OK;
+#else /* !(defined(XP_WIN) || defined(XP_UNIX) || defined(XP_MACOSX)) */
+    SOCKET_LOG(("nsSocketTransport::SetKeepaliveEnabled unsupported platform"));
+    return NS_ERROR_NOT_IMPLEMENTED;
+#endif
+}
+
+NS_IMETHODIMP
+nsSocketTransport::SetKeepaliveVals(int32_t aIdleTime,
+                                    int32_t aRetryInterval)
+{
+#if defined(XP_WIN) || defined(XP_UNIX) || defined(XP_MACOSX)
+    MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread, "wrong thread");
+    if (NS_WARN_IF(aIdleTime <= 0 || kMaxTCPKeepIdle < aIdleTime)) {
+        return NS_ERROR_INVALID_ARG;
+    }
+    if (NS_WARN_IF(aRetryInterval <= 0 ||
+                   kMaxTCPKeepIntvl < aRetryInterval)) {
+        return NS_ERROR_INVALID_ARG;
+    }
+
+    if (aIdleTime == mKeepaliveIdleTimeS &&
+        aRetryInterval == mKeepaliveRetryIntervalS) {
+        SOCKET_LOG(("nsSocketTransport::SetKeepaliveVals [%p] idle time "
+                    "already %ds and retry interval already %ds.",
+                    this, mKeepaliveIdleTimeS,
+                    mKeepaliveRetryIntervalS));
+        return NS_OK;
+    }
+    mKeepaliveIdleTimeS = aIdleTime;
+    mKeepaliveRetryIntervalS = aRetryInterval;
+
+    nsresult rv = NS_OK;
+    if (mKeepaliveProbeCount == -1) {
+        int32_t val = -1;
+        nsresult rv = mSocketTransportService->GetKeepaliveProbeCount(&val);
+        if (NS_WARN_IF(NS_FAILED(rv))) {
+            return rv;
+        }
+        mKeepaliveProbeCount = val;
+    }
+
+    SOCKET_LOG(("nsSocketTransport::SetKeepaliveVals [%p] "
+                "keepalive %s, idle time[%ds] retry interval[%ds] "
+                "packet count[%d]",
+                this, mKeepaliveEnabled ? "enabled" : "disabled",
+                mKeepaliveIdleTimeS, mKeepaliveRetryIntervalS,
+                mKeepaliveProbeCount));
+
+    PRFileDescAutoLock fd(this);
+    if (NS_WARN_IF(!fd.IsInitialized())) {
+        return NS_ERROR_NULL_POINTER;
+    }
+
+    rv = fd.SetKeepaliveVals(mKeepaliveEnabled,
+                             mKeepaliveIdleTimeS,
+                             mKeepaliveRetryIntervalS,
+                             mKeepaliveProbeCount);
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+        return rv;
+    }
+    return NS_OK;
+#else
+    SOCKET_LOG(("nsSocketTransport::SetKeepaliveVals unsupported platform"));
+    return NS_ERROR_NOT_IMPLEMENTED;
+#endif
+}
 
 #ifdef ENABLE_SOCKET_TRACING
 
@@ -2488,7 +2726,8 @@ nsSocketTransport::TraceInBuf(const char *buf, int32_t n)
         return;
 
     nsAutoCString header;
-    header.Assign(NS_LITERAL_CSTRING("Reading from: ") + mHost);
+    header.AssignLiteral("Reading from: ");
+    header.Append(mHost);
     header.Append(':');
     header.AppendInt(mPort);
 
@@ -2503,7 +2742,8 @@ nsSocketTransport::TraceOutBuf(const char *buf, int32_t n)
         return;
 
     nsAutoCString header;
-    header.Assign(NS_LITERAL_CSTRING("Writing to: ") + mHost);
+    header.AssignLiteral("Writing to: ");
+    header.Append(mHost);
     header.Append(':');
     header.AppendInt(mPort);
 
@@ -2511,3 +2751,179 @@ nsSocketTransport::TraceOutBuf(const char *buf, int32_t n)
 }
 
 #endif
+
+static void LogNSPRError(const char* aPrefix, const void *aObjPtr)
+{
+#if defined(PR_LOGGING) && defined(DEBUG)
+    PRErrorCode errCode = PR_GetError();
+    int errLen = PR_GetErrorTextLength();
+    nsAutoCString errStr;
+    if (errLen > 0) {
+        errStr.SetLength(errLen);
+        PR_GetErrorText(errStr.BeginWriting());
+    }
+    NS_WARNING(nsPrintfCString(
+               "%s [%p] NSPR error[0x%x] %s.",
+               aPrefix ? aPrefix : "nsSocketTransport", aObjPtr, errCode,
+               errLen > 0 ? errStr.BeginReading() : "<no error text>").get());
+#endif
+}
+
+nsresult
+nsSocketTransport::PRFileDescAutoLock::SetKeepaliveEnabled(bool aEnable)
+{
+    MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread, "wrong thread");
+    MOZ_ASSERT(!(aEnable && !gSocketTransportService->IsKeepaliveEnabled()),
+               "Cannot enable keepalive if global pref is disabled!");
+    if (aEnable && !gSocketTransportService->IsKeepaliveEnabled()) {
+        return NS_ERROR_ILLEGAL_VALUE;
+    }
+
+    PRSocketOptionData opt;
+
+    opt.option = PR_SockOpt_Keepalive;
+    opt.value.keep_alive = aEnable;
+    PRStatus status = PR_SetSocketOption(mFd, &opt);
+    if (NS_WARN_IF(status != PR_SUCCESS)) {
+        LogNSPRError("nsSocketTransport::PRFileDescAutoLock::SetKeepaliveEnabled",
+                     mSocketTransport);
+        return ErrorAccordingToNSPR(PR_GetError());
+    }
+    return NS_OK;
+}
+
+static void LogOSError(const char *aPrefix, const void *aObjPtr)
+{
+#if defined(PR_LOGGING) && defined(DEBUG)
+    MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread, "wrong thread");
+
+#ifdef XP_WIN
+    DWORD errCode = WSAGetLastError();
+    LPVOID errMessage;
+    FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                  FORMAT_MESSAGE_FROM_SYSTEM |
+                  FORMAT_MESSAGE_IGNORE_INSERTS,
+                  NULL,
+                  errCode,
+                  MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                  (LPTSTR) &errMessage,
+                  0, NULL);
+#else
+    int errCode = errno;
+    char *errMessage = strerror(errno);
+#endif
+    NS_WARNING(nsPrintfCString(
+               "%s [%p] OS error[0x%x] %s",
+               aPrefix ? aPrefix : "nsSocketTransport", aObjPtr, errCode,
+               errMessage ? errMessage : "<no error text>").get());
+#ifdef XP_WIN
+    LocalFree(errMessage);
+#endif
+#endif
+}
+
+/* XXX PR_SetSockOpt does not support setting keepalive values, so native
+ * handles and platform specific apis (setsockopt, WSAIOCtl) are used in this
+ * file. Requires inclusion of NSPR private/pprio.h, and platform headers.
+ */
+
+nsresult
+nsSocketTransport::PRFileDescAutoLock::SetKeepaliveVals(bool aEnabled,
+                                                        int aIdleTime,
+                                                        int aRetryInterval,
+                                                        int aProbeCount)
+{
+#if defined(XP_WIN) || defined(XP_UNIX) || defined(XP_MACOSX)
+    MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread, "wrong thread");
+    if (NS_WARN_IF(aIdleTime <= 0 || kMaxTCPKeepIdle < aIdleTime)) {
+        return NS_ERROR_INVALID_ARG;
+    }
+    if (NS_WARN_IF(aRetryInterval <= 0 ||
+                   kMaxTCPKeepIntvl < aRetryInterval)) {
+        return NS_ERROR_INVALID_ARG;
+    }
+    if (NS_WARN_IF(aProbeCount <= 0 || kMaxTCPKeepCount < aProbeCount)) {
+        return NS_ERROR_INVALID_ARG;
+    }
+
+    PROsfd sock = PR_FileDesc2NativeHandle(mFd);
+    if (NS_WARN_IF(sock == -1)) {
+        LogNSPRError("nsSocketTransport::PRFileDescAutoLock::SetKeepaliveVals",
+                     mSocketTransport);
+        return ErrorAccordingToNSPR(PR_GetError());
+    }
+#endif
+
+#if defined(XP_WIN)
+    // Windows allows idle time and retry interval to be set; NOT ping count.
+    struct tcp_keepalive keepalive_vals = {
+        (int)aEnabled,
+        // Windows uses msec.
+        aIdleTime * 1000,
+        aRetryInterval * 1000
+    };
+    DWORD bytes_returned;
+    int err = WSAIoctl(sock, SIO_KEEPALIVE_VALS, &keepalive_vals,
+                       sizeof(keepalive_vals), NULL, 0, &bytes_returned, NULL,
+                       NULL);
+    if (NS_WARN_IF(err)) {
+        LogOSError("nsSocketTransport WSAIoctl failed", mSocketTransport);
+        return NS_ERROR_UNEXPECTED;
+    }
+    return NS_OK;
+
+#elif defined(XP_MACOSX)
+    // OS X uses sec; only supports idle time being set.
+    int err = setsockopt(sock, IPPROTO_TCP, TCP_KEEPALIVE,
+                         &aIdleTime, sizeof(aIdleTime));
+    if (NS_WARN_IF(err)) {
+        LogOSError("nsSocketTransport Failed setting TCP_KEEPALIVE",
+                   mSocketTransport);
+        return NS_ERROR_UNEXPECTED;
+    }
+    return NS_OK;
+
+#elif defined(XP_UNIX)
+    // Not all *nix OSes support the following setsockopt() options
+    // ... but we assume they are supported in the Android kernel;
+    // build errors will tell us if they are not.
+#if defined(ANDROID) || defined(TCP_KEEPIDLE)
+    // Idle time until first keepalive probe; interval between ack'd probes; seconds.
+    int err = setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE,
+                         &aIdleTime, sizeof(aIdleTime));
+    if (NS_WARN_IF(err)) {
+        LogOSError("nsSocketTransport Failed setting TCP_KEEPIDLE",
+                   mSocketTransport);
+        return NS_ERROR_UNEXPECTED;
+    }
+
+#endif
+#if defined(ANDROID) || defined(TCP_KEEPINTVL)
+    // Interval between unack'd keepalive probes; seconds.
+    err = setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL,
+                        &aRetryInterval, sizeof(aRetryInterval));
+    if (NS_WARN_IF(err)) {
+        LogOSError("nsSocketTransport Failed setting TCP_KEEPINTVL",
+                   mSocketTransport);
+        return NS_ERROR_UNEXPECTED;
+    }
+
+#endif
+#if defined(ANDROID) || defined(TCP_KEEPCNT)
+    // Number of unack'd keepalive probes before connection times out.
+    err = setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT,
+                     &aProbeCount, sizeof(aProbeCount));
+    if (NS_WARN_IF(err)) {
+        LogOSError("nsSocketTransport Failed setting TCP_KEEPCNT",
+                   mSocketTransport);
+        return NS_ERROR_UNEXPECTED;
+    }
+
+#endif
+    return NS_OK;
+#else
+    MOZ_ASSERT(false, "nsSocketTransport::PRFileDescAutoLock::SetKeepaliveVals "
+               "called on unsupported platform!");
+    return NS_ERROR_UNEXPECTED;
+#endif
+}

@@ -27,22 +27,29 @@ CompileRuntime::onMainThread()
     return js::CurrentThreadCanAccessRuntime(runtime());
 }
 
-const void *
-CompileRuntime::addressOfIonTop()
+js::PerThreadData *
+CompileRuntime::mainThread()
 {
-    return &runtime()->mainThread.ionTop;
+    MOZ_ASSERT(onMainThread());
+    return &runtime()->mainThread;
 }
 
 const void *
-CompileRuntime::addressOfIonStackLimit()
+CompileRuntime::addressOfJitTop()
 {
-    return &runtime()->mainThread.ionStackLimit;
+    return &runtime()->mainThread.jitTop;
+}
+
+const void *
+CompileRuntime::addressOfJitStackLimit()
+{
+    return &runtime()->mainThread.jitStackLimit;
 }
 
 const void *
 CompileRuntime::addressOfJSContext()
 {
-    return &runtime()->mainThread.ionJSContext;
+    return &runtime()->mainThread.jitJSContext;
 }
 
 const void *
@@ -61,7 +68,7 @@ CompileRuntime::addressOfLastCachedNativeIterator()
 const void *
 CompileRuntime::addressOfGCZeal()
 {
-    return &runtime()->gcZeal_;
+    return runtime()->gc.addressOfZealMode();
 }
 #endif
 
@@ -69,6 +76,18 @@ const void *
 CompileRuntime::addressOfInterrupt()
 {
     return &runtime()->interrupt;
+}
+
+const void *
+CompileRuntime::addressOfInterruptPar()
+{
+    return &runtime()->interruptPar;
+}
+
+const void *
+CompileRuntime::addressOfThreadPool()
+{
+    return &runtime()->threadPool;
 }
 
 const JitRuntime *
@@ -84,9 +103,9 @@ CompileRuntime::spsProfiler()
 }
 
 bool
-CompileRuntime::signalHandlersInstalled()
+CompileRuntime::canUseSignalHandlers()
 {
-    return runtime()->signalHandlersInstalled();
+    return runtime()->canUseSignalHandlers();
 }
 
 bool
@@ -101,16 +120,28 @@ CompileRuntime::hadOutOfMemory()
     return runtime()->hadOutOfMemory;
 }
 
+bool
+CompileRuntime::profilingScripts()
+{
+    return runtime()->profilingScripts;
+}
+
 const JSAtomState &
 CompileRuntime::names()
 {
-    return runtime()->atomState;
+    return *runtime()->commonNames;
+}
+
+const PropertyName *
+CompileRuntime::emptyString()
+{
+    return runtime()->emptyString;
 }
 
 const StaticStrings &
 CompileRuntime::staticStrings()
 {
-    return runtime()->staticStrings;
+    return *runtime()->staticStrings;
 }
 
 const Value &
@@ -125,11 +156,13 @@ CompileRuntime::positiveInfinityValue()
     return runtime()->positiveInfinityValue;
 }
 
+#ifdef DEBUG
 bool
 CompileRuntime::isInsideNursery(gc::Cell *cell)
 {
-    return UninlinedIsInsideNursery(runtime(), cell);
+    return UninlinedIsInsideNursery(cell);
 }
+#endif
 
 const DOMCallbacks *
 CompileRuntime::DOMcallbacks()
@@ -147,7 +180,7 @@ CompileRuntime::maybeGetMathCache()
 const Nursery &
 CompileRuntime::gcNursery()
 {
-    return runtime()->gcNursery;
+    return runtime()->gc.nursery;
 }
 #endif
 
@@ -164,21 +197,21 @@ CompileZone::get(Zone *zone)
 }
 
 const void *
-CompileZone::addressOfNeedsBarrier()
+CompileZone::addressOfNeedsIncrementalBarrier()
 {
-    return zone()->addressOfNeedsBarrier();
+    return zone()->addressOfNeedsIncrementalBarrier();
 }
 
 const void *
 CompileZone::addressOfFreeListFirst(gc::AllocKind allocKind)
 {
-    return &zone()->allocator.arenas.getFreeList(allocKind)->first;
+    return zone()->allocator.arenas.getFreeList(allocKind)->addressOfFirst();
 }
 
 const void *
 CompileZone::addressOfFreeListLast(gc::AllocKind allocKind)
 {
-    return &zone()->allocator.arenas.getFreeList(allocKind)->last;
+    return zone()->allocator.arenas.getFreeList(allocKind)->addressOfLast();
 }
 
 JSCompartment *
@@ -227,4 +260,31 @@ bool
 CompileCompartment::hasObjectMetadataCallback()
 {
     return compartment()->hasObjectMetadataCallback();
+}
+
+// Note: This function is thread-safe because setSingletonAsValue sets a boolean
+// variable to false, and this boolean variable has no way to be resetted to
+// true. So even if there is a concurrent write, this concurrent write will
+// always have the same value.  If there is a concurrent read, then we will
+// clone a singleton instead of using the value which is baked in the JSScript,
+// and this would be an unfortunate allocation, but this will not change the
+// semantics of the JavaScript code which is executed.
+void
+CompileCompartment::setSingletonsAsValues()
+{
+    return JS::CompartmentOptionsRef(compartment()).setSingletonsAsValues();
+}
+
+JitCompileOptions::JitCompileOptions()
+  : cloneSingletons_(false),
+    spsSlowAssertionsEnabled_(false)
+{
+}
+
+JitCompileOptions::JitCompileOptions(JSContext *cx)
+{
+    JS::CompartmentOptions &options = cx->compartment()->options();
+    cloneSingletons_ = options.cloneSingletons();
+    spsSlowAssertionsEnabled_ = cx->runtime()->spsProfiler.enabled() &&
+                                cx->runtime()->spsProfiler.slowAssertionsEnabled();
 }

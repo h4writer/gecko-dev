@@ -66,13 +66,13 @@ public:
     , mInBrowserElement(inBrowser)
   {}
 
-  nsCookieKey(const KeyTypePointer other)
+  explicit nsCookieKey(KeyTypePointer other)
     : mBaseDomain(other->mBaseDomain)
     , mAppId(other->mAppId)
     , mInBrowserElement(other->mInBrowserElement)
   {}
 
-  nsCookieKey(const KeyType other)
+  nsCookieKey(KeyType other)
     : mBaseDomain(other.mBaseDomain)
     , mAppId(other.mAppId)
     , mInBrowserElement(other.mInBrowserElement)
@@ -97,9 +97,9 @@ public:
   {
     // TODO: more efficient way to generate hash?
     nsAutoCString temp(aKey->mBaseDomain);
-    temp.Append("#");
+    temp.Append('#');
     temp.Append(aKey->mAppId);
-    temp.Append("#");
+    temp.Append('#');
     temp.Append(aKey->mInBrowserElement ? 1 : 0);
     return mozilla::HashString(temp);
   }
@@ -122,7 +122,7 @@ class nsCookieEntry : public nsCookieKey
     typedef nsTArray< nsRefPtr<nsCookie> > ArrayType;
     typedef ArrayType::index_type IndexType;
 
-    nsCookieEntry(KeyTypePointer aKey)
+    explicit nsCookieEntry(KeyTypePointer aKey)
      : nsCookieKey(aKey)
     {}
 
@@ -155,12 +155,19 @@ struct CookieDomainTuple
 
 // encapsulates in-memory and on-disk DB states, so we can
 // conveniently switch state when entering or exiting private browsing.
-struct DBState
+struct DBState MOZ_FINAL
 {
   DBState() : cookieCount(0), cookieOldestTime(INT64_MAX), corruptFlag(OK)
   {
   }
 
+private:
+  // Private destructor, to discourage deletion outside of Release():
+  ~DBState()
+  {
+  }
+
+public:
   NS_INLINE_DECL_REFCOUNTING(DBState)
 
   size_t SizeOfIncludingThis(mozilla::MallocSizeOf aMallocSizeOf) const;
@@ -231,26 +238,24 @@ enum OpenDBResult
  * class declaration
  ******************************************************************************/
 
-class nsCookieService : public mozilla::MemoryUniReporter
-                      , public nsICookieService
+class nsCookieService : public nsICookieService
                       , public nsICookieManager2
                       , public nsIObserver
                       , public nsSupportsWeakReference
+                      , public nsIMemoryReporter
 {
   private:
-    int64_t Amount() MOZ_OVERRIDE;
     size_t SizeOfIncludingThis(mozilla::MallocSizeOf aMallocSizeOf) const;
 
   public:
-    // nsISupports
-    NS_DECL_ISUPPORTS_INHERITED
+    NS_DECL_ISUPPORTS
     NS_DECL_NSIOBSERVER
     NS_DECL_NSICOOKIESERVICE
     NS_DECL_NSICOOKIEMANAGER
     NS_DECL_NSICOOKIEMANAGER2
+    NS_DECL_NSIMEMORYREPORTER
 
     nsCookieService();
-    virtual ~nsCookieService();
     static nsICookieService*      GetXPCOMSingleton();
     nsresult                      Init();
 
@@ -263,6 +268,8 @@ class nsCookieService : public mozilla::MemoryUniReporter
   static void AppClearDataObserverInit();
 
   protected:
+    virtual ~nsCookieService();
+
     void                          PrefChanged(nsIPrefBranch *aPrefBranch);
     void                          InitDBStates();
     OpenDBResult                  TryInitDB(bool aDeleteExistingDB);
@@ -304,7 +311,7 @@ class nsCookieService : public mozilla::MemoryUniReporter
     static void                   FindStaleCookie(nsCookieEntry *aEntry, int64_t aCurrentTime, nsListIter &aIter);
     void                          NotifyRejected(nsIURI *aHostURI);
     void                          NotifyThirdParty(nsIURI *aHostURI, bool aAccepted, nsIChannel *aChannel);
-    void                          NotifyChanged(nsISupports *aSubject, const PRUnichar *aData);
+    void                          NotifyChanged(nsISupports *aSubject, const char16_t *aData);
     void                          NotifyPurged(nsICookie2* aCookie);
     already_AddRefed<nsIArray>    CreatePurgeList(nsICookie2* aCookie);
 

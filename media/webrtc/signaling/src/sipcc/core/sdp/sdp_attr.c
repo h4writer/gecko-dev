@@ -492,7 +492,7 @@ sdp_result_e sdp_parse_attr_fmtp (sdp_t *sdp_p, sdp_attr_t *attr_p,
      * default value will be assumed for remote sdp. If remote sdp does specify
      * any value for these parameters, then default value will be overridden.
     */
-    fmtp_p->packetization_mode = 0;
+    fmtp_p->packetization_mode = SDP_DEFAULT_PACKETIZATION_MODE_VALUE;
     fmtp_p->level_asymmetry_allowed = SDP_DEFAULT_LEVEL_ASYMMETRY_ALLOWED_VALUE;
 
     /* BEGIN - a typical macro fn to replace '/' with ';' from fmtp line*/
@@ -1746,6 +1746,21 @@ sdp_result_e sdp_parse_attr_fmtp (sdp_t *sdp_p, sdp_attr_t *attr_p,
                 }
             } /* if (temp) */
             done = TRUE;
+        } else {
+          // XXX Note that DTMF fmtp will fall into here:
+          // a=fmtp:101 0-15 (or 0-15,NN,NN etc)
+
+          // unknown parameter - eat chars until ';'
+          CSFLogDebug(logTag, "%s Unknown fmtp type (%s) - ignoring", __FUNCTION__,
+                      tmp);
+          fmtp_ptr = sdp_getnextstrtok(fmtp_ptr, tmp, sizeof(tmp), "; \t",
+                                       &result1);
+          if (result1 != SDP_SUCCESS) {
+            fmtp_ptr = sdp_getnextstrtok(fmtp_ptr, tmp, sizeof(tmp), " \t", &result1);
+            if (result1 != SDP_SUCCESS) {
+              // hmmm, no ; or spaces or tabs; continue on
+            }
+          }
         }
         fmtp_ptr++;
       } else {
@@ -4750,6 +4765,27 @@ sdp_result_e sdp_parse_attr_ice_attr (sdp_t *sdp_p, sdp_attr_t *attr_p, const ch
 }
 
 
+sdp_result_e sdp_build_attr_simple_flag (sdp_t *sdp_p, sdp_attr_t *attr_p,
+                                         flex_string *fs) {
+    flex_string_sprintf(fs, "a=%s\r\n", sdp_get_attr_name(attr_p->type));
+
+    return SDP_SUCCESS;
+}
+
+
+sdp_result_e sdp_parse_attr_simple_flag (sdp_t *sdp_p, sdp_attr_t *attr_p,
+                                      const char *ptr) {
+    /* No parameters to parse. */
+
+    if (sdp_p->debug_flag[SDP_DEBUG_TRACE]) {
+        SDP_PRINT("%s Parsed a=%s", sdp_p->debug_str,
+                  sdp_get_attr_name(attr_p->type));
+    }
+
+    return (SDP_SUCCESS);
+}
+
+
 sdp_result_e sdp_parse_attr_fingerprint_attr (sdp_t *sdp_p, sdp_attr_t *attr_p,
                                            const char *ptr)
 {
@@ -5145,6 +5181,79 @@ sdp_result_e sdp_parse_attr_connection(sdp_t *sdp_p,
         return SDP_FAILURE;
         break;
     }
+    return SDP_SUCCESS;
+}
+
+sdp_result_e sdp_build_attr_extmap(sdp_t *sdp_p,
+                                       sdp_attr_t *attr_p,
+                                       flex_string *fs)
+{
+    flex_string_sprintf(fs, "a=extmap:%d %s\r\n",
+        attr_p->attr.extmap.id,
+        attr_p->attr.extmap.uri);
 
     return SDP_SUCCESS;
 }
+
+sdp_result_e sdp_parse_attr_extmap(sdp_t *sdp_p,
+                                   sdp_attr_t *attr_p,
+                                   const char *ptr)
+{
+    sdp_result_e  result;
+
+    attr_p->attr.extmap.id = 0;
+    attr_p->attr.extmap.media_direction = SDP_DIRECTION_SENDRECV;
+    attr_p->attr.extmap.uri[0] = '\0';
+    attr_p->attr.extmap.extension_attributes[0] = '\0';
+
+    /* Find the payload type number. */
+    attr_p->attr.extmap.id =
+    (u16)sdp_getnextnumtok(ptr, &ptr, "/ \t", &result);
+    if (result != SDP_SUCCESS) {
+        sdp_parse_error(sdp_p->peerconnection,
+            "%s Warning: Invalid extmap id specified for %s attribute.",
+            sdp_p->debug_str, sdp_get_attr_name(attr_p->type));
+        sdp_p->conf_p->num_invalid_param++;
+        return (SDP_INVALID_PARAMETER);
+    }
+
+    if (*ptr == '/') {
+        char direction[SDP_MAX_STRING_LEN+1];
+        /* Find the encoding name. */
+        ptr = sdp_getnextstrtok(ptr, direction,
+                                sizeof(direction), " \t", &result);
+        if (result != SDP_SUCCESS) {
+            sdp_parse_error(sdp_p->peerconnection,
+                "%s Warning: No uri specified in %s attribute.",
+                sdp_p->debug_str, sdp_get_attr_name(attr_p->type));
+            sdp_p->conf_p->num_invalid_param++;
+            return (SDP_INVALID_PARAMETER);
+        }
+    }
+
+    ptr = sdp_getnextstrtok(ptr, attr_p->attr.extmap.uri,
+                            sizeof(attr_p->attr.extmap.uri), " \t", &result);
+    if (result != SDP_SUCCESS) {
+        sdp_parse_error(sdp_p->peerconnection,
+            "%s Warning: No uri specified in %s attribute.",
+            sdp_p->debug_str, sdp_get_attr_name(attr_p->type));
+        sdp_p->conf_p->num_invalid_param++;
+        return (SDP_INVALID_PARAMETER);
+    }
+
+    ptr = sdp_getnextstrtok(ptr, attr_p->attr.extmap.extension_attributes,
+                            sizeof(attr_p->attr.extmap.extension_attributes), "\r\n", &result);
+
+    if (sdp_p->debug_flag[SDP_DEBUG_TRACE]) {
+        SDP_PRINT("%s Parsed a=%s, id %u, direction %s, "
+                  "uri %s, extension %s", sdp_p->debug_str,
+                  sdp_get_attr_name(attr_p->type),
+                  attr_p->attr.extmap.id,
+                  SDP_DIRECTION_PRINT(attr_p->attr.extmap.media_direction),
+                  attr_p->attr.extmap.uri,
+                  attr_p->attr.extmap.extension_attributes);
+    }
+
+    return (SDP_SUCCESS);
+}
+

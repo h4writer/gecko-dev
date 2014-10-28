@@ -14,7 +14,6 @@ BRANDING_FILES := \
 	branding.nsi \
 	appname.bmp \
 	bgintro.bmp \
-	bgplain.bmp \
 	clock.bmp \
 	particles.bmp \
 	pencil.bmp \
@@ -44,13 +43,6 @@ BRANDING_FILES := \
 	default32.png \
 	default48.png \
 	mozicon128.png \
-	$(NULL)
-endif
-
-ifeq ($(OS_ARCH),OS2)
-BRANDING_FILES := \
-	firefox-os2.ico \
-	document-os2.ico \
 	$(NULL)
 endif
 

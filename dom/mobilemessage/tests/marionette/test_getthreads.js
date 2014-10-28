@@ -15,7 +15,7 @@ function sendSmsToEmulator(from, text, callback) {
   ++pendingEmulatorCmdCount;
 
   let cmd = "sms send " + from + " " + text;
-  runEmulatorCmd(cmd, function (result) {
+  runEmulatorCmd(cmd, function(result) {
     --pendingEmulatorCmdCount;
 
     callback(result[0] == "OK");
@@ -28,11 +28,11 @@ let tasks = {
   _tasks: [],
   _nextTaskIndex: 0,
 
-  push: function push(func) {
+  push: function(func) {
     this._tasks.push(func);
   },
 
-  next: function next() {
+  next: function() {
     let index = this._nextTaskIndex++;
     let task = this._tasks[index];
     try {
@@ -46,19 +46,16 @@ let tasks = {
     }
   },
 
-  finish: function finish() {
+  finish: function() {
     this._tasks[this._tasks.length - 1]();
   },
 
-  run: function run() {
+  run: function() {
     this.next();
   }
 };
 
 function getAllMessages(callback, filter, reverse) {
-  if (!filter) {
-    filter = new MozSmsFilter;
-  }
   let messages = [];
   let request = manager.getMessages(filter, reverse || false);
   request.onsuccess = function(event) {
@@ -83,7 +80,7 @@ function deleteAllMessages() {
 
     let request = manager.delete(message.id);
     request.onsuccess = deleteAll.bind(null, messages);
-    request.onerror = function (event) {
+    request.onerror = function(event) {
       ok(false, "failed to delete all messages");
       tasks.finish();
     }
@@ -91,7 +88,7 @@ function deleteAllMessages() {
 }
 
 function sendMessage(to, body) {
-  manager.onsent = function () {
+  manager.onsent = function() {
     manager.onsent = null;
     tasks.next();
   };
@@ -100,11 +97,11 @@ function sendMessage(to, body) {
 }
 
 function receiveMessage(from, body) {
-  manager.onreceived = function () {
+  manager.onreceived = function() {
     manager.onreceived = null;
     tasks.next();
   };
-  sendSmsToEmulator(from, body, function (success) {
+  sendSmsToEmulator(from, body, function(success) {
     if (!success) {
       tasks.finish();
     }
@@ -118,7 +115,7 @@ function getAllThreads(callback) {
   ok(cursor instanceof DOMCursor,
      "cursor is instanceof " + cursor.constructor);
 
-  cursor.onsuccess = function (event) {
+  cursor.onsuccess = function(event) {
     if (!cursor.done) {
       threads.push(cursor.result);
       cursor.continue();
@@ -153,12 +150,9 @@ function checkThread(bodies, lastBody, unreadCount, participants,
        "thread.participants[" + i + "]");
   }
 
-  ok(thread.timestamp instanceof Date, "thread.timestamp");
-
   // Check whether the thread does contain all the messages it supposed to have.
-  let filter = new MozSmsFilter;
-  filter.threadId = thread.id;
-  getAllMessages(function (messages) {
+  let filter = { threadId: thread.id };
+  getAllMessages(function(messages) {
     is(messages.length, bodies.length, "messages.length and bodies.length");
 
     for (let message of messages) {
@@ -176,7 +170,7 @@ function checkThread(bodies, lastBody, unreadCount, participants,
 
 tasks.push(deleteAllMessages);
 
-tasks.push(getAllThreads.bind(null, function (threads) {
+tasks.push(getAllThreads.bind(null, function(threads) {
   is(threads.length, 0, "Empty thread list at beginning.");
   tasks.next();
 }));
@@ -375,8 +369,11 @@ checkFuncs.push(checkThread.bind(null, ["thread 18-1", "thread 18-2"],
                                  "thread 18-2", 0, ["555211018"]));
 
 // Check threads.
-tasks.push(getAllThreads.bind(null, function (threads) {
+tasks.push(getAllThreads.bind(null, function(threads) {
   is(threads.length, checkFuncs.length, "number of threads got");
+
+  // Reverse threads as we iterate over them in reverse order
+  threads.reverse();
 
   (function callback() {
     if (!threads.length) {
@@ -390,7 +387,7 @@ tasks.push(getAllThreads.bind(null, function (threads) {
 
 tasks.push(deleteAllMessages);
 
-tasks.push(getAllThreads.bind(null, function (threads) {
+tasks.push(getAllThreads.bind(null, function(threads) {
   is(threads.length, 0, "Empty thread list at the end.");
   tasks.next();
 }));

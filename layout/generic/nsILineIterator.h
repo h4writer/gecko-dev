@@ -7,6 +7,7 @@
 
 #include "nscore.h"
 #include "nsCoord.h"
+#include "mozilla/Attributes.h"
 
 class nsIFrame;
 struct nsRect;
@@ -93,21 +94,19 @@ public:
   // nsIFrame::GetNextSibling()
   NS_IMETHOD GetNextSiblingOnLine(nsIFrame*& aFrame, int32_t aLineNumber) = 0;
 
-#ifdef IBMBIDI
   // Check whether visual and logical order of frames within a line are identical.
   //  If not, return the first and last visual frames
   NS_IMETHOD CheckLineOrder(int32_t                  aLine,
                             bool                     *aIsReordered,
                             nsIFrame                 **aFirstVisual,
                             nsIFrame                 **aLastVisual) = 0;
-#endif
 };
 
 class nsAutoLineIterator
 {
 public:
   nsAutoLineIterator() : mRawPtr(nullptr) { }
-  nsAutoLineIterator(nsILineIterator *i) : mRawPtr(i) { }
+  MOZ_IMPLICIT nsAutoLineIterator(nsILineIterator *i) : mRawPtr(i) { }
 
   ~nsAutoLineIterator() {
     if (mRawPtr)

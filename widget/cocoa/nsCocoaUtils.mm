@@ -3,7 +3,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "gfxImageSurface.h"
+#include <cmath>
+
+#include "gfx2DGlue.h"
+#include "gfxPlatform.h"
+#include "gfxUtils.h"
+#include "ImageRegion.h"
 #include "nsCocoaUtils.h"
 #include "nsChildView.h"
 #include "nsMenuBarX.h"
@@ -17,12 +22,26 @@
 #include "nsMenuUtilsX.h"
 #include "nsToolkit.h"
 #include "nsCRT.h"
+#include "SVGImageContext.h"
+#include "mozilla/gfx/2D.h"
 #include "mozilla/MiscEvents.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/TextEvents.h"
 
 using namespace mozilla;
 using namespace mozilla::widget;
+
+using mozilla::gfx::BackendType;
+using mozilla::gfx::DataSourceSurface;
+using mozilla::gfx::DrawTarget;
+using mozilla::gfx::Factory;
+using mozilla::gfx::IntPoint;
+using mozilla::gfx::IntRect;
+using mozilla::gfx::IntSize;
+using mozilla::gfx::SurfaceFormat;
+using mozilla::gfx::SourceSurface;
+using mozilla::image::ImageRegion;
+using std::ceil;
 
 static float
 MenuBarScreenHeight()
@@ -124,18 +143,95 @@ NSPoint nsCocoaUtils::EventLocationForWindow(NSEvent* anEvent, NSWindow* aWindow
   NS_OBJC_END_TRY_ABORT_BLOCK_RETURN(NSMakePoint(0.0, 0.0));
 }
 
+@interface NSEvent (ScrollPhase)
+// 10.5 and 10.6
+- (long long)_scrollPhase;
+// 10.7 and above
+- (NSEventPhase)phase;
+- (NSEventPhase)momentumPhase;
+@end
+
+NSEventPhase nsCocoaUtils::EventPhase(NSEvent* aEvent)
+{
+  if ([aEvent respondsToSelector:@selector(phase)]) {
+    return [aEvent phase];
+  }
+  return NSEventPhaseNone;
+}
+
+NSEventPhase nsCocoaUtils::EventMomentumPhase(NSEvent* aEvent)
+{
+  if ([aEvent respondsToSelector:@selector(momentumPhase)]) {
+    return [aEvent momentumPhase];
+  }
+  if ([aEvent respondsToSelector:@selector(_scrollPhase)]) {
+    switch ([aEvent _scrollPhase]) {
+      case 1: return NSEventPhaseBegan;
+      case 2: return NSEventPhaseChanged;
+      case 3: return NSEventPhaseEnded;
+      default: return NSEventPhaseNone;
+    }
+  }
+  return NSEventPhaseNone;
+}
+
 BOOL nsCocoaUtils::IsMomentumScrollEvent(NSEvent* aEvent)
 {
-  if ([aEvent type] != NSScrollWheel)
-    return NO;
-    
-  if ([aEvent respondsToSelector:@selector(momentumPhase)])
-    return ([aEvent momentumPhase] & NSEventPhaseChanged) != 0;
-    
-  if ([aEvent respondsToSelector:@selector(_scrollPhase)])
-    return [aEvent _scrollPhase] != 0;
-    
-  return NO;
+  return [aEvent type] == NSScrollWheel &&
+    EventMomentumPhase(aEvent) != NSEventPhaseNone;
+}
+
+@interface NSEvent (HasPreciseScrollingDeltas)
+// 10.7 and above
+- (BOOL)hasPreciseScrollingDeltas;
+// For 10.6 and below, see the comment in nsChildView.h about _eventRef
+- (EventRef)_eventRef;
+@end
+
+BOOL nsCocoaUtils::HasPreciseScrollingDeltas(NSEvent* aEvent)
+{
+  if ([aEvent respondsToSelector:@selector(hasPreciseScrollingDeltas)]) {
+    return [aEvent hasPreciseScrollingDeltas];
+  }
+
+  // For events that don't contain pixel scrolling information, the event
+  // kind of their underlaying carbon event is kEventMouseWheelMoved instead
+  // of kEventMouseScroll.
+  EventRef carbonEvent = [aEvent _eventRef];
+  return carbonEvent && ::GetEventKind(carbonEvent) == kEventMouseScroll;
+}
+
+@interface NSEvent (ScrollingDeltas)
+// 10.6 and below
+- (CGFloat)deviceDeltaX;
+- (CGFloat)deviceDeltaY;
+// 10.7 and above
+- (CGFloat)scrollingDeltaX;
+- (CGFloat)scrollingDeltaY;
+@end
+
+void nsCocoaUtils::GetScrollingDeltas(NSEvent* aEvent, CGFloat* aOutDeltaX, CGFloat* aOutDeltaY)
+{
+  if ([aEvent respondsToSelector:@selector(scrollingDeltaX)]) {
+    *aOutDeltaX = [aEvent scrollingDeltaX];
+    *aOutDeltaY = [aEvent scrollingDeltaY];
+    return;
+  }
+  if ([aEvent respondsToSelector:@selector(deviceDeltaX)] &&
+      HasPreciseScrollingDeltas(aEvent)) {
+    // Calling deviceDeltaX/Y on those events that do not contain pixel
+    // scrolling information triggers a Cocoa assertion and an
+    // Objective-C NSInternalInconsistencyException.
+    *aOutDeltaX = [aEvent deviceDeltaX];
+    *aOutDeltaY = [aEvent deviceDeltaY];
+    return;
+  }
+
+  // This is only hit pre-10.7 when we are called on a scroll event that does
+  // not contain pixel scrolling information.
+  CGFloat lineDeltaPixels = 12;
+  *aOutDeltaX = [aEvent deltaX] * lineDeltaPixels;
+  *aOutDeltaY = [aEvent deltaY] * lineDeltaPixels;
 }
 
 void nsCocoaUtils::HideOSChromeOnScreen(bool aShouldHide, NSScreen* aScreen)
@@ -258,29 +354,58 @@ void nsCocoaUtils::CleanUpAfterNativeAppModalDialog()
   NS_OBJC_END_TRY_ABORT_BLOCK;
 }
 
-nsresult nsCocoaUtils::CreateCGImageFromSurface(gfxImageSurface *aFrame, CGImageRef *aResult)
+void data_ss_release_callback(void *aDataSourceSurface,
+                              const void *data,
+                              size_t size)
 {
+  if (aDataSourceSurface) {
+    static_cast<DataSourceSurface*>(aDataSourceSurface)->Unmap();
+    static_cast<DataSourceSurface*>(aDataSourceSurface)->Release();
+  }
+}
 
-  int32_t width = aFrame->Width();
-  int32_t stride = aFrame->Stride();
-  int32_t height = aFrame->Height();
-  if ((stride % 4 != 0) || (height < 1) || (width < 1)) {
+nsresult nsCocoaUtils::CreateCGImageFromSurface(SourceSurface* aSurface,
+                                                CGImageRef* aResult)
+{
+  RefPtr<DataSourceSurface> dataSurface;
+
+  if (aSurface->GetFormat() ==  SurfaceFormat::B8G8R8A8) {
+    dataSurface = aSurface->GetDataSurface();
+  } else {
+    // CGImageCreate only supports 16- and 32-bit bit-depth
+    // Convert format to SurfaceFormat::B8G8R8A8
+    dataSurface = gfxUtils::
+      CopySurfaceToDataSourceSurfaceWithFormat(aSurface,
+                                               SurfaceFormat::B8G8R8A8);
+  }
+
+  NS_ENSURE_TRUE(dataSurface, NS_ERROR_FAILURE);
+
+  int32_t width = dataSurface->GetSize().width;
+  int32_t height = dataSurface->GetSize().height;
+  if (height < 1 || width < 1) {
     return NS_ERROR_FAILURE;
   }
+
+  DataSourceSurface::MappedSurface map;
+  if (!dataSurface->Map(DataSourceSurface::MapType::READ, &map)) {
+    return NS_ERROR_FAILURE;
+  }
+  // The Unmap() call happens in data_ss_release_callback
 
   // Create a CGImageRef with the bits from the image, taking into account
   // the alpha ordering and endianness of the machine so we don't have to
   // touch the bits ourselves.
-  CGDataProviderRef dataProvider = ::CGDataProviderCreateWithData(NULL,
-                                                                  aFrame->Data(),
-                                                                  stride * height,
-                                                                  NULL);
+  CGDataProviderRef dataProvider = ::CGDataProviderCreateWithData(dataSurface.forget().drop(),
+                                                                  map.mData,
+                                                                  map.mStride * height,
+                                                                  data_ss_release_callback);
   CGColorSpaceRef colorSpace = ::CGColorSpaceCreateWithName(kCGColorSpaceGenericRGB);
   *aResult = ::CGImageCreate(width,
                              height,
                              8,
                              32,
-                             stride,
+                             map.mStride,
                              colorSpace,
                              kCGBitmapByteOrder32Host | kCGImageAlphaPremultipliedFirst,
                              dataProvider,
@@ -348,42 +473,43 @@ nsresult nsCocoaUtils::CreateNSImageFromCGImage(CGImageRef aInputImage, NSImage 
 
 nsresult nsCocoaUtils::CreateNSImageFromImageContainer(imgIContainer *aImage, uint32_t aWhichFrame, NSImage **aResult, CGFloat scaleFactor)
 {
-  nsRefPtr<gfxImageSurface> frame;
+  RefPtr<SourceSurface> surface;
   int32_t width = 0, height = 0;
   aImage->GetWidth(&width);
   aImage->GetHeight(&height);
 
   // Render a vector image at the correct resolution on a retina display
   if (aImage->GetType() == imgIContainer::TYPE_VECTOR && scaleFactor != 1.0f) {
-    int scaledWidth = (int)ceilf(width * scaleFactor);
-    int scaledHeight = (int)ceilf(height * scaleFactor);
+    gfxIntSize scaledSize(ceil(width * scaleFactor),
+                          ceil(height * scaleFactor));
 
-    frame = new gfxImageSurface(gfxIntSize(scaledWidth, scaledHeight), gfxImageFormatARGB32);
-    NS_ENSURE_TRUE(frame, NS_ERROR_FAILURE);
+    RefPtr<DrawTarget> drawTarget = gfxPlatform::GetPlatform()->
+      CreateOffscreenContentDrawTarget(ToIntSize(scaledSize),
+                                       SurfaceFormat::B8G8R8A8);
+    if (!drawTarget) {
+      NS_ERROR("Failed to create DrawTarget");
+      return NS_ERROR_FAILURE;
+    }
 
-    nsRefPtr<gfxContext> context = new gfxContext(frame);
-    NS_ENSURE_TRUE(context, NS_ERROR_FAILURE);
+    nsRefPtr<gfxContext> context = new gfxContext(drawTarget);
+    if (!context) {
+      NS_ERROR("Failed to create gfxContext");
+      return NS_ERROR_FAILURE;
+    }
 
-    aImage->Draw(context, GraphicsFilter::FILTER_NEAREST, gfxMatrix(),
-      gfxRect(0.0f, 0.0f, scaledWidth, scaledHeight),
-      nsIntRect(0, 0, width, height),
-      nsIntSize(scaledWidth, scaledHeight),
-      nullptr, aWhichFrame, imgIContainer::FLAG_SYNC_DECODE);
+    aImage->Draw(context, scaledSize, ImageRegion::Create(scaledSize),
+                 aWhichFrame, GraphicsFilter::FILTER_NEAREST, Nothing(),
+                 imgIContainer::FLAG_SYNC_DECODE);
+
+    surface = drawTarget->Snapshot();
+  } else {
+    surface = aImage->GetFrame(aWhichFrame, imgIContainer::FLAG_SYNC_DECODE);
   }
 
-  else {
-    nsRefPtr<gfxASurface> surface;
-    aImage->GetFrame(aWhichFrame,
-                     imgIContainer::FLAG_SYNC_DECODE,
-                     getter_AddRefs(surface));
-    NS_ENSURE_TRUE(surface, NS_ERROR_FAILURE);
-
-    frame = surface->GetAsReadableARGB32ImageSurface();
-    NS_ENSURE_TRUE(frame, NS_ERROR_FAILURE);
-  }
+  NS_ENSURE_TRUE(surface, NS_ERROR_FAILURE);
 
   CGImageRef imageRef = NULL;
-  nsresult rv = nsCocoaUtils::CreateCGImageFromSurface(frame, &imageRef);
+  nsresult rv = nsCocoaUtils::CreateCGImageFromSurface(surface, &imageRef);
   if (NS_FAILED(rv) || !imageRef) {
     return NS_ERROR_FAILURE;
   }
@@ -486,7 +612,7 @@ nsCocoaUtils::InitPluginEvent(WidgetPluginEvent &aPluginEvent,
                               NPCocoaEvent &aCocoaEvent)
 {
   aPluginEvent.time = PR_IntervalNow();
-  aPluginEvent.pluginEvent = (void*)&aCocoaEvent;
+  aPluginEvent.mPluginEvent.Copy(aCocoaEvent);
   aPluginEvent.retargetToFocusedDocument = false;
 }
 
@@ -714,7 +840,6 @@ static const KeyConversionData gKeyConversions[] = {
   KEYCODE_ENTRY(VK_TAB, NSTabCharacter),
   KEYCODE_ENTRY(VK_CLEAR, NSClearLineFunctionKey),
   KEYCODE_ENTRY(VK_RETURN, NSEnterCharacter),
-  KEYCODE_ENTRY(VK_ENTER, NSEnterCharacter),
   KEYCODE_ENTRY(VK_SHIFT, 0),
   KEYCODE_ENTRY(VK_CONTROL, 0),
   KEYCODE_ENTRY(VK_ALT, 0),

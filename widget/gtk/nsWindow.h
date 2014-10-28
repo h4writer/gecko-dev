@@ -37,9 +37,6 @@
 #undef LOG
 #ifdef MOZ_LOGGING
 
-// make sure that logging is enabled before including prlog.h
-#define FORCE_PR_LOG
-
 #include "prlog.h"
 #include "nsTArray.h"
 
@@ -75,7 +72,6 @@ class nsWindow : public nsBaseWidget, public nsSupportsWeakReference
 {
 public:
     nsWindow();
-    virtual ~nsWindow();
 
     static void ReleaseGlobals();
 
@@ -125,15 +121,13 @@ public:
     NS_IMETHOD         PlaceBehind(nsTopLevelWidgetZPlacement  aPlacement,
                                    nsIWidget                  *aWidget,
                                    bool                        aActivate);
-    NS_IMETHOD         SetZIndex(int32_t aZIndex);
+    void               SetZIndex(int32_t aZIndex);
     NS_IMETHOD         SetSizeMode(int32_t aMode);
     NS_IMETHOD         Enable(bool aState);
     NS_IMETHOD         SetFocus(bool aRaise = false);
     NS_IMETHOD         GetScreenBounds(nsIntRect &aRect);
     NS_IMETHOD         GetClientBounds(nsIntRect &aRect);
     virtual nsIntPoint GetClientOffset();
-    NS_IMETHOD         SetForegroundColor(const nscolor &aColor);
-    NS_IMETHOD         SetBackgroundColor(const nscolor &aColor);
     NS_IMETHOD         SetCursor(nsCursor aCursor);
     NS_IMETHOD         SetCursor(imgIContainer* aCursor,
                                  uint32_t aHotspotX, uint32_t aHotspotY);
@@ -263,10 +257,16 @@ public:
     bool               DispatchKeyDownEvent(GdkEventKey *aEvent,
                                             bool *aIsCancelled);
 
-    NS_IMETHOD NotifyIME(NotificationToIME aNotification) MOZ_OVERRIDE;
+    NS_IMETHOD NotifyIME(const IMENotification& aIMENotification) MOZ_OVERRIDE;
     NS_IMETHOD_(void) SetInputContext(const InputContext& aContext,
                                       const InputContextAction& aAction);
     NS_IMETHOD_(InputContext) GetInputContext();
+    virtual nsIMEUpdatePreference GetIMEUpdatePreference();
+    NS_IMETHOD_(bool) ExecuteNativeKeyBinding(
+                        NativeKeyBindingsType aType,
+                        const mozilla::WidgetKeyboardEvent& aEvent,
+                        DoCommandCallback aCallback,
+                        void* aCallbackData) MOZ_OVERRIDE;
     NS_IMETHOD GetToggledKeyState(uint32_t aKeyCode, bool* aLEDState);
 
     // These methods are for toplevel windows only.
@@ -279,14 +279,11 @@ public:
    virtual nsresult    ConfigureChildren(const nsTArray<Configuration>& aConfigurations);
    nsresult            UpdateTranslucentWindowAlphaInternal(const nsIntRect& aRect,
                                                             uint8_t* aAlphas, int32_t aStride);
+    virtual gfxASurface *GetThebesSurface();
 
 #if (MOZ_WIDGET_GTK == 2)
-    gfxASurface       *GetThebesSurface();
-
     static already_AddRefed<gfxASurface> GetSurfaceForGdkDrawable(GdkDrawable* aDrawable,
                                                                   const nsIntSize& aSize);
-#else
-    gfxASurface       *GetThebesSurface(cairo_t *cr);
 #endif
     NS_IMETHOD         ReparentNativeWidget(nsIWidget* aNewParent);
 
@@ -298,6 +295,8 @@ public:
     { return SynthesizeNativeMouseEvent(aPoint, GDK_MOTION_NOTIFY, 0); }
 
 protected:
+    virtual ~nsWindow();
+
     // event handling code
     void DispatchActivateEvent(void);
     void DispatchDeactivateEvent(void);
@@ -362,6 +361,11 @@ private:
 
     int32_t             mTransparencyBitmapWidth;
     int32_t             mTransparencyBitmapHeight;
+
+#if GTK_CHECK_VERSION(3,4,0)
+    // This field omits duplicate scroll events caused by GNOME bug 726878.
+    guint32             mLastScrollEventTime;
+#endif
 
 #ifdef MOZ_HAVE_SHMIMAGE
     // If we're using xshm rendering, mThebesSurface wraps mShmImage
@@ -440,9 +444,12 @@ private:
 
     // nsBaseWidget
     virtual LayerManager* GetLayerManager(PLayerTransactionChild* aShadowManager = nullptr,
-                                          LayersBackend aBackendHint = mozilla::layers::LAYERS_NONE,
+                                          LayersBackend aBackendHint = mozilla::layers::LayersBackend::LAYERS_NONE,
                                           LayerManagerPersistence aPersistence = LAYER_MANAGER_CURRENT,
                                           bool* aAllowRetaining = nullptr) MOZ_OVERRIDE;
+#if (MOZ_WIDGET_GTK == 3)
+    gfxASurface* GetThebesSurface(cairo_t *cr);
+#endif
 
     void CleanLayerManagerRecursive();
 

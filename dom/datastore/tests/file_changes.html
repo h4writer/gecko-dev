@@ -61,7 +61,12 @@
     }, cbError);
   }
 
+  function testStoreClear() {
+    gStore.clear().catch(cbError);
+  }
+
   function eventListener(evt) {
+    ok(evt instanceof DataStoreChangeEvent, "DataStoreChangeEvent has been received");
     ok(evt, "OnChangeListener is called with data");
     is(/[0-9a-zA-Z]{8}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{12}/.test(evt.revisionId), true, "event.revisionId returns something");
     is(evt.id, gChangeId, "OnChangeListener is called with the right ID: " + evt.id);
@@ -92,6 +97,10 @@
     function() { gChangeId = 1; gChangeOperation = 'removed';
                  testStoreRemove(1, true); },
 
+    // Clear
+    function() { gChangeId = null; gChangeOperation = 'cleared';
+                 testStoreClear(); },
+
     // Remove onchange function and replace it with addEventListener
     function() {
       gStore.onchange = null;
@@ -110,6 +119,10 @@
     // Remove
     function() { gChangeId = 2; gChangeOperation = 'removed';
                  testStoreRemove(2, true); },
+
+    // Clear
+    function() { gChangeId = null; gChangeOperation = 'cleared';
+                 testStoreClear(); },
 
     // Remove event listener
     function() {

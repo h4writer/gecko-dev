@@ -22,7 +22,7 @@ function sendSmsToEmulator(from, text) {
   ++pendingEmulatorCmdCount;
 
   let cmd = "sms send " + from + " " + text;
-  runEmulatorCmd(cmd, function (result) {
+  runEmulatorCmd(cmd, function(result) {
     --pendingEmulatorCmdCount;
 
     is(result[0], "OK", "Emulator response");
@@ -35,11 +35,11 @@ let tasks = {
   _tasks: [],
   _nextTaskIndex: 0,
 
-  push: function push(func) {
+  push: function(func) {
     this._tasks.push(func);
   },
 
-  next: function next() {
+  next: function() {
     let index = this._nextTaskIndex++;
     let task = this._tasks[index];
     try {
@@ -53,11 +53,11 @@ let tasks = {
     }
   },
 
-  finish: function finish() {
+  finish: function() {
     this._tasks[this._tasks.length - 1]();
   },
 
-  run: function run() {
+  run: function() {
     this.next();
   }
 };
@@ -145,8 +145,7 @@ tasks.push(function init() {
     is(incomingSms.receiver, RECEIVER, "receiver");
     is(incomingSms.sender, SENDER, "sender");
     is(incomingSms.messageClass, "normal", "messageClass");
-    ok(incomingSms.timestamp instanceof Date, "timestamp is istanceof date");
-    ok(incomingSms.deliveryTimestamp === null, "deliveryTimestamp is null");
+    is(incomingSms.deliveryTimestamp, 0, "deliveryTimestamp is 0");
 
     verifySmsExists(incomingSms);
   };
@@ -209,7 +208,7 @@ tasks.push(function cleanUp() {
 
   manager.onreceived = null;
   SpecialPowers.removePermission("sms", document);
-  SpecialPowers.setBoolPref("dom.sms.enabled", false);
+  SpecialPowers.clearUserPref("dom.sms.enabled");
   log("Finish!!!");
   finish();
 });

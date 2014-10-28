@@ -14,23 +14,17 @@
 
 #include "vm/ProxyObject.h"
 
-struct OuterWrapper : js::Wrapper
-{
-    OuterWrapper() : Wrapper(0) {}
-
-    virtual bool isOuterWindow() {
-        return true;
-    }
-
-    virtual bool finalizeInBackground(JS::Value priv) {
-        return false;
-    }
-
-    static OuterWrapper singleton;
-};
-
-OuterWrapper
-OuterWrapper::singleton;
+const js::Class OuterWrapperClass =
+    PROXY_CLASS_WITH_EXT(
+        "Proxy",
+        0, /* additional class flags */
+        PROXY_MAKE_EXT(
+            nullptr, /* outerObject */
+            js::proxy_innerObject,
+            nullptr, /* iteratorObject */
+            false,   /* isWrappedNative */
+            nullptr  /* objectMoved */
+        ));
 
 static JSObject *
 wrap(JSContext *cx, JS::HandleObject toWrap, JS::HandleObject target)
@@ -43,14 +37,8 @@ wrap(JSContext *cx, JS::HandleObject toWrap, JS::HandleObject target)
 }
 
 static JSObject *
-SameCompartmentWrap(JSContext *cx, JS::HandleObject obj)
-{
-    JS_GC(JS_GetRuntime(cx));
-    return obj;
-}
-
-static JSObject *
-PreWrap(JSContext *cx, JS::HandleObject scope, JS::HandleObject obj, unsigned flags)
+PreWrap(JSContext *cx, JS::HandleObject scope, JS::HandleObject obj,
+        JS::HandleObject objectPassedToWrap)
 {
     JS_GC(JS_GetRuntime(cx));
     return obj;
@@ -58,15 +46,22 @@ PreWrap(JSContext *cx, JS::HandleObject scope, JS::HandleObject obj, unsigned fl
 
 static JSObject *
 Wrap(JSContext *cx, JS::HandleObject existing, JS::HandleObject obj,
-     JS::HandleObject proto, JS::HandleObject parent, unsigned flags)
+     JS::HandleObject parent)
 {
-    return js::Wrapper::New(cx, obj, proto, parent, &js::CrossCompartmentWrapper::singleton);
+    return js::Wrapper::New(cx, obj, parent, &js::CrossCompartmentWrapper::singleton);
 }
+
+static const JSWrapObjectCallbacks WrapObjectCallbacks = {
+    Wrap,
+    PreWrap
+};
 
 BEGIN_TEST(testBug604087)
 {
-    JS::RootedObject outerObj(cx, js::Wrapper::New(cx, global, global->getProto(), global,
-                                               &OuterWrapper::singleton));
+    js::WrapperOptions options;
+    options.setClass(&OuterWrapperClass);
+    options.setSingleton(true);
+    JS::RootedObject outerObj(cx, js::Wrapper::New(cx, global, global, &js::Wrapper::singleton, options));
     JS::RootedObject compartment2(cx, JS_NewGlobalObject(cx, getGlobalClass(), nullptr, JS::FireOnNewGlobalHook));
     JS::RootedObject compartment3(cx, JS_NewGlobalObject(cx, getGlobalClass(), nullptr, JS::FireOnNewGlobalHook));
     JS::RootedObject compartment4(cx, JS_NewGlobalObject(cx, getGlobalClass(), nullptr, JS::FireOnNewGlobalHook));
@@ -87,12 +82,11 @@ BEGIN_TEST(testBug604087)
     JS::RootedObject next(cx);
     {
         JSAutoCompartment ac(cx, compartment2);
-        next = js::Wrapper::New(cx, compartment2, compartment2->getProto(), compartment2,
-                                &OuterWrapper::singleton);
+        next = js::Wrapper::New(cx, compartment2, compartment2, &js::Wrapper::singleton, options);
         CHECK(next);
     }
 
-    JS_SetWrapObjectCallbacks(JS_GetRuntime(cx), Wrap, SameCompartmentWrap, PreWrap);
+    JS_SetWrapObjectCallbacks(JS_GetRuntime(cx), &WrapObjectCallbacks);
     CHECK(JS_TransplantObject(cx, outerObj, next));
     return true;
 }

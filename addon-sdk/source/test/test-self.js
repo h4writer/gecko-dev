@@ -3,11 +3,10 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 "use strict";
 
-const { Cc, Ci, Cu, Cm, components } = require("chrome");
 const xulApp = require("sdk/system/xul-app");
 const self = require("sdk/self");
-
-const { AddonManager } = Cu.import("resource://gre/modules/AddonManager.jsm", {});
+const { Loader, main, unload } = require("toolkit/loader");
+const loaderOptions = require("@loader/options");
 
 exports.testSelf = function(assert) {
   // Likewise, we can't assert anything about the full URL, because that
@@ -38,25 +37,19 @@ exports.testSelf = function(assert) {
                'usePrivateBrowsing property is false by default');
 };
 
-exports.testSelfID = function(assert, done) {
-  var self = require("sdk/self");
-  // We can't assert anything about the ID inside the unit test right now,
-  // because the ID we get depends upon how the test was invoked. The idea
-  // is that it is supposed to come from the main top-level package's
-  // package.json file, from the "id" key.
-  assert.equal(typeof(self.id), "string", "self.id is a string");
-  assert.ok(self.id.length > 0);
-
-  AddonManager.getAddonByID(self.id, function(addon) {
-    if (!addon) {
-      assert.fail("did not find addon with self.id");
-    }
-    else {
-      assert.pass("found addon with self.id");
-    }
-
-    done();
-  });
-}
+exports.testSelfHandlesLackingLoaderOptions = function (assert) {
+  let root = module.uri.substr(0, module.uri.lastIndexOf('/'));
+  let uri = root + '/fixtures/loader/self/';
+  let sdkPath = loaderOptions.paths[''] + 'sdk';
+  let loader = Loader({ paths: { '': uri, 'sdk': sdkPath }});
+  let program = main(loader, 'main');
+  let self = program.self;
+  assert.pass("No errors thrown when including sdk/self without loader options");
+  assert.equal(self.isPrivateBrowsingSupported, false,
+    "safely checks sdk/self.isPrivateBrowsingSupported");
+  assert.equal(self.packed, false,
+    "safely checks sdk/self.packed");
+  unload(loader);
+};
 
 require("sdk/test").run(exports);

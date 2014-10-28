@@ -4,12 +4,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-XPIDL_SOURCES += [
-    'nsIB2GKeyboard.idl',
-]
-
-XPIDL_MODULE = 'dom_inputmethod'
-
 EXTRA_COMPONENTS += [
     'InputMethod.manifest',
     'MozKeyboard.js',
@@ -18,3 +12,7 @@ EXTRA_COMPONENTS += [
 EXTRA_JS_MODULES += [
     'Keyboard.jsm',
 ]
+
+JAR_MANIFESTS += ['jar.mn']
+
+MOCHITEST_MANIFESTS += ['mochitest/mochitest.ini']

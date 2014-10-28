@@ -6,7 +6,6 @@
 #define CacheFile__h__
 
 #include "CacheFileChunk.h"
-#include "nsWeakReference.h"
 #include "CacheFileIOManager.h"
 #include "CacheFileMetadata.h"
 #include "nsRefPtrHashtable.h"
@@ -15,6 +14,7 @@
 
 class nsIInputStream;
 class nsIOutputStream;
+class nsICacheEntryMetaDataVisitor;
 
 namespace mozilla {
 namespace net {
@@ -47,7 +47,6 @@ NS_DEFINE_STATIC_IID_ACCESSOR(CacheFileListener, CACHEFILELISTENER_IID)
 class CacheFile : public CacheFileChunkListener
                 , public CacheFileIOListener
                 , public CacheFileMetadataListener
-                , public nsSupportsWeakReference
 {
 public:
   NS_DECL_THREADSAFE_ISUPPORTS
@@ -58,7 +57,6 @@ public:
                 bool aCreateNew,
                 bool aMemoryOnly,
                 bool aPriority,
-                bool aKeyIsHash,
                 CacheFileListener *aCallback);
 
   NS_IMETHOD OnChunkRead(nsresult aResult, CacheFileChunk *aChunk);
@@ -73,6 +71,7 @@ public:
   NS_IMETHOD OnDataRead(CacheFileHandle *aHandle, char *aBuf, nsresult aResult);
   NS_IMETHOD OnFileDoomed(CacheFileHandle *aHandle, nsresult aResult);
   NS_IMETHOD OnEOFSet(CacheFileHandle *aHandle, nsresult aResult);
+  NS_IMETHOD OnFileRenamed(CacheFileHandle *aHandle, nsresult aResult);
 
   NS_IMETHOD OnMetadataRead(nsresult aResult);
   NS_IMETHOD OnMetadataWritten(nsresult aResult);
@@ -85,44 +84,71 @@ public:
   nsresult   ThrowMemoryCachedData();
 
   // metadata forwarders
-  nsresult GetElement(const char *aKey, const char **_retval);
+  nsresult GetElement(const char *aKey, char **_retval);
   nsresult SetElement(const char *aKey, const char *aValue);
+  nsresult VisitMetaData(nsICacheEntryMetaDataVisitor *aVisitor);
   nsresult ElementsSize(uint32_t *_retval);
   nsresult SetExpirationTime(uint32_t aExpirationTime);
   nsresult GetExpirationTime(uint32_t *_retval);
-  nsresult SetLastModified(uint32_t aLastModified);
+  nsresult SetFrecency(uint32_t aFrecency);
+  nsresult GetFrecency(uint32_t *_retval);
   nsresult GetLastModified(uint32_t *_retval);
   nsresult GetLastFetched(uint32_t *_retval);
   nsresult GetFetchCount(uint32_t *_retval);
+  // Called by upper layers to indicated the entry has been fetched,
+  // i.e. delivered to the consumer.
+  nsresult OnFetched();
 
   bool DataSize(int64_t* aSize);
   void Key(nsACString& aKey) { aKey = mKey; }
+  bool IsDoomed();
+  bool IsWriteInProgress();
+
+  // Memory reporting
+  size_t SizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
+  size_t SizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
 
 private:
+  friend class CacheFileIOManager;
   friend class CacheFileChunk;
   friend class CacheFileInputStream;
   friend class CacheFileOutputStream;
   friend class CacheFileAutoLock;
   friend class MetadataWriteTimer;
-  friend class MetadataListenerHelper;
 
   virtual ~CacheFile();
 
   void     Lock();
   void     Unlock();
-  void     AssertOwnsLock();
+  void     AssertOwnsLock() const;
   void     ReleaseOutsideLock(nsISupports *aObject);
 
-  nsresult GetChunk(uint32_t aIndex, bool aWriter,
+  enum ECallerType {
+    READER    = 0,
+    WRITER    = 1,
+    PRELOADER = 2
+  };
+
+  nsresult DoomLocked(CacheFileListener *aCallback);
+
+  nsresult GetChunk(uint32_t aIndex, ECallerType aCaller,
                     CacheFileChunkListener *aCallback,
                     CacheFileChunk **_retval);
-  nsresult GetChunkLocked(uint32_t aIndex, bool aWriter,
+  nsresult GetChunkLocked(uint32_t aIndex, ECallerType aCaller,
                           CacheFileChunkListener *aCallback,
                           CacheFileChunk **_retval);
-  nsresult RemoveChunk(CacheFileChunk *aChunk);
 
-  nsresult RemoveInput(CacheFileInputStream *aInput);
-  nsresult RemoveOutput(CacheFileOutputStream *aOutput);
+  void     PreloadChunks(uint32_t aIndex);
+  bool     ShouldCacheChunk(uint32_t aIndex);
+  bool     MustKeepCachedChunk(uint32_t aIndex);
+
+  nsresult DeactivateChunk(CacheFileChunk *aChunk);
+  void     RemoveChunkInternal(CacheFileChunk *aChunk, bool aCacheChunk);
+
+  int64_t  BytesFromChunk(uint32_t aIndex);
+
+  nsresult RemoveInput(CacheFileInputStream *aInput, nsresult aStatus);
+  nsresult RemoveOutput(CacheFileOutputStream *aOutput, nsresult aStatus);
   nsresult NotifyChunkListener(CacheFileChunkListener *aCallback,
                                nsIEventTarget *aTarget,
                                nsresult aResult,
@@ -137,6 +163,7 @@ private:
 
   bool IsDirty();
   void WriteMetadataIfNeeded();
+  void WriteMetadataIfNeededLocked(bool aFireAndForget = false);
   void PostWriteTimer();
 
   static PLDHashOperator WriteAllCachedChunks(const uint32_t& aIdx,
@@ -152,16 +179,27 @@ private:
                                              nsRefPtr<CacheFileChunk>& aChunk,
                                              void* aClosure);
 
+  static PLDHashOperator CleanUpCachedChunks(const uint32_t& aIdx,
+                                             nsRefPtr<CacheFileChunk>& aChunk,
+                                             void* aClosure);
+
   nsresult PadChunkWithZeroes(uint32_t aChunkIdx);
+
+  void SetError(nsresult aStatus);
+
+  nsresult InitIndexEntry();
 
   mozilla::Mutex mLock;
   bool           mOpeningFile;
   bool           mReady;
   bool           mMemoryOnly;
+  bool           mOpenAsMemoryOnly;
+  bool           mPriority;
   bool           mDataAccessed;
   bool           mDataIsDirty;
   bool           mWritingMetadata;
-  bool           mKeyIsHash;
+  bool           mPreloadWithoutInputStreams;
+  uint32_t       mPreloadChunkCount;
   nsresult       mStatus;
   int64_t        mDataSize;
   nsCString      mKey;
@@ -169,7 +207,7 @@ private:
   nsRefPtr<CacheFileHandle>    mHandle;
   nsRefPtr<CacheFileMetadata>  mMetadata;
   nsCOMPtr<CacheFileListener>  mListener;
-  nsRefPtr<MetadataWriteTimer> mTimer;
+  nsCOMPtr<CacheFileIOListener>   mDoomAfterOpenListener;
 
   nsRefPtrHashtable<nsUint32HashKey, CacheFileChunk> mChunks;
   nsClassHashtable<nsUint32HashKey, ChunkListeners> mChunkListeners;
@@ -183,7 +221,7 @@ private:
 
 class CacheFileAutoLock {
 public:
-  CacheFileAutoLock(CacheFile *aFile)
+  explicit CacheFileAutoLock(CacheFile *aFile)
     : mFile(aFile)
     , mLocked(true)
   {

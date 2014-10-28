@@ -11,6 +11,7 @@ XPIDL_SOURCES += [
 XPIDL_MODULE = 'MobileComponents'
 
 EXTRA_COMPONENTS += [
+    'ActivitiesGlue.js',
     'AddonUpdateService.js',
     'BlocklistPrompt.js',
     'ColorPicker.js',
@@ -24,6 +25,8 @@ EXTRA_COMPONENTS += [
     'PromptService.js',
     'SiteSpecificUserAgent.js',
     'Snippets.js',
+    'TabSource.js',
+    'WebappsUpdateTimer.js',
     'XPIDialogService.js',
 ]
 
@@ -38,3 +41,5 @@ EXTRA_PP_COMPONENTS += [
 ]
 
 DEFINES['ANDROID_PACKAGE_NAME'] = CONFIG['ANDROID_PACKAGE_NAME']
+
+DIRS += ['build']

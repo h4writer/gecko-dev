@@ -31,12 +31,15 @@ namespace dom {
 typedef bool
 (* ResolveOwnProperty)(JSContext* cx, JS::Handle<JSObject*> wrapper,
                        JS::Handle<JSObject*> obj, JS::Handle<jsid> id,
-                       JS::MutableHandle<JSPropertyDescriptor> desc, unsigned flags);
+                       JS::MutableHandle<JSPropertyDescriptor> desc);
 
 typedef bool
 (* EnumerateOwnProperties)(JSContext* cx, JS::Handle<JSObject*> wrapper,
                            JS::Handle<JSObject*> obj,
                            JS::AutoIdVector& props);
+
+bool
+CheckPermissions(JSContext* aCx, JSObject* aObj, const char* const aPermissions[]);
 
 struct ConstantSpec
 {
@@ -49,17 +52,42 @@ typedef bool (*PropertyEnabled)(JSContext* cx, JSObject* global);
 template<typename T>
 struct Prefable {
   inline bool isEnabled(JSContext* cx, JSObject* obj) const {
-    return enabled &&
-      (!enabledFunc ||
-       enabledFunc(cx, js::GetGlobalForObjectCrossCompartment(obj)));
+    if (!enabled) {
+      return false;
+    }
+    if (!enabledFunc && !availableFunc && !checkPermissions) {
+      return true;
+    }
+    // Just go ahead and root obj, in case enabledFunc GCs
+    JS::Rooted<JSObject*> rootedObj(cx, obj);
+    if (enabledFunc &&
+        !enabledFunc(cx, js::GetGlobalForObjectCrossCompartment(rootedObj))) {
+      return false;
+    }
+    if (availableFunc &&
+        !availableFunc(cx, js::GetGlobalForObjectCrossCompartment(rootedObj))) {
+      return false;
+    }
+    if (checkPermissions &&
+        !CheckPermissions(cx, js::GetGlobalForObjectCrossCompartment(rootedObj),
+                          checkPermissions)) {
+      return false;
+    }
+    return true;
   }
 
   // A boolean indicating whether this set of specs is enabled
   bool enabled;
   // A function pointer to a function that can say the property is disabled
   // even if "enabled" is set to true.  If the pointer is null the value of
-  // "enabled" is used as-is.
+  // "enabled" is used as-is unless availableFunc overrides.
   PropertyEnabled enabledFunc;
+  // A function pointer to a function that can be used to disable a
+  // property even if "enabled" is true and enabledFunc allowed.  This
+  // is basically a hack to avoid having to codegen PropertyEnabled
+  // implementations in case when we need to do two separate checks.
+  PropertyEnabled availableFunc;
+  const char* const* checkPermissions;
   // Array of specs, terminated in whatever way is customary for T.
   // Null to indicate a end-of-array for Prefable, when such an
   // indicator is needed.
@@ -70,19 +98,28 @@ struct NativeProperties
 {
   const Prefable<const JSFunctionSpec>* staticMethods;
   jsid* staticMethodIds;
-  const JSFunctionSpec* staticMethodsSpecs;
+  const JSFunctionSpec* staticMethodSpecs;
+
   const Prefable<const JSPropertySpec>* staticAttributes;
   jsid* staticAttributeIds;
   const JSPropertySpec* staticAttributeSpecs;
+
   const Prefable<const JSFunctionSpec>* methods;
   jsid* methodIds;
-  const JSFunctionSpec* methodsSpecs;
+  const JSFunctionSpec* methodSpecs;
+
   const Prefable<const JSPropertySpec>* attributes;
   jsid* attributeIds;
   const JSPropertySpec* attributeSpecs;
+
+  const Prefable<const JSFunctionSpec>* unforgeableMethods;
+  jsid* unforgeableMethodIds;
+  const JSFunctionSpec* unforgeableMethodSpecs;
+
   const Prefable<const JSPropertySpec>* unforgeableAttributes;
   jsid* unforgeableAttributeIds;
   const JSPropertySpec* unforgeableAttributeSpecs;
+
   const Prefable<const ConstantSpec>* constants;
   jsid* constantIds;
   const ConstantSpec* constantSpecs;
@@ -119,28 +156,55 @@ struct NativePropertyHooks
   // constructors::id::_ID_Count.
   constructors::ID mConstructorID;
 
-  // The NativePropertyHooks instance for the parent interface.
+  // The NativePropertyHooks instance for the parent interface (for
+  // ShimInterfaceInfo).
   const NativePropertyHooks* mProtoHooks;
 };
 
 enum DOMObjectType {
   eInstance,
+  eGlobalInstance,
   eInterface,
-  eInterfacePrototype
+  eInterfacePrototype,
+  eGlobalInterfacePrototype,
+  eNamedPropertiesObject
 };
 
+inline
+bool
+IsInstance(DOMObjectType type)
+{
+  return type == eInstance || type == eGlobalInstance;
+}
+
+inline
+bool
+IsInterfacePrototype(DOMObjectType type)
+{
+  return type == eInterfacePrototype || type == eGlobalInterfacePrototype;
+}
+
 typedef JSObject* (*ParentGetter)(JSContext* aCx, JS::Handle<JSObject*> aObj);
+
+typedef JSObject* (*ProtoGetter)(JSContext* aCx,
+                                 JS::Handle<JSObject*> aGlobal);
 /**
  * Returns a handle to the relevent WebIDL prototype object for the given global
  * (which may be a handle to null on out of memory).  Once allocated, the
  * prototype object is guaranteed to exist as long as the global does, since the
  * global traces its array of WebIDL prototypes and constructors.
  */
-typedef JS::Handle<JSObject*> (*ProtoGetter)(JSContext* aCx,
-                                             JS::Handle<JSObject*> aGlobal);
+typedef JS::Handle<JSObject*> (*ProtoHandleGetter)(JSContext* aCx,
+                                                   JS::Handle<JSObject*> aGlobal);
 
-struct DOMClass
+// Special JSClass for reflected DOM objects.
+struct DOMJSClass
 {
+  // It would be nice to just inherit from JSClass, but that precludes pure
+  // compile-time initialization of the form |DOMJSClass = {...};|, since C++
+  // only allows brace initialization for aggregate/POD types.
+  const js::Class mBase;
+
   // A list of interfaces that this object implements, in order of decreasing
   // derivedness.
   const prototypes::ID mInterfaceChain[MAX_PROTOTYPE_CHAIN_LENGTH];
@@ -154,23 +218,12 @@ struct DOMClass
   const NativePropertyHooks* mNativeHooks;
 
   ParentGetter mGetParent;
-  ProtoGetter mGetProto;
+  ProtoHandleGetter mGetProto;
 
   // This stores the CC participant for the native, null if this class is for a
   // worker or for a native inheriting from nsISupports (we can get the CC
   // participant by QI'ing in that case).
   nsCycleCollectionParticipant* mParticipant;
-};
-
-// Special JSClass for reflected DOM objects.
-struct DOMJSClass
-{
-  // It would be nice to just inherit from JSClass, but that precludes pure
-  // compile-time initialization of the form |DOMJSClass = {...};|, since C++
-  // only allows brace initialization for aggregate/POD types.
-  const JSClass mBase;
-
-  const DOMClass mClass;
 
   static const DOMJSClass* FromJSClass(const JSClass* base) {
     MOZ_ASSERT(base->flags & JSCLASS_IS_DOMJSCLASS);
@@ -181,19 +234,20 @@ struct DOMJSClass
     return FromJSClass(Jsvalify(base));
   }
 
-  const JSClass* ToJSClass() const { return &mBase; }
+  const JSClass* ToJSClass() const { return Jsvalify(&mBase); }
 };
 
 // Special JSClass for DOM interface and interface prototype objects.
 struct DOMIfaceAndProtoJSClass
 {
-  // It would be nice to just inherit from JSClass, but that precludes pure
+  // It would be nice to just inherit from js::Class, but that precludes pure
   // compile-time initialization of the form
   // |DOMJSInterfaceAndPrototypeClass = {...};|, since C++ only allows brace
   // initialization for aggregate/POD types.
-  const JSClass mBase;
+  const js::Class mBase;
 
-  // Either eInterface or eInterfacePrototype
+  // Either eInterface, eInterfacePrototype, eGlobalInterfacePrototype or
+  // eNamedPropertiesObject.
   DOMObjectType mType;
 
   const NativePropertyHooks* mNativeHooks;
@@ -205,6 +259,8 @@ struct DOMIfaceAndProtoJSClass
   const prototypes::ID mPrototypeID;
   const uint32_t mDepth;
 
+  ProtoGetter mGetParentProto;
+
   static const DOMIfaceAndProtoJSClass* FromJSClass(const JSClass* base) {
     MOZ_ASSERT(base->flags & JSCLASS_IS_DOMIFACEANDPROTOJSCLASS);
     return reinterpret_cast<const DOMIfaceAndProtoJSClass*>(base);
@@ -213,24 +269,24 @@ struct DOMIfaceAndProtoJSClass
     return FromJSClass(Jsvalify(base));
   }
 
-  const JSClass* ToJSClass() const { return &mBase; }
+  const JSClass* ToJSClass() const { return Jsvalify(&mBase); }
 };
 
-class ProtoAndIfaceArray;
+class ProtoAndIfaceCache;
 
 inline bool
-HasProtoAndIfaceArray(JSObject* global)
+HasProtoAndIfaceCache(JSObject* global)
 {
   MOZ_ASSERT(js::GetObjectClass(global)->flags & JSCLASS_DOM_GLOBAL);
   // This can be undefined if we GC while creating the global
   return !js::GetReservedSlot(global, DOM_PROTOTYPE_SLOT).isUndefined();
 }
 
-inline ProtoAndIfaceArray*
-GetProtoAndIfaceArray(JSObject* global)
+inline ProtoAndIfaceCache*
+GetProtoAndIfaceCache(JSObject* global)
 {
   MOZ_ASSERT(js::GetObjectClass(global)->flags & JSCLASS_DOM_GLOBAL);
-  return static_cast<ProtoAndIfaceArray*>(
+  return static_cast<ProtoAndIfaceCache*>(
     js::GetReservedSlot(global, DOM_PROTOTYPE_SLOT).toPrivate());
 }
 

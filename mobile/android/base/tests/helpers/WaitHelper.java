@@ -4,13 +4,17 @@
 
 package org.mozilla.gecko.tests.helpers;
 
-import static org.mozilla.gecko.tests.helpers.AssertionHelper.*;
+import static org.mozilla.gecko.tests.helpers.AssertionHelper.fAssertNotNull;
+import static org.mozilla.gecko.tests.helpers.AssertionHelper.fAssertTrue;
+
+import android.os.SystemClock;
+import java.util.regex.Pattern;
 
 import org.mozilla.gecko.Actions;
 import org.mozilla.gecko.Actions.EventExpecter;
-import org.mozilla.gecko.tests.components.ToolbarComponent;
 import org.mozilla.gecko.tests.UITestContext;
 import org.mozilla.gecko.tests.UITestContext.ComponentType;
+import org.mozilla.gecko.tests.components.ToolbarComponent;
 
 import com.jayway.android.robotium.solo.Condition;
 import com.jayway.android.robotium.solo.Solo;
@@ -23,7 +27,7 @@ public final class WaitHelper {
     // assertion from waitFor)?
     private static final int DEFAULT_MAX_WAIT_MS = 5000;
     private static final int PAGE_LOAD_WAIT_MS = 10000;
-    private static final int CHANGE_WAIT_MS = 5000;
+    private static final int CHANGE_WAIT_MS = 15000;
 
     // TODO: via lucasr - Add ThrobberVisibilityChangeVerifier?
     private static final ChangeVerifier[] PAGE_LOAD_VERIFIERS = new ChangeVerifier[] {
@@ -38,7 +42,7 @@ public final class WaitHelper {
 
     private WaitHelper() { /* To disallow instantiation. */ }
 
-    public static void init(final UITestContext context) {
+    protected static void init(final UITestContext context) {
         sContext = context;
         sSolo = context.getSolo();
         sActions = context.getActions();
@@ -52,7 +56,7 @@ public final class WaitHelper {
      */
     public static void waitFor(String message, final Condition condition) {
         message = "Waiting for " + message + ".";
-        assertTrue(message, sSolo.waitForCondition(condition, DEFAULT_MAX_WAIT_MS));
+        fAssertTrue(message, sSolo.waitForCondition(condition, DEFAULT_MAX_WAIT_MS));
     }
 
     /**
@@ -61,7 +65,7 @@ public final class WaitHelper {
      */
     public static void waitFor(String message, final Condition condition, final int waitMillis) {
         message = "Waiting for " + message + " with timeout " + waitMillis + ".";
-        assertTrue(message, sSolo.waitForCondition(condition, waitMillis));
+        fAssertTrue(message, sSolo.waitForCondition(condition, waitMillis));
     }
 
     /**
@@ -69,7 +73,7 @@ public final class WaitHelper {
      * that will perform the action that will cause the page to load.
      */
     public static void waitForPageLoad(final Runnable initiatingAction) {
-        assertNotNull("initiatingAction is not null", initiatingAction);
+        fAssertNotNull("initiatingAction is not null", initiatingAction);
 
         // Some changes to the UI occur in response to the same event we listen to for when
         // the page has finished loading (e.g. a page title update). As such, we ensure this
@@ -81,31 +85,39 @@ public final class WaitHelper {
         }
 
         // Wait for the page load and title changed event.
-        final EventExpecter contentEventExpecter = sActions.expectGeckoEvent("DOMContentLoaded");
-        final EventExpecter titleEventExpecter = sActions.expectGeckoEvent("DOMTitleChanged");
+        final EventExpecter[] eventExpecters = new EventExpecter[] {
+            sActions.expectGeckoEvent("DOMContentLoaded"),
+            sActions.expectGeckoEvent("DOMTitleChanged")
+        };
 
         initiatingAction.run();
 
-        contentEventExpecter.blockForEventDataWithTimeout(PAGE_LOAD_WAIT_MS);
-        contentEventExpecter.unregisterListener();
-        titleEventExpecter.blockForEventDataWithTimeout(PAGE_LOAD_WAIT_MS);
-        titleEventExpecter.unregisterListener();
+        // PAGE_LOAD_WAIT_MS is the total time we wait for all events to finish.
+        final long expecterStartMillis = SystemClock.uptimeMillis();
+        for (final EventExpecter expecter : eventExpecters) {
+            final int eventWaitTimeMillis = PAGE_LOAD_WAIT_MS - (int)(SystemClock.uptimeMillis() - expecterStartMillis);
+            expecter.blockForEventDataWithTimeout(eventWaitTimeMillis);
+            expecter.unregisterListener();
+        }
+
+        // The timeout wait time should be the aggregate time for all ChangeVerifiers.
+        final long verifierStartMillis = SystemClock.uptimeMillis();
 
         // Verify remaining state has changed.
         for (final ChangeVerifier verifier : pageLoadVerifiers) {
             // If we timeout, either the state is set to the same value (which is fine), or
             // the state has not yet changed. Since we can't be sure it will ever change, move
             // on and let the assertions fail if applicable.
+            final int verifierWaitMillis = CHANGE_WAIT_MS - (int)(SystemClock.uptimeMillis() - verifierStartMillis);
             final boolean hasTimedOut = !sSolo.waitForCondition(new Condition() {
                 @Override
                 public boolean isSatisfied() {
                     return verifier.hasStateChanged();
                 }
-            }, CHANGE_WAIT_MS);
+            }, verifierWaitMillis);
 
-            if (hasTimedOut) {
-                sContext.dumpLog(verifier.getClass().getName() + " timed out.");
-            }
+            sContext.dumpLog(verifier.getLogTag(),
+                    (hasTimedOut ? "timed out." : "was satisfied."));
         }
     }
 
@@ -115,6 +127,8 @@ public final class WaitHelper {
      * returned from hasStateChanged, indicating this change of status.
      */
     private static interface ChangeVerifier {
+        public String getLogTag();
+
         /**
          * Stores the initial state of the system. This system state is used to diff against
          * the end state to determine if the system has changed. Since this is just a diff
@@ -126,14 +140,22 @@ public final class WaitHelper {
     }
 
     private static class ToolbarTitleTextChangeVerifier implements ChangeVerifier {
-        // A regex that matches the page title that shows up while the page is loading.
-        private static final String LOADING_REGEX = "^[A-Za-z]{3,9}://";
+        private static final String LOGTAG = ToolbarTitleTextChangeVerifier.class.getSimpleName();
 
-        private CharSequence oldTitleText;
+        // A regex that matches the page title that shows up while the page is loading.
+        private static final Pattern LOADING_PREFIX = Pattern.compile("[A-Za-z]{3,9}://");
+
+        private CharSequence mOldTitleText;
+
+        @Override
+        public String getLogTag() {
+            return LOGTAG;
+        }
 
         @Override
         public void storeState() {
-            oldTitleText = sToolbar.getPotentiallyInconsistentTitle();
+            mOldTitleText = sToolbar.getPotentiallyInconsistentTitle();
+            sContext.dumpLog(LOGTAG, "stored title, \"" + mOldTitleText + "\".");
         }
 
         @Override
@@ -147,8 +169,13 @@ public final class WaitHelper {
             // (e.g. the page title). However, the title is set to the URL before the title is
             // loaded from the server and set as the final page title; we ignore the
             // intermediate URL loading state here.
-            final boolean isLoading = title.toString().matches(LOADING_REGEX);
-            return !isLoading && !oldTitleText.equals(title);
+            final boolean isLoading = LOADING_PREFIX.matcher(title).lookingAt();
+            final boolean hasStateChanged = !isLoading && !mOldTitleText.equals(title);
+
+            if (hasStateChanged) {
+                sContext.dumpLog(LOGTAG, "state changed to title, \"" + title + "\".");
+            }
+            return hasStateChanged;
         }
     }
 }

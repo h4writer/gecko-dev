@@ -9,7 +9,6 @@
 #include "jsapi.h"
 #include "jsfriendapi.h"
 #include "jswrapper.h"
-#include "js/OldDebugAPI.h"
 #include "mozilla/ModuleUtils.h"
 #include "nsServiceManagerUtils.h"
 #include "nsMemory.h"
@@ -25,7 +24,7 @@ namespace jsdebugger {
 
 NS_GENERIC_FACTORY_CONSTRUCTOR(JSDebugger)
 
-NS_IMPL_ISUPPORTS1(JSDebugger, IJSDebugger)
+NS_IMPL_ISUPPORTS(JSDebugger, IJSDebugger)
 
 JSDebugger::JSDebugger()
 {
@@ -36,7 +35,7 @@ JSDebugger::~JSDebugger()
 }
 
 NS_IMETHODIMP
-JSDebugger::AddClass(const JS::Value &global, JSContext* cx)
+JSDebugger::AddClass(JS::Handle<JS::Value> global, JSContext* cx)
 {
   nsresult rv;
   nsCOMPtr<nsIXPConnect> xpc = do_GetService(nsIXPConnect::GetCID(), &rv);

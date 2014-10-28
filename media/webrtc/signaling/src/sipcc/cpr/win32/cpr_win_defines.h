@@ -55,7 +55,6 @@ typedef enum
 
 cprRegion_t cprCreateRegion (const char *regionName);
 cprPool_t cprCreatePool (cprRegion_t region, const char *name, uint32_t initialBuffers, uint32_t bufferSize) ;
-uint16_t cprGetDepth (cprMsgQueue_t msgQueue);
 
 
 void cprDisableSwap (void);
@@ -69,21 +68,6 @@ void cprEnableSwap (void);
  */
 #define CIPPORT_EPH_LOW         0xC000
 #define CIPPORT_EPH_HI          0xCFFF
-
-
-/*
- * Msg queue information needed to hide OS differences in implementation.
- * To use msg queues, the application code may pass in a name to the
- * create function for msg queues. CPR does not use this field, it is
- * solely for the convenience of the application and to aid in debugging.
- */
-typedef struct {
-    const char *name;
-    uint16_t queueId;
-    uint16_t currentCount;
-    void *handlePtr;
-} cpr_msg_queue_t;
-
 
 
 

@@ -12,7 +12,6 @@
 #include "mozilla/ReentrantMonitor.h"
 #include "nsCOMPtr.h"
 #include "nsString.h"
-#include "nsIObserver.h"
 #include "nsIDOMElement.h"
 #include "nsIDOMWindow.h"
 #include "nsIDOMHTMLFormElement.h"
@@ -42,21 +41,17 @@ class nsIInterfaceRequestor;
 class nsSecureBrowserUIImpl : public nsISecureBrowserUI,
                               public nsIWebProgressListener,
                               public nsIFormSubmitObserver,
-                              public nsIObserver,
                               public nsSupportsWeakReference,
                               public nsISSLStatusProvider
 {
 public:
   
   nsSecureBrowserUIImpl();
-  virtual ~nsSecureBrowserUIImpl();
   
   NS_DECL_THREADSAFE_ISUPPORTS
   NS_DECL_NSIWEBPROGRESSLISTENER
   NS_DECL_NSISECUREBROWSERUI
   
-  // nsIObserver
-  NS_DECL_NSIOBSERVER
   NS_DECL_NSISSLSTATUSPROVIDER
 
   NS_IMETHOD Notify(nsIDOMHTMLFormElement* formNode, nsIDOMWindow* window,
@@ -65,6 +60,8 @@ public:
                                  nsIArray* invalidElements) { return NS_OK; }
   
 protected:
+  virtual ~nsSecureBrowserUIImpl();
+
   mozilla::ReentrantMonitor mReentrantMonitor;
   
   nsWeakPtr mWindow;
@@ -108,8 +105,8 @@ protected:
                         nsIRequest* aRequest);
 
   nsresult EvaluateAndUpdateSecurityState(nsIRequest* aRequest, nsISupports *info,
-                                          bool withNewLocation);
-  void UpdateSubrequestMembers(nsISupports *securityInfo);
+                                          bool withNewLocation, bool withNewSink);
+  void UpdateSubrequestMembers(nsISupports* securityInfo, nsIRequest* request);
 
   void ObtainEventSink(nsIChannel *channel, 
                        nsCOMPtr<nsISecurityEventSink> &sink);

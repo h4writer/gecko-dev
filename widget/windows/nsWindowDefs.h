@@ -33,13 +33,21 @@
 #define MOZ_WM_HSCROLL                    (WM_APP+0x0313)
 #define MOZ_WM_MOUSEWHEEL_FIRST           MOZ_WM_MOUSEVWHEEL
 #define MOZ_WM_MOUSEWHEEL_LAST            MOZ_WM_HSCROLL
+// If a popup window is being activated, we try to reactivate the previous
+// window with this message.
+#define MOZ_WM_REACTIVATE                 (WM_APP+0x0314)
 
 // Internal message for ensuring the file picker is visible on multi monitor
 // systems, and when the screen resolution changes.
-#define MOZ_WM_ENSUREVISIBLE              (WM_APP + 14159)
+#define MOZ_WM_ENSUREVISIBLE              (WM_APP+0x374F)
 
 #ifndef SM_CXPADDEDBORDER
 #define SM_CXPADDEDBORDER                 92
+#endif
+
+// require WINVER >= 0x601
+#ifndef SM_MAXIMUMTOUCHES
+#define SM_MAXIMUMTOUCHES                 95
 #endif
 
 #ifndef WM_THEMECHANGED
@@ -80,6 +88,19 @@
 #define MAPVK_VK_TO_CHAR                  2
 #define MAPVK_VSC_TO_VK_EX                3
 #define MAPVK_VK_TO_VSC_EX                4
+#endif
+
+#ifndef WM_DWMCOMPOSITIONCHANGED
+#define WM_DWMCOMPOSITIONCHANGED          0x031E
+#endif
+#ifndef WM_DWMNCRENDERINGCHANGED
+#define WM_DWMNCRENDERINGCHANGED          0x031F
+#endif
+#ifndef WM_DWMCOLORIZATIONCOLORCHANGED
+#define WM_DWMCOLORIZATIONCOLORCHANGED    0x0320
+#endif
+#ifndef WM_DWMWINDOWMAXIMIZEDCHANGE
+#define WM_DWMWINDOWMAXIMIZEDCHANGE       0x0321
 #endif
 
 // ConstrainPosition window positioning slop value

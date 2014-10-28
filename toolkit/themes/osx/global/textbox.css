@@ -16,7 +16,6 @@ textbox {
   -moz-border-left-colors: transparent #888888 #000000;
   border-top-right-radius: 2px;
   border-bottom-left-radius: 2px;
-  /*padding: 1px 0px 1px 2px ;*/
   padding: 0px;
   background-color: -moz-Field;
   color: -moz-FieldText;
@@ -26,7 +25,7 @@ html|*.textbox-input,
 html|*.textbox-textarea {
   margin: 0px !important;
   border: none !important;
-  padding: 0px !important;
+  padding: 0px 1px !important;
   background-color: inherit;
   color: inherit;
   font: inherit;
@@ -64,6 +63,11 @@ textbox.plain {
   padding: 0px !important;
   margin: 0px !important;
   border: none !important;
+}
+
+textbox.plain html|*.textbox-input,
+textbox.plain html|*.textbox-textarea {
+  padding: 0px !important;
 }
 
 /* ::::: search box ::::: */

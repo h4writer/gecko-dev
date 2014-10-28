@@ -2,8 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#if defined(JSGC_USE_EXACT_ROOTING)
-
 #include "js/Class.h"
 #include "jsapi-tests/tests.h"
 
@@ -35,23 +33,22 @@ const JSClass BarkWhenTracedClass::class_ = {
   nullptr,
   nullptr,
   nullptr,
-  nullptr,
   trace
 };
 
 struct Kennel {
     PersistentRootedObject obj;
-    Kennel(JSContext *cx) : obj(cx) { }
-    Kennel(JSContext *cx, const HandleObject &woof) : obj(cx, woof) { };
+    explicit Kennel(JSContext *cx) : obj(cx) { }
+    Kennel(JSContext *cx, const HandleObject &woof) : obj(cx, woof) { }
 };
 
 // A function for allocating a Kennel and a barker. Only allocating
 // PersistentRooteds on the heap, and in this function, helps ensure that the
 // conservative GC doesn't find stray references to the barker. Ugh.
-JS_NEVER_INLINE static Kennel *
+MOZ_NEVER_INLINE static Kennel *
 Allocate(JSContext *cx)
 {
-    RootedObject barker(cx, JS_NewObject(cx, &BarkWhenTracedClass::class_, nullptr, nullptr));
+    RootedObject barker(cx, JS_NewObject(cx, &BarkWhenTracedClass::class_, JS::NullPtr(), JS::NullPtr()));
     if (!barker)
         return nullptr;
 
@@ -181,5 +178,3 @@ BEGIN_TEST(test_PersistentRootedAssign)
     return true;
 }
 END_TEST(test_PersistentRootedAssign)
-
-#endif // defined(JSGC_USE_EXACT_ROOTING)

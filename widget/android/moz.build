@@ -15,7 +15,7 @@ EXPORTS += [
     'AndroidJavaWrappers.h',
     'AndroidJNIWrapper.h',
     'GeneratedJNIWrappers.h',
-    'GfxInfo.h',
+    'GeneratedSDKWrappers.h',
 ]
 
 SOURCES += [
@@ -25,8 +25,12 @@ SOURCES += [
     'AndroidJavaWrappers.cpp',
     'AndroidJNI.cpp',
     'AndroidJNIWrapper.cpp',
+    'APZCCallbackHandler.cpp',
     'GeneratedJNIWrappers.cpp',
+    'GeneratedSDKWrappers.cpp',
     'GfxInfo.cpp',
+    'NativeJSContainer.cpp',
+    'nsAndroidProtocolHandler.cpp',
     'nsAppShell.cpp',
     'nsClipboard.cpp',
     'nsDeviceContextAndroid.cpp',
@@ -41,20 +45,18 @@ SOURCES += [
 
 FAIL_ON_WARNINGS = True
 
-LIBRARY_NAME = 'widget_android'
-
 include('/ipc/chromium/chromium-config.mozbuild')
 
 FINAL_LIBRARY = 'xul'
 
 LOCAL_INCLUDES += [
-    '/content/events/src',
     '/docshell/base',
+    '/dom/base',
     '/dom/system/android',
+    '/netwerk/base/src',
     '/netwerk/cache',
+    '/widget',
     '/widget/android/android',
-    '/widget/shared',
-    '/widget/xpwidgets',
 ]
 
 #DEFINES['DEBUG_WIDGETS'] = True

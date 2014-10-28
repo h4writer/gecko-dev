@@ -13,9 +13,11 @@ Cu.import("resource://gre/modules/devtools/dbg-client.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/FileUtils.jsm");
+const {devtools} = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+const {require} = devtools;
+const {AppActorFront} = require("devtools/app-actor-front");
 
-let gClient, gActor;
-let originalPrefValue;
+let gClient, gActor, gActorFront;
 
 function connect(onDone) {
   // Initialize a loopback remote protocol connection
@@ -29,6 +31,7 @@ function connect(onDone) {
   gClient.connect(function onConnect() {
     gClient.listTabs(function onListTabs(aResponse) {
       gActor = aResponse.webappsActor;
+      gActorFront = new AppActorFront(gClient, aResponse);
       onDone();
     });
   });
@@ -84,8 +87,11 @@ function setup() {
   Components.utils.import('resource://gre/modules/Webapps.jsm');
   DOMApplicationRegistry.allAppsLaunchable = true;
 
-  originalPrefValue = Services.prefs.getBoolPref("devtools.debugger.enable-content-actors");
-  Services.prefs.setBoolPref("devtools.debugger.enable-content-actors", true);
+  // Mock WebappOSUtils
+  Cu.import("resource://gre/modules/WebappOSUtils.jsm");
+  WebappOSUtils.getPackagePath = function(aApp) {
+    return aApp.basePath + "/" + aApp.id;
+  }
 }
 
 function do_get_webappsdir() {

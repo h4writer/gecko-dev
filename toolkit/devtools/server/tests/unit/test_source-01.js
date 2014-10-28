@@ -1,4 +1,4 @@
-/* -*- Mode: javascript; js-indent-level: 2; -*- */
+/* -*- js-indent-level: 2; indent-tabs-mode: nil -*- */
 /* Any copyright is dedicated to the Public Domain.
    http://creativecommons.org/publicdomain/zero/1.0/ */
 
@@ -44,9 +44,6 @@ function test_source()
     gThreadClient.getSources(function (aResponse) {
       do_check_true(!!aResponse);
       do_check_true(!!aResponse.sources);
-      gClient.compat.supportsFeature("sources").then(function (supported) {
-        do_check_true(supported);
-      });
 
       let source = aResponse.sources.filter(function (s) {
         return s.url === SOURCE_URL;

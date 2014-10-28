@@ -647,6 +647,7 @@ lsm_open_rx (lsm_lcb_t *lcb, cc_action_data_open_rcv_t *data,
 
           if (!status) {
             sstrncpy(dcb->ice_default_candidate_addr, default_addr, sizeof(dcb->ice_default_candidate_addr));
+            cpr_free(default_addr);
 
             data->port = (uint16_t)port_allocated;
             media->candidate_ct = candidate_ct;
@@ -916,8 +917,12 @@ lsm_rx_start (lsm_lcb_t *lcb, const char *fname, fsmdef_media_t *media)
            have > 2 streams. (adam@nostrum.com): For now,
            we use all the same stream so pc_stream_id == 0
            and the tracks are assigned in order and are
-           equal to the level in the media objects */
+           equal to the level in the media objects  bug 1056650 */
+        /* See also ReplaceTrack in PeerConnectionMedia.cpp */
+        /* Possible solution is a map from MediaStreamTrack->GetTrackID to this, or
+           to find a way to make them match */
         pc_stream_id = 0;
+        // note: not a TrackID! (on receive, we may use it to create a TrackID though)
         pc_track_id = media->level;
 
         /*
@@ -985,7 +990,19 @@ lsm_rx_start (lsm_lcb_t *lcb, const char *fname, fsmdef_media_t *media)
                 }
 
                 attrs.rtcp_mux = media->rtcp_mux;
+
+                attrs.is_video = FALSE;
+                attrs.bundle_level = 0;
+                attrs.bundle_stream_correlator = 0;
+                attrs.num_ssrcs = 0;
+                attrs.num_unique_payload_types = 0;
+                /* TODO(bcampen@mozilla.com): Bug 784491: Fill in
+                 * attrs.bundle_stream_correlator, attrs.ssrcs, and
+                 * attrs.unique_payload_types
+                 */
+
                 if ( media->cap_index == CC_VIDEO_1 ) {
+                    attrs.is_video = TRUE;
                     attrs.video.opaque = media->video;
                 } else {
                     attrs.audio.packetization_period = media->packetization_period;
@@ -1218,13 +1235,23 @@ lsm_tx_start (lsm_lcb_t *lcb, const char *fname, fsmdef_media_t *media)
         			continue;
             	}
         	}
-
             media->xmit_chan = TRUE;
-
             attrs.mute = FALSE;
-
             attrs.rtcp_mux = media->rtcp_mux;
+            attrs.audio_level = media->audio_level;
+            attrs.audio_level_id = (uint8_t)media->audio_level_id;
+            attrs.is_video = FALSE;
+            attrs.bundle_level = 0;
+            attrs.bundle_stream_correlator = 0;
+            attrs.num_ssrcs = 0;
+            attrs.num_unique_payload_types = 0;
+            /* TODO(bcampen@mozilla.com): Bug 784491: Fill in
+             * attrs.bundle_stream_correlator, attrs.ssrcs, and
+             * attrs.unique_payload_types
+             */
+
             if ( CC_IS_VIDEO(media->cap_index)) {
+                attrs.is_video = TRUE;
                 attrs.video.opaque = media->video;
                 if (lcb->vid_mute) {
                     attrs.mute = TRUE;
@@ -3904,7 +3931,8 @@ lsm_connected (lsm_lcb_t *lcb, cc_state_data_connected_t *data)
 
     /* Start ICE */
     if (start_ice) {
-      short res = vcmStartIceChecks(dcb->peerconnection, !dcb->inbound);
+      short res = vcmStartIceChecks(dcb->peerconnection,
+                                    !dcb->inbound || dcb->peer_ice_lite);
 
       /* TODO(emannion): Set state to dead here. */
       if (res)

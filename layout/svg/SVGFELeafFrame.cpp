@@ -20,7 +20,7 @@ class SVGFELeafFrame : public SVGFELeafFrameBase
   friend nsIFrame*
   NS_NewSVGFELeafFrame(nsIPresShell* aPresShell, nsStyleContext* aContext);
 protected:
-  SVGFELeafFrame(nsStyleContext* aContext)
+  explicit SVGFELeafFrame(nsStyleContext* aContext)
     : SVGFELeafFrameBase(aContext)
   {
     AddStateBits(NS_FRAME_SVG_LAYOUT | NS_FRAME_IS_NONDISPLAY);
@@ -30,18 +30,18 @@ public:
   NS_DECL_FRAMEARENA_HELPERS
 
 #ifdef DEBUG
-  virtual void Init(nsIContent* aContent,
-                    nsIFrame*   aParent,
-                    nsIFrame*   aPrevInFlow) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 #endif
 
-  virtual bool IsFrameOfType(uint32_t aFlags) const
+  virtual bool IsFrameOfType(uint32_t aFlags) const MOZ_OVERRIDE
   {
     return SVGFELeafFrameBase::IsFrameOfType(aFlags & ~(nsIFrame::eSVG));
   }
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
   {
     return MakeFrameName(NS_LITERAL_STRING("SVGFELeaf"), aResult);
   }
@@ -52,13 +52,13 @@ public:
    *
    * @see nsGkAtoms::svgFELeafFrame
    */
-  virtual nsIAtom* GetType() const;
+  virtual nsIAtom* GetType() const MOZ_OVERRIDE;
 
-  NS_IMETHOD AttributeChanged(int32_t  aNameSpaceID,
-                              nsIAtom* aAttribute,
-                              int32_t  aModType);
+  virtual nsresult AttributeChanged(int32_t  aNameSpaceID,
+                                    nsIAtom* aAttribute,
+                                    int32_t  aModType) MOZ_OVERRIDE;
 
-  virtual bool UpdateOverflow() {
+  virtual bool UpdateOverflow() MOZ_OVERRIDE {
     // We don't maintain a visual overflow rect
     return false;
   }
@@ -74,9 +74,9 @@ NS_IMPL_FRAMEARENA_HELPERS(SVGFELeafFrame)
 
 #ifdef DEBUG
 void
-SVGFELeafFrame::Init(nsIContent* aContent,
-                     nsIFrame* aParent,
-                     nsIFrame* aPrevInFlow)
+SVGFELeafFrame::Init(nsIContent*       aContent,
+                     nsContainerFrame* aParent,
+                     nsIFrame*         aPrevInFlow)
 {
   NS_ASSERTION(aContent->IsNodeOfType(nsINode::eFILTER),
                "Trying to construct an SVGFELeafFrame for a "
@@ -92,7 +92,7 @@ SVGFELeafFrame::GetType() const
   return nsGkAtoms::svgFELeafFrame;
 }
 
-NS_IMETHODIMP
+nsresult
 SVGFELeafFrame::AttributeChanged(int32_t  aNameSpaceID,
                                  nsIAtom* aAttribute,
                                  int32_t  aModType)

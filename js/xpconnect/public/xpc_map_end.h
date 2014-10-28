@@ -1,6 +1,6 @@
-/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- *
- * This Source Code Form is subject to the terms of the Mozilla Public
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/* vim: set ts=8 sts=4 et sw=4 tw=99: */
+/* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
@@ -67,9 +67,6 @@ XPC_MAP_CLASSNAME::GetScriptableFlags()
 #ifdef XPC_MAP_WANT_FINALIZE
     nsIXPCScriptable::WANT_FINALIZE |
 #endif
-#ifdef XPC_MAP_WANT_CHECKACCESS
-    nsIXPCScriptable::WANT_CHECKACCESS |
-#endif
 #ifdef XPC_MAP_WANT_CALL
     nsIXPCScriptable::WANT_CALL |
 #endif
@@ -78,9 +75,6 @@ XPC_MAP_CLASSNAME::GetScriptableFlags()
 #endif
 #ifdef XPC_MAP_WANT_HASINSTANCE
     nsIXPCScriptable::WANT_HASINSTANCE |
-#endif
-#ifdef XPC_MAP_WANT_OUTER_OBJECT
-    nsIXPCScriptable::WANT_OUTER_OBJECT |
 #endif
 #ifdef XPC_MAP_FLAGS
     XPC_MAP_FLAGS |
@@ -140,7 +134,7 @@ NS_IMETHODIMP XPC_MAP_CLASSNAME::Enumerate(nsIXPConnectWrappedNative *wrapper, J
 #endif
 
 #ifndef XPC_MAP_WANT_NEWRESOLVE
-NS_IMETHODIMP XPC_MAP_CLASSNAME::NewResolve(nsIXPConnectWrappedNative *wrapper, JSContext * cx, JSObject * obj, jsid id, uint32_t flags, JSObject * *objp, bool *_retval)
+NS_IMETHODIMP XPC_MAP_CLASSNAME::NewResolve(nsIXPConnectWrappedNative *wrapper, JSContext * cx, JSObject * obj, jsid id, JSObject * *objp, bool *_retval)
     {NS_ERROR("never called"); return NS_ERROR_NOT_IMPLEMENTED;}
 #endif
 
@@ -151,11 +145,6 @@ NS_IMETHODIMP XPC_MAP_CLASSNAME::Convert(nsIXPConnectWrappedNative *wrapper, JSC
 
 #ifndef XPC_MAP_WANT_FINALIZE
 NS_IMETHODIMP XPC_MAP_CLASSNAME::Finalize(nsIXPConnectWrappedNative *wrapper, JSFreeOp * fop, JSObject * obj)
-    {NS_ERROR("never called"); return NS_ERROR_NOT_IMPLEMENTED;}
-#endif
-
-#ifndef XPC_MAP_WANT_CHECKACCESS
-NS_IMETHODIMP XPC_MAP_CLASSNAME::CheckAccess(nsIXPConnectWrappedNative *wrapper, JSContext * cx, JSObject * obj, jsid id, uint32_t mode, JS::Value * vp, bool *_retval)
     {NS_ERROR("never called"); return NS_ERROR_NOT_IMPLEMENTED;}
 #endif
 
@@ -170,12 +159,7 @@ NS_IMETHODIMP XPC_MAP_CLASSNAME::Construct(nsIXPConnectWrappedNative *wrapper, J
 #endif
 
 #ifndef XPC_MAP_WANT_HASINSTANCE
-NS_IMETHODIMP XPC_MAP_CLASSNAME::HasInstance(nsIXPConnectWrappedNative *wrapper, JSContext * cx, JSObject * obj, const JS::Value &val, bool *bp, bool *_retval)
-    {NS_ERROR("never called"); return NS_ERROR_NOT_IMPLEMENTED;}
-#endif
-
-#ifndef XPC_MAP_WANT_OUTER_OBJECT
-NS_IMETHODIMP XPC_MAP_CLASSNAME::OuterObject(nsIXPConnectWrappedNative *wrapper, JSContext * cx, JSObject * obj, JSObject * *_retval)
+NS_IMETHODIMP XPC_MAP_CLASSNAME::HasInstance(nsIXPConnectWrappedNative *wrapper, JSContext * cx, JSObject * obj, JS::HandleValue val, bool *bp, bool *_retval)
     {NS_ERROR("never called"); return NS_ERROR_NOT_IMPLEMENTED;}
 #endif
 
@@ -237,10 +221,6 @@ NS_IMETHODIMP XPC_MAP_CLASSNAME::PostCreatePrototype(JSContext *cx, JSObject *pr
 #undef XPC_MAP_WANT_FINALIZE
 #endif
 
-#ifdef XPC_MAP_WANT_CHECKACCESS
-#undef XPC_MAP_WANT_CHECKACCESS
-#endif
-
 #ifdef XPC_MAP_WANT_CALL
 #undef XPC_MAP_WANT_CALL
 #endif
@@ -251,10 +231,6 @@ NS_IMETHODIMP XPC_MAP_CLASSNAME::PostCreatePrototype(JSContext *cx, JSObject *pr
 
 #ifdef XPC_MAP_WANT_HASINSTANCE
 #undef XPC_MAP_WANT_HASINSTANCE
-#endif
-
-#ifdef XPC_MAP_WANT_OUTER_OBJECT
-#undef XPC_MAP_WANT_OUTER_OBJECT
 #endif
 
 #ifdef XPC_MAP_WANT_POST_CREATE_PROTOTYPE

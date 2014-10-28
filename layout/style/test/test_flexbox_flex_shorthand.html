@@ -23,15 +23,23 @@ https://bugzilla.mozilla.org/show_bug.cgi?id=696253
 /** Test for Bug 696253 **/
 /* (Testing the 'flex' CSS shorthand property) */
 
+// The CSS property name for the shorthand we're testing:
 const gFlexPropName = "flex";
+
+// Info from property_database.js on this property:
 const gFlexPropInfo = gCSSProperties[gFlexPropName];
+
+// The name of the property in the DOM (i.e. in elem.style):
+// (NOTE: In this case it's actually the same as the CSS property name --
+// "flex" -- but that's not guaranteed in general.)
+const gFlexDOMName = gFlexPropInfo.domProp;
 
 // Default values for shorthand subproperties, when they're not specified
 // explicitly in a testcase.  This lets the testcases be more concise.
 //
 // The values here are from the flexbox spec on the 'flex' shorthand:
-//   "When omitted, [flex-grow and flex-shrink] are set to '1'.
-//   "If omitted, the flex basis defaults to 0%"
+//   "When omitted, [flex-grow and flex-shrink are] set to '1'."
+//   "When omitted [..., flex-basis's] specified value is '0%'."
 let gFlexShorthandDefaults = {
     "flex-grow":   "1",
     "flex-shrink": "1",
@@ -49,7 +57,7 @@ let gFlexShorthandTestcases = [
     "flex-grow":   "EXPECTED computed value for flex-grow property",
     "flex-shrink": "EXPECTED computed value for flex-shrink property",
     "flex-basis":  "EXPECTED computed value for flex-basis property",
-  }, 
+  },
 */
 
   // Initial values of subproperties:
@@ -60,22 +68,31 @@ let gFlexShorthandTestcases = [
     "flex":        "",
     "flex-grow":   "0",
     "flex-shrink": "1",
-    "flex-basis":  "auto",
+    "flex-basis":  "main-size",
   },
   {
     "flex":        "initial",
     "flex-grow":   "0",
     "flex-shrink": "1",
-    "flex-basis":  "auto",
+    "flex-basis":  "main-size",
   },
 
-  // Special keyword "none" --> "0 0 auto"
+  // Special keyword "none" --> "0 0 main-size"
   // -------------------------------------
   {
     "flex":        "none",
     "flex-grow":   "0",
     "flex-shrink": "0",
-    "flex-basis":  "auto",
+    "flex-basis":  "main-size",
+  },
+
+  // Special keyword "auto" --> "1 1 main-size"
+  // -------------------------------------
+  {
+    "flex":        "auto",
+    "flex-grow":   "1",
+    "flex-shrink": "1",
+    "flex-basis":  "main-size",
   },
 
   // One Value (numeric) --> sets flex-grow
@@ -120,10 +137,6 @@ let gFlexShorthandTestcases = [
     "flex-basis":  "5%",
   },
   {
-    "flex":        "auto",
-    "flex-basis":  "auto",
-  },
-  {
     "flex":        "-moz-fit-content",
     "flex-basis":  "-moz-fit-content",
   },
@@ -134,6 +147,10 @@ let gFlexShorthandTestcases = [
   {
     "flex":        "calc(15% + 30px)",
     "flex-basis":  "calc(30px + 15%)",
+  },
+  {
+    "flex":        "main-size",
+    "flex-basis":  "main-size",
   },
 
   // Two Values (numeric) --> sets flex-grow, flex-shrink
@@ -197,6 +214,11 @@ let gFlexShorthandTestcases = [
     "flex-basis":  "auto",
   },
   {
+    "flex":        "main-size 5",
+    "flex-grow":   "5",
+    "flex-basis":  "main-size",
+  },
+  {
     "flex":        "5 -moz-fit-content",
     "flex-grow":   "5",
     "flex-basis":  "-moz-fit-content",
@@ -241,8 +263,8 @@ function runFlexShorthandTest(aFlexShorthandTestcase)
 
   let elem = document.createElement("div");
 
-  elem.style[gFlexPropInfo.domProp] = aFlexShorthandTestcase[gFlexPropName];
-  content.appendChild(elem); 
+  elem.style[gFlexDOMName] = aFlexShorthandTestcase[gFlexPropName];
+  content.appendChild(elem);
 
   gFlexPropInfo.subproperties.forEach(function(aSubPropName) {
     var expectedVal = aSubPropName in aFlexShorthandTestcase ?

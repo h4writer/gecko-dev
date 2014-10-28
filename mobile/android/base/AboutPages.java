@@ -5,6 +5,11 @@
 
 package org.mozilla.gecko;
 
+import org.mozilla.gecko.home.HomeConfig;
+import org.mozilla.gecko.home.HomeConfig.PanelType;
+import org.mozilla.gecko.mozglue.RobocopTarget;
+import org.mozilla.gecko.util.StringUtils;
+
 public class AboutPages {
     // All of our special pages.
     public static final String ADDONS          = "about:addons";
@@ -20,17 +25,29 @@ public class AboutPages {
 
     public static final String URL_FILTER = "about:%";
 
+    public static final String PANEL_PARAM = "panel";
+
     public static final boolean isAboutPage(final String url) {
-        return url.startsWith("about:");
+        return url != null && url.startsWith("about:");
     }
 
     public static final boolean isTitlelessAboutPage(final String url) {
-        return HOME.equals(url) ||
+        return isAboutHome(url) ||
                PRIVATEBROWSING.equals(url);
     }
 
     public static final boolean isAboutHome(final String url) {
-        return HOME.equals(url);
+        if (url == null || !url.startsWith(HOME)) {
+            return false;
+        }
+        // We sometimes append a parameter to "about:home" to specify which page to
+        // show when we open the home pager. Discard this parameter when checking
+        // whether or not this URL is "about:home".
+        return HOME.equals(url.split("\\?")[0]);
+    }
+
+    public static final String getPanelIdFromAboutHomeUrl(String aboutHomeUrl) {
+        return StringUtils.getQueryParameter(aboutHomeUrl, PANEL_PARAM);
     }
 
     public static final boolean isAboutReader(final String url) {
@@ -41,8 +58,6 @@ public class AboutPages {
     }
 
     private static final String[] DEFAULT_ICON_PAGES = new String[] {
-        HOME,
-
         ADDONS,
         CONFIG,
         DOWNLOADS,
@@ -58,10 +73,15 @@ public class AboutPages {
         return DEFAULT_ICON_PAGES;
     }
 
-    public static boolean isDefaultIconPage(final String url) {
+    public static boolean isBuiltinIconPage(final String url) {
         if (url == null ||
             !url.startsWith("about:")) {
             return false;
+        }
+
+        // about:home uses a separate search built-in icon.
+        if (isAboutHome(url)) {
+            return true;
         }
 
         // TODO: it'd be quicker to not compare the "about:" part every time.
@@ -72,5 +92,16 @@ public class AboutPages {
         }
         return false;
     }
-}
 
+    /**
+     * Get a URL that navigates to the specified built-in Home Panel.
+     *
+     * @param panelType to navigate to.
+     * @return URL.
+     * @throws IllegalArgumentException if the built-in panel type is not a built-in panel.
+     */
+    @RobocopTarget
+    public static String getURLForBuiltinPanelType(PanelType panelType) throws IllegalArgumentException {
+        return HOME + "?panel=" + HomeConfig.getIdForBuiltinPanelType(panelType);
+    }
+}

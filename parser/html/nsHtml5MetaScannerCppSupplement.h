@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
  
 #include "nsEncoderDecoderUtils.h"
-#include "nsTraceRefcnt.h"
+#include "nsISupportsImpl.h"
 
 #include "mozilla/dom/EncodingUtils.h"
 
@@ -32,7 +32,12 @@ nsHtml5MetaScanner::tryCharset(nsString* charset)
   }
   if (encoding.EqualsLiteral("UTF-16BE") ||
       encoding.EqualsLiteral("UTF-16LE")) {
-    mCharset.Assign("UTF-8");
+    mCharset.AssignLiteral("UTF-8");
+    return true;
+  }
+  if (encoding.EqualsLiteral("x-user-defined")) {
+    // WebKit/Blink hack for Indian and Armenian legacy sites
+    mCharset.AssignLiteral("windows-1252");
     return true;
   }
   mCharset.Assign(encoding);

@@ -11,14 +11,14 @@
 class nsMathMLSelectedFrame : public nsMathMLContainerFrame {
 public:
   virtual void
-  Init(nsIContent*      aContent,
-       nsIFrame*        aParent,
-       nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  Init(nsIContent*       aContent,
+       nsContainerFrame* aParent,
+       nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 
   NS_IMETHOD
   TransmitAutomaticData() MOZ_OVERRIDE;
 
-  NS_IMETHOD
+  virtual void
   SetInitialChildList(ChildListID     aListID,
                       nsFrameList&    aChildList) MOZ_OVERRIDE;
 
@@ -34,7 +34,7 @@ public:
         bool                 aPlaceOrigin,
         nsHTMLReflowMetrics& aDesiredSize) MOZ_OVERRIDE;
 
-  NS_IMETHOD
+  virtual void
   Reflow(nsPresContext*          aPresContext,
          nsHTMLReflowMetrics&     aDesiredSize,
          const nsHTMLReflowState& aReflowState,
@@ -43,7 +43,7 @@ public:
   virtual nsQueryFrame::FrameIID GetFrameId() = 0;
 
 protected:
-  nsMathMLSelectedFrame(nsStyleContext* aContext) :
+  explicit nsMathMLSelectedFrame(nsStyleContext* aContext) :
     nsMathMLContainerFrame(aContext) {}
   virtual ~nsMathMLSelectedFrame();
   

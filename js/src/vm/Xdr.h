@@ -8,6 +8,7 @@
 #define vm_Xdr_h
 
 #include "mozilla/Endian.h"
+#include "mozilla/TypeTraits.h"
 
 #include "jsatom.h"
 
@@ -17,16 +18,21 @@ namespace js {
  * Bytecode version number. Increment the subtrahend whenever JS bytecode
  * changes incompatibly.
  *
- * This version number is XDR'd near the front of xdr bytecode and
- * aborts deserialization if there is a mismatch between the current
- * and saved versions. If deserialization fails, the data should be
- * invalidated if possible.
+ * This version number is XDR'd near the front of xdr bytecode and aborts
+ * deserialization if there is a mismatch between the current and saved
+ * versions.  If deserialization fails, the data should be invalidated if
+ * possible.
+ *
+ * When you change this, run make_opcode_doc.py and copy the new output into
+ * this wiki page:
+ *
+ *  https://developer.mozilla.org/en-US/docs/SpiderMonkey/Internals/Bytecode
  */
-static const uint32_t XDR_BYTECODE_VERSION = uint32_t(0xb973c0de - 156);
+static const uint32_t XDR_BYTECODE_VERSION = uint32_t(0xb973c0de - 186);
 
 class XDRBuffer {
   public:
-    XDRBuffer(JSContext *cx)
+    explicit XDRBuffer(JSContext *cx)
       : context(cx), base(nullptr), cursor(nullptr), limit(nullptr) { }
 
     JSContext *cx() const {
@@ -34,7 +40,7 @@ class XDRBuffer {
     }
 
     void *getData(uint32_t *lengthp) const {
-        JS_ASSERT(size_t(cursor - base) <= size_t(UINT32_MAX));
+        MOZ_ASSERT(size_t(cursor - base) <= size_t(UINT32_MAX));
         *lengthp = uint32_t(cursor - base);
         return base;
     }
@@ -46,7 +52,7 @@ class XDRBuffer {
     }
 
     const uint8_t *read(size_t n) {
-        JS_ASSERT(n <= size_t(limit - cursor));
+        MOZ_ASSERT(n <= size_t(limit - cursor));
         uint8_t *ptr = cursor;
         cursor += n;
         return ptr;
@@ -55,8 +61,8 @@ class XDRBuffer {
     const char *readCString() {
         char *ptr = reinterpret_cast<char *>(cursor);
         cursor = reinterpret_cast<uint8_t *>(strchr(ptr, '\0')) + 1;
-        JS_ASSERT(base < cursor);
-        JS_ASSERT(cursor <= limit);
+        MOZ_ASSERT(base < cursor);
+        MOZ_ASSERT(cursor <= limit);
         return ptr;
     }
 
@@ -94,20 +100,12 @@ class XDRState {
     XDRBuffer buf;
 
   protected:
-    JSPrincipals *principals_;
-    JSPrincipals *originPrincipals_;
-
-    XDRState(JSContext *cx)
-      : buf(cx), principals_(nullptr), originPrincipals_(nullptr) {
-    }
+    explicit XDRState(JSContext *cx)
+      : buf(cx) { }
 
   public:
     JSContext *cx() const {
         return buf.cx();
-    }
-
-    JSPrincipals *originPrincipals() const {
-        return originPrincipals_;
     }
 
     bool codeUint8(uint8_t *n) {
@@ -161,6 +159,24 @@ class XDRState {
         return true;
     }
 
+    /*
+     * Use SFINAE to refuse any specialization which is not an enum.  Uses of
+     * this function do not have to specialize the type of the enumerated field
+     * as C++ will extract the parameterized from the argument list.
+     */
+    template <typename T>
+    bool codeEnum32(T *val, typename mozilla::EnableIf<mozilla::IsEnum<T>::value, T>::Type * = NULL)
+    {
+        uint32_t tmp;
+        if (mode == XDR_ENCODE)
+            tmp = *val;
+        if (!codeUint32(&tmp))
+            return false;
+        if (mode == XDR_DECODE)
+            *val = T(tmp);
+        return true;
+    }
+
     bool codeDouble(double *dp) {
         union DoublePun {
             double d;
@@ -206,15 +222,17 @@ class XDRState {
         return true;
     }
 
-    bool codeChars(jschar *chars, size_t nchars);
+    bool codeChars(const JS::Latin1Char *chars, size_t nchars);
+    bool codeChars(char16_t *chars, size_t nchars);
 
-    bool codeFunction(JS::MutableHandleObject objp);
+    bool codeFunction(JS::MutableHandleFunction objp);
     bool codeScript(MutableHandleScript scriptp);
+    bool codeConstValue(MutableHandleValue vp);
 };
 
 class XDREncoder : public XDRState<XDR_ENCODE> {
   public:
-    XDREncoder(JSContext *cx)
+    explicit XDREncoder(JSContext *cx)
       : XDRState<XDR_ENCODE>(cx) {
     }
 
@@ -235,8 +253,7 @@ class XDREncoder : public XDRState<XDR_ENCODE> {
 
 class XDRDecoder : public XDRState<XDR_DECODE> {
   public:
-    XDRDecoder(JSContext *cx, const void *data, uint32_t length,
-               JSPrincipals *principals, JSPrincipals *originPrincipals);
+    XDRDecoder(JSContext *cx, const void *data, uint32_t length);
 
 };
 

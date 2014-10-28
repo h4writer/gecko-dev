@@ -12,20 +12,24 @@ this.EXPORTED_SYMBOLS = ["startup"];
 const Ci = Components.interfaces;
 const Cu = Components.utils;
 
+/* We load here modules that are needed to perform the application startup.
+ * We lazily load modules that aren't needed on every startup.
+ * We load modules that aren't used here but that need to perform some
+ * initialization steps later in the startup function. */
+
+Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
-// Initialize DOMApplicationRegistry by importing Webapps.jsm.
-Cu.import("resource://gre/modules/Webapps.jsm");
-Cu.import("resource://gre/modules/AppsUtils.jsm");
-Cu.import("resource://gre/modules/PermissionsInstaller.jsm");
-Cu.import('resource://gre/modules/Payment.jsm');
 Cu.import("resource://gre/modules/Task.jsm");
 Cu.import("resource://gre/modules/Promise.jsm");
 Cu.import("resource://gre/modules/osfile.jsm");
 
-// Initialize window-independent handling of webapps- notifications.
-Cu.import("resource://webapprt/modules/WebappsHandler.jsm");
 Cu.import("resource://webapprt/modules/WebappRT.jsm");
-Cu.import("resource://webapprt/modules/WebRTCHandler.jsm");
+
+// Lazily load these modules because we don't need them at every
+// startup, but only during first run or runtime update.
+
+XPCOMUtils.defineLazyModuleGetter(this, "PermissionsInstaller",
+  "resource://gre/modules/PermissionsInstaller.jsm");
 
 const PROFILE_DIR = OS.Constants.Path.profileDir;
 
@@ -47,7 +51,7 @@ function isFirstRunOrUpdate() {
 
 function writeFile(aPath, aData) {
   return Task.spawn(function() {
-    let data = TextEncoder().encode(aData);
+    let data = new TextEncoder().encode(aData);
     yield OS.File.writeAtomic(aPath, data, { tmpPath: aPath + ".tmp" });
   });
 }
@@ -81,40 +85,45 @@ function createBrandingFiles() {
 // It waits for XUL window and webapps registry loading.
 this.startup = function(window) {
   return Task.spawn(function () {
-    // Observe registry loading.
-    let deferredRegistry = Promise.defer();
-    function observeRegistryLoading() {
-      Services.obs.removeObserver(observeRegistryLoading, "webapps-registry-start");
-      deferredRegistry.resolve();
-    }
-    Services.obs.addObserver(observeRegistryLoading, "webapps-registry-start", false);
-
     // Observe XUL window loading.
     // For tests, it could be already loaded.
     let deferredWindowLoad = Promise.defer();
     if (window.document && window.document.getElementById("content")) {
       deferredWindowLoad.resolve();
     } else {
-      window.addEventListener("load", function onLoad() {
-        window.removeEventListener("load", onLoad, false);
+      window.addEventListener("DOMContentLoaded", function onLoad() {
+        window.removeEventListener("DOMContentLoaded", onLoad, false);
         deferredWindowLoad.resolve();
       });
     }
 
+    let appUpdated = false;
+    let updatePending = yield WebappRT.isUpdatePending();
+    if (updatePending) {
+      appUpdated = yield WebappRT.applyUpdate();
+    }
+
+    yield WebappRT.configPromise;
+
+    let appData = WebappRT.config.app;
+
+    // Initialize DOMApplicationRegistry by importing Webapps.jsm.
+    Cu.import("resource://gre/modules/Webapps.jsm");
+    // Initialize window-independent handling of webapps- notifications.
+    Cu.import("resource://webapprt/modules/WebappManager.jsm");
+
     // Wait for webapps registry loading.
-    yield deferredRegistry.promise;
+    yield DOMApplicationRegistry.registryStarted;
+    // Add the currently running app to the registry.
+    yield DOMApplicationRegistry.addInstalledApp(appData, appData.manifest,
+                                                 appData.updateManifest);
 
-    // Install/update permissions and get the appID from the webapps registry.
-    let appID = Ci.nsIScriptSecurityManager.NO_APP_ID;
-    let manifestURL = WebappRT.config.app.manifestURL;
+    let manifestURL = appData.manifestURL;
     if (manifestURL) {
-      appID = DOMApplicationRegistry.getAppLocalIdByManifestURL(manifestURL);
-
       // On firstrun, set permissions to their default values.
       // When the webapp runtime is updated, update the permissions.
-      // TODO: Update the permissions when the application is updated.
-      if (isFirstRunOrUpdate(Services.prefs)) {
-        PermissionsInstaller.installPermissions(WebappRT.config.app, true);
+      if (isFirstRunOrUpdate(Services.prefs) || appUpdated) {
+        PermissionsInstaller.installPermissions(appData, true);
         yield createBrandingFiles();
       }
     }
@@ -133,11 +142,35 @@ this.startup = function(window) {
     // Wait for XUL window loading
     yield deferredWindowLoad.promise;
 
+    // Override Toolkit's nsITransfer implementation with the one from the
+    // JavaScript API for downloads. This will eventually be removed when
+    // nsIDownloadManager will not be available anymore (bug 851471).
+    Components.manager.QueryInterface(Ci.nsIComponentRegistrar)
+              .registerFactory(Components.ID("{1b4c85df-cbdd-4bb6-b04e-613caece083c}"),
+                               "", "@mozilla.org/transfer;1", null);
+
+    // Load these modules here because they aren't needed right at startup,
+    // but they need to be loaded to perform some initialization steps.
+    Cu.import("resource://gre/modules/Payment.jsm");
+    Cu.import("resource://gre/modules/AlarmService.jsm");
+    Cu.import("resource://webapprt/modules/WebRTCHandler.jsm");
+    Cu.import("resource://webapprt/modules/DownloadView.jsm");
+
     // Get the <browser> element in the webapp.xul window.
     let appBrowser = window.document.getElementById("content");
 
     // Set the principal to the correct appID and launch the application.
-    appBrowser.docShell.setIsApp(appID);
+    appBrowser.docShell.setIsApp(WebappRT.appID);
     appBrowser.setAttribute("src", WebappRT.launchURI);
-  }).then(null, Cu.reportError.bind(Cu));
+
+    if (appData.manifest.fullscreen) {
+      appBrowser.addEventListener("load", function onLoad() {
+        appBrowser.removeEventListener("load", onLoad, true);
+        appBrowser.contentDocument.
+          documentElement.mozRequestFullScreen();
+      }, true);
+    }
+
+    WebappRT.startUpdateService();
+  });
 }

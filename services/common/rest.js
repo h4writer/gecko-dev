@@ -9,7 +9,7 @@ const {classes: Cc, interfaces: Ci, utils: Cu, results: Cr} = Components;
 this.EXPORTED_SYMBOLS = [
   "RESTRequest",
   "RESTResponse",
-  "TokenAuthenticatedRESTRequest"
+  "TokenAuthenticatedRESTRequest",
 ];
 
 #endif
@@ -145,6 +145,11 @@ RESTRequest.prototype = {
   IN_PROGRESS: 2,
   COMPLETED:   4,
   ABORTED:     8,
+
+  /**
+   * HTTP status text of response
+   */
+  statusText: null,
 
   /**
    * Request timeout (in seconds, though decimal values can be used for
@@ -612,15 +617,30 @@ RESTResponse.prototype = {
   get status() {
     let status;
     try {
-      let channel = this.request.channel.QueryInterface(Ci.nsIHttpChannel);
-      status = channel.responseStatus;
+      status = this.request.channel.responseStatus;
     } catch (ex) {
       this._log.debug("Caught exception fetching HTTP status code:" +
                       CommonUtils.exceptionStr(ex));
       return null;
     }
-    delete this.status;
-    return this.status = status;
+    Object.defineProperty(this, "status", {value: status});
+    return status;
+  },
+
+  /**
+   * HTTP status text
+   */
+  get statusText() {
+    let statusText;
+    try {
+      statusText = this.request.channel.responseStatusText;
+    } catch (ex) {
+      this._log.debug("Caught exception fetching HTTP status text:" +
+                      CommonUtils.exceptionStr(ex));
+      return null;
+    }
+    Object.defineProperty(this, "statusText", {value: statusText});
+    return statusText;
   },
 
   /**
@@ -629,15 +649,14 @@ RESTResponse.prototype = {
   get success() {
     let success;
     try {
-      let channel = this.request.channel.QueryInterface(Ci.nsIHttpChannel);
-      success = channel.requestSucceeded;
+      success = this.request.channel.requestSucceeded;
     } catch (ex) {
       this._log.debug("Caught exception fetching HTTP success flag:" +
                       CommonUtils.exceptionStr(ex));
       return null;
     }
-    delete this.success;
-    return this.success = success;
+    Object.defineProperty(this, "success", {value: success});
+    return success;
   },
 
   /**
@@ -657,8 +676,8 @@ RESTResponse.prototype = {
       return null;
     }
 
-    delete this.headers;
-    return this.headers = headers;
+    Object.defineProperty(this, "headers", {value: headers});
+    return headers;
   },
 
   /**

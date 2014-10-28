@@ -4,7 +4,8 @@
 
 const Cu = Components.utils;
 Cu.import("resource://gre/modules/Services.jsm");
-Cu.import("resource:///modules/devtools/gDevTools.jsm");
+Cu.import("resource://gre/modules/devtools/dbg-client.jsm");
+const {gDevTools} = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
 
 const {devtools} = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
 const {require} = devtools;
@@ -16,7 +17,8 @@ const {getTargetForApp, launchApp, closeApp}
   = require("devtools/app-actor-front");
 const DeviceStore = require("devtools/app-manager/device-store");
 const WebappsStore = require("devtools/app-manager/webapps-store");
-const promise = require("sdk/core/promise");
+const promise = require("devtools/toolkit/deprecated-sync-thenables");
+const DEFAULT_APP_ICON = "chrome://browser/skin/devtools/app-manager/default-app-icon.png";
 
 window.addEventListener("message", function(event) {
   try {
@@ -120,6 +122,20 @@ let UI = {
               this.setWallpaper(dataURL);
             });
           });
+          if (Services.prefs.getBoolPref("devtools.chrome.enabled")) {
+            let rootButton = document.getElementById("root-actor-debug");
+            if (response.consoleActor) {
+              rootButton.removeAttribute("hidden");
+            } else {
+              rootButton.setAttribute("hidden", "true");
+            }
+          }
+          let tabsButton = document.querySelector(".tab.browser-tabs");
+          if (response.tabs.length > 0) {
+            tabsButton.classList.remove("hidden");
+          } else {
+            tabsButton.classList.add("hidden");
+          }
         }
       );
     }
@@ -141,24 +157,22 @@ let UI = {
     if (panel) panel.classList.add("selected");
   },
 
-  screenshot: function() {
+  openToolboxForRootActor: function() {
     if (!this.connected) {
       return;
     }
-    let front = getDeviceFront(this.connection.client, this.listTabsResponse);
-    front.screenshotToBlob().then(blob => {
-      let topWindow = Services.wm.getMostRecentWindow("navigator:browser");
-      let gBrowser = topWindow.gBrowser;
-      let url = topWindow.URL.createObjectURL(blob);
-      let tab = gBrowser.selectedTab = gBrowser.addTab(url);
-      tab.addEventListener("TabClose", function onTabClose() {
-        tab.removeEventListener("TabClose", onTabClose, false);
-        topWindow.URL.revokeObjectURL(url);
-      }, false);
-    }).then(null, console.error);
+
+    let options = {
+      form: this.listTabsResponse,
+      client: this.connection.client,
+      chrome: true
+    };
+    devtools.TargetFactory.forRemoteTab(options).then((target) => {
+      top.UI.openAndShowToolboxForTarget(target, "Main process", null);
+    });
   },
 
-  openToolbox: function(manifest) {
+  openToolboxForApp: function(manifest) {
     if (!this.connected) {
       return;
     }
@@ -170,6 +184,31 @@ let UI = {
 
       top.UI.openAndShowToolboxForTarget(target, app.name, app.iconURL);
     }, console.error);
+  },
+
+  _getTargetForTab: function (form) {
+      let options = {
+        form: form,
+        client: this.connection.client,
+        chrome: false
+      };
+      let deferred = promise.defer();
+      return devtools.TargetFactory.forRemoteTab(options);
+  },
+
+  openToolboxForTab: function (aNode) {
+    let index = Array.prototype.indexOf.apply(
+      aNode.parentNode.parentNode.parentNode.children,
+      [aNode.parentNode.parentNode]);
+    this.connection.client.listTabs(
+      response => {
+        let tab = response.tabs[index];
+        this._getTargetForTab(tab).then(target => {
+          top.UI.openAndShowToolboxForTarget(
+            target, tab.title, DEFAULT_APP_ICON);
+        }, console.error);
+      }
+    );
   },
 
   startApp: function(manifest) {

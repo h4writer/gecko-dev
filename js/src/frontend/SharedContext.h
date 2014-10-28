@@ -200,6 +200,8 @@ class SharedContext
     void setBindingsAccessedDynamically() { anyCxFlags.bindingsAccessedDynamically = true; }
     void setHasDebuggerStatement()        { anyCxFlags.hasDebuggerStatement        = true; }
 
+    inline bool allLocalsAliased();
+
     // JSOPTION_EXTRA_WARNINGS warnings or strict mode errors.
     bool needStrictChecks() {
         return strict || extraWarnings;
@@ -225,7 +227,7 @@ class GlobalSharedContext : public SharedContext
 inline GlobalSharedContext *
 SharedContext::asGlobalSharedContext()
 {
-    JS_ASSERT(isGlobalSharedContext());
+    MOZ_ASSERT(isGlobalSharedContext());
     return static_cast<GlobalSharedContext*>(this);
 }
 
@@ -243,8 +245,8 @@ class FunctionBox : public ObjectBox, public SharedContext
     bool            inWith:1;               /* some enclosing scope is a with-statement */
     bool            inGenexpLambda:1;       /* lambda from generator expression */
     bool            hasDestructuringArgs:1; /* arguments list contains destructuring expression */
-    bool            useAsm:1;               /* function contains "use asm" directive */
-    bool            insideUseAsm:1;         /* nested function of function of "use asm" directive */
+    bool            useAsm:1;               /* see useAsmOrInsideUseAsm */
+    bool            insideUseAsm:1;         /* see useAsmOrInsideUseAsm */
 
     // Fields for use in heuristics.
     bool            usesArguments:1;  /* contains a free use of 'arguments' */
@@ -269,7 +271,7 @@ class FunctionBox : public ObjectBox, public SharedContext
         // A generator kind can be set at initialization, or when "yield" is
         // first seen.  In both cases the transition can only happen from
         // NotGenerator.
-        JS_ASSERT(!isGenerator());
+        MOZ_ASSERT(!isGenerator());
         generatorKindBits_ = GeneratorKindAsBits(kind);
     }
 
@@ -283,15 +285,18 @@ class FunctionBox : public ObjectBox, public SharedContext
     void setHasExtensibleScope()           { funCxFlags.hasExtensibleScope       = true; }
     void setNeedsDeclEnvObject()           { funCxFlags.needsDeclEnvObject       = true; }
     void setArgumentsHasLocalBinding()     { funCxFlags.argumentsHasLocalBinding = true; }
-    void setDefinitelyNeedsArgsObj()       { JS_ASSERT(funCxFlags.argumentsHasLocalBinding);
+    void setDefinitelyNeedsArgsObj()       { MOZ_ASSERT(funCxFlags.argumentsHasLocalBinding);
                                              funCxFlags.definitelyNeedsArgsObj   = true; }
 
     bool hasDefaults() const {
-        return length != function()->nargs - function()->hasRest();
+        return length != function()->nargs() - function()->hasRest();
     }
 
-    // Return whether this function has either specified "use asm" or is
-    // (transitively) nested inside a function that has.
+    // Return whether this or an enclosing function is being parsed and
+    // validated as asm.js. Note: if asm.js validation fails, this will be false
+    // while the function is being reparsed. This flag can be used to disable
+    // certain parsing features that are necessary in general, but unnecessary
+    // for validated asm.js.
     bool useAsmOrInsideUseAsm() const {
         return useAsm || insideUseAsm;
     }
@@ -307,16 +312,29 @@ class FunctionBox : public ObjectBox, public SharedContext
         // Note: this should be kept in sync with JSFunction::isHeavyweight().
         return bindings.hasAnyAliasedBindings() ||
                hasExtensibleScope() ||
-               needsDeclEnvObject();
+               needsDeclEnvObject() ||
+               isGenerator();
     }
 };
 
 inline FunctionBox *
 SharedContext::asFunctionBox()
 {
-    JS_ASSERT(isFunctionBox());
+    MOZ_ASSERT(isFunctionBox());
     return static_cast<FunctionBox*>(this);
 }
+
+// In generators, we treat all locals as aliased so that they get stored on the
+// heap.  This way there is less information to copy off the stack when
+// suspending, and back on when resuming.  It also avoids the need to create and
+// invalidate DebugScope proxies for unaliased locals in a generator frame, as
+// the generator frame will be copied out to the heap and released only by GC.
+inline bool
+SharedContext::allLocalsAliased()
+{
+    return bindingsAccessedDynamically() || (isFunctionBox() && asFunctionBox()->isGenerator());
+}
+
 
 /*
  * NB: If you add a new type of statement that is a scope, add it between
@@ -344,6 +362,7 @@ enum StmtType {
     STMT_FOR_IN_LOOP,           /* for/in loop statement */
     STMT_FOR_OF_LOOP,           /* for/of loop statement */
     STMT_WHILE_LOOP,            /* while loop statement */
+    STMT_SPREAD,                /* spread operator (pseudo for/of) */
     STMT_LIMIT
 };
 
@@ -374,22 +393,30 @@ enum StmtType {
 // work with both types.
 
 struct StmtInfoBase {
-    uint16_t        type;           /* statement type */
+    // Statement type (StmtType).
+    uint16_t        type;
 
-    /*
-     * True if type is STMT_BLOCK, STMT_TRY, STMT_SWITCH, or
-     * STMT_FINALLY and the block contains at least one let-declaration.
-     */
+    // True if type is STMT_BLOCK, STMT_TRY, STMT_SWITCH, or STMT_FINALLY and
+    // the block contains at least one let-declaration, or if type is
+    // STMT_CATCH.
     bool isBlockScope:1;
 
-    /* for (let ...) induced block scope */
+    // True if isBlockScope or type == STMT_WITH.
+    bool isNestedScope:1;
+
+    // for (let ...) induced block scope
     bool isForLetBlock:1;
 
-    RootedAtom      label;          /* name of LABEL */
-    Rooted<StaticBlockObject *> blockObj; /* block scope object */
+    // Block label.
+    RootedAtom      label;
 
-    StmtInfoBase(ExclusiveContext *cx)
-        : isBlockScope(false), isForLetBlock(false), label(cx), blockObj(cx)
+    // Compile-time scope chain node for this scope.  Only set if
+    // isNestedScope.
+    Rooted<NestedScopeObject *> staticScope;
+
+    explicit StmtInfoBase(ExclusiveContext *cx)
+        : isBlockScope(false), isNestedScope(false), isForLetBlock(false),
+          label(cx), staticScope(cx)
     {}
 
     bool maybeScope() const {
@@ -397,7 +424,16 @@ struct StmtInfoBase {
     }
 
     bool linksScope() const {
-        return (STMT_WITH <= type && type <= STMT_CATCH) || isBlockScope;
+        return isNestedScope;
+    }
+
+    void setStaticScope() {
+    }
+
+    StaticBlockObject& staticBlock() const {
+        MOZ_ASSERT(isNestedScope);
+        MOZ_ASSERT(isBlockScope);
+        return staticScope->as<StaticBlockObject>();
     }
 
     bool isLoop() const {
@@ -416,9 +452,10 @@ PushStatement(ContextT *ct, typename ContextT::StmtInfo *stmt, StmtType type)
 {
     stmt->type = type;
     stmt->isBlockScope = false;
+    stmt->isNestedScope = false;
     stmt->isForLetBlock = false;
     stmt->label = nullptr;
-    stmt->blockObj = nullptr;
+    stmt->staticScope = nullptr;
     stmt->down = ct->topStmt;
     ct->topStmt = stmt;
     if (stmt->linksScope()) {
@@ -431,13 +468,13 @@ PushStatement(ContextT *ct, typename ContextT::StmtInfo *stmt, StmtType type)
 
 template <class ContextT>
 void
-FinishPushBlockScope(ContextT *ct, typename ContextT::StmtInfo *stmt, StaticBlockObject &blockObj)
+FinishPushNestedScope(ContextT *ct, typename ContextT::StmtInfo *stmt, NestedScopeObject &staticScope)
 {
-    stmt->isBlockScope = true;
+    stmt->isNestedScope = true;
     stmt->downScope = ct->topScopeStmt;
     ct->topScopeStmt = stmt;
-    ct->blockChain = &blockObj;
-    stmt->blockObj = &blockObj;
+    ct->staticScope = &staticScope;
+    stmt->staticScope = &staticScope;
 }
 
 // Pop pc->topStmt. If the top StmtInfoPC struct is not stack-allocated, it
@@ -451,8 +488,10 @@ FinishPopStatement(ContextT *ct)
     ct->topStmt = stmt->down;
     if (stmt->linksScope()) {
         ct->topScopeStmt = stmt->downScope;
-        if (stmt->isBlockScope)
-            ct->blockChain = stmt->blockObj->enclosingBlock();
+        if (stmt->isNestedScope) {
+            MOZ_ASSERT(stmt->staticScope);
+            ct->staticScope = stmt->staticScope->enclosingNestedScope();
+        }
     }
 }
 

@@ -4,17 +4,42 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 %endif
 
-/* Highlighter */
+/* Box model highlighter */
 
-.highlighter-outline {
-  box-shadow: 0 0 0 1px black;
-  outline: 1px dashed white;
-  outline-offset: -1px;
+svg|g.box-model-container {
+  opacity: 0.4;
 }
 
-.highlighter-outline[locked]  {
-  box-shadow: 0 0 0 1px rgba(0,0,0,0.3);
-  outline-color: rgba(255,255,255,0.7);
+svg|polygon.box-model-content {
+  fill: #80d4ff;
+}
+
+svg|polygon.box-model-padding {
+  fill: #66cc52;
+}
+
+svg|polygon.box-model-border {
+  fill: #ffe431;
+}
+
+svg|polygon.box-model-margin {
+  fill: #d89b28;
+}
+
+svg|polygon.box-model-content,
+svg|polygon.box-model-padding,
+svg|polygon.box-model-border,
+svg|polygon.box-model-margin {
+  stroke: none;
+}
+
+svg|line.box-model-guide-top,
+svg|line.box-model-guide-right,
+svg|line.box-model-guide-bottom,
+svg|line.box-model-guide-left {
+  stroke: #08C;
+  stroke-dasharray: 5 3;
+  shape-rendering: crispEdges;
 }
 
 /* Highlighter - Node Infobar */
@@ -23,11 +48,18 @@
   color: hsl(216,33%,97%);
   border-radius: 3px;
   background: hsl(214,13%,24%) no-repeat padding-box;
+  padding: 5px;
+  /* Avoid cases where the infobar is smaller than the arrow, when the text is
+  short */
+  min-width: 75px;
+   /* Avoid a shadow with lightweight themes - Bug 1037908 */
+  text-shadow: none;
 }
 
 /* Highlighter - Node Infobar - text */
 
 .highlighter-nodeinfobar-text {
+  text-align: center;
   /* 100% - size of the buttons and margins */
   max-width: calc(100% - 2 * (26px + 6px));
   padding-bottom: 1px;
@@ -46,41 +78,11 @@ html|*.highlighter-nodeinfobar-pseudo-classes {
   color: hsl(200,74%,57%);
 }
 
-/* Highlighter - Node Infobar - buttons */
-
-.highlighter-nodeinfobar-button {
-  -moz-appearance: none;
-  border-width: 0;
-  padding: 0;
-  width: 26px;
-  min-height: 26px;
-%ifndef XP_LINUX
-  background-color: transparent;
-%endif
-}
-
-.highlighter-nodeinfobar-inspectbutton {
-  -moz-border-end: 1px solid #5a6169;
-  -moz-margin-end: 12px;
-  list-style-image: url("chrome://browser/skin/devtools/inspect-button.png");
-  -moz-image-region: rect(0px 16px 16px 0px);
-}
-
-.highlighter-nodeinfobar-inspectbutton:active:hover,
-.highlighter-nodeinfobar-container:not([locked]) >  .highlighter-nodeinfobar >  .highlighter-nodeinfobar-inspectbutton {
-  -moz-image-region: rect(0px 32px 16px 16px);
-}
-
-.highlighter-nodeinfobar-menu {
+html|*.highlighter-nodeinfobar-dimensions {
+  color: hsl(210,30%,85%);
   -moz-border-start: 1px solid #5a6169;
-  -moz-margin-start: 12px;
-}
-
-.highlighter-nodeinfobar-menu > .toolbarbutton-menu-dropmarker {
-  -moz-appearance: none !important;
-  list-style-image: url("chrome://browser/skin/devtools/dropmarker.png");
-  -moz-box-align: center;
-  -moz-margin-start: -1px;
+  -moz-margin-start: 6px;
+  -moz-padding-start: 6px;
 }
 
 /* Highlighter - Node Infobar - box & arrow */
@@ -108,4 +110,24 @@ html|*.highlighter-nodeinfobar-pseudo-classes {
 
 .highlighter-nodeinfobar-container[hide-arrow] > .highlighter-nodeinfobar {
   margin: 7px 0;
+}
+
+/* Css transform highlighter */
+
+svg|polygon.css-transform-transformed {
+  fill: #80d4ff;
+  opacity: 0.8;
+}
+
+svg|polygon.css-transform-untransformed {
+  fill: #66cc52;
+  opacity: 0.8;
+}
+
+svg|polygon.css-transform-transformed,
+svg|polygon.css-transform-untransformed,
+svg|line.css-transform-line {
+  stroke: #08C;
+  stroke-dasharray: 5 3;
+  stroke-width: 2;
 }

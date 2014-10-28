@@ -4,10 +4,20 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "D3D9SurfaceImage.h"
-#include "gfxImageSurface.h"
+#include "gfx2DGlue.h"
+#include "mozilla/layers/TextureD3D9.h"
+#include "mozilla/gfx/Types.h"
 
 namespace mozilla {
 namespace layers {
+
+
+D3D9SurfaceImage::D3D9SurfaceImage()
+  : Image(nullptr, ImageFormat::D3D9_RGB32_TEXTURE)
+  , mSize(0, 0)
+{}
+
+D3D9SurfaceImage::~D3D9SurfaceImage() {}
 
 HRESULT
 D3D9SurfaceImage::SetData(const Data& aData)
@@ -73,7 +83,7 @@ D3D9SurfaceImage::SetData(const Data& aData)
 
   mTexture = texture;
   mShareHandle = shareHandle;
-  mSize = gfxIntSize(region.width, region.height);
+  mSize = gfx::IntSize(region.width, region.height);
   mQuery = query;
 
   return S_OK;
@@ -109,23 +119,33 @@ D3D9SurfaceImage::GetDesc() const
   return mDesc;
 }
 
-gfxIntSize
+gfx::IntSize
 D3D9SurfaceImage::GetSize()
 {
   return mSize;
 }
 
-already_AddRefed<gfxASurface>
-D3D9SurfaceImage::GetAsSurface()
+TextureClient*
+D3D9SurfaceImage::GetTextureClient(CompositableClient* aClient)
+{
+  EnsureSynchronized();
+  if (!mTextureClient) {
+    RefPtr<SharedTextureClientD3D9> textureClient =
+      new SharedTextureClientD3D9(gfx::SurfaceFormat::B8G8R8X8, TextureFlags::DEFAULT);
+    textureClient->InitWith(mTexture, mShareHandle, mDesc);
+    mTextureClient = textureClient;
+  }
+  return mTextureClient;
+}
+
+TemporaryRef<gfx::SourceSurface>
+D3D9SurfaceImage::GetAsSourceSurface()
 {
   NS_ENSURE_TRUE(mTexture, nullptr);
 
   HRESULT hr;
-  nsRefPtr<gfxImageSurface> surface =
-    new gfxImageSurface(mSize, gfxImageFormatRGB24);
-
-  if (!surface->CairoSurface() || surface->CairoStatus()) {
-    NS_WARNING("Failed to created Cairo image surface for D3D9SurfaceImage.");
+  RefPtr<gfx::DataSourceSurface> surface = gfx::Factory::CreateDataSourceSurface(mSize, gfx::SurfaceFormat::B8G8R8X8);
+  if (NS_WARN_IF(!surface)) {
     return nullptr;
   }
 
@@ -158,17 +178,24 @@ D3D9SurfaceImage::GetAsSurface()
   hr = systemMemorySurface->LockRect(&rect, nullptr, 0);
   NS_ENSURE_TRUE(SUCCEEDED(hr), nullptr);
 
+  gfx::DataSourceSurface::MappedSurface mappedSurface;
+  if (!surface->Map(gfx::DataSourceSurface::WRITE, &mappedSurface)) {
+    systemMemorySurface->UnlockRect();
+    return nullptr;
+  }
+
   const unsigned char* src = (const unsigned char*)(rect.pBits);
   const unsigned srcPitch = rect.Pitch;
   for (int y = 0; y < mSize.height; y++) {
-    memcpy(surface->Data() + surface->Stride() * y,
+    memcpy(mappedSurface.mData + mappedSurface.mStride * y,
            (unsigned char*)(src) + srcPitch * y,
            mSize.width * 4);
   }
 
   systemMemorySurface->UnlockRect();
+  surface->Unmap();
 
-  return surface.forget();
+  return surface;
 }
 
 } /* layers */

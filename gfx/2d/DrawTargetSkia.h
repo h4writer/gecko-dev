@@ -3,7 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#pragma once
+#ifndef _MOZILLA_GFX_SOURCESURFACESKIA_H
+#define _MOZILLA_GFX_SOURCESURFACESKIA_H
 
 #ifdef USE_SKIA_GPU
 #include "skia/GrContext.h"
@@ -13,6 +14,7 @@
 #include "skia/SkCanvas.h"
 
 #include "2D.h"
+#include "HelpersSkia.h"
 #include "Rect.h"
 #include "PathSkia.h"
 #include <sstream>
@@ -26,10 +28,12 @@ class SourceSurfaceSkia;
 class DrawTargetSkia : public DrawTarget
 {
 public:
+  MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(DrawTargetSkia)
   DrawTargetSkia();
   virtual ~DrawTargetSkia();
 
-  virtual BackendType GetType() const { return BACKEND_SKIA; }
+  virtual DrawTargetType GetType() const MOZ_OVERRIDE;
+  virtual BackendType GetBackendType() const { return BackendType::SKIA; }
   virtual TemporaryRef<SourceSurface> Snapshot();
   virtual IntSize GetSize() { return mSize; }
   virtual void Flush();
@@ -95,27 +99,19 @@ public:
     CreateSourceSurfaceFromNativeSurface(const NativeSurface &aSurface) const;
   virtual TemporaryRef<DrawTarget>
     CreateSimilarDrawTarget(const IntSize &aSize, SurfaceFormat aFormat) const;
-  virtual TemporaryRef<PathBuilder> CreatePathBuilder(FillRule aFillRule = FILL_WINDING) const;
-  virtual TemporaryRef<GradientStops> CreateGradientStops(GradientStop *aStops, uint32_t aNumStops, ExtendMode aExtendMode = EXTEND_CLAMP) const;
+  virtual TemporaryRef<PathBuilder> CreatePathBuilder(FillRule aFillRule = FillRule::FILL_WINDING) const;
+  virtual TemporaryRef<GradientStops> CreateGradientStops(GradientStop *aStops, uint32_t aNumStops, ExtendMode aExtendMode = ExtendMode::CLAMP) const;
   virtual TemporaryRef<FilterNode> CreateFilter(FilterType aType);
   virtual void SetTransform(const Matrix &aTransform);
+  virtual void *GetNativeSurface(NativeSurfaceType aType);
 
   bool Init(const IntSize &aSize, SurfaceFormat aFormat);
   void Init(unsigned char* aData, const IntSize &aSize, int32_t aStride, SurfaceFormat aFormat);
 
 #ifdef USE_SKIA_GPU
-  virtual GenericRefCountedBase* GetGLContext() const MOZ_OVERRIDE { return mGLContext; }
-  void InitWithGLContextAndGrGLInterface(GenericRefCountedBase* aGLContext,
-                                         GrGLInterface* aGrGLInterface,
-                                         const IntSize &aSize,
-                                         SurfaceFormat aFormat) MOZ_OVERRIDE;
-
-  void SetCacheLimits(int aCount, int aSizeInBytes);
-  void PurgeCaches();
-
-  static void SetGlobalCacheLimits(int aCount, int aSizeInBytes);
-  static void RebalanceCacheLimits();
-  static void PurgeAllCaches();
+  bool InitWithGrContext(GrContext* aGrContext,
+                         const IntSize &aSize,
+                         SurfaceFormat aFormat) MOZ_OVERRIDE;
 #endif
 
   operator std::string() const {
@@ -132,25 +128,19 @@ private:
 
   SkRect SkRectCoveringWholeSurface() const;
 
-#ifdef USE_SKIA_GPU
-  /*
-   * These members have inter-dependencies, but do not keep each other alive, so
-   * destruction order is very important here: mGrContext uses mGrGLInterface, and
-   * through it, uses mGLContext, so it is important that they be declared in the
-   * present order.
-   */
-  RefPtr<GenericRefCountedBase> mGLContext;
-  SkRefPtr<GrGLInterface> mGrGLInterface;
-  SkRefPtr<GrContext> mGrContext;
+  bool UsingSkiaGPU() const;
 
-  static int sTextureCacheCount;
-  static int sTextureCacheSizeInBytes;
+#ifdef USE_SKIA_GPU
+  RefPtrSkia<GrContext> mGrContext;
+  uint32_t mTexture;
 #endif
 
   IntSize mSize;
-  SkRefPtr<SkCanvas> mCanvas;
+  RefPtrSkia<SkCanvas> mCanvas;
   SourceSurfaceSkia* mSnapshot;
 };
 
 }
 }
+
+#endif // _MOZILLA_GFX_SOURCESURFACESKIA_H

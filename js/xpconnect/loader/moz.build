@@ -5,7 +5,6 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 # These files cannot be built in unified mode because they rely on plarena.h
-# and they want to force NSPR logging.
 SOURCES += [
     'mozJSComponentLoader.cpp',
     'mozJSLoaderUtils.cpp',
@@ -21,6 +20,11 @@ FAIL_ON_WARNINGS = True
 
 MSVC_ENABLE_PGO = True
 
-FINAL_LIBRARY = 'xpconnect_s'
+FINAL_LIBRARY = 'xul'
 
-DEFINES['JS_THREADSAFE'] = True
+LOCAL_INCLUDES += [
+    '../src',
+    '../wrappers',
+    '/dom/base',
+]
+

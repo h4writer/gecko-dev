@@ -1,18 +1,18 @@
 package org.mozilla.gecko.tests;
 
-import org.mozilla.gecko.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+
+import org.mozilla.gecko.Actions;
+import org.mozilla.gecko.R;
+import org.mozilla.gecko.SuggestClient;
+import org.mozilla.gecko.home.BrowserSearch;
+
 import android.app.Activity;
-import android.content.Context;
 import android.support.v4.app.Fragment;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.TextView;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
-import java.lang.RuntimeException;
-import java.util.ArrayList;
-import java.util.HashMap;
 
 /**
  * Test for search suggestions.
@@ -25,20 +25,12 @@ public class testSearchSuggestions extends BaseTest {
     private static final String TEST_QUERY = "foo barz";
     private static final String SUGGESTION_TEMPLATE = "/robocop/robocop_suggestions.sjs?query=__searchTerms__";
 
-    @Override
-    protected int getTestType() {
-        return TEST_MOCHITEST;
-    }
-
     public void testSearchSuggestions() {
         blockForGeckoReady();
 
         // Map of expected values. See robocop_suggestions.sjs.
         final HashMap<String, ArrayList<String>> suggestMap = new HashMap<String, ArrayList<String>>();
         buildSuggestMap(suggestMap);
-
-        final int suggestionLayoutId = mDriver.findElement(getActivity(), "suggestion_layout").getId();
-        final int suggestionTextId = mDriver.findElement(getActivity(), "suggestion_text").getId();
 
         focusUrlBar();
 
@@ -65,7 +57,7 @@ public class testSearchSuggestions extends BaseTest {
                 @Override
                 public boolean test() {
                     // get the first suggestion row
-                    ViewGroup suggestionGroup = (ViewGroup) getActivity().findViewById(suggestionLayoutId);
+                    ViewGroup suggestionGroup = (ViewGroup) getActivity().findViewById(R.id.suggestion_layout);
                     if (suggestionGroup == null)
                         return false;
 
@@ -75,7 +67,7 @@ public class testSearchSuggestions extends BaseTest {
                         if (queryChild == null || queryChild.getVisibility() == View.GONE)
                             return false;
 
-                        String suggestion = ((TextView) queryChild.findViewById(suggestionTextId)).getText().toString();
+                        String suggestion = ((TextView) queryChild.findViewById(R.id.suggestion_text)).getText().toString();
                         if (!suggestion.equals(expected.get(i)))
                             return false;
                     }
@@ -101,34 +93,20 @@ public class testSearchSuggestions extends BaseTest {
     }
 
     private void connectSuggestClient(final Activity activity) {
-        try {
-            // create a SuggestClient that uses robocop_suggestions.sjs
-            ClassLoader classLoader = getActivity().getApplicationContext().getClassLoader();
-            Class suggestClass = classLoader.loadClass("org.mozilla.gecko.home.SuggestClient");
-            Constructor suggestConstructor = suggestClass.getConstructor(
-                    new Class[] { Context.class, String.class, int.class });
-            String suggestTemplate = getAbsoluteRawUrl(SUGGESTION_TEMPLATE);
+        waitForTest(new BooleanTest() {
+            @Override
+            public boolean test() {
+                final Fragment browserSearch = getBrowserSearch();
+                return (browserSearch != null);
+            }
+        }, SUGGESTION_TIMEOUT);
 
-            Object client = suggestConstructor.newInstance(activity, suggestTemplate, SUGGESTION_TIMEOUT);
+        final BrowserSearch browserSearch = (BrowserSearch) getBrowserSearch();
 
-            // replace mSuggestClient with test client
-            final Class browserSearchClass = classLoader.loadClass("org.mozilla.gecko.home.BrowserSearch");
-            final Field suggestClientField = browserSearchClass.getDeclaredField("mSuggestClient");
-            suggestClientField.setAccessible(true);
-
-            waitForTest(new BooleanTest() {
-                @Override
-                public boolean test() {
-                    final Fragment browserSearch = getBrowserSearch();
-                    return (browserSearch != null);
-                }
-            }, SUGGESTION_TIMEOUT);
-
-            final Fragment browserSearch = getBrowserSearch();
-            suggestClientField.set(browserSearch, client);
-        } catch (Exception e) {
-           throw new RuntimeException("Error setting SuggestClient", e);
-        }
+        final String suggestTemplate = getAbsoluteRawUrl(SUGGESTION_TEMPLATE);
+        final SuggestClient client = new SuggestClient(activity, suggestTemplate,
+                SUGGESTION_TIMEOUT);
+        browserSearch.setSuggestClient(client);
     }
 }
 

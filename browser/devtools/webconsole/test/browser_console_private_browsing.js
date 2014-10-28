@@ -11,7 +11,8 @@ function test()
   const TEST_URI = "data:text/html;charset=utf8,<p>hello world! bug 874061" +
                    "<button onclick='console.log(\"foobar bug 874061\");" +
                    "fooBazBaz.yummy()'>click</button>";
-  let ConsoleAPIStorage = Cu.import("resource://gre/modules/ConsoleAPIStorage.jsm", {}).ConsoleAPIStorage;
+  let ConsoleAPIStorage = Cc["@mozilla.org/consoleAPI-storage;1"]
+                            .getService(Ci.nsIConsoleAPIStorage);
   let privateWindow, privateBrowser, privateTab, privateContent;
   let hud, expectedMessages, nonPrivateMessage;
 
@@ -64,7 +65,7 @@ function test()
       info("private tab opened");
       privateBrowser.selectedBrowser.removeEventListener("load", onLoad, true);
       privateContent = privateBrowser.selectedBrowser.contentWindow;
-      ok(PrivateBrowsingUtils.isWindowPrivate(privateContent), "tab window is private");
+      ok(PrivateBrowsingUtils.isBrowserPrivate(privateBrowser.selectedBrowser), "tab window is private");
       openConsole(privateTab, consoleOpened);
     }, true);
   }

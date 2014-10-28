@@ -18,7 +18,7 @@ nsDataHandler::nsDataHandler() {
 nsDataHandler::~nsDataHandler() {
 }
 
-NS_IMPL_ISUPPORTS1(nsDataHandler, nsIProtocolHandler)
+NS_IMPL_ISUPPORTS(nsDataHandler, nsIProtocolHandler)
 
 nsresult
 nsDataHandler::Create(nsISupports* aOuter, const nsIID& aIID, void* *aResult) {
@@ -103,7 +103,10 @@ nsDataHandler::NewURI(const nsACString &aSpec,
 }
 
 NS_IMETHODIMP
-nsDataHandler::NewChannel(nsIURI* uri, nsIChannel* *result) {
+nsDataHandler::NewChannel2(nsIURI* uri,
+                           nsILoadInfo* aLoadInfo,
+                           nsIChannel** result)
+{
     NS_ENSURE_ARG_POINTER(uri);
     nsDataChannel* channel = new nsDataChannel(uri);
     if (!channel)
@@ -118,6 +121,12 @@ nsDataHandler::NewChannel(nsIURI* uri, nsIChannel* *result) {
 
     *result = channel;
     return NS_OK;
+}
+
+NS_IMETHODIMP
+nsDataHandler::NewChannel(nsIURI* uri, nsIChannel* *result)
+{
+    return NewChannel2(uri, nullptr, result);
 }
 
 NS_IMETHODIMP 

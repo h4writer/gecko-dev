@@ -7,12 +7,19 @@
 #ifndef nsDragService_h__
 #define nsDragService_h__
 
+#include "nsAutoPtr.h"
 #include "nsBaseDragService.h"
 #include "nsIObserver.h"
 #include "nsAutoRef.h"
 #include <gtk/gtk.h>
 
 class nsWindow;
+
+namespace mozilla {
+namespace gfx {
+class SourceSurface;
+}
+}
 
 #ifndef HAVE_NSGOBJECTREFTRAITS
 #define HAVE_NSGOBJECTREFTRAITS
@@ -41,12 +48,11 @@ class nsAutoRefTraits<GdkDragContext> :
  * Native GTK DragService wrapper
  */
 
-class nsDragService : public nsBaseDragService,
-                      public nsIObserver
+class nsDragService MOZ_FINAL : public nsBaseDragService,
+                                public nsIObserver
 {
 public:
     nsDragService();
-    virtual ~nsDragService();
 
     NS_DECL_ISUPPORTS_INHERITED
 
@@ -111,6 +117,9 @@ public:
 
     // set the drag icon during drag-begin
     void SetDragIcon(GdkDragContext* aContext);
+
+protected:
+    virtual ~nsDragService();
 
 private:
 
@@ -183,11 +192,11 @@ private:
 
     // attempts to create a semi-transparent drag image. Returns TRUE if
     // successful, FALSE if not
-    bool SetAlphaPixmap(gfxASurface     *aPixbuf,
-                          GdkDragContext  *aContext,
-                          int32_t          aXOffset,
-                          int32_t          aYOffset,
-                          const nsIntRect &dragRect);
+    bool SetAlphaPixmap(SourceSurface *aPixbuf,
+                        GdkDragContext  *aContext,
+                        int32_t          aXOffset,
+                        int32_t          aYOffset,
+                        const nsIntRect &dragRect);
 
     gboolean Schedule(DragTask aTask, nsWindow *aWindow,
                       GdkDragContext *aDragContext,

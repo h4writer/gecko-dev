@@ -15,23 +15,29 @@
 #include "mozilla/gfx/2D.h"             // for DataSourceSurface
 #include "mozilla/gfx/Point.h"          // for IntSize, IntPoint
 #include "mozilla/gfx/Types.h"          // for SurfaceFormat, etc
+#include "mozilla/layers/Compositor.h"  // for Compositor
 #include "mozilla/layers/CompositorTypes.h"  // for TextureFlags, etc
+#include "mozilla/layers/FenceUtils.h"  // for FenceHandle
 #include "mozilla/layers/LayersTypes.h"  // for LayerRenderState, etc
 #include "mozilla/mozalloc.h"           // for operator delete
+#include "mozilla/UniquePtr.h"          // for UniquePtr
 #include "nsCOMPtr.h"                   // for already_AddRefed
 #include "nsDebug.h"                    // for NS_RUNTIMEABORT
+#include "nsISupportsImpl.h"            // for MOZ_COUNT_CTOR, etc
 #include "nsRegion.h"                   // for nsIntRegion
 #include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
 #include "nscore.h"                     // for nsACString
 #include "mozilla/layers/AtomicRefCountedWithFinalize.h"
 
-class gfxImageSurface;
 class gfxReusableSurfaceWrapper;
 struct nsIntPoint;
 struct nsIntSize;
 struct nsIntRect;
 
 namespace mozilla {
+namespace gl {
+class SharedSurface;
+}
 namespace ipc {
 class Shmem;
 }
@@ -41,8 +47,11 @@ namespace layers {
 class Compositor;
 class CompositableHost;
 class CompositableBackendSpecificData;
+class CompositableParentManager;
 class SurfaceDescriptor;
+class SharedSurfaceDescriptor;
 class ISurfaceAllocator;
+class TextureHostOGL;
 class TextureSourceOGL;
 class TextureSourceD3D9;
 class TextureSourceD3D11;
@@ -59,11 +68,11 @@ class TextureParent;
  * device texture, which forces us to split it in smaller parts.
  * Tiled Compositable is a different thing.
  */
-class TileIterator
+class BigImageIterator
 {
 public:
-  virtual void BeginTileIteration() = 0;
-  virtual void EndTileIteration() {};
+  virtual void BeginBigImageIteration() = 0;
+  virtual void EndBigImageIteration() {};
   virtual nsIntRect GetTileRect() = 0;
   virtual size_t GetTileCount() = 0;
   virtual bool NextTile() = 0;
@@ -78,11 +87,19 @@ public:
  *
  * This class is used on the compositor side.
  */
-class TextureSource : public RefCounted<TextureSource>
+class TextureSource
 {
 public:
+  NS_INLINE_DECL_REFCOUNTING(TextureSource)
+
   TextureSource();
-  virtual ~TextureSource();
+
+  /**
+   * Should be overridden in order to deallocate the data that is associated
+   * with the rendering backend, such as GL textures.
+   */
+  virtual void DeallocateDeviceData() {}
+
 
   /**
    * Return the size of the texture in texels.
@@ -93,7 +110,7 @@ public:
   /**
    * Return the pixel format of this texture
    */
-  virtual gfx::SurfaceFormat GetFormat() const { return gfx::FORMAT_UNKNOWN; }
+  virtual gfx::SurfaceFormat GetFormat() const { return gfx::SurfaceFormat::UNKNOWN; }
 
   /**
    * Cast to a TextureSource for for each backend..
@@ -102,65 +119,28 @@ public:
   virtual TextureSourceD3D9* AsSourceD3D9() { return nullptr; }
   virtual TextureSourceD3D11* AsSourceD3D11() { return nullptr; }
   virtual TextureSourceBasic* AsSourceBasic() { return nullptr; }
-
   /**
    * Cast to a DataTextureSurce.
    */
   virtual DataTextureSource* AsDataTextureSource() { return nullptr; }
 
   /**
-   * In some rare cases we currently need to consider a group of textures as one
-   * TextureSource, that can be split in sub-TextureSources.
-   */
-  virtual TextureSource* GetSubSource(int index) { return nullptr; }
-
-  /**
    * Overload this if the TextureSource supports big textures that don't fit in
    * one device texture and must be tiled internally.
    */
-  virtual TileIterator* AsTileIterator() { return nullptr; }
+  virtual BigImageIterator* AsBigImageIterator() { return nullptr; }
 
-  virtual void SetCompositableBackendSpecificData(CompositableBackendSpecificData* aBackendData);
+  virtual void SetCompositor(Compositor* aCompositor) {}
 
-protected:
-  RefPtr<CompositableBackendSpecificData> mCompositableBackendData;
-};
+  void SetNextSibling(TextureSource* aTexture) { mNextSibling = aTexture; }
 
-
-/**
- * XXX - merge this class with TextureSource when deprecated texture classes
- * are completely removed.
- */
-class NewTextureSource : public TextureSource
-{
-public:
-  NewTextureSource()
-  {
-    MOZ_COUNT_CTOR(NewTextureSource);
-  }
-  virtual ~NewTextureSource()
-  {
-    MOZ_COUNT_DTOR(NewTextureSource);
-  }
+  TextureSource* GetNextSibling() const { return mNextSibling; }
 
   /**
-   * Should be overridden in order to deallocate the data that is associated
-   * with the rendering backend, such as GL textures.
+   * In some rare cases we currently need to consider a group of textures as one
+   * TextureSource, that can be split in sub-TextureSources.
    */
-  virtual void DeallocateDeviceData() = 0;
-
-  void SetNextSibling(NewTextureSource* aTexture)
-  {
-    mNextSibling = aTexture;
-  }
-
-  NewTextureSource* GetNextSibling() const
-  {
-    return mNextSibling;
-  }
-
-  // temporary adapter to use the same SubSource API as the old TextureSource
-  virtual TextureSource* GetSubSource(int index) MOZ_OVERRIDE
+  TextureSource* GetSubSource(int index)
   {
     switch (index) {
       case 0: return this;
@@ -171,7 +151,9 @@ public:
   }
 
 protected:
-  RefPtr<NewTextureSource> mNextSibling;
+  virtual ~TextureSource();
+
+  RefPtr<TextureSource> mNextSibling;
 };
 
 /**
@@ -179,7 +161,7 @@ protected:
  *
  * All backend should implement at least one DataTextureSource.
  */
-class DataTextureSource : public NewTextureSource
+class DataTextureSource : public TextureSource
 {
 public:
   DataTextureSource()
@@ -195,7 +177,6 @@ public:
    * the device texture it uploads to internally.
    */
   virtual bool Update(gfx::DataSourceSurface* aSurface,
-                      TextureFlags aFlags,
                       nsIntRegion* aDestRegion = nullptr,
                       gfx::IntPoint* aSrcOffset = nullptr) = 0;
 
@@ -271,18 +252,29 @@ class TextureHost
   void Finalize();
 
   friend class AtomicRefCountedWithFinalize<TextureHost>;
-
 public:
-  TextureHost(TextureFlags aFlags);
+  explicit TextureHost(TextureFlags aFlags);
 
+protected:
   virtual ~TextureHost();
 
+public:
   /**
    * Factory method.
    */
   static TemporaryRef<TextureHost> Create(const SurfaceDescriptor& aDesc,
                                           ISurfaceAllocator* aDeallocator,
                                           TextureFlags aFlags);
+
+  /**
+   * Tell to TextureChild that TextureHost is recycled.
+   * This function should be called from TextureHost's RecycleCallback.
+   * If SetRecycleCallback is set to TextureHost.
+   * TextureHost can be recycled by calling RecycleCallback
+   * when reference count becomes one.
+   * One reference count is always added by TextureChild.
+   */
+  void CompositorRecycle();
 
   /**
    * Lock the texture host for compositing.
@@ -308,7 +300,7 @@ public:
    * so as to not upload textures while the main thread is blocked.
    * Must not be called while this TextureHost is not sucessfully Locked.
    */
-  virtual NewTextureSource* GetTextureSources() = 0;
+  virtual TextureSource* GetTextureSources() = 0;
 
   /**
    * Is called before compositing if the shared data has changed since last
@@ -378,7 +370,9 @@ public:
    * are for use with the managing IPDL protocols only (so that they can
    * implement AllocPTextureParent and DeallocPTextureParent).
    */
-  static PTextureParent* CreateIPDLActor(ISurfaceAllocator* aAllocator);
+  static PTextureParent* CreateIPDLActor(CompositableParentManager* aManager,
+                                         const SurfaceDescriptor& aSharedData,
+                                         TextureFlags aFlags);
   static bool DestroyIPDLActor(PTextureParent* actor);
 
   /**
@@ -390,6 +384,16 @@ public:
    * Get the TextureHost corresponding to the actor passed in parameter.
    */
   static TextureHost* AsTextureHost(PTextureParent* actor);
+
+  /**
+   * Return a pointer to the IPDLActor.
+   *
+   * This is to be used with IPDL messages only. Do not store the returned
+   * pointer.
+   */
+  PTextureParent* GetIPDLActor();
+
+  FenceHandle GetAndResetReleaseFenceHandle();
 
   /**
    * Specific to B2G's Composer2D
@@ -404,16 +408,36 @@ public:
 
   virtual void SetCompositableBackendSpecificData(CompositableBackendSpecificData* aBackendData);
 
+  virtual void UnsetCompositableBackendSpecificData(CompositableBackendSpecificData* aBackendData);
+
   // If a texture host holds a reference to shmem, it should override this method
   // to forget about the shmem _without_ releasing it.
   virtual void OnShutdown() {}
 
+  // Forget buffer actor. Used only for hacky fix for bug 966446.
+  virtual void ForgetBufferActor() {}
+
   virtual const char *Name() { return "TextureHost"; }
-  virtual void PrintInfo(nsACString& aTo, const char* aPrefix);
+  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix);
+
+  /**
+   * Indicates whether the TextureHost implementation is backed by an
+   * in-memory buffer. The consequence of this is that locking the
+   * TextureHost does not contend with locking the texture on the client side.
+   */
+  virtual bool HasInternalBuffer() const { return false; }
+
+  /**
+   * Cast to a TextureHost for each backend.
+   */
+  virtual TextureHostOGL* AsHostOGL() { return nullptr; }
 
 protected:
+  PTextureParent* mActor;
   TextureFlags mFlags;
   RefPtr<CompositableBackendSpecificData> mCompositableBackendData;
+
+  friend class TextureParent;
 };
 
 /**
@@ -439,13 +463,15 @@ public:
 
   virtual uint8_t* GetBuffer() = 0;
 
+  virtual size_t GetBufferSize() = 0;
+
   virtual void Updated(const nsIntRegion* aRegion = nullptr) MOZ_OVERRIDE;
 
   virtual bool Lock() MOZ_OVERRIDE;
 
   virtual void Unlock() MOZ_OVERRIDE;
 
-  virtual NewTextureSource* GetTextureSources() MOZ_OVERRIDE;
+  virtual TextureSource* GetTextureSources() MOZ_OVERRIDE;
 
   virtual void DeallocateDeviceData() MOZ_OVERRIDE;
 
@@ -456,7 +482,7 @@ public:
    * GetTextureSources.
    *
    * If the shared format is YCbCr and the compositor does not support it,
-   * GetFormat will be RGB32 (even though mFormat is FORMAT_YUV).
+   * GetFormat will be RGB32 (even though mFormat is SurfaceFormat::YUV).
    */
   virtual gfx::SurfaceFormat GetFormat() const MOZ_OVERRIDE;
 
@@ -464,11 +490,13 @@ public:
 
   virtual TemporaryRef<gfx::DataSourceSurface> GetAsSurface() MOZ_OVERRIDE;
 
+  virtual bool HasInternalBuffer() const MOZ_OVERRIDE { return true; }
+
 protected:
   bool Upload(nsIntRegion *aRegion = nullptr);
   bool MaybeUpload(nsIntRegion *aRegion = nullptr);
 
-  Compositor* mCompositor;
+  RefPtr<Compositor> mCompositor;
   RefPtr<DataTextureSource> mFirstSource;
   nsIntRegion mMaybeUpdatedRegion;
   gfx::IntSize mSize;
@@ -476,7 +504,7 @@ protected:
   gfx::SurfaceFormat mFormat;
   uint32_t mUpdateSerial;
   bool mLocked;
-  bool mPartialUpdate;
+  bool mNeedsFullUpdate;
 };
 
 /**
@@ -492,20 +520,24 @@ public:
                    ISurfaceAllocator* aDeallocator,
                    TextureFlags aFlags);
 
+protected:
   ~ShmemTextureHost();
 
+public:
   virtual void DeallocateSharedData() MOZ_OVERRIDE;
 
   virtual void ForgetSharedData() MOZ_OVERRIDE;
 
   virtual uint8_t* GetBuffer() MOZ_OVERRIDE;
 
+  virtual size_t GetBufferSize() MOZ_OVERRIDE;
+
   virtual const char *Name() MOZ_OVERRIDE { return "ShmemTextureHost"; }
 
   virtual void OnShutdown() MOZ_OVERRIDE;
 
 protected:
-  mozilla::ipc::Shmem* mShmem;
+  UniquePtr<mozilla::ipc::Shmem> mShmem;
   RefPtr<ISurfaceAllocator> mDeallocator;
 };
 
@@ -522,13 +554,17 @@ public:
                     gfx::SurfaceFormat aFormat,
                     TextureFlags aFlags);
 
+protected:
   ~MemoryTextureHost();
 
+public:
   virtual void DeallocateSharedData() MOZ_OVERRIDE;
 
   virtual void ForgetSharedData() MOZ_OVERRIDE;
 
   virtual uint8_t* GetBuffer() MOZ_OVERRIDE;
+
+  virtual size_t GetBufferSize() MOZ_OVERRIDE;
 
   virtual const char *Name() MOZ_OVERRIDE { return "MemoryTextureHost"; }
 
@@ -536,290 +572,101 @@ protected:
   uint8_t* mBuffer;
 };
 
-
 /**
- * XXX - This class is deprectaed, will be removed soon.
- *
- * DeprecatedTextureHost is a thin abstraction over texture data that need to be shared
- * or transfered from the content process to the compositor process. It is the
- * compositor-side half of a DeprecatedTextureClient/DeprecatedTextureHost pair. A corresponding
- * DeprecatedTextureClient lives on the client-side.
- *
- * DeprecatedTextureHost only knows how to deserialize or synchronize generic image data
- * (SurfaceDescriptor) and provide access to one or more TextureSource objects
- * (these provide the necessary APIs for compositor backends to composite the
- * image).
- *
- * A DeprecatedTextureHost should mostly correspond to one or several SurfaceDescriptor
- * types. This means that for YCbCr planes, even though they are represented as
- * 3 textures internally, use 1 DeprecatedTextureHost and not 3, because the 3 planes
- * arrive in the same IPC message.
- *
- * The Lock/Unlock mechanism here mirrors Lock/Unlock in DeprecatedTextureClient. These two
- * methods don't always have to use blocking locks, unless a resource is shared
- * between the two sides (like shared texture handles). For instance, in some
- * cases the data received in Update(...) is a copy in shared memory of the data
- * owned by the content process, in which case no blocking lock is required.
- *
- * DeprecatedTextureHosts can be changed at any time, for example if we receive a
- * SurfaceDescriptor type that was not expected. This should be an incentive
- * to keep the ownership model simple (especially on the OpenGL case, where
- * we have additionnal constraints).
- *
- * There are two fundamental operations carried out on texture hosts - update
- * from the content thread and composition. Texture upload can occur in either
- * phase. Update happens in response to an IPDL message from content and
- * composition when the compositor 'ticks'. We may composite many times before
- * update.
- *
- * Update ends up at DeprecatedTextureHost::UpdateImpl. It always occurs in a layers
- * transacton. (TextureParent should call EnsureTexture before updating to
- * ensure the DeprecatedTextureHost exists and is of the correct type).
- *
- * CompositableHost::Composite does compositing. It should check the texture
- * host exists (and give up otherwise), then lock the texture host
- * (DeprecatedTextureHost::Lock). Then it passes the texture host to the Compositor in an
- * effect as a texture source, which does the actual composition. Finally the
- * compositable calls Unlock on the DeprecatedTextureHost.
- *
- * The class TextureImageDeprecatedTextureHostOGL is a good example of a DeprecatedTextureHost
- * implementation.
- *
- * This class is used only on the compositor side.
+ * A TextureHost for SharedSurfaces
  */
-class DeprecatedTextureHost : public TextureSource
+class SharedSurfaceTextureHost : public TextureHost
 {
 public:
-  /**
-   * Create a new texture host to handle surfaces of aDescriptorType
-   *
-   * @param aDescriptorType The SurfaceDescriptor type being passed
-   * @param aDeprecatedTextureHostFlags Modifier flags that specify changes in
-   * the usage of a aDescriptorType, see DeprecatedTextureHostFlags
-   * @param aTextureFlags Flags to pass to the new DeprecatedTextureHost
-   */
-  static TemporaryRef<DeprecatedTextureHost> CreateDeprecatedTextureHost(SurfaceDescriptorType aDescriptorType,
-                                                     uint32_t aDeprecatedTextureHostFlags,
-                                                     uint32_t aTextureFlags,
-                                                     CompositableHost* aCompositableHost);
+  SharedSurfaceTextureHost(TextureFlags aFlags,
+                           const SharedSurfaceDescriptor& aDesc);
 
-  DeprecatedTextureHost();
-  virtual ~DeprecatedTextureHost();
-
-  virtual gfx::SurfaceFormat GetFormat() const MOZ_OVERRIDE { return mFormat; }
-
-  virtual bool IsValid() const { return true; }
-
-  /**
-   * Update the texture host using the data from aSurfaceDescriptor.
-   *
-   * @param aImage Source image to update with.
-   * @param aRegion Region of the texture host to update.
-   * @param aOffset Offset in the source to update from
-   */
-  void Update(const SurfaceDescriptor& aImage,
-              nsIntRegion *aRegion = nullptr,
-              nsIntPoint* aOffset = nullptr);
-
-  /**
-   * Change the current surface of the texture host to aImage. aResult will return
-   * the previous surface.
-   */
-  void SwapTextures(const SurfaceDescriptor& aImage,
-                    SurfaceDescriptor* aResult = nullptr,
-                    nsIntRegion *aRegion = nullptr);
-
-  /**
-   * Update for tiled texture hosts could probably have a better signature, but we
-   * will replace it with PTexture stuff anyway, so nm.
-   */
-  virtual void Update(gfxReusableSurfaceWrapper* aReusableSurface,
-  	                  TextureFlags aFlags,
-  	                  const gfx::IntSize& aSize) {}
-
-  /**
-   * Lock the texture host for compositing, returns true if the DeprecatedTextureHost is
-   * valid for composition.
-   */
-  virtual bool Lock() { return IsValid(); }
-
-  /**
-   * Unlock the texture host after compositing.
-   * Should handle the case where Lock failed without crashing.
-   */
-  virtual void Unlock() {}
-
-  void SetFlags(TextureFlags aFlags) { mFlags = aFlags; }
-  void AddFlag(TextureFlags aFlag) { mFlags |= aFlag; }
-  TextureFlags GetFlags() { return mFlags; }
-
-  /**
-   * Sets ths DeprecatedTextureHost's compositor.
-   * A DeprecatedTextureHost can change compositor on certain occasions, in particular if
-   * it belongs to an async Compositable.
-   * aCompositor can be null, in which case the DeprecatedTextureHost must cleanup  all
-   * of it's device textures.
-   */
-  virtual void SetCompositor(Compositor* aCompositor) {}
-
-  ISurfaceAllocator* GetDeAllocator()
-  {
-    return mDeAllocator;
+  virtual ~SharedSurfaceTextureHost() {
+    MOZ_ASSERT(!mIsLocked);
   }
 
-  bool operator== (const DeprecatedTextureHost& o) const
-  {
-    return GetIdentifier() == o.GetIdentifier();
-  }
-  bool operator!= (const DeprecatedTextureHost& o) const
-  {
-    return GetIdentifier() != o.GetIdentifier();
+  virtual void DeallocateDeviceData() MOZ_OVERRIDE {};
+
+  virtual TemporaryRef<gfx::DataSourceSurface> GetAsSurface() MOZ_OVERRIDE {
+    return nullptr; // XXX - implement this (for MOZ_DUMP_PAINTING)
   }
 
-  virtual LayerRenderState GetRenderState()
-  {
-    return LayerRenderState();
+  virtual void SetCompositor(Compositor* aCompositor) MOZ_OVERRIDE {
+    MOZ_ASSERT(!mIsLocked);
+
+    if (aCompositor == mCompositor)
+      return;
+
+    mTexSource = nullptr;
+    mCompositor = aCompositor;
   }
 
-  virtual TemporaryRef<gfx::DataSourceSurface> GetAsSurface() = 0;
+public:
 
-  virtual const char *Name() = 0;
-  virtual void PrintInfo(nsACString& aTo, const char* aPrefix);
+  virtual bool Lock() MOZ_OVERRIDE;
+  virtual void Unlock() MOZ_OVERRIDE;
 
-  /**
-   * TEMPORARY.
-   *
-   * Ensure that a buffer of the given size/type has been allocated so that
-   * we can update it using Update and/or CopyTo.
-   */
-  virtual void EnsureBuffer(const nsIntSize& aSize, gfxContentType aType)
-  {
-    NS_RUNTIMEABORT("DeprecatedTextureHost doesn't support EnsureBuffer");
+  virtual TextureSource* GetTextureSources() MOZ_OVERRIDE {
+    MOZ_ASSERT(mIsLocked);
+    MOZ_ASSERT(mTexSource);
+    return mTexSource;
   }
 
-  /**
-   * Copy the contents of this DeprecatedTextureHost to aDest. aDest must already
-   * have a suitable buffer allocated using EnsureBuffer.
-   *
-   * @param aSourceRect Area of this texture host to copy.
-   * @param aDest Destination texture host.
-   * @param aDestRect Destination rect.
-   */
-  virtual void CopyTo(const nsIntRect& aSourceRect,
-                      DeprecatedTextureHost *aDest,
-                      const nsIntRect& aDestRect)
-  {
-    NS_RUNTIMEABORT("DeprecatedTextureHost doesn't support CopyTo");
-  }
+  virtual gfx::SurfaceFormat GetFormat() const MOZ_OVERRIDE;
 
+  virtual gfx::IntSize GetSize() const MOZ_OVERRIDE;
 
-  SurfaceDescriptor* GetBuffer() const { return mBuffer; }
-  virtual SurfaceDescriptor* LockSurfaceDescriptor() const { return GetBuffer(); }
-
-  /**
-   * Set a SurfaceDescriptor for this texture host. By setting a buffer and
-   * allocator/de-allocator for the DeprecatedTextureHost, you cause the DeprecatedTextureHost to
-   * retain a SurfaceDescriptor.
-   * Ownership of the SurfaceDescriptor passes to this.
-   */
-  // only made virtual to allow overriding in GrallocDeprecatedTextureHostOGL, for hacky fix in gecko 23 for bug 862324.
-  // see bug 865908 about fixing this.
-  virtual void SetBuffer(SurfaceDescriptor* aBuffer, ISurfaceAllocator* aAllocator);
-
-  // used only for hacky fix in gecko 23 for bug 862324
-  // see bug 865908 about fixing this.
-  virtual void ForgetBuffer() {}
-
-  void OnShutdown();
+#ifdef MOZ_LAYERS_HAVE_LOG
+  virtual const char* Name() { return "SharedSurfaceTextureHost"; }
+#endif
 
 protected:
-  /**
-   * Should be implemented by the backend-specific DeprecatedTextureHost classes
-   *
-   * It should not take a reference to aImage, unless it knows the data
-   * to be thread-safe.
-   */
-  virtual void UpdateImpl(const SurfaceDescriptor& aImage,
-                          nsIntRegion *aRegion,
-                          nsIntPoint *aOffset = nullptr)
-  {
-    NS_RUNTIMEABORT("Should not be reached");
-  }
+  void EnsureTexSource();
 
-  /**
-   * Should be implemented by the backend-specific DeprecatedTextureHost classes.
-   *
-   * Doesn't need to do the actual surface descriptor swap, just
-   * any preparation work required to use the new descriptor.
-   *
-   * If the implementation doesn't define anything in particular
-   * for handling swaps, then we can just do an update instead.
-   */
-  virtual void SwapTexturesImpl(const SurfaceDescriptor& aImage,
-                                nsIntRegion *aRegion)
-  {
-    UpdateImpl(aImage, aRegion, nullptr);
-  }
-
-  // An internal identifier for this texture host. Two texture hosts
-  // should be considered equal iff their identifiers match. Should
-  // not be exposed publicly.
-  virtual uint64_t GetIdentifier() const
-  {
-    return reinterpret_cast<uint64_t>(this);
-  }
-
-  // Texture info
-  TextureFlags mFlags;
-  SurfaceDescriptor* mBuffer; // FIXME [bjacob] it's terrible to have a SurfaceDescriptor here,
-                              // because SurfaceDescriptor's may have raw pointers to IPDL actors,
-                              // which can go away under our feet at any time. This is the cause
-                              // of bug 862324 among others. Our current understanding is that
-                              // this will be gone in Gecko 24. See bug 858914.
-  RefPtr<ISurfaceAllocator> mDeAllocator;
-  gfx::SurfaceFormat mFormat;
+  bool mIsLocked;
+  gl::SharedSurface* const mSurf;
+  RefPtr<Compositor> mCompositor;
+  RefPtr<TextureSource> mTexSource;
 };
 
-class AutoLockDeprecatedTextureHost
+class MOZ_STACK_CLASS AutoLockTextureHost
 {
 public:
-  AutoLockDeprecatedTextureHost(DeprecatedTextureHost* aHost)
-    : mDeprecatedTextureHost(aHost)
-    , mIsValid(true)
+  explicit AutoLockTextureHost(TextureHost* aTexture)
+    : mTexture(aTexture)
   {
-    if (mDeprecatedTextureHost) {
-      mIsValid = mDeprecatedTextureHost->Lock();
+    mLocked = mTexture ? mTexture->Lock() : false;
+  }
+
+  ~AutoLockTextureHost()
+  {
+    if (mTexture && mLocked) {
+      mTexture->Unlock();
     }
   }
 
-  ~AutoLockDeprecatedTextureHost()
-  {
-    if (mDeprecatedTextureHost && mIsValid) {
-      mDeprecatedTextureHost->Unlock();
-    }
-  }
-
-  bool IsValid() { return mIsValid; }
+  bool Failed() { return mTexture && !mLocked; }
 
 private:
-  DeprecatedTextureHost *mDeprecatedTextureHost;
-  bool mIsValid;
+  RefPtr<TextureHost> mTexture;
+  bool mLocked;
 };
 
 /**
  * This can be used as an offscreen rendering target by the compositor, and
  * subsequently can be used as a source by the compositor.
  */
-class CompositingRenderTarget : public TextureSource
+class CompositingRenderTarget: public TextureSource
 {
 public:
-  CompositingRenderTarget(const gfx::IntPoint& aOrigin)
+
+  explicit CompositingRenderTarget(const gfx::IntPoint& aOrigin)
     : mOrigin(aOrigin)
   {}
   virtual ~CompositingRenderTarget() {}
 
 #ifdef MOZ_DUMP_PAINTING
-  virtual already_AddRefed<gfxImageSurface> Dump(Compositor* aCompositor) { return nullptr; }
+  virtual TemporaryRef<gfx::DataSourceSurface> Dump(Compositor* aCompositor) { return nullptr; }
 #endif
 
   const gfx::IntPoint& GetOrigin() { return mOrigin; }

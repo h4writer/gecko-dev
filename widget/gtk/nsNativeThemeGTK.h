@@ -3,6 +3,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#ifndef _GTK_NSNATIVETHEMEGTK_H_
+#define _GTK_NSNATIVETHEMEGTK_H_
+
 #include "nsITheme.h"
 #include "nsCOMPtr.h"
 #include "nsIAtom.h"
@@ -29,17 +32,17 @@ public:
   NS_IMETHOD GetWidgetBorder(nsDeviceContext* aContext, nsIFrame* aFrame,
                              uint8_t aWidgetType, nsIntMargin* aResult);
 
-  virtual NS_HIDDEN_(bool) GetWidgetPadding(nsDeviceContext* aContext,
+  virtual bool GetWidgetPadding(nsDeviceContext* aContext,
                                               nsIFrame* aFrame,
                                               uint8_t aWidgetType,
                                               nsIntMargin* aResult);
 
-  virtual NS_HIDDEN_(bool) GetWidgetOverflow(nsDeviceContext* aContext,
+  virtual bool GetWidgetOverflow(nsDeviceContext* aContext,
                                                nsIFrame* aFrame,
                                                uint8_t aWidgetType,
                                                nsRect* aOverflowRect);
 
-  NS_IMETHOD GetMinimumWidgetSize(nsRenderingContext* aContext,
+  NS_IMETHOD GetMinimumWidgetSize(nsPresContext* aPresContext,
                                   nsIFrame* aFrame, uint8_t aWidgetType,
                                   nsIntSize* aResult, bool* aIsOverridable);
 
@@ -62,6 +65,8 @@ public:
                                              uint8_t aWidgetType);
 
   nsNativeThemeGTK();
+
+protected:
   virtual ~nsNativeThemeGTK();
 
 private:
@@ -78,3 +83,5 @@ private:
   uint8_t mSafeWidgetStates[1024];    // 256 widgets * 32 bits per widget
   static const char* sDisabledEngines[];
 };
+
+#endif

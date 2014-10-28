@@ -22,7 +22,7 @@ class nsICODecoder : public Decoder
 {
 public:
 
-  nsICODecoder(RasterImage &aImage);
+  explicit nsICODecoder(RasterImage &aImage);
   virtual ~nsICODecoder();
 
   // Obtains the width of the icon directory entry
@@ -37,7 +37,7 @@ public:
     return mDirEntry.mHeight == 0 ? 256 : mDirEntry.mHeight; 
   }
 
-  virtual void WriteInternal(const char* aBuffer, uint32_t aCount);
+  virtual void WriteInternal(const char* aBuffer, uint32_t aCount, DecodeStrategy aStrategy);
   virtual void FinishInternal();
   virtual bool NeedsNewFrame() const;
   virtual nsresult AllocateFrame();
@@ -45,7 +45,7 @@ public:
 private:
   // Writes to the contained decoder and sets the appropriate errors
   // Returns true if there are no errors.
-  bool WriteToContainedDecoder(const char* aBuffer, uint32_t aCount);
+  bool WriteToContainedDecoder(const char* aBuffer, uint32_t aCount, DecodeStrategy aStrategy);
 
   // Processes a single dir entry of the icon resource
   void ProcessDirEntry(IconDirEntry& aTarget);
@@ -79,7 +79,7 @@ private:
   int32_t mCurLine;   // Line index of the image that's currently being decoded
   uint32_t mRowBytes; // How many bytes of the row were already received
   int32_t mOldLine;   // Previous index of the line 
-  nsAutoPtr<Decoder> mContainedDecoder; // Contains either a BMP or PNG resource
+  nsRefPtr<Decoder> mContainedDecoder; // Contains either a BMP or PNG resource
 
   char mDirEntryArray[ICODIRENTRYSIZE]; // Holds the current dir entry buffer
   IconDirEntry mDirEntry; // Holds a decoded dir entry

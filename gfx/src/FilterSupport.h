@@ -8,8 +8,10 @@
 
 #include "mozilla/Attributes.h"
 #include "mozilla/RefPtr.h"
+#include "mozilla/TypedEnum.h"
 #include "mozilla/gfx/Rect.h"
 #include "mozilla/gfx/Matrix.h"
+#include "mozilla/gfx/2D.h"
 #include "nsClassHashtable.h"
 #include "nsTArray.h"
 #include "nsRegion.h"
@@ -28,6 +30,8 @@ const unsigned short SVG_FECOLORMATRIX_TYPE_MATRIX = 1;
 const unsigned short SVG_FECOLORMATRIX_TYPE_SATURATE = 2;
 const unsigned short SVG_FECOLORMATRIX_TYPE_HUE_ROTATE = 3;
 const unsigned short SVG_FECOLORMATRIX_TYPE_LUMINANCE_TO_ALPHA = 4;
+// ColorMatrix types for CSS filters
+const unsigned short SVG_FECOLORMATRIX_TYPE_SEPIA = 5;
 
 // ComponentTransfer types
 const unsigned short SVG_FECOMPONENTTRANSFER_TYPE_UNKNOWN  = 0;
@@ -44,6 +48,17 @@ const unsigned short SVG_FEBLEND_MODE_MULTIPLY = 2;
 const unsigned short SVG_FEBLEND_MODE_SCREEN = 3;
 const unsigned short SVG_FEBLEND_MODE_DARKEN = 4;
 const unsigned short SVG_FEBLEND_MODE_LIGHTEN = 5;
+const unsigned short SVG_FEBLEND_MODE_OVERLAY = 6;
+const unsigned short SVG_FEBLEND_MODE_COLOR_DODGE = 7;
+const unsigned short SVG_FEBLEND_MODE_COLOR_BURN = 8;
+const unsigned short SVG_FEBLEND_MODE_HARD_LIGHT = 9;
+const unsigned short SVG_FEBLEND_MODE_SOFT_LIGHT = 10;
+const unsigned short SVG_FEBLEND_MODE_DIFFERENCE = 11;
+const unsigned short SVG_FEBLEND_MODE_EXCLUSION = 12;
+const unsigned short SVG_FEBLEND_MODE_HUE = 13;
+const unsigned short SVG_FEBLEND_MODE_SATURATION = 14;
+const unsigned short SVG_FEBLEND_MODE_COLOR = 15;
+const unsigned short SVG_FEBLEND_MODE_LUMINOSITY = 16;
 
 // Edge Mode Values
 const unsigned short SVG_EDGEMODE_UNKNOWN = 0;
@@ -100,6 +115,9 @@ enum AttributeName {
   eConvolveMatrixKernelUnitLength,
   eConvolveMatrixPreserveAlpha,
   eOffsetOffset,
+  eDropShadowStdDeviation,
+  eDropShadowOffset,
+  eDropShadowColor,
   eDisplacementMapScale,
   eDisplacementMapXChannel,
   eDisplacementMapYChannel,
@@ -136,12 +154,32 @@ enum AttributeName {
   eImageNativeSize,
   eImageSubregion,
   eImageTransform,
+  eLastAttributeName
 };
 
 class DrawTarget;
 class SourceSurface;
 class FilterNode;
 struct FilterAttribute;
+
+MOZ_BEGIN_ENUM_CLASS(AttributeType)
+  eBool,
+  eUint,
+  eFloat,
+  eSize,
+  eIntSize,
+  eIntPoint,
+  eMatrix,
+  eMatrix5x4,
+  ePoint3D,
+  eColor,
+  eAttributeMap,
+  eFloats,
+  Max
+MOZ_END_ENUM_CLASS(AttributeType)
+
+// Limits
+const float kMaxStdDeviation = 500;
 
 // A class that stores values of different types, keyed by an attribute name.
 // The Get*() methods assert that they're called for the same type that the
@@ -152,6 +190,11 @@ public:
   AttributeMap();
   AttributeMap(const AttributeMap& aOther);
   AttributeMap& operator=(const AttributeMap& aOther);
+  bool operator==(const AttributeMap& aOther) const;
+  bool operator!=(const AttributeMap& aOther) const
+  {
+    return !(*this == aOther);
+  }
   ~AttributeMap();
 
   void Set(AttributeName aName, bool aValue);
@@ -180,32 +223,73 @@ public:
   AttributeMap GetAttributeMap(AttributeName aName) const;
   const nsTArray<float>& GetFloats(AttributeName aName) const;
 
+  typedef bool (*AttributeHandleCallback)(AttributeName aName, AttributeType aType, void* aUserData);
+  void EnumerateRead(AttributeHandleCallback aCallback, void* aUserData) const;
+  uint32_t Count() const;
+
 private:
   mutable nsClassHashtable<nsUint32HashKey, FilterAttribute>  mMap;
 };
 
-enum ColorSpace { SRGB, LINEAR_RGB };
-enum AlphaModel { UNPREMULTIPLIED, PREMULTIPLIED };
+MOZ_BEGIN_ENUM_CLASS(ColorSpace)
+  SRGB,
+  LinearRGB,
+  Max
+MOZ_END_ENUM_CLASS(ColorSpace)
+
+MOZ_BEGIN_ENUM_CLASS(AlphaModel)
+  Unpremultiplied,
+  Premultiplied
+MOZ_END_ENUM_CLASS(AlphaModel)
 
 class ColorModel {
 public:
-  static ColorModel PremulSRGB() { return ColorModel(SRGB, PREMULTIPLIED); }
+  static ColorModel PremulSRGB()
+  {
+    return ColorModel(ColorSpace::SRGB, AlphaModel::Premultiplied);
+  }
 
   ColorModel(ColorSpace aColorSpace, AlphaModel aAlphaModel) :
     mColorSpace(aColorSpace), mAlphaModel(aAlphaModel) {}
   ColorModel() :
-    mColorSpace(SRGB), mAlphaModel(PREMULTIPLIED) {}
+    mColorSpace(ColorSpace::SRGB), mAlphaModel(AlphaModel::Premultiplied) {}
   bool operator==(const ColorModel& aOther) const {
     return mColorSpace == aOther.mColorSpace &&
            mAlphaModel == aOther.mAlphaModel;
   }
 
   // Used to index FilterCachedColorModels::mFilterForColorModel.
-  uint8_t ToIndex() const { return (mColorSpace << 1) + mAlphaModel; }
+  uint8_t ToIndex() const
+  {
+    return (uint8_t(mColorSpace) << 1) + uint8_t(mAlphaModel);
+  }
 
   ColorSpace mColorSpace;
   AlphaModel mAlphaModel;
 };
+
+MOZ_BEGIN_ENUM_CLASS(PrimitiveType)
+  Empty = 0,
+  Blend,
+  Morphology,
+  ColorMatrix,
+  Flood,
+  Tile,
+  ComponentTransfer,
+  ConvolveMatrix,
+  Offset,
+  DisplacementMap,
+  Turbulence,
+  Composite,
+  Merge,
+  Image,
+  GaussianBlur,
+  DropShadow,
+  DiffuseLighting,
+  SpecularLighting,
+  ToAlpha,
+  Max
+MOZ_END_ENUM_CLASS(PrimitiveType)
 
 /**
  * A data structure to carry attributes for a given primitive that's part of a
@@ -215,25 +299,6 @@ public:
  */
 class FilterPrimitiveDescription MOZ_FINAL {
 public:
-  enum PrimitiveType {
-    eNone = 0,
-    eBlend,
-    eMorphology,
-    eColorMatrix,
-    eFlood,
-    eTile,
-    eComponentTransfer,
-    eConvolveMatrix,
-    eOffset,
-    eDisplacementMap,
-    eTurbulence,
-    eComposite,
-    eMerge,
-    eImage,
-    eGaussianBlur,
-    eDiffuseLighting,
-    eSpecularLighting
-  };
   enum {
     kPrimitiveIndexSourceGraphic = -1,
     kPrimitiveIndexSourceAlpha = -2,
@@ -241,15 +306,19 @@ public:
     kPrimitiveIndexStrokePaint = -4
   };
 
-  FilterPrimitiveDescription(PrimitiveType aType);
+  FilterPrimitiveDescription();
+  explicit FilterPrimitiveDescription(PrimitiveType aType);
   FilterPrimitiveDescription(const FilterPrimitiveDescription& aOther);
   FilterPrimitiveDescription& operator=(const FilterPrimitiveDescription& aOther);
 
   PrimitiveType Type() const { return mType; }
+  void SetType(PrimitiveType aType) { mType = aType; }
   const AttributeMap& Attributes() const { return mAttributes; }
   AttributeMap& Attributes() { return mAttributes; }
 
   IntRect PrimitiveSubregion() const { return mFilterPrimitiveSubregion; }
+  IntRect FilterSpaceBounds() const { return mFilterSpaceBounds; }
+  bool IsTainted() const { return mIsTainted; }
 
   size_t NumberOfInputs() const { return mInputPrimitives.Length(); }
   int32_t InputPrimitiveIndex(size_t aInputIndex) const
@@ -271,6 +340,16 @@ public:
     mFilterPrimitiveSubregion = aRect;
   }
 
+  void SetFilterSpaceBounds(const IntRect& aRect)
+  {
+    mFilterSpaceBounds = aRect;
+  }
+
+  void SetIsTainted(bool aIsTainted)
+  {
+    mIsTainted = aIsTainted;
+  }
+
   void SetInputPrimitive(size_t aInputIndex, int32_t aInputPrimitiveIndex)
   {
     mInputPrimitives.EnsureLengthAtLeast(aInputIndex + 1);
@@ -288,13 +367,21 @@ public:
     mOutputColorSpace = aColorSpace;
   }
 
+  bool operator==(const FilterPrimitiveDescription& aOther) const;
+  bool operator!=(const FilterPrimitiveDescription& aOther) const
+  {
+    return !(*this == aOther);
+  }
+
 private:
   PrimitiveType mType;
   AttributeMap mAttributes;
   nsTArray<int32_t> mInputPrimitives;
   IntRect mFilterPrimitiveSubregion;
+  IntRect mFilterSpaceBounds;
   nsTArray<ColorSpace> mInputColorSpaces;
   ColorSpace mOutputColorSpace;
+  bool mIsTainted;
 };
 
 /**
@@ -304,14 +391,17 @@ private:
  */
 struct FilterDescription MOZ_FINAL {
   FilterDescription() {}
-  FilterDescription(const nsTArray<FilterPrimitiveDescription>& aPrimitives,
-                    const IntRect& aFilterSpaceBounds)
+  explicit FilterDescription(const nsTArray<FilterPrimitiveDescription>& aPrimitives)
    : mPrimitives(aPrimitives)
-   , mFilterSpaceBounds(aFilterSpaceBounds)
   {}
 
+  bool operator==(const FilterDescription& aOther) const;
+  bool operator!=(const FilterDescription& aOther) const
+  {
+    return !(*this == aOther);
+  }
+
   nsTArray<FilterPrimitiveDescription> mPrimitives;
-  IntRect mFilterSpaceBounds;
 };
 
 /**
@@ -341,7 +431,9 @@ public:
                           const IntRect& aFillPaintRect,
                           SourceSurface* aStrokePaint,
                           const IntRect& aStrokePaintRect,
-                          nsTArray<RefPtr<SourceSurface>>& aAdditionalImages);
+                          nsTArray<RefPtr<SourceSurface>>& aAdditionalImages,
+                          const Point& aDestPoint,
+                          const DrawOptions& aOptions = DrawOptions());
 
   /**
    * Computes the region that changes in the filter output due to a change in
@@ -371,6 +463,13 @@ public:
   ComputePostFilterExtents(const FilterDescription& aFilter,
                            const nsIntRegion& aSourceGraphicExtents);
 
+  /**
+   * Computes the size of a single FilterPrimitiveDescription's output given a
+   * set of input extents.
+   */
+  static nsIntRegion
+  PostFilterExtentsForPrimitive(const FilterPrimitiveDescription& aDescription,
+                                const nsTArray<nsIntRegion>& aInputExtents);
 };
 
 }

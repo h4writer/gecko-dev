@@ -6,9 +6,11 @@
 #ifndef GFX_IMAGETYPES_H
 #define GFX_IMAGETYPES_H
 
+#include "mozilla/TypedEnum.h"
+
 namespace mozilla {
 
-enum ImageFormat {
+MOZ_BEGIN_ENUM_CLASS(ImageFormat)
   /**
    * The PLANAR_YCBCR format creates a PlanarYCbCrImage. All backends should
    * support this format, because the Ogg video decoder depends on it.
@@ -24,7 +26,7 @@ enum ImageFormat {
   GRALLOC_PLANAR_YCBCR,
 
   /**
-   * The SHARED_RGB format creates a DeprecatedSharedRGBImage, which stores RGB data in
+   * The SHARED_RGB format creates a SharedRGBImage, which stores RGB data in
    * shared memory. Some Android hardware video decoders require this format.
    * Currently only used on Android.
    */
@@ -34,7 +36,7 @@ enum ImageFormat {
    * The CAIRO_SURFACE format creates a CairoImage. All backends should
    * support this format, because video rendering sometimes requires it.
    *
-   * This format is useful even though a ThebesLayer could be used.
+   * This format is useful even though a PaintedLayer could be used.
    * It makes it easy to render a cairo surface when another Image format
    * could be used. It can also avoid copying the surface data in some
    * cases.
@@ -51,37 +53,36 @@ enum ImageFormat {
   MAC_IOSURFACE,
 
   /**
-   * An bitmap image that can be shared with a remote process.
+   * An Android SurfaceTexture ID that can be shared across threads and
+   * processes.
    */
-  REMOTE_IMAGE_BITMAP,
+  SURFACE_TEXTURE,
 
   /**
-   * A OpenGL texture that can be shared across threads or processes
+   * An EGL Image that can be shared across threads.
    */
-  SHARED_TEXTURE,
-
-  /**
-   * An DXGI shared surface handle that can be shared with a remote process.
-   */
-  REMOTE_IMAGE_DXGI_TEXTURE,
+  EGLIMAGE,
 
   /**
    * The D3D9_RGB32_TEXTURE format creates a D3D9SurfaceImage, and wraps a
    * IDirect3DTexture9 in RGB32 layout.
    */
-  D3D9_RGB32_TEXTURE
+  D3D9_RGB32_TEXTURE,
 
-};
+  /**
+   * An Image type carries an opaque handle once for each stream.
+   * The opaque handle would be a platform specific identifier.
+   */
+  OVERLAY_IMAGE
+MOZ_END_ENUM_CLASS(ImageFormat)
 
-
-enum StereoMode {
-  STEREO_MODE_MONO,
-  STEREO_MODE_LEFT_RIGHT,
-  STEREO_MODE_RIGHT_LEFT,
-  STEREO_MODE_BOTTOM_TOP,
-  STEREO_MODE_TOP_BOTTOM
-};
-
+MOZ_BEGIN_ENUM_CLASS(StereoMode)
+  MONO,
+  LEFT_RIGHT,
+  RIGHT_LEFT,
+  BOTTOM_TOP,
+  TOP_BOTTOM
+MOZ_END_ENUM_CLASS(StereoMode)
 
 } // namespace
 

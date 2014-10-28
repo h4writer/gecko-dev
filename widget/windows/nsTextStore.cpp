@@ -6,9 +6,6 @@
 #include <olectl.h>
 #include <algorithm>
 
-#ifdef MOZ_LOGGING
-#define FORCE_PR_LOG /* Allow logging in the release build */
-#endif // MOZ_LOGGING
 #include "prlog.h"
 
 #include "nscore.h"
@@ -23,10 +20,14 @@
 #include "mozilla/WindowsVersion.h"
 
 #define INPUTSCOPE_INIT_GUID
+#define TEXTATTRS_INIT_GUID
 #include "nsTextStore.h"
 
 using namespace mozilla;
 using namespace mozilla::widget;
+
+static const char* kPrefNameEnableTSF = "intl.tsf.enable";
+static const char* kPrefNameForceEnableTSF = "intl.tsf.force_enable";
 
 #ifdef PR_LOGGING
 /**
@@ -48,104 +49,6 @@ using namespace mozilla::widget;
  */
 
 PRLogModuleInfo* sTextStoreLog = nullptr;
-#endif // #ifdef PR_LOGGING
-
-/******************************************************************/
-/* InputScopeImpl                                                 */
-/******************************************************************/
-
-class InputScopeImpl MOZ_FINAL : public ITfInputScope
-{
-public:
-  InputScopeImpl(const nsTArray<InputScope>& aList) :
-    mRefCnt(1),
-    mInputScopes(aList)
-  {
-    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-      ("TSF: 0x%p InputScopeImpl()", this));
-  }
-
-  STDMETHODIMP_(ULONG) AddRef(void) { return ++mRefCnt; }
-
-  STDMETHODIMP_(ULONG) Release(void)
-  {
-    --mRefCnt;
-    if (mRefCnt) {
-      return mRefCnt;
-    }
-    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-      ("TSF: 0x%p InputScopeImpl::Release() final", this));
-    delete this;
-    return 0;
-  }
-
-  STDMETHODIMP QueryInterface(REFIID riid, void** ppv)
-  {
-    *ppv=nullptr;
-    if ( (IID_IUnknown == riid) || (IID_ITfInputScope == riid) ) {
-      *ppv = static_cast<ITfInputScope*>(this);
-    }
-    if (*ppv) {
-      AddRef();
-      return S_OK;
-    }
-    return E_NOINTERFACE;
-  }
-
-  STDMETHODIMP GetInputScopes(InputScope** pprgInputScopes, UINT* pcCount)
-  {
-    uint32_t count = (mInputScopes.IsEmpty() ? 1 : mInputScopes.Length());
-
-    InputScope* pScope = (InputScope*) CoTaskMemAlloc(sizeof(InputScope) * count);
-    NS_ENSURE_TRUE(pScope, E_OUTOFMEMORY);
-
-    if (mInputScopes.IsEmpty()) {
-      *pScope = IS_DEFAULT;
-      *pcCount = 1;
-      *pprgInputScopes = pScope;
-      return S_OK;
-    }
-
-    *pcCount = 0;
-
-    for (uint32_t idx = 0; idx < count; idx++) {
-      *(pScope + idx) = mInputScopes[idx];
-      (*pcCount)++;
-    }
-
-    *pprgInputScopes = pScope;
-    return S_OK;
-  }
-
-  STDMETHODIMP GetPhrase(BSTR **ppbstrPhrases, UINT *pcCount) { return E_NOTIMPL; }
-  STDMETHODIMP GetRegularExpression(BSTR *pbstrRegExp) { return E_NOTIMPL; }
-  STDMETHODIMP GetSRGS(BSTR *pbstrSRGS) { return E_NOTIMPL; }
-  STDMETHODIMP GetXML(BSTR *pbstrXML) { return E_NOTIMPL; }
-
-private:
-  DWORD mRefCnt;
-  nsTArray<InputScope> mInputScopes;
-};
-
-/******************************************************************/
-/* nsTextStore                                                    */
-/******************************************************************/
-
-ITfThreadMgr*           nsTextStore::sTsfThreadMgr   = nullptr;
-ITfMessagePump*         nsTextStore::sMessagePump    = nullptr;
-ITfKeystrokeMgr*        nsTextStore::sKeystrokeMgr   = nullptr;
-ITfDisplayAttributeMgr* nsTextStore::sDisplayAttrMgr = nullptr;
-ITfCategoryMgr*         nsTextStore::sCategoryMgr    = nullptr;
-ITfDocumentMgr*         nsTextStore::sTsfDisabledDocumentMgr = nullptr;
-ITfContext*             nsTextStore::sTsfDisabledContext = nullptr;
-DWORD         nsTextStore::sTsfClientId  = 0;
-nsTextStore*  nsTextStore::sTsfTextStore = nullptr;
-
-UINT nsTextStore::sFlushTIPInputMessage  = 0;
-
-#define TEXTSTORE_DEFAULT_VIEW (1)
-
-#ifdef PR_LOGGING
 
 static const char*
 GetBoolName(bool aBool)
@@ -195,7 +98,7 @@ GetFindFlagName(DWORD aFindFlag)
   if (description.IsEmpty()) {
     description.AppendLiteral("Unknown (");
     description.AppendInt(static_cast<uint32_t>(aFindFlag));
-    description.AppendLiteral(")");
+    description.Append(')');
   }
   return description;
 }
@@ -249,6 +152,117 @@ GetCLSIDNameStr(REFCLSID aCLSID)
   result = NS_ConvertUTF16toUTF8(str);
   ::CoTaskMemFree(str);
   return result;
+}
+
+static nsCString
+GetGUIDNameStr(REFGUID aGUID)
+{
+  OLECHAR str[40];
+  int len = ::StringFromGUID2(aGUID, str, ArrayLength(str));
+  if (!len || !str[0]) {
+    return EmptyCString();
+  }
+
+  return NS_ConvertUTF16toUTF8(str);
+}
+
+static nsCString
+GetGUIDNameStrWithTable(REFGUID aGUID)
+{
+#define RETURN_GUID_NAME(aNamedGUID) \
+  if (IsEqualGUID(aGUID, aNamedGUID)) { \
+    return NS_LITERAL_CSTRING(#aNamedGUID); \
+  }
+
+  RETURN_GUID_NAME(GUID_PROP_INPUTSCOPE)
+  RETURN_GUID_NAME(TSATTRID_OTHERS)
+  RETURN_GUID_NAME(TSATTRID_Font)
+  RETURN_GUID_NAME(TSATTRID_Font_FaceName)
+  RETURN_GUID_NAME(TSATTRID_Font_SizePts)
+  RETURN_GUID_NAME(TSATTRID_Font_Style)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Bold)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Italic)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_SmallCaps)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Capitalize)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Uppercase)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Lowercase)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Animation)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Animation_LasVegasLights)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Animation_BlinkingBackground)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Animation_SparkleText)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Animation_MarchingBlackAnts)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Animation_MarchingRedAnts)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Animation_Shimmer)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Animation_WipeDown)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Animation_WipeRight)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Emboss)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Engrave)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Hidden)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Kerning)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Outlined)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Position)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Protected)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Shadow)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Spacing)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Weight)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Height)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Underline)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Underline_Single)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Underline_Double)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Strikethrough)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Strikethrough_Single)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Strikethrough_Double)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Overline)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Overline_Single)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Overline_Double)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Blink)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Subscript)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Superscript)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_Color)
+  RETURN_GUID_NAME(TSATTRID_Font_Style_BackgroundColor)
+  RETURN_GUID_NAME(TSATTRID_Text)
+  RETURN_GUID_NAME(TSATTRID_Text_VerticalWriting)
+  RETURN_GUID_NAME(TSATTRID_Text_RightToLeft)
+  RETURN_GUID_NAME(TSATTRID_Text_Orientation)
+  RETURN_GUID_NAME(TSATTRID_Text_Language)
+  RETURN_GUID_NAME(TSATTRID_Text_ReadOnly)
+  RETURN_GUID_NAME(TSATTRID_Text_EmbeddedObject)
+  RETURN_GUID_NAME(TSATTRID_Text_Alignment)
+  RETURN_GUID_NAME(TSATTRID_Text_Alignment_Left)
+  RETURN_GUID_NAME(TSATTRID_Text_Alignment_Right)
+  RETURN_GUID_NAME(TSATTRID_Text_Alignment_Center)
+  RETURN_GUID_NAME(TSATTRID_Text_Alignment_Justify)
+  RETURN_GUID_NAME(TSATTRID_Text_Link)
+  RETURN_GUID_NAME(TSATTRID_Text_Hyphenation)
+  RETURN_GUID_NAME(TSATTRID_Text_Para)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_FirstLineIndent)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_LeftIndent)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_RightIndent)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_SpaceAfter)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_SpaceBefore)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_LineSpacing)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_LineSpacing_Single)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_LineSpacing_OnePtFive)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_LineSpacing_Double)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_LineSpacing_AtLeast)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_LineSpacing_Exactly)
+  RETURN_GUID_NAME(TSATTRID_Text_Para_LineSpacing_Multiple)
+  RETURN_GUID_NAME(TSATTRID_List)
+  RETURN_GUID_NAME(TSATTRID_List_LevelIndel)
+  RETURN_GUID_NAME(TSATTRID_List_Type)
+  RETURN_GUID_NAME(TSATTRID_List_Type_Bullet)
+  RETURN_GUID_NAME(TSATTRID_List_Type_Arabic)
+  RETURN_GUID_NAME(TSATTRID_List_Type_LowerLetter)
+  RETURN_GUID_NAME(TSATTRID_List_Type_UpperLetter)
+  RETURN_GUID_NAME(TSATTRID_List_Type_LowerRoman)
+  RETURN_GUID_NAME(TSATTRID_List_Type_UpperRoman)
+  RETURN_GUID_NAME(TSATTRID_App)
+  RETURN_GUID_NAME(TSATTRID_App_IncorrectSpelling)
+  RETURN_GUID_NAME(TSATTRID_App_IncorrectGrammar)
+
+#undef RETURN_GUID_NAME
+
+  return GetGUIDNameStr(aGUID);
 }
 
 static nsCString
@@ -495,71 +509,724 @@ GetDisplayAttrStr(const TF_DISPLAYATTRIBUTE &aDispAttr)
   return str;
 }
 
+static const char*
+GetEventMessageName(uint32_t aMessage)
+{
+  switch (aMessage) {
+    case NS_MOUSE_BUTTON_DOWN:
+      return "NS_MOUSE_BUTTON_DOWN";
+    case NS_MOUSE_BUTTON_UP:
+      return "NS_MOUSE_BUTTON_UP";
+    default:
+      return "Unknown";
+  }
+}
+
+static const char*
+GetMouseButtonName(int16_t aButton)
+{
+  switch (aButton) {
+    case WidgetMouseEventBase::eLeftButton:
+      return "LeftButton";
+    case WidgetMouseEventBase::eMiddleButton:
+      return "MiddleButton";
+    case WidgetMouseEventBase::eRightButton:
+      return "RightButton";
+    default:
+      return "UnknownButton";
+  }
+}
+
+#define ADD_SEPARATOR_IF_NECESSARY(aStr) \
+  if (!aStr.IsEmpty()) { \
+    aStr.AppendLiteral(", "); \
+  }
+
+static nsCString
+GetMouseButtonsName(int16_t aButtons)
+{
+  if (!aButtons) {
+    return NS_LITERAL_CSTRING("no buttons");
+  }
+  nsAutoCString names;
+  if (aButtons & WidgetMouseEventBase::eLeftButtonFlag) {
+    names = "LeftButton";
+  }
+  if (aButtons & WidgetMouseEventBase::eRightButtonFlag) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += "RightButton";
+  }
+  if (aButtons & WidgetMouseEventBase::eMiddleButtonFlag) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += "MiddleButton";
+  }
+  if (aButtons & WidgetMouseEventBase::e4thButtonFlag) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += "4thButton";
+  }
+  if (aButtons & WidgetMouseEventBase::e5thButtonFlag) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += "5thButton";
+  }
+  return names;
+}
+
+static nsCString
+GetModifiersName(Modifiers aModifiers)
+{
+  if (aModifiers == MODIFIER_NONE) {
+    return NS_LITERAL_CSTRING("no modifiers");
+  }
+  nsAutoCString names;
+  if (aModifiers & MODIFIER_ALT) {
+    names = NS_DOM_KEYNAME_ALT;
+  }
+  if (aModifiers & MODIFIER_ALTGRAPH) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += NS_DOM_KEYNAME_ALTGRAPH;
+  }
+  if (aModifiers & MODIFIER_CAPSLOCK) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += NS_DOM_KEYNAME_CAPSLOCK;
+  }
+  if (aModifiers & MODIFIER_CONTROL) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += NS_DOM_KEYNAME_CONTROL;
+  }
+  if (aModifiers & MODIFIER_FN) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += NS_DOM_KEYNAME_FN;
+  }
+  if (aModifiers & MODIFIER_META) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += NS_DOM_KEYNAME_META;
+  }
+  if (aModifiers & MODIFIER_NUMLOCK) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += NS_DOM_KEYNAME_NUMLOCK;
+  }
+  if (aModifiers & MODIFIER_SCROLLLOCK) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += NS_DOM_KEYNAME_SCROLLLOCK;
+  }
+  if (aModifiers & MODIFIER_SHIFT) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += NS_DOM_KEYNAME_SHIFT;
+  }
+  if (aModifiers & MODIFIER_SYMBOLLOCK) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += NS_DOM_KEYNAME_SYMBOLLOCK;
+  }
+  if (aModifiers & MODIFIER_OS) {
+    ADD_SEPARATOR_IF_NECESSARY(names);
+    names += NS_DOM_KEYNAME_OS;
+  }
+  return names;
+}
+
 #endif // #ifdef PR_LOGGING
 
-nsTextStore::nsTextStore()
- : mContent(mComposition, mSelection)
+/******************************************************************/
+/* InputScopeImpl                                                 */
+/******************************************************************/
+
+class InputScopeImpl MOZ_FINAL : public ITfInputScope
+{
+  ~InputScopeImpl() {}
+
+public:
+  InputScopeImpl(const nsTArray<InputScope>& aList)
+    : mInputScopes(aList)
+  {
+    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+      ("TSF: 0x%p InputScopeImpl()", this));
+  }
+
+  NS_INLINE_DECL_IUNKNOWN_REFCOUNTING(InputScopeImpl)
+
+  STDMETHODIMP QueryInterface(REFIID riid, void** ppv)
+  {
+    *ppv=nullptr;
+    if ( (IID_IUnknown == riid) || (IID_ITfInputScope == riid) ) {
+      *ppv = static_cast<ITfInputScope*>(this);
+    }
+    if (*ppv) {
+      AddRef();
+      return S_OK;
+    }
+    return E_NOINTERFACE;
+  }
+
+  STDMETHODIMP GetInputScopes(InputScope** pprgInputScopes, UINT* pcCount)
+  {
+    uint32_t count = (mInputScopes.IsEmpty() ? 1 : mInputScopes.Length());
+
+    InputScope* pScope = (InputScope*) CoTaskMemAlloc(sizeof(InputScope) * count);
+    NS_ENSURE_TRUE(pScope, E_OUTOFMEMORY);
+
+    if (mInputScopes.IsEmpty()) {
+      *pScope = IS_DEFAULT;
+      *pcCount = 1;
+      *pprgInputScopes = pScope;
+      return S_OK;
+    }
+
+    *pcCount = 0;
+
+    for (uint32_t idx = 0; idx < count; idx++) {
+      *(pScope + idx) = mInputScopes[idx];
+      (*pcCount)++;
+    }
+
+    *pprgInputScopes = pScope;
+    return S_OK;
+  }
+
+  STDMETHODIMP GetPhrase(BSTR **ppbstrPhrases, UINT *pcCount) { return E_NOTIMPL; }
+  STDMETHODIMP GetRegularExpression(BSTR *pbstrRegExp) { return E_NOTIMPL; }
+  STDMETHODIMP GetSRGS(BSTR *pbstrSRGS) { return E_NOTIMPL; }
+  STDMETHODIMP GetXML(BSTR *pbstrXML) { return E_NOTIMPL; }
+
+private:
+  nsTArray<InputScope> mInputScopes;
+};
+
+/******************************************************************/
+/* TSFStaticSink                                                  */
+/******************************************************************/
+
+class TSFStaticSink MOZ_FINAL : public ITfActiveLanguageProfileNotifySink
+                              , public ITfInputProcessorProfileActivationSink
+{
+public:
+  static TSFStaticSink* GetInstance()
+  {
+    if (!sInstance) {
+      sInstance = new TSFStaticSink();
+    }
+    return sInstance;
+  }
+
+  static void Shutdown()
+  {
+    if (sInstance) {
+      sInstance->Destroy();
+      sInstance = nullptr;
+    }
+  }
+
+  bool Init(ITfThreadMgr* aThreadMgr,
+            ITfInputProcessorProfiles* aInputProcessorProfiles);
+  STDMETHODIMP QueryInterface(REFIID riid, void** ppv)
+  {
+    *ppv = nullptr;
+    if (IID_IUnknown == riid ||
+        IID_ITfActiveLanguageProfileNotifySink == riid) {
+      *ppv = static_cast<ITfActiveLanguageProfileNotifySink*>(this);
+    } else if (IID_ITfInputProcessorProfileActivationSink == riid) {
+      *ppv = static_cast<ITfInputProcessorProfileActivationSink*>(this);
+    }
+    if (*ppv) {
+      AddRef();
+      return S_OK;
+    }
+    return E_NOINTERFACE;
+  }
+
+  NS_INLINE_DECL_IUNKNOWN_REFCOUNTING(TSFStaticSink)
+
+  const nsString& GetActiveTIPKeyboardDescription() const
+  {
+    return mActiveTIPKeyboardDescription;
+  }
+
+  static bool IsIMM_IME()
+  {
+    if (!sInstance || !sInstance->EnsureInitActiveTIPKeyboard()) {
+      return IsIMM_IME(::GetKeyboardLayout(0));
+    }
+    return sInstance->mIsIMM_IME;
+  }
+
+  static bool IsIMM_IME(HKL aHKL)
+  {
+     return (::ImmGetIMEFileNameW(aHKL, nullptr, 0) > 0);
+  }
+
+  bool EnsureInitActiveTIPKeyboard();
+
+public: // ITfActiveLanguageProfileNotifySink
+  STDMETHODIMP OnActivated(REFCLSID clsid, REFGUID guidProfile,
+                           BOOL fActivated);
+
+public: // ITfInputProcessorProfileActivationSink
+  STDMETHODIMP OnActivated(DWORD, LANGID, REFCLSID, REFGUID, REFGUID,
+                           HKL, DWORD);
+
+private:
+  TSFStaticSink();
+  virtual ~TSFStaticSink() {}
+
+  void Destroy();
+
+  void GetTIPDescription(REFCLSID aTextService, LANGID aLangID,
+                         REFGUID aProfile, nsAString& aDescription);
+  bool IsTIPCategoryKeyboard(REFCLSID aTextService, LANGID aLangID,
+                             REFGUID aProfile);
+
+  // Cookie of installing ITfInputProcessorProfileActivationSink
+  DWORD mIPProfileCookie;
+  // Cookie of installing ITfActiveLanguageProfileNotifySink
+  DWORD mLangProfileCookie;
+
+  // True if current IME is implemented with IMM.
+  bool mIsIMM_IME;
+  // True if OnActivated() is already called
+  bool mOnActivatedCalled;
+
+  nsRefPtr<ITfThreadMgr> mThreadMgr;
+  nsRefPtr<ITfInputProcessorProfiles> mInputProcessorProfiles;
+
+  // Active TIP keyboard's description.  If active language profile isn't TIP,
+  // i.e., IMM-IME or just a keyboard layout, this is empty.
+  nsString mActiveTIPKeyboardDescription;
+
+  static StaticRefPtr<TSFStaticSink> sInstance;
+};
+
+StaticRefPtr<TSFStaticSink> TSFStaticSink::sInstance;
+
+TSFStaticSink::TSFStaticSink()
+  : mIPProfileCookie(TF_INVALID_COOKIE)
+  , mLangProfileCookie(TF_INVALID_COOKIE)
+  , mIsIMM_IME(false)
+  , mOnActivatedCalled(false)
+{
+}
+
+bool
+TSFStaticSink::Init(ITfThreadMgr* aThreadMgr,
+                    ITfInputProcessorProfiles* aInputProcessorProfiles)
+{
+  MOZ_ASSERT(!mThreadMgr && !mInputProcessorProfiles,
+             "TSFStaticSink::Init() must be called only once");
+
+  mThreadMgr = aThreadMgr;
+  mInputProcessorProfiles = aInputProcessorProfiles;
+
+  nsRefPtr<ITfSource> source;
+  HRESULT hr =
+    mThreadMgr->QueryInterface(IID_ITfSource, getter_AddRefs(source));
+  if (FAILED(hr)) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF: 0x%p TSFStaticSink::Init() FAILED to get ITfSource "
+       "instance (0x%08X)", this, hr));
+    return false;
+  }
+
+  // On Vista or later, Windows let us know activate IME changed only with
+  // ITfInputProcessorProfileActivationSink.  However, it's not available on XP.
+  // On XP, ITfActiveLanguageProfileNotifySink is available for it.
+  // NOTE: Each OnActivated() should be called when TSF becomes available.
+  if (IsVistaOrLater()) {
+    hr = source->AdviseSink(IID_ITfInputProcessorProfileActivationSink,
+                   static_cast<ITfInputProcessorProfileActivationSink*>(this),
+                   &mIPProfileCookie);
+    if (FAILED(hr) || mIPProfileCookie == TF_INVALID_COOKIE) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+        ("TSF: 0x%p TSFStaticSink::Init() FAILED to install "
+         "ITfInputProcessorProfileActivationSink (0x%08X)", this, hr));
+      return false;
+    }
+  } else {
+    hr = source->AdviseSink(IID_ITfActiveLanguageProfileNotifySink,
+                   static_cast<ITfActiveLanguageProfileNotifySink*>(this),
+                   &mLangProfileCookie);
+    if (FAILED(hr) || mLangProfileCookie == TF_INVALID_COOKIE) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+        ("TSF: 0x%p TSFStaticSink::Init() FAILED to install "
+         "ITfActiveLanguageProfileNotifySink (0x%08X)", this, hr));
+      return false;
+    }
+  }
+
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+    ("TSF: 0x%p TSFStaticSink::Init(), "
+     "mIPProfileCookie=0x%08X, mLangProfileCookie=0x%08X",
+     this, mIPProfileCookie, mLangProfileCookie));
+  return true;
+}
+
+void
+TSFStaticSink::Destroy()
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-    ("TSF: 0x%p nsTextStore::nsTestStore(): instance is created", this));
+    ("TSF: 0x%p TSFStaticSink::Shutdown() "
+     "mIPProfileCookie=0x%08X, mLangProfileCookie=0x%08X",
+     this, mIPProfileCookie, mLangProfileCookie));
 
-  mRefCnt = 1;
-  mEditCookie = 0;
-  mSinkMask = 0;
-  mLock = 0;
-  mLockQueued = 0;
-  mTextChange.acpStart = INT32_MAX;
-  mTextChange.acpOldEnd = mTextChange.acpNewEnd = 0;
-  mInputScopeDetected = false;
-  mInputScopeRequested = false;
-  mIsRecordingActionsWithoutLock = false;
-  mNotifySelectionChange = false;
+  if (mIPProfileCookie != TF_INVALID_COOKIE) {
+    nsRefPtr<ITfSource> source;
+    HRESULT hr =
+      mThreadMgr->QueryInterface(IID_ITfSource, getter_AddRefs(source));
+    if (FAILED(hr)) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+        ("TSF: 0x%p   TSFStaticSink::Shutdown() FAILED to get "
+         "ITfSource instance (0x%08X)", this, hr));
+    } else {
+      hr = source->UnadviseSink(mIPProfileCookie);
+      if (FAILED(hr)) {
+        PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+          ("TSF: 0x%p   nsTextStore::Shutdown() FAILED to uninstall "
+           "ITfInputProcessorProfileActivationSink (0x%08X)",
+           this, hr));
+      }
+    }
+  }
+
+  if (mLangProfileCookie != TF_INVALID_COOKIE) {
+    nsRefPtr<ITfSource> source;
+    HRESULT hr =
+      mThreadMgr->QueryInterface(IID_ITfSource, getter_AddRefs(source));
+    if (FAILED(hr)) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+        ("TSF: 0x%p   TSFStaticSink::Shutdown() FAILED to get "
+         "ITfSource instance (0x%08X)", this, hr));
+    } else {
+      hr = source->UnadviseSink(mLangProfileCookie);
+      if (FAILED(hr)) {
+        PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+          ("TSF: 0x%p   TSFStaticSink::Shutdown() FAILED to uninstall "
+           "ITfActiveLanguageProfileNotifySink (0x%08X)",
+           this, hr));
+      }
+    }
+  }
+
+  mThreadMgr = nullptr;
+  mInputProcessorProfiles = nullptr;
+}
+
+STDMETHODIMP
+TSFStaticSink::OnActivated(REFCLSID clsid, REFGUID guidProfile,
+                           BOOL fActivated)
+{
+  // NOTE: This is installed only on XP or Server 2003.
+  if (fActivated) {
+    // TODO: We should check if the profile's category is keyboard or not.
+    mOnActivatedCalled = true;
+    mIsIMM_IME = IsIMM_IME(::GetKeyboardLayout(0));
+
+    LANGID langID;
+    HRESULT hr = mInputProcessorProfiles->GetCurrentLanguage(&langID);
+    if (FAILED(hr)) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+             ("TSF: TSFStaticSink::OnActivated() FAILED due to "
+              "GetCurrentLanguage() failure, hr=0x%08X", hr));
+    } else if (IsTIPCategoryKeyboard(clsid, langID, guidProfile)) {
+      GetTIPDescription(clsid, langID, guidProfile,
+                        mActiveTIPKeyboardDescription);
+    } else if (clsid == CLSID_NULL || guidProfile == GUID_NULL) {
+      // Perhaps, this case is that keyboard layout without TIP is activated.
+      mActiveTIPKeyboardDescription.Truncate();
+    }
+  }
+
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+         ("TSF: 0x%p TSFStaticSink::OnActivated(rclsid=%s, guidProfile=%s, "
+          "fActivated=%s), mIsIMM_IME=%s, mActiveTIPDescription=\"%s\"",
+          this, GetCLSIDNameStr(clsid).get(),
+          GetGUIDNameStr(guidProfile).get(), GetBoolName(fActivated),
+          GetBoolName(mIsIMM_IME),
+          NS_ConvertUTF16toUTF8(mActiveTIPKeyboardDescription).get()));
+  return S_OK;
+}
+
+STDMETHODIMP
+TSFStaticSink::OnActivated(DWORD dwProfileType,
+                           LANGID langid,
+                           REFCLSID rclsid,
+                           REFGUID catid,
+                           REFGUID guidProfile,
+                           HKL hkl,
+                           DWORD dwFlags)
+{
+  // NOTE: This is installed only on Vista or later.  However, this may be
+  //       called by EnsureInitActiveLanguageProfile() even on XP or Server
+  //       2003.
+  if ((dwFlags & TF_IPSINK_FLAG_ACTIVE) &&
+      (dwProfileType == TF_PROFILETYPE_KEYBOARDLAYOUT ||
+       catid == GUID_TFCAT_TIP_KEYBOARD)) {
+    mOnActivatedCalled = true;
+    mIsIMM_IME = IsIMM_IME(hkl);
+    GetTIPDescription(rclsid, langid, guidProfile,
+                      mActiveTIPKeyboardDescription);
+  }
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+         ("TSF: 0x%p TSFStaticSink::OnActivated(dwProfileType=%s (0x%08X), "
+          "langid=0x%08X, rclsid=%s, catid=%s, guidProfile=%s, hkl=0x%08X, "
+          "dwFlags=0x%08X (TF_IPSINK_FLAG_ACTIVE: %s)), mIsIMM_IME=%s, "
+          "mActiveTIPDescription=\"%s\"",
+          this, dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR ?
+                  "TF_PROFILETYPE_INPUTPROCESSOR" :
+                dwProfileType == TF_PROFILETYPE_KEYBOARDLAYOUT ?
+                  "TF_PROFILETYPE_KEYBOARDLAYOUT" : "Unknown", dwProfileType,
+          langid, GetCLSIDNameStr(rclsid).get(), GetGUIDNameStr(catid).get(),
+          GetGUIDNameStr(guidProfile).get(), hkl, dwFlags,
+          GetBoolName(dwFlags & TF_IPSINK_FLAG_ACTIVE),
+          GetBoolName(mIsIMM_IME),
+          NS_ConvertUTF16toUTF8(mActiveTIPKeyboardDescription).get()));
+  return S_OK;
+}
+
+bool
+TSFStaticSink::EnsureInitActiveTIPKeyboard()
+{
+  if (mOnActivatedCalled) {
+    return true;
+  }
+
+  if (IsVistaOrLater()) {
+    nsRefPtr<ITfInputProcessorProfileMgr> profileMgr;
+    HRESULT hr =
+      mInputProcessorProfiles->QueryInterface(IID_ITfInputProcessorProfileMgr,
+                                              getter_AddRefs(profileMgr));
+    if (FAILED(hr) || !profileMgr) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+        ("TSF: 0x%p   TSFStaticSink::EnsureInitActiveLanguageProfile(), FAILED "
+         "to get input processor profile manager, hr=0x%08X", this, hr));
+      return false;
+    }
+
+    TF_INPUTPROCESSORPROFILE profile;
+    hr = profileMgr->GetActiveProfile(GUID_TFCAT_TIP_KEYBOARD, &profile);
+    if (hr == S_FALSE) {
+      PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+        ("TSF: 0x%p   TSFStaticSink::EnsureInitActiveLanguageProfile(), FAILED "
+         "to get active keyboard layout profile due to no active profile, "
+         "hr=0x%08X", this, hr));
+      // XXX Should we call OnActivated() with arguments like non-TIP in this
+      //     case?
+      return false;
+    }
+    if (FAILED(hr)) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+        ("TSF: 0x%p   TSFStaticSink::EnsureInitActiveLanguageProfile(), FAILED "
+         "to get active TIP keyboard, hr=0x%08X", this, hr));
+      return false;
+    }
+
+    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+      ("TSF: 0x%p   TSFStaticSink::EnsureInitActiveLanguageProfile(), "
+       "calling OnActivated() manually...", this));
+    OnActivated(profile.dwProfileType, profile.langid, profile.clsid,
+                profile.catid, profile.guidProfile, ::GetKeyboardLayout(0),
+                TF_IPSINK_FLAG_ACTIVE);
+    return true;
+  }
+
+  LANGID langID;
+  HRESULT hr = mInputProcessorProfiles->GetCurrentLanguage(&langID);
+  if (FAILED(hr)) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF: 0x%p   TSFStaticSink::EnsureInitActiveLanguageProfile(), FAILED "
+       "to get current language ID, hr=0x%08X", this, hr));
+    return false;
+  }
+
+  nsRefPtr<IEnumTfLanguageProfiles> enumLangProfiles;
+  hr = mInputProcessorProfiles->EnumLanguageProfiles(langID,
+                                  getter_AddRefs(enumLangProfiles));
+  if (FAILED(hr) || !enumLangProfiles) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF: 0x%p   TSFStaticSink::EnsureInitActiveLanguageProfile(), FAILED "
+       "to get language profiles enumerator, hr=0x%08X", this, hr));
+    return false;
+  }
+
+  TF_LANGUAGEPROFILE profile;
+  ULONG fetch = 0;
+  while (SUCCEEDED(enumLangProfiles->Next(1, &profile, &fetch)) && fetch) {
+    if (!profile.fActive || profile.catid != GUID_TFCAT_TIP_KEYBOARD) {
+      continue;
+    }
+    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+      ("TSF: 0x%p   TSFStaticSink::EnsureInitActiveLanguageProfile(), "
+       "calling OnActivated() manually...", this));
+    bool isTIP = profile.guidProfile != GUID_NULL;
+    OnActivated(isTIP ? TF_PROFILETYPE_INPUTPROCESSOR :
+                        TF_PROFILETYPE_KEYBOARDLAYOUT,
+                profile.langid, profile.clsid, profile.catid,
+                profile.guidProfile, ::GetKeyboardLayout(0),
+                TF_IPSINK_FLAG_ACTIVE);
+    return true;
+  }
+
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+    ("TSF: 0x%p   TSFStaticSink::EnsureInitActiveLanguageProfile(), "
+     "calling OnActivated() without active TIP manually...", this));
+  OnActivated(TF_PROFILETYPE_KEYBOARDLAYOUT,
+              langID, CLSID_NULL, GUID_TFCAT_TIP_KEYBOARD,
+              GUID_NULL, ::GetKeyboardLayout(0),
+              TF_IPSINK_FLAG_ACTIVE);
+  return true;
+}
+
+void
+TSFStaticSink::GetTIPDescription(REFCLSID aTextService, LANGID aLangID,
+                                 REFGUID aProfile, nsAString& aDescription)
+{
+  aDescription.Truncate();
+
+  if (aTextService == CLSID_NULL || aProfile == GUID_NULL) {
+    return;
+  }
+
+  BSTR description = nullptr;
+  HRESULT hr =
+    mInputProcessorProfiles->GetLanguageProfileDescription(aTextService,
+                                                           aLangID,
+                                                           aProfile,
+                                                           &description);
+  if (FAILED(hr)) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   TSFStaticSink::InitActiveTIPDescription() FAILED "
+            "due to GetLanguageProfileDescription() failure, hr=0x%08X",
+            this, hr));
+    return;
+  }
+
+  if (description && description[0]) {
+    aDescription.Assign(description);
+  }
+  ::SysFreeString(description);
+}
+
+bool
+TSFStaticSink::IsTIPCategoryKeyboard(REFCLSID aTextService, LANGID aLangID,
+                                     REFGUID aProfile)
+{
+  if (aTextService == CLSID_NULL || aProfile == GUID_NULL) {
+    return false;
+  }
+
+  nsRefPtr<IEnumTfLanguageProfiles> enumLangProfiles;
+  HRESULT hr =
+    mInputProcessorProfiles->EnumLanguageProfiles(aLangID,
+                               getter_AddRefs(enumLangProfiles));
+  if (FAILED(hr) || !enumLangProfiles) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF: 0x%p   TSFStaticSink::IsTIPCategoryKeyboard(), FAILED "
+       "to get language profiles enumerator, hr=0x%08X", this, hr));
+    return false;
+  }
+
+  TF_LANGUAGEPROFILE profile;
+  ULONG fetch = 0;
+  while (SUCCEEDED(enumLangProfiles->Next(1, &profile, &fetch)) && fetch) {
+    // XXX We're not sure a profile is registered with two or more categories.
+    if (profile.clsid == aTextService &&
+        profile.guidProfile == aProfile &&
+        profile.catid == GUID_TFCAT_TIP_KEYBOARD) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/******************************************************************/
+/* nsTextStore                                                    */
+/******************************************************************/
+
+StaticRefPtr<ITfThreadMgr> nsTextStore::sThreadMgr;
+StaticRefPtr<ITfMessagePump> nsTextStore::sMessagePump;
+StaticRefPtr<ITfKeystrokeMgr> nsTextStore::sKeystrokeMgr;
+StaticRefPtr<ITfDisplayAttributeMgr> nsTextStore::sDisplayAttrMgr;
+StaticRefPtr<ITfCategoryMgr> nsTextStore::sCategoryMgr;
+StaticRefPtr<ITfDocumentMgr> nsTextStore::sDisabledDocumentMgr;
+StaticRefPtr<ITfContext> nsTextStore::sDisabledContext;
+StaticRefPtr<ITfInputProcessorProfiles> nsTextStore::sInputProcessorProfiles;
+StaticRefPtr<nsTextStore> nsTextStore::sEnabledTextStore;
+DWORD nsTextStore::sClientId  = 0;
+
+bool nsTextStore::sCreateNativeCaretForATOK = false;
+bool nsTextStore::sDoNotReturnNoLayoutErrorToFreeChangJie = false;
+bool nsTextStore::sDoNotReturnNoLayoutErrorToEasyChangjei = false;
+
+#define TIP_NAME_BEGINS_WITH_ATOK \
+  (NS_LITERAL_STRING("ATOK "))
+// NOTE: Free ChangJie 2010 missspells its name...
+#define TIP_NAME_FREE_CHANG_JIE_2010 \
+  (NS_LITERAL_STRING("Free CangJie IME 10"))
+#define TIP_NAME_EASY_CHANGJEI \
+  (NS_LITERAL_STRING( \
+     "\x4E2D\x6587 (\x7E41\x9AD4) - \x6613\x9821\x8F38\x5165\x6CD5"))
+
+#define TEXTSTORE_DEFAULT_VIEW (1)
+
+nsTextStore::nsTextStore()
+  : mLockedContent(mComposition, mSelection)
+  , mEditCookie(0)
+  , mSinkMask(0)
+  , mLock(0)
+  , mLockQueued(0)
+  , mRequestedAttrValues(false)
+  , mIsRecordingActionsWithoutLock(false)
+  , mPendingOnSelectionChange(false)
+  , mPendingOnLayoutChange(false)
+  , mPendingDestroy(false)
+  , mNativeCaretIsCreated(false)
+{
+  for (int32_t i = 0; i < NUM_OF_SUPPORTED_ATTRS; i++) {
+    mRequestedAttrs[i] = false;
+  }
+
   // We hope that 5 or more actions don't occur at once.
   mPendingActions.SetCapacity(5);
+
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+    ("TSF: 0x%p nsTextStore::nsTestStore() SUCCEEDED", this));
 }
 
 nsTextStore::~nsTextStore()
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-    ("TSF: 0x%p nsTextStore instance is destroyed, "
-     "mWidget=0x%p, mDocumentMgr=0x%p, mContext=0x%p",
-     this, mWidget.get(), mDocumentMgr.get(), mContext.get()));
-
-  mComposition.EnsureLayoutChangeTimerStopped();
+    ("TSF: 0x%p nsTextStore instance is destroyed", this));
 }
 
 bool
-nsTextStore::Create(nsWindowBase* aWidget)
+nsTextStore::Init(nsWindowBase* aWidget)
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-    ("TSF: 0x%p nsTextStore::Create(aWidget=0x%p)",
+    ("TSF: 0x%p nsTextStore::Init(aWidget=0x%p)",
      this, aWidget));
+
+  TSFStaticSink::GetInstance()->EnsureInitActiveTIPKeyboard();
 
   if (mDocumentMgr) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-      ("TSF: 0x%p   nsTextStore::Create() FAILED due to already initialized",
+      ("TSF: 0x%p   nsTextStore::Init() FAILED due to already initialized",
        this));
     return false;
   }
 
   // Create document manager
-  HRESULT hr = sTsfThreadMgr->CreateDocumentMgr(
-                                  getter_AddRefs(mDocumentMgr));
+  HRESULT hr = sThreadMgr->CreateDocumentMgr(getter_AddRefs(mDocumentMgr));
   if (FAILED(hr)) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-      ("TSF: 0x%p   nsTextStore::Create() FAILED to create DocumentMgr "
+      ("TSF: 0x%p   nsTextStore::Init() FAILED to create DocumentMgr "
        "(0x%08X)", this, hr));
     return false;
   }
   mWidget = aWidget;
 
   // Create context and add it to document manager
-  hr = mDocumentMgr->CreateContext(sTsfClientId, 0,
+  hr = mDocumentMgr->CreateContext(sClientId, 0,
                                    static_cast<ITextStoreACP*>(this),
                                    getter_AddRefs(mContext), &mEditCookie);
   if (FAILED(hr)) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-      ("TSF: 0x%p   nsTextStore::Create() FAILED to create the context "
+      ("TSF: 0x%p   nsTextStore::Init() FAILED to create the context "
        "(0x%08X)", this, hr));
     mDocumentMgr = nullptr;
     return false;
@@ -568,7 +1235,7 @@ nsTextStore::Create(nsWindowBase* aWidget)
   hr = mDocumentMgr->Push(mContext);
   if (FAILED(hr)) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-      ("TSF: 0x%p   nsTextStore::Create() FAILED to push the context (0x%08X)",
+      ("TSF: 0x%p   nsTextStore::Init() FAILED to push the context (0x%08X)",
        this, hr));
     // XXX Why don't we use NS_IF_RELEASE() here??
     mContext = nullptr;
@@ -577,7 +1244,7 @@ nsTextStore::Create(nsWindowBase* aWidget)
   }
 
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-    ("TSF: 0x%p   nsTextStore::Create() succeeded: "
+    ("TSF: 0x%p   nsTextStore::Init() succeeded: "
      "mDocumentMgr=0x%p, mContext=0x%p, mEditCookie=0x%08X",
      this, mDocumentMgr.get(), mContext.get(), mEditCookie));
 
@@ -585,26 +1252,29 @@ nsTextStore::Create(nsWindowBase* aWidget)
 }
 
 bool
-nsTextStore::Destroy(void)
+nsTextStore::Destroy()
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-    ("TSF: 0x%p nsTextStore::Destroy()", this));
+    ("TSF: 0x%p nsTextStore::Destroy(), mLock=%s, "
+     "mComposition.IsComposing()=%s",
+     this, GetLockFlagNameStr(mLock).get(),
+     GetBoolName(mComposition.IsComposing())));
 
-  mContent.Clear();
+  if (mLock) {
+    mPendingDestroy = true;
+    return true;
+  }
+
+  // If there is composition, TSF keeps the composition even after the text
+  // store destroyed.  So, we should clear the composition here.
+  if (mComposition.IsComposing()) {
+    NS_WARNING("Composition is still alive at destroying the text store");
+    CommitCompositionInternal(false);
+  }
+
+  mLockedContent.Clear();
   mSelection.MarkDirty();
 
-  if (mWidget) {
-    // When blurred, Tablet Input Panel posts "blur" messages
-    // and try to insert text when the message is retrieved later.
-    // But by that time the text store is already destroyed,
-    // so try to get the message early
-    MSG msg;
-    if (WinUtils::PeekMessage(&msg, mWidget->GetWindowHandle(),
-                              sFlushTIPInputMessage, sFlushTIPInputMessage,
-                              PM_REMOVE)) {
-      ::DispatchMessageW(&msg);
-    }
-  }
   mContext = nullptr;
   if (mDocumentMgr) {
     mDocumentMgr->Pop(TF_POPF_ALL);
@@ -612,6 +1282,13 @@ nsTextStore::Destroy(void)
   }
   mSink = nullptr;
   mWidget = nullptr;
+
+  if (!mMouseTrackers.IsEmpty()) {
+    PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+      ("TSF: 0x%p   nsTextStore::Destroy(), removing a mouse tracker...",
+       this));
+    mMouseTrackers.Clear();
+  }
 
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
     ("TSF: 0x%p   nsTextStore::Destroy() succeeded", this));
@@ -627,6 +1304,8 @@ nsTextStore::QueryInterface(REFIID riid,
     *ppv = static_cast<ITextStoreACP*>(this);
   } else if (IID_ITfContextOwnerCompositionSink == riid) {
     *ppv = static_cast<ITfContextOwnerCompositionSink*>(this);
+  } else if (IID_ITfMouseTrackerACP == riid) {
+    *ppv = static_cast<ITfMouseTrackerACP*>(this);
   }
   if (*ppv) {
     AddRef();
@@ -637,20 +1316,6 @@ nsTextStore::QueryInterface(REFIID riid,
     ("TSF: 0x%p nsTextStore::QueryInterface() FAILED, riid=%s",
      this, GetRIIDNameStr(riid).get()));
   return E_NOINTERFACE;
-}
-
-STDMETHODIMP_(ULONG) nsTextStore::AddRef()
-{
-  return ++mRefCnt;
-}
-
-STDMETHODIMP_(ULONG) nsTextStore::Release()
-{
-  --mRefCnt;
-  if (0 != mRefCnt)
-    return mRefCnt;
-  delete this;
-  return 0;
 }
 
 STDMETHODIMP
@@ -765,40 +1430,76 @@ nsTextStore::RequestLock(DWORD dwLockFlags,
   if (!mLock) {
     // put on lock
     mLock = dwLockFlags & (~TS_LF_SYNC);
-    PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
       ("TSF: 0x%p   Locking (%s) >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
-       ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
        ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>",
        this, GetLockFlagNameStr(mLock).get()));
+    // Don't release this instance during this lock because this is called by
+    // TSF but they don't grab us during this call.
+    nsRefPtr<nsTextStore> kungFuDeathGrip(this);
     *phrSession = mSink->OnLockGranted(mLock);
     PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
       ("TSF: 0x%p   Unlocked (%s) <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
-       "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
        "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<",
        this, GetLockFlagNameStr(mLock).get()));
-    if (IsReadWriteLocked()) {
-      FlushPendingActions();
-    }
+    DidLockGranted();
     while (mLockQueued) {
       mLock = mLockQueued;
       mLockQueued = 0;
       PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
         ("TSF: 0x%p   Locking for the request in the queue (%s) >>>>>>>>>>>>>>"
-         ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
          ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>",
          this, GetLockFlagNameStr(mLock).get()));
       mSink->OnLockGranted(mLock);
       PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
         ("TSF: 0x%p   Unlocked (%s) <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
-         "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
          "<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<",
          this, GetLockFlagNameStr(mLock).get()));
-      if (IsReadWriteLocked()) {
-        FlushPendingActions();
+      DidLockGranted();
+    }
+
+    // The document is now completely unlocked.
+    mLock = 0;
+
+    if (!mPendingDestroy && mPendingOnLayoutChange) {
+      mPendingOnLayoutChange = false;
+      if (mSink) {
+        PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+               ("TSF: 0x%p   nsTextStore::RequestLock(), "
+                "calling ITextStoreACPSink::OnLayoutChange()...", this));
+        mSink->OnLayoutChange(TS_LC_CHANGE, TEXTSTORE_DEFAULT_VIEW);
+      }
+      // The layout change caused by composition string change should cause
+      // calling ITfContextOwnerServices::OnLayoutChange() too.
+      if (mContext) {
+        nsRefPtr<ITfContextOwnerServices> service;
+        mContext->QueryInterface(IID_ITfContextOwnerServices,
+                                 getter_AddRefs(service));
+        if (service) {
+          PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+                 ("TSF: 0x%p   nsTextStore::RequestLock(), "
+                  "calling ITfContextOwnerServices::OnLayoutChange()...",
+                  this));
+          service->OnLayoutChange();
+        }
       }
     }
-    mLock = 0;
-    PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+
+    if (!mPendingDestroy && mPendingOnSelectionChange) {
+      mPendingOnSelectionChange = false;
+      if (mSink) {
+        PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+               ("TSF: 0x%p   nsTextStore::RequestLock(), "
+                "calling ITextStoreACPSink::OnSelectionChange()...", this));
+        mSink->OnSelectionChange();
+      }
+    }
+
+    if (mPendingDestroy) {
+      Destroy();
+    }
+
+    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
       ("TSF: 0x%p   nsTextStore::RequestLock() succeeded: *phrSession=%s",
        this, GetTextStoreReturnValueName(*phrSession)));
     return S_OK;
@@ -826,17 +1527,42 @@ nsTextStore::RequestLock(DWORD dwLockFlags,
 }
 
 void
+nsTextStore::DidLockGranted()
+{
+  if (mNativeCaretIsCreated) {
+    ::DestroyCaret();
+    mNativeCaretIsCreated = false;
+  }
+  if (IsReadWriteLocked()) {
+    // FreeCJ (TIP for Traditional Chinese) calls SetSelection() to set caret
+    // to the start of composition string and insert a full width space for
+    // a placeholder with a call of SetText().  After that, it calls
+    // OnUpdateComposition() without new range.  Therefore, let's record the
+    // composition update information here.
+    CompleteLastActionIfStillIncomplete();
+
+    FlushPendingActions();
+  }
+
+  // If the widget has gone, we don't need to notify anything.
+  if (!mWidget || mWidget->Destroyed()) {
+    mPendingOnSelectionChange = false;
+    mPendingOnLayoutChange = false;
+  }
+}
+
+void
 nsTextStore::FlushPendingActions()
 {
   if (!mWidget || mWidget->Destroyed()) {
     mPendingActions.Clear();
-    mContent.Clear();
-    mNotifySelectionChange = false;
+    mLockedContent.Clear();
+    mPendingOnSelectionChange = false;
+    mPendingOnLayoutChange = false;
     return;
   }
 
-  bool notifyTSFOfLayoutChange = mContent.NeedToNotifyTSFOfLayoutChange();
-  mContent.Clear();
+  mLockedContent.Clear();
 
   nsRefPtr<nsWindowBase> kungFuDeathGrip(mWidget);
   for (uint32_t i = 0; i < mPendingActions.Length(); i++) {
@@ -849,20 +1575,20 @@ nsTextStore::FlushPendingActions()
                 "mSelectionLength=%d }",
                 this, action.mSelectionStart, action.mSelectionLength));
 
-        MOZ_ASSERT(mComposition.mLastData.IsEmpty());
-
-        // Select composition range so the new composition replaces the range
-        WidgetSelectionEvent selectionSet(true, NS_SELECTION_SET, mWidget);
-        mWidget->InitEvent(selectionSet);
-        selectionSet.mOffset = static_cast<uint32_t>(action.mSelectionStart);
-        selectionSet.mLength = static_cast<uint32_t>(action.mSelectionLength);
-        selectionSet.mReversed = false;
-        mWidget->DispatchWindowEvent(&selectionSet);
-        if (!selectionSet.mSucceeded) {
-          PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-                 ("TSF: 0x%p   nsTextStore::FlushPendingActions() "
-                  "FAILED due to NS_SELECTION_SET failure", this));
-          break;
+        if (action.mAdjustSelection) {
+          // Select composition range so the new composition replaces the range
+          WidgetSelectionEvent selectionSet(true, NS_SELECTION_SET, mWidget);
+          mWidget->InitEvent(selectionSet);
+          selectionSet.mOffset = static_cast<uint32_t>(action.mSelectionStart);
+          selectionSet.mLength = static_cast<uint32_t>(action.mSelectionLength);
+          selectionSet.mReversed = false;
+          mWidget->DispatchWindowEvent(&selectionSet);
+          if (!selectionSet.mSucceeded) {
+            PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+                   ("TSF: 0x%p   nsTextStore::FlushPendingActions() "
+                    "FAILED due to NS_SELECTION_SET failure", this));
+            break;
+          }
         }
         PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
                ("TSF: 0x%p   nsTextStore::FlushPendingActions() "
@@ -874,87 +1600,66 @@ nsTextStore::FlushPendingActions()
         if (!mWidget || mWidget->Destroyed()) {
           break;
         }
-        mComposition.StartLayoutChangeTimer(this);
         break;
       }
       case PendingAction::COMPOSITION_UPDATE: {
         PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
                ("TSF: 0x%p   nsTextStore::FlushPendingActions() "
                 "flushing COMPOSITION_UPDATE={ mData=\"%s\", "
-                "mRanges.Length()=%d }",
-                this, NS_ConvertUTF16toUTF8(action.mData).get(),
-                action.mRanges.Length()));
+                "mRanges=0x%p, mRanges->Length()=%d }",
+                this, NS_ConvertUTF16toUTF8(action.mData).get(), action.mRanges.get(),
+                action.mRanges ? action.mRanges->Length() : 0));
 
-        if (action.mRanges.IsEmpty()) {
-          TextRange wholeRange;
-          wholeRange.mStartOffset = 0;
-          wholeRange.mEndOffset = action.mData.Length();
-          wholeRange.mRangeType = NS_TEXTRANGE_RAWINPUT;
-          action.mRanges.AppendElement(wholeRange);
-        } else {
-          // Adjust offsets in the ranges for XP linefeed character (only \n).
-          // XXX Following code is the safest approach.  However, it wastes
-          //     a little performance.  For ensuring the clauses do not
-          //     overlap each other, we should redesign TextRange later.
-          for (uint32_t i = 0; i < action.mRanges.Length(); ++i) {
-            TextRange& range = action.mRanges[i];
-            TextRange nativeRange = range;
-            if (nativeRange.mStartOffset > 0) {
-              nsAutoString preText(
-                Substring(action.mData, 0, nativeRange.mStartOffset));
-              preText.ReplaceSubstring(NS_LITERAL_STRING("\r\n"),
-                                       NS_LITERAL_STRING("\n"));
-              range.mStartOffset = preText.Length();
-            }
-            if (nativeRange.Length() == 0) {
-              range.mEndOffset = range.mStartOffset;
-            } else {
-              nsAutoString clause(
-                Substring(action.mData,
-                          nativeRange.mStartOffset, nativeRange.Length()));
-              clause.ReplaceSubstring(NS_LITERAL_STRING("\r\n"),
-                                      NS_LITERAL_STRING("\n"));
-              range.mEndOffset = range.mStartOffset + clause.Length();
-            }
+        if (!action.mRanges) {
+          NS_WARNING("How does this case occur?");
+          action.mRanges = new TextRangeArray();
+        }
+
+        // Adjust offsets in the ranges for XP linefeed character (only \n).
+        // XXX Following code is the safest approach.  However, it wastes
+        //     a little performance.  For ensuring the clauses do not
+        //     overlap each other, we should redesign TextRange later.
+        for (uint32_t i = 0; i < action.mRanges->Length(); ++i) {
+          TextRange& range = action.mRanges->ElementAt(i);
+          TextRange nativeRange = range;
+          if (nativeRange.mStartOffset > 0) {
+            nsAutoString preText(
+              Substring(action.mData, 0, nativeRange.mStartOffset));
+            preText.ReplaceSubstring(NS_LITERAL_STRING("\r\n"),
+                                     NS_LITERAL_STRING("\n"));
+            range.mStartOffset = preText.Length();
+          }
+          if (nativeRange.Length() == 0) {
+            range.mEndOffset = range.mStartOffset;
+          } else {
+            nsAutoString clause(
+              Substring(action.mData,
+                        nativeRange.mStartOffset, nativeRange.Length()));
+            clause.ReplaceSubstring(NS_LITERAL_STRING("\r\n"),
+                                    NS_LITERAL_STRING("\n"));
+            range.mEndOffset = range.mStartOffset + clause.Length();
           }
         }
 
         action.mData.ReplaceSubstring(NS_LITERAL_STRING("\r\n"),
                                       NS_LITERAL_STRING("\n"));
 
-        if (action.mData != mComposition.mLastData) {
-          PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-                 ("TSF: 0x%p   nsTextStore::FlushPendingActions(), "
-                  "dispatching compositionupdate event...", this));
-          WidgetCompositionEvent compositionUpdate(true, NS_COMPOSITION_UPDATE,
-                                                   mWidget);
-          mWidget->InitEvent(compositionUpdate);
-          compositionUpdate.data = action.mData;
-          mComposition.mLastData = compositionUpdate.data;
-          mWidget->DispatchWindowEvent(&compositionUpdate);
-          if (!mWidget || mWidget->Destroyed()) {
-            break;
-          }
-        }
-
-        MOZ_ASSERT(action.mData == mComposition.mLastData);
-
         PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
                ("TSF: 0x%p   nsTextStore::FlushPendingActions(), "
-                "dispatching text event...", this));
-        WidgetTextEvent textEvent(true, NS_TEXT_TEXT, mWidget);
-        mWidget->InitEvent(textEvent);
-        textEvent.theText = mComposition.mLastData;
-        if (action.mRanges.IsEmpty()) {
+                "dispatching compositionchange event...", this));
+        WidgetCompositionEvent compositionChange(true, NS_COMPOSITION_CHANGE,
+                                                 mWidget);
+        mWidget->InitEvent(compositionChange);
+        compositionChange.mData = action.mData;
+        if (action.mRanges->IsEmpty()) {
           TextRange wholeRange;
           wholeRange.mStartOffset = 0;
-          wholeRange.mEndOffset = textEvent.theText.Length();
+          wholeRange.mEndOffset = compositionChange.mData.Length();
           wholeRange.mRangeType = NS_TEXTRANGE_RAWINPUT;
-          action.mRanges.AppendElement(wholeRange);
+          action.mRanges->AppendElement(wholeRange);
         }
-        textEvent.rangeArray = action.mRanges.Elements();
-        textEvent.rangeCount = action.mRanges.Length();
-        mWidget->DispatchWindowEvent(&textEvent);
+        compositionChange.mRanges = action.mRanges;
+        mWidget->DispatchWindowEvent(&compositionChange);
         // Be aware, the mWidget might already have been destroyed.
         break;
       }
@@ -964,34 +1669,17 @@ nsTextStore::FlushPendingActions()
                 "flushing COMPOSITION_END={ mData=\"%s\" }",
                 this, NS_ConvertUTF16toUTF8(action.mData).get()));
 
-        mComposition.EnsureLayoutChangeTimerStopped();
-
         action.mData.ReplaceSubstring(NS_LITERAL_STRING("\r\n"),
                                       NS_LITERAL_STRING("\n"));
-        if (action.mData != mComposition.mLastData) {
-          PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-                 ("TSF: 0x%p   nsTextStore::FlushPendingActions(), "
-                  "dispatching compositionupdate event...", this));
-          WidgetCompositionEvent compositionUpdate(true, NS_COMPOSITION_UPDATE,
-                                                   mWidget);
-          mWidget->InitEvent(compositionUpdate);
-          compositionUpdate.data = action.mData;
-          mComposition.mLastData = compositionUpdate.data;
-          mWidget->DispatchWindowEvent(&compositionUpdate);
-          if (!mWidget || mWidget->Destroyed()) {
-            break;
-          }
-        }
-
-        MOZ_ASSERT(action.mData == mComposition.mLastData);
 
         PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
                ("TSF: 0x%p   nsTextStore::FlushPendingActions(), "
-                "dispatching text event...", this));
-        WidgetTextEvent textEvent(true, NS_TEXT_TEXT, mWidget);
-        mWidget->InitEvent(textEvent);
-        textEvent.theText = mComposition.mLastData;
-        mWidget->DispatchWindowEvent(&textEvent);
+                "dispatching compositionchange event...", this));
+        WidgetCompositionEvent compositionChange(true, NS_COMPOSITION_CHANGE,
+                                                 mWidget);
+        mWidget->InitEvent(compositionChange);
+        compositionChange.mData = action.mData;
+        mWidget->DispatchWindowEvent(&compositionChange);
         if (!mWidget || mWidget->Destroyed()) {
           break;
         }
@@ -1001,13 +1689,12 @@ nsTextStore::FlushPendingActions()
                 "dispatching compositionend event...", this));
         WidgetCompositionEvent compositionEnd(true, NS_COMPOSITION_END,
                                               mWidget);
-        compositionEnd.data = mComposition.mLastData;
+        compositionEnd.mData = compositionChange.mData;
         mWidget->InitEvent(compositionEnd);
         mWidget->DispatchWindowEvent(&compositionEnd);
         if (!mWidget || mWidget->Destroyed()) {
           break;
         }
-        mComposition.mLastData.Truncate();
         break;
       }
       case PendingAction::SELECTION_SET: {
@@ -1034,42 +1721,12 @@ nsTextStore::FlushPendingActions()
       continue;
     }
 
-    mComposition.EnsureLayoutChangeTimerStopped();
-
     PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
            ("TSF: 0x%p   nsTextStore::FlushPendingActions(), "
             "qutting since the mWidget has gone", this));
     break;
   }
   mPendingActions.Clear();
-
-  if (notifyTSFOfLayoutChange && mWidget && !mWidget->Destroyed()) {
-    if (mSink) {
-      PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-             ("TSF: 0x%p   nsTextStore::FlushPendingActions(), "
-              "calling ITextStoreACPSink::OnLayoutChange()...", this));
-      mSink->OnLayoutChange(TS_LC_CHANGE, TEXTSTORE_DEFAULT_VIEW);
-    }
-    // The layout change caused by composition string change should cause
-    // calling ITfContextOwnerServices::OnLayoutChange() too.
-    // Actually, MS-IME 2002 (The default Japanese IME of WinXP) needs this.
-    if (mContext) {
-      nsRefPtr<ITfContextOwnerServices> service;
-      mContext->QueryInterface(IID_ITfContextOwnerServices,
-                               getter_AddRefs(service));
-      if (service) {
-        PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-               ("TSF: 0x%p   nsTextStore::FlushPendingActions(), "
-                "calling ITfContextOwnerServices::OnLayoutChange()...", this));
-        service->OnLayoutChange();
-      }
-    }
-  }
-
-  if (mNotifySelectionChange && mSink && mWidget && !mWidget->Destroyed()) {
-    mSink->OnSelectionChange();
-  }
-  mNotifySelectionChange = false;
 }
 
 STDMETHODIMP
@@ -1176,32 +1833,60 @@ nsTextStore::GetSelection(ULONG ulIndex,
 }
 
 nsTextStore::Content&
-nsTextStore::CurrentContent()
+nsTextStore::LockedContent()
 {
-  Selection& currentSel = CurrentSelection();
-  if (currentSel.IsDirty()) {
-    mContent.Clear();
-    return mContent;
+  MOZ_ASSERT(IsReadLocked(),
+             "LockedContent must be called only during the document is locked");
+  if (!IsReadLocked()) {
+    mLockedContent.Clear();
+    return mLockedContent;
   }
 
-  if (!mContent.IsInitialized()) {
-    MOZ_ASSERT(mWidget && !mWidget->Destroyed());
+  Selection& currentSel = CurrentSelection();
+  if (currentSel.IsDirty()) {
+    mLockedContent.Clear();
+    return mLockedContent;
+  }
 
-    WidgetQueryContentEvent queryText(true, NS_QUERY_TEXT_CONTENT, mWidget);
-    queryText.InitForQueryTextContent(0, UINT32_MAX);
-    mWidget->InitEvent(queryText);
-    mWidget->DispatchWindowEvent(&queryText);
-    NS_ENSURE_TRUE(queryText.mSucceeded, mContent);
+  if (!mLockedContent.IsInitialized()) {
+    nsAutoString text;
+    if (NS_WARN_IF(!GetCurrentText(text))) {
+      mLockedContent.Clear();
+      return mLockedContent;
+    }
 
-    mContent.Init(queryText.mReply.mString);
+    mLockedContent.Init(text);
   }
 
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-         ("TSF: 0x%p   nsTextStore::CurrentContent(): "
-          "mContent={ mText.Length()=%d }",
-          this, mContent.Text().Length()));
+         ("TSF: 0x%p   nsTextStore::LockedContent(): "
+          "mLockedContent={ mText.Length()=%d }",
+          this, mLockedContent.Text().Length()));
 
-  return mContent;
+  return mLockedContent;
+}
+
+bool
+nsTextStore::GetCurrentText(nsAString& aTextContent)
+{
+  if (mLockedContent.IsInitialized()) {
+    aTextContent = mLockedContent.Text();
+    return true;
+  }
+
+  MOZ_ASSERT(mWidget && !mWidget->Destroyed());
+
+  WidgetQueryContentEvent queryText(true, NS_QUERY_TEXT_CONTENT, mWidget);
+  queryText.InitForQueryTextContent(0, UINT32_MAX);
+  mWidget->InitEvent(queryText);
+  mWidget->DispatchWindowEvent(&queryText);
+  if (NS_WARN_IF(!queryText.mSucceeded)) {
+    aTextContent.Truncate();
+    return false;
+  }
+
+  aTextContent = queryText.mReply.mString;
+  return true;
 }
 
 nsTextStore::Selection&
@@ -1391,16 +2076,127 @@ nsTextStore::RestartCompositionIfNecessary(ITfRange* aRangeNew)
     // If the queried composition length is different from the length
     // of our composition string, OnUpdateComposition is being called
     // because a part of the original composition was committed.
-    // Reflect that by committing existing composition and starting
-    // a new one. RecordCompositionEndAction() followed by
-    // RecordCompositionStartAction() will accomplish this automagically.
-    RecordCompositionEndAction();
-    RecordCompositionStartAction(pComposition, composingRange, true);
+    hr = RestartComposition(pComposition, composingRange);
+    if (FAILED(hr)) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+             ("TSF: 0x%p   nsTextStore::RestartCompositionIfNecessary() FAILED "
+              "due to RestartComposition() failure", this));
+      return hr;
+    }
   }
 
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
          ("TSF: 0x%p   nsTextStore::RestartCompositionIfNecessary() succeeded",
           this));
+  return S_OK;
+}
+
+HRESULT
+nsTextStore::RestartComposition(ITfCompositionView* aCompositionView,
+                                ITfRange* aNewRange)
+{
+  Selection& currentSelection = CurrentSelection();
+
+  LONG newStart, newLength;
+  HRESULT hr = GetRangeExtent(aNewRange, &newStart, &newLength);
+  LONG newEnd = newStart + newLength;
+
+  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+         ("TSF: 0x%p   nsTextStore::RestartComposition(aCompositionView=0x%p, "
+          "aNewRange=0x%p { newStart=%d, newLength=%d }), "
+          "mComposition={ mStart=%d, mCompositionString.Length()=%d }, "
+          "currentSelection={ IsDirty()=%s, StartOffset()=%d, Length()=%d }",
+          this, aCompositionView, aNewRange, newStart, newLength,
+          mComposition.mStart, mComposition.mString.Length(),
+          GetBoolName(currentSelection.IsDirty()),
+          currentSelection.StartOffset(), currentSelection.Length()));
+
+  if (currentSelection.IsDirty()) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::RestartComposition() FAILED "
+            "due to CurrentSelection() failure", this));
+    return E_FAIL;
+  }
+
+  if (FAILED(hr)) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::RestartComposition() FAILED "
+            "due to GetRangeExtent() failure", this));
+    return hr;
+  }
+
+  // If the new range has no overlap with the crrent range, we just commit
+  // the composition and restart new composition with the new range but
+  // current selection range should be preserved.
+  if (newStart >= mComposition.EndOffset() || newEnd <= mComposition.mStart) {
+    RecordCompositionEndAction();
+    RecordCompositionStartAction(aCompositionView, newStart, newLength, true);
+    return S_OK;
+  }
+
+  // If the new range has an overlap with the current one, we should not commit
+  // the whole current range to avoid creating an odd undo transaction.
+  // I.e., the overlapped range which is being composed should not appear in
+  // undo transaction.
+
+  // Backup current composition data and selection data.
+  Composition oldComposition = mComposition;
+  Selection oldSelection = currentSelection;
+
+  // Commit only the part of composition.
+  LONG keepComposingStartOffset = std::max(mComposition.mStart, newStart);
+  LONG keepComposingEndOffset = std::min(mComposition.EndOffset(), newEnd);
+  MOZ_ASSERT(keepComposingStartOffset <= keepComposingEndOffset,
+    "Why keepComposingEndOffset is smaller than keepComposingStartOffset?");
+  LONG keepComposingLength = keepComposingEndOffset - keepComposingStartOffset;
+  // Remove the overlapped part from the commit string.
+  nsAutoString commitString(mComposition.mString);
+  commitString.Cut(keepComposingStartOffset - mComposition.mStart,
+                   keepComposingLength);
+  // Update the composition string.
+  Content& lockedContent = LockedContent();
+  if (!lockedContent.IsInitialized()) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::RestartComposition() FAILED "
+            "due to LockedContent() failure", this));
+    return E_FAIL;
+  }
+  lockedContent.ReplaceTextWith(mComposition.mStart,
+                                mComposition.mString.Length(),
+                                commitString);
+  // Record a compositionupdate action for commit the part of composing string.
+  PendingAction* action = LastOrNewPendingCompositionUpdate();
+  action->mData = mComposition.mString;
+  action->mRanges->Clear();
+  TextRange caretRange;
+  caretRange.mStartOffset = caretRange.mEndOffset =
+    uint32_t(oldComposition.mStart + commitString.Length());
+  caretRange.mRangeType = NS_TEXTRANGE_CARETPOSITION;
+  action->mRanges->AppendElement(caretRange);
+  action->mIncomplete = false;
+
+  // Record compositionend action.
+  RecordCompositionEndAction();
+
+  // Record compositionstart action only with the new start since this method
+  // hasn't restored composing string yet.
+  RecordCompositionStartAction(aCompositionView, newStart, 0, false);
+
+  // Restore the latest text content and selection.
+  lockedContent.ReplaceSelectedTextWith(
+    nsDependentSubstring(oldComposition.mString,
+                         keepComposingStartOffset - oldComposition.mStart,
+                         keepComposingLength));
+  currentSelection = oldSelection;
+
+  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+         ("TSF: 0x%p   nsTextStore::RestartComposition() succeeded, "
+          "mComposition={ mStart=%d, mCompositionString.Length()=%d }, "
+          "currentSelection={ IsDirty()=%s, StartOffset()=%d, Length()=%d }",
+          this, mComposition.mStart, mComposition.mString.Length(),
+          GetBoolName(currentSelection.IsDirty()),
+          currentSelection.StartOffset(), currentSelection.Length()));
+
   return S_OK;
 }
 
@@ -1453,9 +2249,11 @@ nsTextStore::RecordCompositionUpdateAction()
 {
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
          ("TSF: 0x%p   nsTextStore::RecordCompositionUpdateAction(), "
-          "mComposition={ mView=0x%p, mString=\"%s\" }",
-          this, mComposition.mView.get(),
-          NS_ConvertUTF16toUTF8(mComposition.mString).get()));
+          "mComposition={ mView=0x%p, mStart=%d, mString=\"%s\" "
+          "(Length()=%d) }",
+          this, mComposition.mView.get(), mComposition.mStart,
+          NS_ConvertUTF16toUTF8(mComposition.mString).get(),
+          mComposition.mString.Length()));
 
   if (!mComposition.IsComposing()) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
@@ -1470,7 +2268,7 @@ nsTextStore::RecordCompositionUpdateAction()
   // the attribute, we have to find out all the ranges that have distinct
   // attribute values. Then we query for what the value represents through
   // the display attribute manager and translate that to TextRange to be
-  // sent in NS_TEXT_TEXT
+  // sent in NS_COMPOSITION_CHANGE
 
   nsRefPtr<ITfProperty> attrPropetry;
   HRESULT hr = mContext->GetProperty(GUID_PROP_ATTRIBUTE,
@@ -1510,28 +2308,53 @@ nsTextStore::RecordCompositionUpdateAction()
     return E_FAIL;
   }
 
-  PendingAction* action = GetPendingCompositionUpdate();
+  PendingAction* action = LastOrNewPendingCompositionUpdate();
   action->mData = mComposition.mString;
-  nsTArray<TextRange>& textRanges = action->mRanges;
-  // The ranges might already have been initialized already, however, if this
-  // is called again, that means we need to overwrite the ranges with current
+  // The ranges might already have been initialized, however, if this is
+  // called again, that means we need to overwrite the ranges with current
   // information.
-  textRanges.Clear();
+  action->mRanges->Clear();
 
   TextRange newRange;
   // No matter if we have display attribute info or not,
-  // we always pass in at least one range to NS_TEXT_TEXT
+  // we always pass in at least one range to NS_COMPOSITION_CHANGE
   newRange.mStartOffset = 0;
   newRange.mEndOffset = action->mData.Length();
   newRange.mRangeType = NS_TEXTRANGE_RAWINPUT;
-  textRanges.AppendElement(newRange);
+  action->mRanges->AppendElement(newRange);
 
   nsRefPtr<ITfRange> range;
   while (S_OK == enumRanges->Next(1, getter_AddRefs(range), nullptr) && range) {
 
-    LONG start = 0, length = 0;
-    if (FAILED(GetRangeExtent(range, &start, &length)))
+    LONG rangeStart = 0, rangeLength = 0;
+    if (FAILED(GetRangeExtent(range, &rangeStart, &rangeLength))) {
       continue;
+    }
+    // The range may include out of composition string.  We should ignore
+    // outside of the composition string.
+    LONG start = std::min(std::max(rangeStart, mComposition.mStart),
+                          mComposition.EndOffset());
+    LONG end = std::max(std::min(rangeStart + rangeLength,
+                                 mComposition.EndOffset()),
+                        mComposition.mStart);
+    LONG length = end - start;
+    if (length < 0) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+             ("TSF: 0x%p   nsTextStore::RecordCompositionUpdateAction() "
+              "ignores invalid range (%d-%d)",
+              this, rangeStart - mComposition.mStart,
+              rangeStart - mComposition.mStart + rangeLength));
+      continue;
+    }
+    if (!length) {
+      PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+             ("TSF: 0x%p   nsTextStore::RecordCompositionUpdateAction() "
+              "ignores a range due to outside of the composition or empty "
+              "(%d-%d)",
+              this, rangeStart - mComposition.mStart,
+              rangeStart - mComposition.mStart + rangeLength));
+      continue;
+    }
 
     TextRange newRange;
     newRange.mStartOffset = uint32_t(start - mComposition.mStart);
@@ -1564,14 +2387,14 @@ nsTextStore::RecordCompositionUpdateAction()
       }
     }
 
-    TextRange& lastRange = textRanges[textRanges.Length() - 1];
+    TextRange& lastRange = action->mRanges->LastElement();
     if (lastRange.mStartOffset == newRange.mStartOffset) {
       // Replace range if last range is the same as this one
       // So that ranges don't overlap and confuse the editor
       lastRange = newRange;
     } else {
       lastRange.mEndOffset = newRange.mStartOffset;
-      textRanges.AppendElement(newRange);
+      action->mRanges->AppendElement(newRange);
     }
   }
 
@@ -1583,8 +2406,8 @@ nsTextStore::RecordCompositionUpdateAction()
   // string,  however, Gecko doesn't support the wide caret drawing now (Gecko
   // doesn't support XOR drawing), unfortunately.  For now, we should change
   // the range style to undefined.
-  if (!currentSel.IsCollapsed() && textRanges.Length() == 1) {
-    TextRange& range = textRanges[0];
+  if (!currentSel.IsCollapsed() && action->mRanges->Length() == 1) {
+    TextRange& range = action->mRanges->ElementAt(0);
     LONG start = currentSel.MinOffset();
     LONG end = currentSel.MaxOffset();
     if ((LONG)range.mStartOffset == start - mComposition.mStart &&
@@ -1602,7 +2425,9 @@ nsTextStore::RecordCompositionUpdateAction()
   TextRange caretRange;
   caretRange.mStartOffset = caretRange.mEndOffset = uint32_t(caretPosition);
   caretRange.mRangeType = NS_TEXTRANGE_CARETPOSITION;
-  textRanges.AppendElement(caretRange);
+  action->mRanges->AppendElement(caretRange);
+
+  action->mIncomplete = false;
 
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
          ("TSF: 0x%p   nsTextStore::RecordCompositionUpdateAction() "
@@ -1613,13 +2438,16 @@ nsTextStore::RecordCompositionUpdateAction()
 
 HRESULT
 nsTextStore::SetSelectionInternal(const TS_SELECTION_ACP* pSelection,
-                                  bool aDispatchTextEvent)
+                                  bool aDispatchCompositionChangeEvent)
 {
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-         ("TSF: 0x%p   nsTextStore::SetSelectionInternal(pSelection=%ld-%ld, "
-          "aDispatchTextEvent=%s), IsComposing()=%s",
+         ("TSF: 0x%p   nsTextStore::SetSelectionInternal(pSelection={ "
+          "acpStart=%ld, acpEnd=%ld, style={ ase=%s, fInterimChar=%s} }, "
+          "aDispatchCompositionChangeEvent=%s), mComposition.IsComposing()=%s",
           this, pSelection->acpStart, pSelection->acpEnd,
-          GetBoolName(aDispatchTextEvent),
+          GetActiveSelEndName(pSelection->style.ase),
+          GetBoolName(pSelection->style.fInterimChar),
+          GetBoolName(aDispatchCompositionChangeEvent),
           GetBoolName(mComposition.IsComposing())));
 
   MOZ_ASSERT(IsReadWriteLocked());
@@ -1633,7 +2461,7 @@ nsTextStore::SetSelectionInternal(const TS_SELECTION_ACP* pSelection,
   }
 
   if (mComposition.IsComposing()) {
-    if (aDispatchTextEvent) {
+    if (aDispatchCompositionChangeEvent) {
       HRESULT hr = RestartCompositionIfNecessary();
       if (FAILED(hr)) {
         PR_LOG(sTextStoreLog, PR_LOG_ERROR,
@@ -1651,7 +2479,7 @@ nsTextStore::SetSelectionInternal(const TS_SELECTION_ACP* pSelection,
     }
     // Emulate selection during compositions
     currentSel.SetSelection(*pSelection);
-    if (aDispatchTextEvent) {
+    if (aDispatchCompositionChangeEvent) {
       HRESULT hr = RecordCompositionUpdateAction();
       if (FAILED(hr)) {
         PR_LOG(sTextStoreLog, PR_LOG_ERROR,
@@ -1663,6 +2491,7 @@ nsTextStore::SetSelectionInternal(const TS_SELECTION_ACP* pSelection,
     return S_OK;
   }
 
+  CompleteLastActionIfStillIncomplete();
   PendingAction* action = mPendingActions.AppendElement();
   action->mType = PendingAction::SELECTION_SET;
   action->mSelectionStart = pSelection->acpStart;
@@ -1679,8 +2508,15 @@ nsTextStore::SetSelection(ULONG ulCount,
                           const TS_SELECTION_ACP *pSelection)
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-         ("TSF: 0x%p nsTextStore::SetSelection(ulCount=%lu)",
-          this, ulCount));
+         ("TSF: 0x%p nsTextStore::SetSelection(ulCount=%lu, pSelection=%p { "
+          "acpStart=%ld, acpEnd=%ld, style={ ase=%s, fInterimChar=%s } }), "
+          "mComposition.IsComposing()=%s",
+          this, ulCount, pSelection,
+          pSelection ? pSelection->acpStart : 0,
+          pSelection ? pSelection->acpEnd : 0,
+          pSelection ? GetActiveSelEndName(pSelection->style.ase) : "",
+          pSelection ? GetBoolName(pSelection->style.fInterimChar) : "",
+          GetBoolName(mComposition.IsComposing())));
 
   if (!IsReadWriteLocked()) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
@@ -1728,7 +2564,7 @@ nsTextStore::GetText(LONG acpStart,
     ("TSF: 0x%p nsTextStore::GetText(acpStart=%ld, acpEnd=%ld, pchPlain=0x%p, "
      "cchPlainReq=%lu, pcchPlainOut=0x%p, prgRunInfo=0x%p, ulRunInfoReq=%lu, "
      "pulRunInfoOut=0x%p, pacpNext=0x%p), mComposition={ mStart=%ld, "
-     "mString.Length()=%lu IsComposing()=%s }",
+     "mString.Length()=%lu, IsComposing()=%s }",
      this, acpStart, acpEnd, pchPlain, cchPlainReq, pcchPlainOut,
      prgRunInfo, ulRunInfoReq, pulRunInfoOut, pacpNext,
      mComposition.mStart, mComposition.mString.Length(),
@@ -1766,36 +2602,36 @@ nsTextStore::GetText(LONG acpStart,
     prgRunInfo->type = TS_RT_PLAIN;
   }
 
-  Content& currentContent = CurrentContent();
-  if (!currentContent.IsInitialized()) {
+  Content& lockedContent = LockedContent();
+  if (!lockedContent.IsInitialized()) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
            ("TSF: 0x%p   nsTextStore::GetText() FAILED due to "
-            "CurrentContent() failure", this));
+            "LockedContent() failure", this));
     return E_FAIL;
   }
-  if (currentContent.Text().Length() < static_cast<uint32_t>(acpStart)) {
+  if (lockedContent.Text().Length() < static_cast<uint32_t>(acpStart)) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
            ("TSF: 0x%p   nsTextStore::GetText() FAILED due to "
             "acpStart is larger offset than the actual text length", this));
     return TS_E_INVALIDPOS;
   }
   if (acpEnd != -1 &&
-      currentContent.Text().Length() < static_cast<uint32_t>(acpEnd)) {
+      lockedContent.Text().Length() < static_cast<uint32_t>(acpEnd)) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
            ("TSF: 0x%p   nsTextStore::GetText() FAILED due to "
             "acpEnd is larger offset than the actual text length", this));
     return TS_E_INVALIDPOS;
   }
   uint32_t length = (acpEnd == -1) ?
-    currentContent.Text().Length() - static_cast<uint32_t>(acpStart) :
+    lockedContent.Text().Length() - static_cast<uint32_t>(acpStart) :
     static_cast<uint32_t>(acpEnd - acpStart);
   if (cchPlainReq && cchPlainReq - 1 < length) {
     length = cchPlainReq - 1;
   }
   if (length) {
     if (pchPlain && cchPlainReq) {
-      const PRUnichar* startChar =
-        currentContent.Text().BeginReading() + acpStart;
+      const char16_t* startChar =
+        lockedContent.Text().BeginReading() + acpStart;
       memcpy(pchPlain, startChar, length * sizeof(*pchPlain));
       pchPlain[length] = 0;
       *pcchPlainOut = length;
@@ -1827,8 +2663,9 @@ nsTextStore::SetText(DWORD dwFlags,
                      TS_TEXTCHANGE *pChange)
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-         ("TSF: 0x%p nsTextStore::SetText(dwFlags=%s, acpStart=%ld, acpEnd=%ld, "
-          "pchText=0x%p \"%s\", cch=%lu, pChange=0x%p), IsComposing()=%s",
+         ("TSF: 0x%p nsTextStore::SetText(dwFlags=%s, acpStart=%ld, "
+          "acpEnd=%ld, pchText=0x%p \"%s\", cch=%lu, pChange=0x%p), "
+          "mComposition.IsComposing()=%s",
           this, dwFlags == TS_ST_CORRECTION ? "TS_ST_CORRECTION" :
                                               "not-specified",
           acpStart, acpEnd, pchText,
@@ -1967,15 +2804,41 @@ nsTextStore::SetInputScope(const nsString& aHTMLInputType)
   }
 }
 
+int32_t
+nsTextStore::GetRequestedAttrIndex(const TS_ATTRID& aAttrID)
+{
+  if (IsEqualGUID(aAttrID, GUID_PROP_INPUTSCOPE)) {
+    return eInputScope;
+  }
+  if (IsEqualGUID(aAttrID, TSATTRID_Text_VerticalWriting)) {
+    return eTextVerticalWriting;
+  }
+  return eNotSupported;
+}
+
+TS_ATTRID
+nsTextStore::GetAttrID(int32_t aIndex)
+{
+  switch (aIndex) {
+    case eInputScope:
+      return GUID_PROP_INPUTSCOPE;
+    case eTextVerticalWriting:
+      return TSATTRID_Text_VerticalWriting;
+    default:
+      MOZ_CRASH("Invalid index? Or not implemented yet?");
+      return GUID_NULL;
+  }
+}
+
 HRESULT
-nsTextStore::ProcessScopeRequest(DWORD dwFlags,
-                                 ULONG cFilterAttrs,
-                                 const TS_ATTRID *paFilterAttrs)
+nsTextStore::HandleRequestAttrs(DWORD aFlags,
+                                ULONG aFilterCount,
+                                const TS_ATTRID* aFilterAttrs)
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-         ("TSF: 0x%p nsTextStore::ProcessScopeRequest() called "
-          "cFilterAttrs=%d dwFlags=%s", this, cFilterAttrs,
-          GetFindFlagName(dwFlags).get()));
+         ("TSF: 0x%p nsTextStore::HandleRequestAttrs(aFlags=%s, "
+          "aFilterCount=%u)",
+          this, GetFindFlagName(aFlags).get(), aFilterCount));
 
   // This is a little weird! RequestSupportedAttrs gives us advanced notice
   // of a support query via RetrieveRequestedAttrs for a specific attribute.
@@ -1983,25 +2846,19 @@ nsTextStore::ProcessScopeRequest(DWORD dwFlags,
   // support, but the text service will only want the input scope object
   // returned in RetrieveRequestedAttrs if the dwFlags passed in here contains
   // TS_ATTR_FIND_WANT_VALUE.
-  mInputScopeDetected = mInputScopeRequested = false;
+  for (int32_t i = 0; i < NUM_OF_SUPPORTED_ATTRS; i++) {
+    mRequestedAttrs[i] = false;
+  }
+  mRequestedAttrValues = !!(aFlags & TS_ATTR_FIND_WANT_VALUE);
 
-  // Currently we only support GUID_PROP_INPUTSCOPE
-  for (uint32_t idx = 0; idx < cFilterAttrs; ++idx) {
+  for (uint32_t i = 0; i < aFilterCount; i++) {
     PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-           ("TSF: 0x%p   nsTextStore::ProcessScopeRequest() "
-            "requested attr=%s", this, GetCLSIDNameStr(paFilterAttrs[idx]).get()));
-    if (IsEqualGUID(paFilterAttrs[idx], GUID_PROP_INPUTSCOPE)) {
-      PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-             ("TSF: 0x%p   nsTextStore::ProcessScopeRequest() "
-              "GUID_PROP_INPUTSCOPE queried", this));
-      mInputScopeDetected = true;
-      if (dwFlags & TS_ATTR_FIND_WANT_VALUE) {
-        PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-               ("TSF: 0x%p   nsTextStore::ProcessScopeRequest() "
-                "TS_ATTR_FIND_WANT_VALUE specified", this));
-        mInputScopeRequested = true;
-      }
-      break;
+           ("TSF: 0x%p   nsTextStore::HandleRequestAttrs(), "
+            "requested attr=%s",
+            this, GetGUIDNameStrWithTable(aFilterAttrs[i]).get()));
+    int32_t index = GetRequestedAttrIndex(aFilterAttrs[i]);
+    if (index != eNotSupported) {
+      mRequestedAttrs[index] = true;
     }
   }
   return S_OK;
@@ -2013,11 +2870,11 @@ nsTextStore::RequestSupportedAttrs(DWORD dwFlags,
                                    const TS_ATTRID *paFilterAttrs)
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-         ("TSF: 0x%p nsTextStore::RequestSupportedAttrs() called "
-          "cFilterAttrs=%d dwFlags=%s", this, cFilterAttrs,
-          GetFindFlagName(dwFlags).get()));
+         ("TSF: 0x%p nsTextStore::RequestSupportedAttrs(dwFlags=%s, "
+          "cFilterAttrs=%lu)",
+          this, GetFindFlagName(dwFlags).get(), cFilterAttrs));
 
-  return ProcessScopeRequest(dwFlags, cFilterAttrs, paFilterAttrs);
+  return HandleRequestAttrs(dwFlags, cFilterAttrs, paFilterAttrs);
 }
 
 STDMETHODIMP
@@ -2027,12 +2884,12 @@ nsTextStore::RequestAttrsAtPosition(LONG acpPos,
                                     DWORD dwFlags)
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-         ("TSF: 0x%p nsTextStore::RequestAttrsAtPosition() called "
-          "acpPos=%d cFilterAttrs=%d dwFlags=%s", this, acpPos, cFilterAttrs,
-          GetFindFlagName(dwFlags).get()));
+         ("TSF: 0x%p nsTextStore::RequestAttrsAtPosition(acpPos=%ld, "
+          "cFilterAttrs=%lu, dwFlags=%s)",
+          this, acpPos, cFilterAttrs, GetFindFlagName(dwFlags).get()));
 
-  return ProcessScopeRequest(dwFlags | TS_ATTR_FIND_WANT_VALUE,
-                             cFilterAttrs, paFilterAttrs);
+  return HandleRequestAttrs(dwFlags | TS_ATTR_FIND_WANT_VALUE,
+                            cFilterAttrs, paFilterAttrs);
 }
 
 STDMETHODIMP
@@ -2042,8 +2899,10 @@ nsTextStore::RequestAttrsTransitioningAtPosition(LONG acpPos,
                                                  DWORD dwFlags)
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-         ("TSF: 0x%p nsTextStore::RequestAttrsTransitioningAtPosition() called "
-          "but not supported (S_OK)", this));
+         ("TSF: 0x%p nsTextStore::RequestAttrsTransitioningAtPosition("
+          "acpPos=%ld, cFilterAttrs=%lu, dwFlags=%s) called but not supported "
+          "(S_OK)",
+          this, acpPos, cFilterAttrs, GetFindFlagName(dwFlags).get()));
 
   // no per character attributes defined
   return S_OK;
@@ -2061,7 +2920,7 @@ nsTextStore::FindNextAttrTransition(LONG acpStart,
 {
   if (!pacpNext || !pfFound || !plFoundOffset) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-           ("TSF: 0x%p nsTextStore::FindNextAttrTransition() FAILED due to "
+           ("TSF:   0x%p nsTextStore::FindNextAttrTransition() FAILED due to "
             "null argument", this));
     return E_INVALIDARG;
   }
@@ -2081,36 +2940,75 @@ nsTextStore::RetrieveRequestedAttrs(ULONG ulCount,
                                     TS_ATTRVAL *paAttrVals,
                                     ULONG *pcFetched)
 {
-  if (!pcFetched || !ulCount || !paAttrVals) {
+  if (!pcFetched || !paAttrVals) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
            ("TSF: 0x%p nsTextStore::RetrieveRequestedAttrs() FAILED due to "
             "null argument", this));
     return E_INVALIDARG;
   }
 
-  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-         ("TSF: 0x%p   nsTextStore::RetrieveRequestedAttrs() called "
-          "ulCount=%d", this, ulCount));
-
-  if (mInputScopeDetected || mInputScopeRequested) {
-    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-           ("TSF: 0x%p   nsTextStore::RetrieveRequestedAttrs() for "
-            "GUID_PROP_INPUTSCOPE: "
-            "mInputScopeDetected=%s mInputScopeRequested=%s",
-            this, GetBoolName(mInputScopeDetected),
-            GetBoolName(mInputScopeRequested)));
-
-    paAttrVals->idAttr = GUID_PROP_INPUTSCOPE;
-    paAttrVals->dwOverlapId = 0;
-    paAttrVals->varValue.vt = VT_EMPTY;
-    *pcFetched = 1;
-
-    if (mInputScopeRequested) {
-      paAttrVals->varValue.vt = VT_UNKNOWN;
-      paAttrVals->varValue.punkVal = (IUnknown*) new InputScopeImpl(mInputScopes);
+  ULONG expectedCount = 0;
+  for (int32_t i = 0; i < NUM_OF_SUPPORTED_ATTRS; i++) {
+    if (mRequestedAttrs[i]) {
+      expectedCount++;
     }
+  }
+  if (ulCount < expectedCount) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p nsTextStore::RetrieveRequestedAttrs() FAILED due to "
+            "not enough count ulCount=%u, expectedCount=%u",
+            this, ulCount, expectedCount));
+    return E_INVALIDARG;
+  }
 
-    mInputScopeDetected = mInputScopeRequested = false;
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+         ("TSF: 0x%p nsTextStore::RetrieveRequestedAttrs() called "
+          "ulCount=%d, mRequestedAttrValues=%s",
+          this, ulCount, GetBoolName(mRequestedAttrValues)));
+
+  int32_t count = 0;
+  for (int32_t i = 0; i < NUM_OF_SUPPORTED_ATTRS; i++) {
+    if (!mRequestedAttrs[i]) {
+      continue;
+    }
+    mRequestedAttrs[i] = false;
+
+    TS_ATTRID attrID = GetAttrID(i);
+
+    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+           ("TSF: 0x%p   nsTextStore::RetrieveRequestedAttrs() for %s",
+            this, GetGUIDNameStrWithTable(attrID).get()));
+
+    paAttrVals[count].idAttr = attrID;
+    paAttrVals[count].dwOverlapId = 0;
+
+    if (!mRequestedAttrValues) {
+      paAttrVals[count].varValue.vt = VT_EMPTY;
+    } else {
+      switch (i) {
+        case eInputScope: {
+          paAttrVals[count].varValue.vt = VT_UNKNOWN;
+          nsRefPtr<IUnknown> inputScope = new InputScopeImpl(mInputScopes);
+          paAttrVals[count].varValue.punkVal = inputScope.forget().take();
+          break;
+        }
+        case eTextVerticalWriting:
+          // Currently, we don't support vertical writing mode.
+          paAttrVals[count].varValue.vt = VT_BOOL;
+          paAttrVals[count].varValue.boolVal = VARIANT_FALSE;
+          break;
+        default:
+          MOZ_CRASH("Invalid index? Or not implemented yet?");
+          break;
+      }
+    }
+    count++;
+  }
+
+  mRequestedAttrValues = false;
+
+  if (count) {
+    *pcFetched = count;
     return S_OK;
   }
 
@@ -2144,14 +3042,14 @@ nsTextStore::GetEndACP(LONG *pacp)
     return E_INVALIDARG;
   }
 
-  Content& currentContent = CurrentContent();
-  if (!currentContent.IsInitialized()) {
+  Content& lockedContent = LockedContent();
+  if (!lockedContent.IsInitialized()) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
            ("TSF: 0x%p   nsTextStore::GetEndACP() FAILED due to "
-            "CurrentContent() failure", this));
+            "LockedContent() failure", this));
     return E_FAIL;
   }
-  *pacp = static_cast<LONG>(currentContent.Text().Length());
+  *pacp = static_cast<LONG>(lockedContent.Text().Length());
   return S_OK;
 }
 
@@ -2196,11 +3094,11 @@ nsTextStore::GetACPFromPoint(TsViewCookie vcView,
     return E_INVALIDARG;
   }
 
-  if (mContent.IsLayoutChanged()) {
+  if (mLockedContent.IsLayoutChanged()) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
            ("TSF: 0x%p   nsTextStore::GetACPFromPoint() FAILED due to "
             "layout not recomputed", this));
-    mContent.NeedsToNotifyTSFOfLayoutChange();
+    mPendingOnLayoutChange = true;
     return TS_E_NOLAYOUT;
   }
 
@@ -2253,11 +3151,32 @@ nsTextStore::GetTextExt(TsViewCookie vcView,
     return TS_E_INVALIDPOS;
   }
 
-  if (mContent.IsLayoutChangedAfter(acpEnd)) {
+  // Free ChangJie 2010 and Easy Changjei 1.0.12.0 doesn't handle
+  // ITfContextView::GetTextExt() properly.  Prehaps, it's due to a bug of TSF.
+  // TSF (at least on Win 8.1) doesn't return TS_E_NOLAYOUT to the caller
+  // even if we return it.  It's converted to just E_FAIL.
+  // TODO: On Win 9, we need to check this hack is still necessary.
+  const nsString& activeTIPKeyboardDescription =
+    TSFStaticSink::GetInstance()->GetActiveTIPKeyboardDescription();
+  if ((sDoNotReturnNoLayoutErrorToFreeChangJie &&
+       activeTIPKeyboardDescription.Equals(TIP_NAME_FREE_CHANG_JIE_2010)) ||
+      (sDoNotReturnNoLayoutErrorToEasyChangjei &&
+       activeTIPKeyboardDescription.Equals(TIP_NAME_EASY_CHANGJEI)) &&
+      mComposition.IsComposing() &&
+      mLockedContent.IsLayoutChangedAfter(acpEnd) &&
+      mComposition.mStart < acpEnd) {
+    acpEnd = mComposition.mStart;
+    acpStart = std::min(acpStart, acpEnd);
+    PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+           ("TSF: 0x%p   nsTextStore::GetTextExt() hacked the offsets for TIP "
+            "acpStart=%d, acpEnd=%d", this, acpStart, acpEnd));
+  }
+
+  if (mLockedContent.IsLayoutChangedAfter(acpEnd)) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
            ("TSF: 0x%p   nsTextStore::GetTextExt() FAILED due to "
             "layout not recomputed at %d", this, acpEnd));
-    mContent.NeedsToNotifyTSFOfLayoutChange();
+    mPendingOnLayoutChange = true;
     return TS_E_NOLAYOUT;
   }
 
@@ -2312,6 +3231,22 @@ nsTextStore::GetTextExt(TsViewCookie vcView,
 
   // not equal if text rect was clipped
   *pfClipped = !::EqualRect(prc, &textRect);
+
+  // ATOK refers native caret position and size on Desktop applications for
+  // deciding candidate window.  Therefore, we need to create native caret
+  // for hacking the bug.
+  if (sCreateNativeCaretForATOK &&
+      StringBeginsWith(
+        activeTIPKeyboardDescription, TIP_NAME_BEGINS_WITH_ATOK) &&
+      mComposition.IsComposing() &&
+      mComposition.mStart <= acpStart && mComposition.EndOffset() >= acpStart &&
+      mComposition.mStart <= acpEnd && mComposition.EndOffset() >= acpEnd) {
+    if (mNativeCaretIsCreated) {
+      ::DestroyCaret();
+      mNativeCaretIsCreated = false;
+    }
+    CreateNativeCaret();
+  }
 
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
          ("TSF: 0x%p   nsTextStore::GetTextExt() succeeded: "
@@ -2574,15 +3509,15 @@ nsTextStore::InsertTextAtSelectionInternal(const nsAString &aInsertStr,
           this, NS_ConvertUTF16toUTF8(aInsertStr).get(), aTextChange,
           GetBoolName(mComposition.IsComposing())));
 
-  Content& currentContent = CurrentContent();
-  if (!currentContent.IsInitialized()) {
+  Content& lockedContent = LockedContent();
+  if (!lockedContent.IsInitialized()) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
            ("TSF: 0x%p   nsTextStore::InsertTextAtSelectionInternal() failed "
-            "due to CurrentContent() failure()", this));
+            "due to LockedContent() failure()", this));
     return false;
   }
 
-  TS_SELECTION_ACP oldSelection = currentContent.Selection().ACP();
+  TS_SELECTION_ACP oldSelection = lockedContent.Selection().ACP();
   if (!mComposition.IsComposing()) {
     // Use a temporary composition to contain the text
     PendingAction* compositionStart = mPendingActions.AppendElement();
@@ -2596,12 +3531,12 @@ nsTextStore::InsertTextAtSelectionInternal(const nsAString &aInsertStr,
     compositionEnd->mData = aInsertStr;
   }
 
-  currentContent.ReplaceSelectedTextWith(aInsertStr);
+  lockedContent.ReplaceSelectedTextWith(aInsertStr);
 
   if (aTextChange) {
     aTextChange->acpStart = oldSelection.acpStart;
     aTextChange->acpOldEnd = oldSelection.acpEnd;
-    aTextChange->acpNewEnd = currentContent.Selection().EndOffset();
+    aTextChange->acpNewEnd = lockedContent.Selection().EndOffset();
   }
 
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
@@ -2632,15 +3567,15 @@ nsTextStore::InsertEmbeddedAtSelection(DWORD dwFlags,
 }
 
 HRESULT
-nsTextStore::RecordCompositionStartAction(ITfCompositionView* pComposition,
+nsTextStore::RecordCompositionStartAction(ITfCompositionView* aComposition,
                                           ITfRange* aRange,
                                           bool aPreserveSelection)
 {
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
          ("TSF: 0x%p   nsTextStore::RecordCompositionStartAction("
-          "pComposition=0x%p, aRange=0x%p, aPreserveSelection=%s), "
+          "aComposition=0x%p, aRange=0x%p, aPreserveSelection=%s), "
           "mComposition.mView=0x%p",
-          this, pComposition, aRange, GetBoolName(aPreserveSelection),
+          this, aComposition, aRange, GetBoolName(aPreserveSelection),
           mComposition.mView.get()));
 
   LONG start = 0, length = 0;
@@ -2652,22 +3587,59 @@ nsTextStore::RecordCompositionStartAction(ITfCompositionView* pComposition,
     return hr;
   }
 
-  Content& currentContent = CurrentContent();
-  if (!currentContent.IsInitialized()) {
+  return RecordCompositionStartAction(aComposition, start, length,
+                                      aPreserveSelection);
+}
+
+HRESULT
+nsTextStore::RecordCompositionStartAction(ITfCompositionView* aComposition,
+                                          LONG aStart,
+                                          LONG aLength,
+                                          bool aPreserveSelection)
+{
+  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+         ("TSF: 0x%p   nsTextStore::RecordCompositionStartAction("
+          "aComposition=0x%p, aStart=%d, aLength=%d, aPreserveSelection=%s), "
+          "mComposition.mView=0x%p",
+          this, aComposition, aStart, aLength, GetBoolName(aPreserveSelection),
+          mComposition.mView.get()));
+
+  Content& lockedContent = LockedContent();
+  if (!lockedContent.IsInitialized()) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
            ("TSF: 0x%p   nsTextStore::RecordCompositionStartAction() FAILED "
-            "due to CurrentContent() failure", this));
+            "due to LockedContent() failure", this));
     return E_FAIL;
   }
 
+  CompleteLastActionIfStillIncomplete();
   PendingAction* action = mPendingActions.AppendElement();
   action->mType = PendingAction::COMPOSITION_START;
-  action->mSelectionStart = start;
-  action->mSelectionLength = length;
+  action->mSelectionStart = aStart;
+  action->mSelectionLength = aLength;
 
-  currentContent.StartComposition(pComposition, *action, aPreserveSelection);
+  Selection& currentSel = CurrentSelection();
+  if (currentSel.IsDirty()) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::RecordCompositionStartAction() FAILED "
+            "due to CurrentSelection() failure", this));
+    action->mAdjustSelection = true;
+  } else if (currentSel.MinOffset() != aStart ||
+             currentSel.MaxOffset() != aStart + aLength) {
+    // If new composition range is different from current selection range,
+    // we need to set selection before dispatching compositionstart event.
+    action->mAdjustSelection = true;
+  } else {
+    // We shouldn't dispatch selection set event before dispatching
+    // compositionstart event because it may cause put caret different
+    // position in HTML editor since generated flat text content and offset in
+    // it are lossy data of HTML contents.
+    action->mAdjustSelection = false;
+  }
 
-  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+  lockedContent.StartComposition(aComposition, *action, aPreserveSelection);
+
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
          ("TSF: 0x%p   nsTextStore::RecordCompositionStartAction() succeeded: "
           "mComposition={ mStart=%ld, mString.Length()=%ld, "
           "mSelection={ acpStart=%ld, acpEnd=%ld, style.ase=%s, "
@@ -2683,25 +3655,26 @@ HRESULT
 nsTextStore::RecordCompositionEndAction()
 {
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-         ("TSF: 0x%p nsTextStore::RecordCompositionEndAction(), "
+         ("TSF: 0x%p   nsTextStore::RecordCompositionEndAction(), "
           "mComposition={ mView=0x%p, mString=\"%s\" }",
           this, mComposition.mView.get(),
           NS_ConvertUTF16toUTF8(mComposition.mString).get()));
 
   MOZ_ASSERT(mComposition.IsComposing());
 
+  CompleteLastActionIfStillIncomplete();
   PendingAction* action = mPendingActions.AppendElement();
   action->mType = PendingAction::COMPOSITION_END;
   action->mData = mComposition.mString;
 
-  Content& currentContent = CurrentContent();
-  if (!currentContent.IsInitialized()) {
+  Content& lockedContent = LockedContent();
+  if (!lockedContent.IsInitialized()) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
            ("TSF: 0x%p   nsTextStore::RecordCompositionEndAction() FAILED due "
-            "to CurrentContent() failure", this));
+            "to LockedContent() failure", this));
     return E_FAIL;
   }
-  currentContent.EndComposition(*action);
+  lockedContent.EndComposition(*action);
 
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
          ("TSF: 0x%p   nsTextStore::RecordCompositionEndAction(), succeeded",
@@ -2784,6 +3757,8 @@ nsTextStore::OnUpdateComposition(ITfCompositionView* pComposition,
 
   // pRangeNew is null when the update is not complete
   if (!pRangeNew) {
+    PendingAction* action = LastOrNewPendingCompositionUpdate();
+    action->mIncomplete = true;
     PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
            ("TSF: 0x%p   nsTextStore::OnUpdateComposition() succeeded but "
             "not complete", this));
@@ -2866,172 +3841,365 @@ nsTextStore::OnEndComposition(ITfCompositionView* pComposition)
   return S_OK;
 }
 
+STDMETHODIMP
+nsTextStore::AdviseMouseSink(ITfRangeACP* range,
+                             ITfMouseSink* pSink,
+                             DWORD* pdwCookie)
+{
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+         ("TSF: 0x%p nsTextStore::AdviseMouseSink(range=0x%p, pSink=0x%p, "
+          "pdwCookie=0x%p)", this, range, pSink, pdwCookie));
+
+  if (!pdwCookie) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::AdviseMouseSink() FAILED due to the "
+            "pdwCookie is null", this));
+    return E_INVALIDARG;
+  }
+  // Initialize the result with invalid cookie for safety.
+  *pdwCookie = MouseTracker::kInvalidCookie;
+
+  if (!range) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::AdviseMouseSink() FAILED due to the "
+            "range is null", this));
+    return E_INVALIDARG;
+  }
+  if (!pSink) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::AdviseMouseSink() FAILED due to the "
+            "pSink is null", this));
+    return E_INVALIDARG;
+  }
+
+  // Looking for an unusing tracker.
+  MouseTracker* tracker = nullptr;
+  for (size_t i = 0; i < mMouseTrackers.Length(); i++) {
+    if (mMouseTrackers[i].IsUsing()) {
+      continue;
+    }
+    tracker = &mMouseTrackers[i];
+  }
+  // If there is no unusing tracker, create new one.
+  // XXX Should we make limitation of the number of installs?
+  if (!tracker) {
+    tracker = mMouseTrackers.AppendElement();
+    HRESULT hr = tracker->Init(this);
+    if (FAILED(hr)) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+             ("TSF: 0x%p   nsTextStore::AdviseMouseSink() FAILED due to "
+              "failure of MouseTracker::Init()", this));
+      return hr;
+    }
+  }
+  HRESULT hr = tracker->AdviseSink(this, range, pSink);
+  if (FAILED(hr)) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::AdviseMouseSink() FAILED due to failure "
+            "of MouseTracker::Init()", this));
+    return hr;
+  }
+  *pdwCookie = tracker->Cookie();
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+         ("TSF: 0x%p   nsTextStore::AdviseMouseSink(), succeeded, "
+          "*pdwCookie=%d", this, *pdwCookie));
+  return S_OK;
+}
+
+STDMETHODIMP
+nsTextStore::UnadviseMouseSink(DWORD dwCookie)
+{
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+         ("TSF: 0x%p nsTextStore::UnadviseMouseSink(dwCookie=%d)",
+          this, dwCookie));
+  if (dwCookie == MouseTracker::kInvalidCookie) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::UnadviseMouseSink() FAILED due to "
+            "the cookie is invalid value", this));
+    return E_INVALIDARG;
+  }
+  // The cookie value must be an index of mMouseTrackers.
+  // We can use this shortcut for now.
+  if (static_cast<size_t>(dwCookie) >= mMouseTrackers.Length()) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::UnadviseMouseSink() FAILED due to "
+            "the cookie is too large value", this));
+    return E_INVALIDARG;
+  }
+  MouseTracker& tracker = mMouseTrackers[dwCookie];
+  if (!tracker.IsUsing()) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::UnadviseMouseSink() FAILED due to "
+            "the found tracker uninstalled already", this));
+    return E_INVALIDARG;
+  }
+  tracker.UnadviseSink();
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+         ("TSF: 0x%p   nsTextStore::UnadviseMouseSink(), succeeded", this));
+  return S_OK;
+}
+
 // static
 nsresult
 nsTextStore::OnFocusChange(bool aGotFocus,
                            nsWindowBase* aFocusedWidget,
-                           IMEState::Enabled aIMEEnabled)
+                           const InputContext& aContext)
 {
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-         ("TSF: nsTextStore::OnFocusChange(aGotFocus=%s, "
-          "aFocusedWidget=0x%p, aIMEEnabled=%s), sTsfThreadMgr=0x%p, "
-          "sTsfTextStore=0x%p",
+         ("TSF:   nsTextStore::OnFocusChange(aGotFocus=%s, "
+          "aFocusedWidget=0x%p, aContext={ mIMEState={ mEnabled=%s }, "
+          "mHTMLInputType=\"%s\" }), "
+          "sThreadMgr=0x%p, sEnabledTextStore=0x%p",
           GetBoolName(aGotFocus), aFocusedWidget,
-          GetIMEEnabledName(aIMEEnabled), sTsfThreadMgr, sTsfTextStore));
+          GetIMEEnabledName(aContext.mIMEState.mEnabled),
+          NS_ConvertUTF16toUTF8(aContext.mHTMLInputType).get(),
+          sThreadMgr.get(), sEnabledTextStore.get()));
 
-  // no change notifications if TSF is disabled
-  NS_ENSURE_TRUE(sTsfThreadMgr && sTsfTextStore, NS_ERROR_NOT_AVAILABLE);
+  if (NS_WARN_IF(!IsInTSFMode())) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
 
-  nsRefPtr<ITfDocumentMgr> prevFocusedDocumentMgr;
-  if (aGotFocus && (aIMEEnabled == IMEState::ENABLED ||
-                    aIMEEnabled == IMEState::PASSWORD)) {
-    bool bRet = sTsfTextStore->Create(aFocusedWidget);
-    NS_ENSURE_TRUE(bRet, NS_ERROR_FAILURE);
-    NS_ENSURE_TRUE(sTsfTextStore->mDocumentMgr, NS_ERROR_FAILURE);
-    if (aIMEEnabled == IMEState::PASSWORD) {
-      MarkContextAsKeyboardDisabled(sTsfTextStore->mContext);
-      nsRefPtr<ITfContext> topContext;
-      sTsfTextStore->mDocumentMgr->GetTop(getter_AddRefs(topContext));
-      if (topContext && topContext != sTsfTextStore->mContext) {
-        MarkContextAsKeyboardDisabled(topContext);
-      }
+  // If currently sEnableTextStore has focus, notifies TSF of losing focus.
+  if (ThinksHavingFocus()) {
+    nsRefPtr<ITfDocumentMgr> prevFocusedDocumentMgr;
+    DebugOnly<HRESULT> hr =
+      sThreadMgr->AssociateFocus(
+        sEnabledTextStore->mWidget->GetWindowHandle(),
+        nullptr, getter_AddRefs(prevFocusedDocumentMgr));
+    NS_ASSERTION(SUCCEEDED(hr), "Disassociating focus failed");
+    NS_ASSERTION(prevFocusedDocumentMgr == sEnabledTextStore->mDocumentMgr,
+                 "different documentMgr has been associated with the window");
+  }
+
+  // If there is sEnabledTextStore, we don't use it in the new focused editor.
+  // Release it now.
+  if (sEnabledTextStore) {
+    sEnabledTextStore->Destroy();
+    sEnabledTextStore = nullptr;
+  }
+
+  // If this is a notification of blur, move focus to the dummy document
+  // manager.
+  if (!aGotFocus || !aContext.mIMEState.IsEditable()) {
+    HRESULT hr = sThreadMgr->SetFocus(sDisabledDocumentMgr);
+    if (NS_WARN_IF(FAILED(hr))) {
+      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+             ("TSF:   nsTextStore::OnFocusChange() FAILED due to "
+              "ITfThreadMgr::SetFocus() failure"));
+      return NS_ERROR_FAILURE;
     }
-    HRESULT hr = sTsfThreadMgr->SetFocus(sTsfTextStore->mDocumentMgr);
-    NS_ENSURE_TRUE(SUCCEEDED(hr), NS_ERROR_FAILURE);
-    // Use AssociateFocus() for ensuring that any native focus event
-    // never steal focus from our documentMgr.
-    hr = sTsfThreadMgr->AssociateFocus(aFocusedWidget->GetWindowHandle(),
-                                       sTsfTextStore->mDocumentMgr,
-                                       getter_AddRefs(prevFocusedDocumentMgr));
-    NS_ENSURE_TRUE(SUCCEEDED(hr), NS_ERROR_FAILURE);
-  } else {
-    if (ThinksHavingFocus()) {
-      DebugOnly<HRESULT> hr = sTsfThreadMgr->AssociateFocus(
-                                sTsfTextStore->mWidget->GetWindowHandle(),
-                                nullptr, getter_AddRefs(prevFocusedDocumentMgr));
-      NS_ASSERTION(SUCCEEDED(hr), "Disassociating focus failed");
-      NS_ASSERTION(prevFocusedDocumentMgr == sTsfTextStore->mDocumentMgr,
-                   "different documentMgr has been associated with the window");
-      sTsfTextStore->Destroy();
+    return NS_OK;
+  }
+
+  // If an editor is getting focus, create new TextStore and set focus.
+  if (NS_WARN_IF(!CreateAndSetFocus(aFocusedWidget, aContext))) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF:   nsTextStore::OnFocusChange() FAILED due to "
+            "ITfThreadMgr::CreateAndSetFocus() failure"));
+    // If setting focus, we should destroy the TextStore completely because
+    // it causes memory leak.
+    if (sEnabledTextStore) {
+      sEnabledTextStore->Destroy();
+      sEnabledTextStore = nullptr;
     }
-    HRESULT hr = sTsfThreadMgr->SetFocus(sTsfDisabledDocumentMgr);
-    NS_ENSURE_TRUE(SUCCEEDED(hr), NS_ERROR_FAILURE);
+    return NS_ERROR_FAILURE;
   }
   return NS_OK;
+}
+
+// static
+bool
+nsTextStore::CreateAndSetFocus(nsWindowBase* aFocusedWidget,
+                               const InputContext& aContext)
+{
+  // TSF might do something which causes that we need to access static methods
+  // of nsTextStore.  At that time, sEnabledTextStore may be necessary.
+  // So, we should set sEnabledTextStore directly.
+  sEnabledTextStore = new nsTextStore();
+  if (NS_WARN_IF(!sEnabledTextStore->Init(aFocusedWidget))) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF:   nsTextStore::CreateAndSetFocus() FAILED due to "
+            "nsTextStore::Init() failure"));
+    return false;
+  }
+  if (NS_WARN_IF(!sEnabledTextStore->mDocumentMgr)) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF:   nsTextStore::CreateAndSetFocus() FAILED due to "
+            "invalid nsTextStore::mDocumentMgr"));
+    return false;
+  }
+  if (aContext.mIMEState.mEnabled == IMEState::PASSWORD) {
+    MarkContextAsKeyboardDisabled(sEnabledTextStore->mContext);
+    nsRefPtr<ITfContext> topContext;
+    sEnabledTextStore->mDocumentMgr->GetTop(getter_AddRefs(topContext));
+    if (topContext && topContext != sEnabledTextStore->mContext) {
+      MarkContextAsKeyboardDisabled(topContext);
+    }
+  }
+  HRESULT hr = sThreadMgr->SetFocus(sEnabledTextStore->mDocumentMgr);
+  if (NS_WARN_IF(FAILED(hr))) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF:   nsTextStore::CreateAndSetFocus() FAILED due to "
+            "ITfTheadMgr::SetFocus() failure"));
+    return false;
+  }
+  // Use AssociateFocus() for ensuring that any native focus event
+  // never steal focus from our documentMgr.
+  nsRefPtr<ITfDocumentMgr> prevFocusedDocumentMgr;
+  hr = sThreadMgr->AssociateFocus(aFocusedWidget->GetWindowHandle(),
+                                  sEnabledTextStore->mDocumentMgr,
+                                  getter_AddRefs(prevFocusedDocumentMgr));
+  if (NS_WARN_IF(FAILED(hr))) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF:   nsTextStore::CreateAndSetFocus() FAILED due to "
+            "ITfTheadMgr::AssociateFocus() failure"));
+    return false;
+  }
+  sEnabledTextStore->SetInputScope(aContext.mHTMLInputType);
+  return true;
 }
 
 // static
 nsIMEUpdatePreference
 nsTextStore::GetIMEUpdatePreference()
 {
-  int8_t notifications = nsIMEUpdatePreference::NOTIFY_NOTHING;
-  if (sTsfThreadMgr && sTsfTextStore && sTsfTextStore->mDocumentMgr) {
+  if (sThreadMgr && sEnabledTextStore && sEnabledTextStore->mDocumentMgr) {
     nsRefPtr<ITfDocumentMgr> docMgr;
-    sTsfThreadMgr->GetFocus(getter_AddRefs(docMgr));
-    if (docMgr == sTsfTextStore->mDocumentMgr) {
-      notifications = (nsIMEUpdatePreference::NOTIFY_SELECTION_CHANGE |
-                       nsIMEUpdatePreference::NOTIFY_TEXT_CHANGE);
+    sThreadMgr->GetFocus(getter_AddRefs(docMgr));
+    if (docMgr == sEnabledTextStore->mDocumentMgr) {
+      nsIMEUpdatePreference updatePreference(
+        nsIMEUpdatePreference::NOTIFY_SELECTION_CHANGE |
+        nsIMEUpdatePreference::NOTIFY_TEXT_CHANGE |
+        nsIMEUpdatePreference::NOTIFY_POSITION_CHANGE |
+        nsIMEUpdatePreference::NOTIFY_MOUSE_BUTTON_EVENT_ON_CHAR |
+        nsIMEUpdatePreference::NOTIFY_DURING_DEACTIVE);
+      // nsTextStore shouldn't notify TSF of selection change and text change
+      // which are caused by composition.
+      updatePreference.DontNotifyChangesCausedByComposition();
+      return updatePreference;
     }
   }
-  return nsIMEUpdatePreference(notifications, false);
+  return nsIMEUpdatePreference();
 }
 
 nsresult
-nsTextStore::OnTextChangeInternal(uint32_t aStart,
-                                  uint32_t aOldEnd,
-                                  uint32_t aNewEnd)
+nsTextStore::OnTextChangeInternal(const IMENotification& aIMENotification)
 {
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-         ("TSF: 0x%p nsTextStore::OnTextChangeInternal(aStart=%lu, "
-          "aOldEnd=%lu, aNewEnd=%lu), mSink=0x%p, mSinkMask=%s, "
-          "mTextChange={ acpStart=%ld, acpOldEnd=%ld, acpNewEnd=%ld }",
-          this, aStart, aOldEnd, aNewEnd, mSink.get(),
-          GetSinkMaskNameStr(mSinkMask).get(), mTextChange.acpStart,
-          mTextChange.acpOldEnd, mTextChange.acpNewEnd));
+         ("TSF: 0x%p   nsTextStore::OnTextChangeInternal(aIMENotification={ "
+          "mMessage=0x%08X, mTextChangeData={ mStartOffset=%lu, "
+          "mOldEndOffset=%lu, mNewEndOffset=%lu}), mSink=0x%p, mSinkMask=%s, "
+          "mComposition.IsComposing()=%s",
+          this, aIMENotification.mMessage,
+          aIMENotification.mTextChangeData.mStartOffset,
+          aIMENotification.mTextChangeData.mOldEndOffset,
+          aIMENotification.mTextChangeData.mNewEndOffset, mSink.get(),
+          GetSinkMaskNameStr(mSinkMask).get(),
+          GetBoolName(mComposition.IsComposing())));
 
   if (IsReadLocked()) {
     return NS_OK;
   }
 
-  NS_ASSERTION(!mComposition.IsComposing(), "text changed during composition");
   mSelection.MarkDirty();
 
-  if (mSink && 0 != (mSinkMask & TS_AS_TEXT_CHANGE)) {
-    mTextChange.acpStart = std::min(mTextChange.acpStart, LONG(aStart));
-    mTextChange.acpOldEnd = std::max(mTextChange.acpOldEnd, LONG(aOldEnd));
-    mTextChange.acpNewEnd = std::max(mTextChange.acpNewEnd, LONG(aNewEnd));
-    ::PostMessageW(mWidget->GetWindowHandle(),
-                   WM_USER_TSF_TEXTCHANGE, 0, 0);
+  if (!mSink || !(mSinkMask & TS_AS_TEXT_CHANGE)) {
+    return NS_OK;
   }
-  return NS_OK;
-}
 
-void
-nsTextStore::OnTextChangeMsgInternal(void)
-{
-  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-         ("TSF: 0x%p nsTextStore::OnTextChangeMsgInternal(), "
-          "mSink=0x%p, mSinkMask=%s, mTextChange={ acpStart=%ld, "
-          "acpOldEnd=%ld, acpNewEnd=%ld }",
-          this, mSink.get(),
-          GetSinkMaskNameStr(mSinkMask).get(), mTextChange.acpStart,
-          mTextChange.acpOldEnd, mTextChange.acpNewEnd));
+  if (!aIMENotification.mTextChangeData.IsInInt32Range()) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::OnTextChangeInternal() FAILED due to "
+            "offset is too big for calling mSink->OnTextChange()...",
+            this));
+    return NS_OK;
+  }
 
-  if (!mLock && mSink && 0 != (mSinkMask & TS_AS_TEXT_CHANGE) &&
-      INT32_MAX > mTextChange.acpStart) {
+  // Some TIPs are confused by text change notification during composition.
+  // Especially, some of them stop working for composition in our process.
+  // For preventing it, let's commit the composition.
+  if (mComposition.IsComposing()) {
     PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-           ("TSF: 0x%p   nsTextStore::OnTextChangeMsgInternal(), calling"
-            "mSink->OnTextChange(0, { acpStart=%ld, acpOldEnd=%ld, "
-            "acpNewEnd=%ld })...", this, mTextChange.acpStart,
-            mTextChange.acpOldEnd, mTextChange.acpNewEnd));
-    mSink->OnTextChange(0, &mTextChange);
-    mTextChange.acpStart = INT32_MAX;
-    mTextChange.acpOldEnd = mTextChange.acpNewEnd = 0;
+           ("TSF: 0x%p   nsTextStore::OnTextChangeInternal(), "
+            "committing the composition for avoiding making TIP confused...",
+            this));
+    CommitCompositionInternal(false);
+    return NS_OK;
   }
+
+  TS_TEXTCHANGE textChange;
+  textChange.acpStart =
+    static_cast<LONG>(aIMENotification.mTextChangeData.mStartOffset);
+  textChange.acpOldEnd =
+    static_cast<LONG>(aIMENotification.mTextChangeData.mOldEndOffset);
+  textChange.acpNewEnd =
+    static_cast<LONG>(aIMENotification.mTextChangeData.mNewEndOffset);
+
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+         ("TSF: 0x%p   nsTextStore::OnTextChangeInternal(), calling "
+          "mSink->OnTextChange(0, { acpStart=%ld, acpOldEnd=%ld, "
+          "acpNewEnd=%ld })...", this, textChange.acpStart,
+          textChange.acpOldEnd, textChange.acpNewEnd));
+  mSink->OnTextChange(0, &textChange);
+
+  return NS_OK;
 }
 
 nsresult
 nsTextStore::OnSelectionChangeInternal(void)
 {
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-         ("TSF: 0x%p nsTextStore::OnSelectionChangeInternal(), "
-          "mSink=0x%p, mSinkMask=%s, mIsRecordingActionsWithoutLock=%s",
+         ("TSF: 0x%p   nsTextStore::OnSelectionChangeInternal(), "
+          "mSink=0x%p, mSinkMask=%s, mIsRecordingActionsWithoutLock=%s, "
+          "mComposition.IsComposing()=%s",
           this, mSink.get(), GetSinkMaskNameStr(mSinkMask).get(),
-          GetBoolName(mIsRecordingActionsWithoutLock)));
+          GetBoolName(mIsRecordingActionsWithoutLock),
+          GetBoolName(mComposition.IsComposing())));
 
   if (IsReadLocked()) {
     return NS_OK;
   }
 
-  NS_ASSERTION(!mComposition.IsComposing(),
-               "selection changed during composition");
   mSelection.MarkDirty();
 
-  if (mSink && 0 != (mSinkMask & TS_AS_SEL_CHANGE)) {
+  if (!mSink || !(mSinkMask & TS_AS_SEL_CHANGE)) {
+    return NS_OK;
+  }
+
+  // Some TIPs are confused by selection change notification during composition.
+  // Especially, some of them stop working for composition in our process.
+  // For preventing it, let's commit the composition.
+  if (mComposition.IsComposing()) {
+    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+           ("TSF: 0x%p   nsTextStore::OnSelectionChangeInternal(), "
+            "committing the composition for avoiding making TIP confused...",
+            this));
+    CommitCompositionInternal(false);
+    return NS_OK;
+  }
+
+  if (!mIsRecordingActionsWithoutLock) {
     PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
            ("TSF: 0x%p   nsTextStore::OnSelectionChangeInternal(), calling "
             "mSink->OnSelectionChange()...", this));
-    if (!mIsRecordingActionsWithoutLock) {
-      mSink->OnSelectionChange();
-    } else {
-      mNotifySelectionChange = true;
-    }
+    mSink->OnSelectionChange();
+  } else {
+    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+           ("TSF: 0x%p   nsTextStore::OnSelectionChangeInternal(), pending "
+            "a call of mSink->OnSelectionChange()...", this));
+    mPendingOnSelectionChange = true;
   }
   return NS_OK;
 }
 
 nsresult
-nsTextStore::OnLayoutChange()
+nsTextStore::OnLayoutChangeInternal()
 {
   NS_ENSURE_TRUE(mContext, NS_ERROR_FAILURE);
   NS_ENSURE_TRUE(mSink, NS_ERROR_FAILURE);
 
-  // XXXmnakano We always call OnLayoutChange for now, but this might use CPU
-  // power when the focused editor has very long text. Ideally, we should call
-  // this only when the composition string screen position is changed by window
-  // moving, resizing. And also reflowing and scrolling the contents.
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-         ("TSF: 0x%p   nsTextStore::OnLayoutChange(), calling "
+         ("TSF: 0x%p   nsTextStore::OnLayoutChangeInternal(), calling "
           "mSink->OnLayoutChange()...", this));
   HRESULT hr = mSink->OnLayoutChange(TS_LC_CHANGE, TEXTSTORE_DEFAULT_VIEW);
   NS_ENSURE_TRUE(SUCCEEDED(hr), NS_ERROR_FAILURE);
@@ -3039,11 +4207,148 @@ nsTextStore::OnLayoutChange()
   return NS_OK;
 }
 
+nsresult
+nsTextStore::OnMouseButtonEventInternal(const IMENotification& aIMENotification)
+{
+  if (mMouseTrackers.IsEmpty()) {
+    return NS_OK;
+  }
+
+  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+         ("TSF: 0x%p   nsTextStore::OnMouseButtonEventInternal("
+          "aIMENotification={ mEventMessage=%s, mOffset=%u, mCursorPos={ "
+          "mX=%d, mY=%d }, mCharRect={ mX=%d, mY=%d, mWidth=%d, mHeight=%d }, "
+          "mButton=%s, mButtons=%s, mModifiers=%s })",
+          this, GetEventMessageName(
+                  aIMENotification.mMouseButtonEventData.mEventMessage),
+          aIMENotification.mMouseButtonEventData.mOffset,
+          aIMENotification.mMouseButtonEventData.mCursorPos.mX,
+          aIMENotification.mMouseButtonEventData.mCursorPos.mY,
+          aIMENotification.mMouseButtonEventData.mCharRect.mX,
+          aIMENotification.mMouseButtonEventData.mCharRect.mY,
+          aIMENotification.mMouseButtonEventData.mCharRect.mWidth,
+          aIMENotification.mMouseButtonEventData.mCharRect.mHeight,
+          GetMouseButtonName(aIMENotification.mMouseButtonEventData.mButton),
+          GetMouseButtonsName(
+            aIMENotification.mMouseButtonEventData.mButtons).get(),
+          GetModifiersName(
+            aIMENotification.mMouseButtonEventData.mModifiers).get()));
+
+  uint32_t offset = aIMENotification.mMouseButtonEventData.mOffset;
+  nsIntRect charRect =
+    aIMENotification.mMouseButtonEventData.mCharRect.AsIntRect();
+  nsIntPoint cursorPos =
+    aIMENotification.mMouseButtonEventData.mCursorPos.AsIntPoint();
+  ULONG quadrant = 1;
+  if (charRect.width > 0) {
+    int32_t cursorXInChar = cursorPos.x - charRect.x;
+    quadrant = cursorXInChar * 4 / charRect.width;
+    quadrant = (quadrant + 2) % 4;
+  }
+  ULONG edge = quadrant < 2 ? offset + 1 : offset;
+  DWORD buttonStatus = 0;
+  bool isMouseUp =
+    aIMENotification.mMouseButtonEventData.mEventMessage == NS_MOUSE_BUTTON_UP;
+  if (!isMouseUp) {
+    switch (aIMENotification.mMouseButtonEventData.mButton) {
+      case WidgetMouseEventBase::eLeftButton:
+        buttonStatus = MK_LBUTTON;
+        break;
+      case WidgetMouseEventBase::eMiddleButton:
+        buttonStatus = MK_MBUTTON;
+        break;
+      case WidgetMouseEventBase::eRightButton:
+        buttonStatus = MK_RBUTTON;
+        break;
+    }
+  }
+  if (aIMENotification.mMouseButtonEventData.mModifiers & MODIFIER_CONTROL) {
+    buttonStatus |= MK_CONTROL;
+  }
+  if (aIMENotification.mMouseButtonEventData.mModifiers & MODIFIER_SHIFT) {
+    buttonStatus |= MK_SHIFT;
+  }
+  for (size_t i = 0; i < mMouseTrackers.Length(); i++) {
+    MouseTracker& tracker = mMouseTrackers[i];
+    if (!tracker.IsUsing() || !tracker.InRange(offset)) {
+      continue;
+    }
+    if (tracker.OnMouseButtonEvent(edge - tracker.RangeStart(),
+                                   quadrant, buttonStatus)) {
+      return NS_SUCCESS_EVENT_CONSUMED;
+    }
+  }
+  return NS_OK;
+}
+
+void
+nsTextStore::CreateNativeCaret()
+{
+  // This method must work only on desktop application.
+  if (XRE_GetWindowsEnvironment() != WindowsEnvironmentType_Desktop) {
+    return;
+  }
+
+  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+         ("TSF: 0x%p   nsTextStore::CreateNativeCaret(), "
+          "mComposition.IsComposing()=%s",
+          this, GetBoolName(mComposition.IsComposing())));
+
+  Selection& currentSel = CurrentSelection();
+  if (currentSel.IsDirty()) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::CreateNativeCaret() FAILED due to "
+            "CurrentSelection() failure", this));
+    return;
+  }
+
+  // XXX If this is called without composition and the selection isn't
+  //     collapsed, is it OK?
+  uint32_t caretOffset = currentSel.MaxOffset();
+
+  WidgetQueryContentEvent queryCaretRect(true, NS_QUERY_CARET_RECT, mWidget);
+  queryCaretRect.InitForQueryCaretRect(caretOffset);
+  mWidget->InitEvent(queryCaretRect);
+  mWidget->DispatchWindowEvent(&queryCaretRect);
+  if (!queryCaretRect.mSucceeded) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::CreateNativeCaret() FAILED due to "
+            "NS_QUERY_CARET_RECT failure (offset=%d)", this, caretOffset));
+    return;
+  }
+
+  nsIntRect& caretRect = queryCaretRect.mReply.mRect;
+  mNativeCaretIsCreated = ::CreateCaret(mWidget->GetWindowHandle(), nullptr,
+                                        caretRect.width, caretRect.height);
+  if (!mNativeCaretIsCreated) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::CreateNativeCaret() FAILED due to "
+            "CreateCaret() failure", this));
+    return;
+  }
+
+  nsWindow* window = static_cast<nsWindow*>(mWidget.get());
+  nsWindow* toplevelWindow = window->GetTopLevelWindow(false);
+  if (!toplevelWindow) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::CreateNativeCaret() FAILED due to "
+            "no top level window", this));
+    return;
+  }
+
+  if (toplevelWindow != window) {
+    caretRect.MoveBy(toplevelWindow->WidgetToScreenOffset());
+    caretRect.MoveBy(-window->WidgetToScreenOffset());
+  }
+
+  ::SetCaretPos(caretRect.x, caretRect.y);
+}
+
 void
 nsTextStore::CommitCompositionInternal(bool aDiscard)
 {
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
-         ("TSF: 0x%p nsTextStore::CommitCompositionInternal(aDiscard=%s), "
+         ("TSF: 0x%p   nsTextStore::CommitCompositionInternal(aDiscard=%s), "
           "mSink=0x%p, mContext=0x%p, mComposition.mView=0x%p, "
           "mComposition.mString=\"%s\"",
           this, GetBoolName(aDiscard), mSink.get(), mContext.get(),
@@ -3113,7 +4418,7 @@ nsTextStore::SetIMEOpenState(bool aState)
          ("TSF: nsTextStore::SetIMEOpenState(aState=%s)", GetBoolName(aState)));
 
   nsRefPtr<ITfCompartment> comp;
-  if (!GetCompartment(sTsfThreadMgr,
+  if (!GetCompartment(sThreadMgr,
                       GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
                       getter_AddRefs(comp))) {
     PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
@@ -3129,7 +4434,7 @@ nsTextStore::SetIMEOpenState(bool aState)
          ("TSF:   nsTextStore::SetIMEOpenState(), setting "
           "0x%04X to GUID_COMPARTMENT_KEYBOARD_OPENCLOSE...",
           variant.lVal));
-  comp->SetValue(sTsfClientId, &variant);
+  comp->SetValue(sClientId, &variant);
 }
 
 // static
@@ -3137,7 +4442,7 @@ bool
 nsTextStore::GetIMEOpenState(void)
 {
   nsRefPtr<ITfCompartment> comp;
-  if (!GetCompartment(sTsfThreadMgr,
+  if (!GetCompartment(sThreadMgr,
                       GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
                       getter_AddRefs(comp)))
     return false;
@@ -3160,26 +4465,26 @@ nsTextStore::SetInputContext(nsWindowBase* aWidget,
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
          ("TSF: nsTextStore::SetInputContext(aWidget=%p, "
           "aContext.mIMEState.mEnabled=%s, aAction.mFocusChange=%s), "
-          "ThinksHavingFocus()=%s",
+          "sEnabledTextStore=0x%p, ThinksHavingFocus()=%s",
           aWidget, GetIMEEnabledName(aContext.mIMEState.mEnabled),
-          GetFocusChangeName(aAction.mFocusChange),
+          GetFocusChangeName(aAction.mFocusChange), sEnabledTextStore.get(),
           GetBoolName(ThinksHavingFocus())));
 
-  NS_ENSURE_TRUE_VOID(sTsfTextStore);
-  sTsfTextStore->SetInputScope(aContext.mHTMLInputType);
+  NS_ENSURE_TRUE_VOID(IsInTSFMode());
 
   if (aAction.mFocusChange != InputContextAction::FOCUS_NOT_CHANGED) {
+    if (sEnabledTextStore) {
+      sEnabledTextStore->SetInputScope(aContext.mHTMLInputType);
+    }
     return;
   }
 
   // If focus isn't actually changed but the enabled state is changed,
   // emulate the focus move.
-  if (!ThinksHavingFocus() &&
-      aContext.mIMEState.mEnabled == IMEState::ENABLED) {
-    OnFocusChange(true, aWidget, aContext.mIMEState.mEnabled);
-  } else if (ThinksHavingFocus() &&
-             aContext.mIMEState.mEnabled != IMEState::ENABLED) {
-    OnFocusChange(false, aWidget, aContext.mIMEState.mEnabled);
+  if (!ThinksHavingFocus() && aContext.mIMEState.IsEditable()) {
+    OnFocusChange(true, aWidget, aContext);
+  } else if (ThinksHavingFocus() && !aContext.mIMEState.IsEditable()) {
+    OnFocusChange(false, aWidget, aContext);
   }
 }
 
@@ -3205,7 +4510,7 @@ nsTextStore::MarkContextAsKeyboardDisabled(ITfContext* aContext)
          ("TSF: nsTextStore::MarkContextAsKeyboardDisabled(), setting "
           "to disable context 0x%p...",
           aContext));
-  comp->SetValue(sTsfClientId, &variant_int4_value1);
+  comp->SetValue(sClientId, &variant_int4_value1);
 }
 
 // static
@@ -3229,12 +4534,12 @@ nsTextStore::MarkContextAsEmpty(ITfContext* aContext)
   PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
          ("TSF: nsTextStore::MarkContextAsEmpty(), setting "
           "to mark empty context 0x%p...", aContext));
-  comp->SetValue(sTsfClientId, &variant_int4_value1);
+  comp->SetValue(sClientId, &variant_int4_value1);
 }
 
 // static
 void
-nsTextStore::Initialize(void)
+nsTextStore::Initialize()
 {
 #ifdef PR_LOGGING
   if (!sTextStoreLog) {
@@ -3242,125 +4547,168 @@ nsTextStore::Initialize(void)
   }
 #endif
 
-  bool enableTsf = Preferences::GetBool("intl.enable_tsf_support", false);
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-    ("TSF: nsTextStore::Initialize(), TSF is %s",
+    ("TSF: nsTextStore::Initialize() is called..."));
+
+  if (sThreadMgr) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED due to already initialized"));
+    return;
+  }
+
+  bool enableTsf =
+    Preferences::GetBool(kPrefNameForceEnableTSF, false) ||
+    (IsVistaOrLater() && Preferences::GetBool(kPrefNameEnableTSF, false));
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+    ("TSF:   nsTextStore::Initialize(), TSF is %s",
      enableTsf ? "enabled" : "disabled"));
   if (!enableTsf) {
     return;
   }
 
-  if (!sTsfThreadMgr) {
-    if (SUCCEEDED(CoCreateInstance(CLSID_TF_ThreadMgr, nullptr,
-          CLSCTX_INPROC_SERVER, IID_ITfThreadMgr,
-          reinterpret_cast<void**>(&sTsfThreadMgr)))) {
-      DebugOnly<HRESULT> hr =
-        sTsfThreadMgr->QueryInterface(IID_ITfMessagePump,
-                                      reinterpret_cast<void**>(&sMessagePump));
-      MOZ_ASSERT(SUCCEEDED(hr));
-      MOZ_ASSERT(sMessagePump);
-      hr =
-        sTsfThreadMgr->QueryInterface(IID_ITfKeystrokeMgr,
-                                      reinterpret_cast<void**>(&sKeystrokeMgr));
-      MOZ_ASSERT(SUCCEEDED(hr));
-      MOZ_ASSERT(sKeystrokeMgr);
-      PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-        ("TSF:   nsTextStore::Initialize() succeeded to "
-         "create the thread manager, activating..."));
-      if (FAILED(sTsfThreadMgr->Activate(&sTsfClientId))) {
-        PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-          ("TSF:   nsTextStore::Initialize() FAILED to activate, "
-           "releasing the thread manager..."));
-        NS_RELEASE(sTsfThreadMgr);
-      }
-    }
-#ifdef PR_LOGGING
-    else {
-      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-        ("TSF:   nsTextStore::Initialize() FAILED to "
-         "create the thread manager"));
-    }
-#endif // #ifdef PR_LOGGING
-  }
-  if (sTsfThreadMgr && !sTsfTextStore) {
-    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-      ("TSF:   nsTextStore::Initialize() is creating "
-       "an nsTextStore instance..."));
-    sTsfTextStore = new nsTextStore();
-  }
-  if (sTsfThreadMgr && !sDisplayAttrMgr) {
-    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-      ("TSF:   nsTextStore::Initialize() is creating "
-       "a display attribute manager instance..."));
-    HRESULT hr =
-      ::CoCreateInstance(CLSID_TF_DisplayAttributeMgr, nullptr,
-                         CLSCTX_INPROC_SERVER, IID_ITfDisplayAttributeMgr,
-                         reinterpret_cast<void**>(&sDisplayAttrMgr));
-    if (FAILED(hr) || !sDisplayAttrMgr) {
-      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-        ("TSF:   nsTextStore::Initialize() FAILED to create "
-         "a display attribute manager instance"));
-    }
-  }
-  if (sTsfThreadMgr && sDisplayAttrMgr && !sCategoryMgr) {
-    PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-      ("TSF:   nsTextStore::Initialize() is creating "
-       "a category manager instance..."));
-    HRESULT hr =
-      ::CoCreateInstance(CLSID_TF_CategoryMgr, nullptr,
-                         CLSCTX_INPROC_SERVER, IID_ITfCategoryMgr,
-                         reinterpret_cast<void**>(&sCategoryMgr));
-    if (FAILED(hr) || !sCategoryMgr) {
-      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-        ("TSF:   nsTextStore::Initialize() FAILED to create "
-         "a category manager instance"));
-      // release the display manager because it cannot work without the
-      // category manager
-      NS_RELEASE(sDisplayAttrMgr);
-    }
+  // XXX MSDN documents that ITfInputProcessorProfiles is available only on
+  //     desktop apps.  However, there is no known way to obtain
+  //     ITfInputProcessorProfileMgr instance without ITfInputProcessorProfiles
+  //     instance.
+  nsRefPtr<ITfInputProcessorProfiles> inputProcessorProfiles;
+  HRESULT hr =
+    ::CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr,
+                       CLSCTX_INPROC_SERVER,
+                       IID_ITfInputProcessorProfiles,
+                       getter_AddRefs(inputProcessorProfiles));
+  if (FAILED(hr) || !inputProcessorProfiles) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED to create input processor "
+       "profiles, hr=0x%08X", hr));
+    return;
   }
 
-  if (sTsfThreadMgr && sTsfTextStore) {
-    HRESULT hr =
-      sTsfThreadMgr->CreateDocumentMgr(&sTsfDisabledDocumentMgr);
-    if (FAILED(hr) || !sTsfDisabledDocumentMgr) {
-      PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-        ("TSF:   nsTextStore::Initialize() FAILED to create "
-         "a document manager for disabled mode"));
-    }
-    if (sTsfDisabledDocumentMgr) {
-      DWORD editCookie = 0;
-      hr = sTsfDisabledDocumentMgr->CreateContext(sTsfClientId, 0, nullptr,
-                                                  &sTsfDisabledContext,
-                                                  &editCookie);
-      if (FAILED(hr) || !sTsfDisabledContext) {
-        PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-          ("TSF:   nsTextStore::Initialize() FAILED to create "
-           "a context for disabled mode"));
-      }
-      if (sTsfDisabledContext) {
-        MarkContextAsKeyboardDisabled(sTsfDisabledContext);
-        MarkContextAsEmpty(sTsfDisabledContext);
-      }
-    }
+  nsRefPtr<ITfThreadMgr> threadMgr;
+  hr = ::CoCreateInstance(CLSID_TF_ThreadMgr, nullptr,
+                          CLSCTX_INPROC_SERVER, IID_ITfThreadMgr,
+                          getter_AddRefs(threadMgr));
+  if (FAILED(hr) || !threadMgr) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED to "
+       "create the thread manager, hr=0x%08X", hr));
+    return;
   }
 
-  if (sTsfThreadMgr && !sFlushTIPInputMessage) {
-    sFlushTIPInputMessage = ::RegisterWindowMessageW(
-        NS_LITERAL_STRING("Flush TIP Input Message").get());
+  nsRefPtr<ITfMessagePump> messagePump;
+  hr = threadMgr->QueryInterface(IID_ITfMessagePump,
+                                 getter_AddRefs(messagePump));
+  if (FAILED(hr) || !messagePump) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED to "
+       "QI message pump from the thread manager, hr=0x%08X", hr));
+    return;
   }
 
-  if (!sTsfThreadMgr) {
-    NS_IF_RELEASE(sMessagePump);
-    NS_IF_RELEASE(sKeystrokeMgr);
+  nsRefPtr<ITfKeystrokeMgr> keystrokeMgr;
+  hr = threadMgr->QueryInterface(IID_ITfKeystrokeMgr,
+                                 getter_AddRefs(keystrokeMgr));
+  if (FAILED(hr) || !keystrokeMgr) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED to "
+       "QI keystroke manager from the thread manager, hr=0x%08X", hr));
+    return;
   }
+
+  hr = threadMgr->Activate(&sClientId);
+  if (FAILED(hr)) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED to activate, hr=0x%08X", hr));
+    return;
+  }
+
+  nsRefPtr<ITfDisplayAttributeMgr> displayAttributeMgr;
+  hr = ::CoCreateInstance(CLSID_TF_DisplayAttributeMgr, nullptr,
+                          CLSCTX_INPROC_SERVER, IID_ITfDisplayAttributeMgr,
+                          getter_AddRefs(displayAttributeMgr));
+  if (FAILED(hr) || !displayAttributeMgr) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED to create "
+       "a display attribute manager instance, hr=0x%08X", hr));
+    return;
+  }
+
+  nsRefPtr<ITfCategoryMgr> categoryMgr;
+  hr = ::CoCreateInstance(CLSID_TF_CategoryMgr, nullptr,
+                          CLSCTX_INPROC_SERVER, IID_ITfCategoryMgr,
+                          getter_AddRefs(categoryMgr));
+  if (FAILED(hr) || !categoryMgr) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED to create "
+       "a category manager instance, hr=0x%08X", hr));
+    return;
+  }
+
+  nsRefPtr<ITfDocumentMgr> disabledDocumentMgr;
+  hr = threadMgr->CreateDocumentMgr(getter_AddRefs(disabledDocumentMgr));
+  if (FAILED(hr) || !disabledDocumentMgr) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED to create "
+       "a document manager for disabled mode, hr=0x%08X", hr));
+    return;
+  }
+
+  nsRefPtr<ITfContext> disabledContext;
+  DWORD editCookie = 0;
+  hr = disabledDocumentMgr->CreateContext(sClientId, 0, nullptr,
+                                          getter_AddRefs(disabledContext),
+                                          &editCookie);
+  if (FAILED(hr) || !disabledContext) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED to create "
+       "a context for disabled mode, hr=0x%08X", hr));
+    return;
+  }
+
+  MarkContextAsKeyboardDisabled(disabledContext);
+  MarkContextAsEmpty(disabledContext);
 
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
-    ("TSF:   nsTextStore::Initialize(), sTsfThreadMgr=0x%p, "
-     "sTsfClientId=0x%08X, sTsfTextStore=0x%p, sDisplayAttrMgr=0x%p, "
-     "sCategoryMgr=0x%p, sTsfDisabledDocumentMgr=0x%p, sTsfDisabledContext=%p",
-     sTsfThreadMgr, sTsfClientId, sTsfTextStore, sDisplayAttrMgr, sCategoryMgr,
-     sTsfDisabledDocumentMgr, sTsfDisabledContext));
+    ("TSF:   nsTextStore::Initialize() is creating "
+     "a TSFStaticSink instance..."));
+  TSFStaticSink* staticSink = TSFStaticSink::GetInstance();
+  if (!staticSink->Init(threadMgr, inputProcessorProfiles)) {
+    TSFStaticSink::Shutdown();
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+      ("TSF:   nsTextStore::Initialize() FAILED to initialize TSFStaticSink "
+       "instance"));
+    return;
+  }
+
+  sInputProcessorProfiles = inputProcessorProfiles;
+  sThreadMgr = threadMgr;
+  sMessagePump = messagePump;
+  sKeystrokeMgr = keystrokeMgr;
+  sDisplayAttrMgr = displayAttributeMgr;
+  sCategoryMgr = categoryMgr;
+  sDisabledDocumentMgr = disabledDocumentMgr;
+  sDisabledContext = disabledContext;
+
+  sCreateNativeCaretForATOK =
+    Preferences::GetBool("intl.tsf.hack.atok.create_native_caret", true);
+  sDoNotReturnNoLayoutErrorToFreeChangJie =
+    Preferences::GetBool(
+      "intl.tsf.hack.free_chang_jie.do_not_return_no_layout_error", true);
+  sDoNotReturnNoLayoutErrorToEasyChangjei =
+    Preferences::GetBool(
+      "intl.tsf.hack.easy_changjei.do_not_return_no_layout_error", true);
+
+  PR_LOG(sTextStoreLog, PR_LOG_ALWAYS,
+    ("TSF:   nsTextStore::Initialize(), sThreadMgr=0x%p, "
+     "sClientId=0x%08X, sDisplayAttrMgr=0x%p, "
+     "sCategoryMgr=0x%p, sDisabledDocumentMgr=0x%p, sDisabledContext=%p, "
+     "sCreateNativeCaretForATOK=%s, "
+     "sDoNotReturnNoLayoutErrorToFreeChangJie=%s, "
+     "sDoNotReturnNoLayoutErrorToEasyChangjei=%s",
+     sThreadMgr.get(), sClientId, sDisplayAttrMgr.get(),
+     sCategoryMgr.get(), sDisabledDocumentMgr.get(), sDisabledContext.get(),
+     GetBoolName(sCreateNativeCaretForATOK),
+     GetBoolName(sDoNotReturnNoLayoutErrorToFreeChangJie),
+     GetBoolName(sDoNotReturnNoLayoutErrorToEasyChangjei)));
 }
 
 // static
@@ -3369,17 +4717,20 @@ nsTextStore::Terminate(void)
 {
   PR_LOG(sTextStoreLog, PR_LOG_ALWAYS, ("TSF: nsTextStore::Terminate()"));
 
-  NS_IF_RELEASE(sDisplayAttrMgr);
-  NS_IF_RELEASE(sCategoryMgr);
-  NS_IF_RELEASE(sTsfTextStore);
-  NS_IF_RELEASE(sTsfDisabledDocumentMgr);
-  NS_IF_RELEASE(sTsfDisabledContext);
-  sTsfClientId = 0;
-  if (sTsfThreadMgr) {
-    sTsfThreadMgr->Deactivate();
-    NS_RELEASE(sTsfThreadMgr);
-    NS_RELEASE(sMessagePump);
-    NS_RELEASE(sKeystrokeMgr);
+  TSFStaticSink::Shutdown();
+
+  sDisplayAttrMgr = nullptr;
+  sCategoryMgr = nullptr;
+  sEnabledTextStore = nullptr;
+  sDisabledDocumentMgr = nullptr;
+  sDisabledContext = nullptr;
+  sInputProcessorProfiles = nullptr;
+  sClientId = 0;
+  if (sThreadMgr) {
+    sThreadMgr->Deactivate();
+    sThreadMgr = nullptr;
+    sMessagePump = nullptr;
+    sKeystrokeMgr = nullptr;
   }
 }
 
@@ -3412,6 +4763,41 @@ nsTextStore::ProcessRawKeyMessage(const MSG& aMsg)
   return false;
 }
 
+// static
+void
+nsTextStore::ProcessMessage(nsWindowBase* aWindow, UINT aMessage,
+                            WPARAM& aWParam, LPARAM& aLParam,
+                            MSGResult& aResult)
+{
+  switch (aMessage) {
+    case WM_IME_SETCONTEXT:
+      // If a windowless plugin had focus and IME was handled on it, composition
+      // window was set the position.  After that, even in TSF mode, WinXP keeps
+      // to use composition window at the position if the active IME is not
+      // aware TSF.  For avoiding this issue, we need to hide the composition
+      // window here.
+      if (aWParam) {
+        aLParam &= ~ISC_SHOWUICOMPOSITIONWINDOW;
+      }
+      break;
+    case WM_ENTERIDLE:
+      // When an modal dialog such as a file picker is open, composition
+      // should be committed because IME might be used on it.
+      if (!IsComposingOn(aWindow)) {
+        break;
+      }
+      CommitComposition(false);
+      break;
+  }
+}
+
+// static
+bool
+nsTextStore::IsIMM_IME()
+{
+  return TSFStaticSink::IsIMM_IME();
+}
+
 /******************************************************************/
 /* nsTextStore::Composition                                       */
 /******************************************************************/
@@ -3431,47 +4817,6 @@ nsTextStore::Composition::End()
 {
   mView = nullptr;
   mString.Truncate();
-}
-
-void
-nsTextStore::Composition::StartLayoutChangeTimer(nsTextStore* aTextStore)
-{
-  MOZ_ASSERT(!mLayoutChangeTimer);
-  mLayoutChangeTimer = do_CreateInstance(NS_TIMER_CONTRACTID);
-  mLayoutChangeTimer->InitWithFuncCallback(TimerCallback, aTextStore,
-    GetLayoutChangeIntervalTime(), nsITimer::TYPE_REPEATING_SLACK);
-}
-
-void
-nsTextStore::Composition::EnsureLayoutChangeTimerStopped()
-{
-  if (!mLayoutChangeTimer) {
-    return;
-  }
-  mLayoutChangeTimer->Cancel();
-  mLayoutChangeTimer = nullptr;
-}
-
-// static
-void
-nsTextStore::Composition::TimerCallback(nsITimer* aTimer, void* aClosure)
-{
-  nsTextStore *ts = static_cast<nsTextStore*>(aClosure);
-  ts->OnLayoutChange();
-}
-
-// static
-uint32_t
-nsTextStore::Composition::GetLayoutChangeIntervalTime()
-{
-  static int32_t sTime = -1;
-  if (sTime > 0) {
-    return static_cast<uint32_t>(sTime);
-  }
-
-  sTime = std::max(10,
-    Preferences::GetInt("intl.tsf.on_layout_change_interval", 100));
-  return static_cast<uint32_t>(sTime);
 }
 
 /******************************************************************************
@@ -3529,9 +4874,9 @@ nsTextStore::Content::ReplaceTextWith(LONG aStart, LONG aLength,
     if (mComposition.IsComposing()) {
       // Emulate text insertion during compositions, because during a
       // composition, editor expects the whole composition string to
-      // be sent in NS_TEXT_TEXT, not just the inserted part.
-      // The actual NS_TEXT_TEXT will be sent in SetSelection or
-      // OnUpdateComposition.
+      // be sent in NS_COMPOSITION_CHANGE, not just the inserted part.
+      // The actual NS_COMPOSITION_CHANGE will be sent in SetSelection
+      // or OnUpdateComposition.
       MOZ_ASSERT(aStart >= mComposition.mStart);
       MOZ_ASSERT(aStart + aLength <= mComposition.EndOffset());
       mComposition.mString.Replace(
@@ -3576,36 +4921,155 @@ nsTextStore::Content::EndComposition(const PendingAction& aCompEnd)
   mComposition.End();
 }
 
+/******************************************************************************
+ *  nsTextStore::MouseTracker
+ *****************************************************************************/
+
+nsTextStore::MouseTracker::MouseTracker()
+  : mStart(-1)
+  , mLength(-1)
+  , mCookie(kInvalidCookie)
+{
+}
+
+HRESULT
+nsTextStore::MouseTracker::Init(nsTextStore* aTextStore)
+{
+  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+         ("TSF: 0x%p   nsTextStore::MouseTracker::Init(aTextStore=0x%p), "
+          "aTextStore->mMouseTrackers.Length()=%d",
+          this, aTextStore->mMouseTrackers.Length()));
+
+  if (&aTextStore->mMouseTrackers.LastElement() != this) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::MouseTracker::Init() FAILED due to "
+            "this is not the last element of mMouseTrackers", this));
+    return E_FAIL;
+  }
+  if (aTextStore->mMouseTrackers.Length() > kInvalidCookie) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::MouseTracker::Init() FAILED due to "
+            "no new cookie available", this));
+    return E_FAIL;
+  }
+  MOZ_ASSERT(!aTextStore->mMouseTrackers.IsEmpty(),
+             "This instance must be in nsTextStore::mMouseTrackers");
+  mCookie = static_cast<DWORD>(aTextStore->mMouseTrackers.Length() - 1);
+  return S_OK;
+}
+
+HRESULT
+nsTextStore::MouseTracker::AdviseSink(nsTextStore* aTextStore,
+                                      ITfRangeACP* aTextRange,
+                                      ITfMouseSink* aMouseSink)
+{
+  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+         ("TSF: 0x%p   nsTextStore::MouseTracker::AdviseSink(aTextStore=0x%p, "
+          "aTextRange=0x%p, aMouseSink=0x%p), mCookie=%d, mSink=0x%p",
+          this, aTextStore, aTextRange, aMouseSink, mCookie, mSink.get()));
+  MOZ_ASSERT(mCookie != kInvalidCookie, "This hasn't been initalized?");
+
+  if (mSink) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::MouseTracker::AdviseMouseSink() FAILED "
+            "due to already being used", this));
+    return E_FAIL;
+  }
+
+  HRESULT hr = aTextRange->GetExtent(&mStart, &mLength);
+  if (FAILED(hr)) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::MouseTracker::AdviseMouseSink() FAILED "
+            "due to failure of ITfRangeACP::GetExtent()", this));
+    return hr;
+  }
+
+  if (mStart < 0 || mLength <= 0) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::MouseTracker::AdviseMouseSink() FAILED "
+            "due to odd result of ITfRangeACP::GetExtent(), "
+            "mStart=%d, mLength=%d", this, mStart, mLength));
+    return E_INVALIDARG;
+  }
+
+  nsAutoString textContent;
+  if (NS_WARN_IF(!aTextStore->GetCurrentText(textContent))) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::MouseTracker::AdviseMouseSink() FAILED "
+            "due to failure of nsTextStore::GetCurrentText()", this));
+    return E_FAIL;
+  }
+
+  if (textContent.Length() <= static_cast<uint32_t>(mStart) ||
+      textContent.Length() < static_cast<uint32_t>(mStart + mLength)) {
+    PR_LOG(sTextStoreLog, PR_LOG_ERROR,
+           ("TSF: 0x%p   nsTextStore::MouseTracker::AdviseMouseSink() FAILED "
+            "due to out of range, mStart=%d, mLength=%d, "
+            "textContent.Length()=%d",
+            this, mStart, mLength, textContent.Length()));
+    return E_INVALIDARG;
+  }
+
+  mSink = aMouseSink;
+
+  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+         ("TSF: 0x%p   nsTextStore::MouseTracker::AdviseMouseSink(), "
+          "succeeded, mStart=%d, mLength=%d, textContent.Length()=%d",
+          this, mStart, mLength, textContent.Length()));
+  return S_OK;
+}
+
+void
+nsTextStore::MouseTracker::UnadviseSink()
+{
+  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+         ("TSF: 0x%p   nsTextStore::MouseTracker::UnadviseSink(), "
+          "mCookie=%d, mSink=0x%p, mStart=%d, mLength=%d",
+          this, mCookie, mSink.get(), mStart, mLength));
+  mSink = nullptr;
+  mStart = mLength = -1;
+}
+
+bool
+nsTextStore::MouseTracker::OnMouseButtonEvent(ULONG aEdge,
+                                              ULONG aQuadrant,
+                                              DWORD aButtonStatus)
+{
+  MOZ_ASSERT(IsUsing(), "The caller must check before calling OnMouseEvent()");
+
+  BOOL eaten = FALSE;
+  HRESULT hr = mSink->OnMouseEvent(aEdge, aQuadrant, aButtonStatus, &eaten);
+
+  PR_LOG(sTextStoreLog, PR_LOG_DEBUG,
+         ("TSF: 0x%p   nsTextStore::MouseTracker::OnMouseEvent(aEdge=%d, "
+          "aQuadrant=%d, aButtonStatus=0x%08X), hr=0x%08X, eaten=%s",
+          this, aEdge, aQuadrant, aButtonStatus, hr, GetBoolName(!!eaten)));
+
+  return SUCCEEDED(hr) && eaten;
+}
+
 #ifdef DEBUG
 // static
 bool
 nsTextStore::CurrentKeyboardLayoutHasIME()
 {
-  // XXX MSDN documents that ITfInputProcessorProfiles is available only on
-  //     desktop apps.  However, there is no known way to obtain
-  //     ITfInputProcessorProfileMgr instance without ITfInputProcessorProfiles
-  //     instance.
-  nsRefPtr<ITfInputProcessorProfiles> profiles;
-  HRESULT hr = ::CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr,
-                                  CLSCTX_INPROC_SERVER,
-                                  IID_ITfInputProcessorProfiles,
-                                  getter_AddRefs(profiles));
-  if (FAILED(hr) || !profiles) {
+  if (!sInputProcessorProfiles) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-      ("TSF: nsTextStore::CurrentKeyboardLayoutHasIME() FAILED to create "
-       "an input processor profiles instance"));
+      ("TSF: nsTextStore::CurrentKeyboardLayoutHasIME() FAILED due to there is "
+       "no input processor profiles instance"));
     return false;
   }
   nsRefPtr<ITfInputProcessorProfileMgr> profileMgr;
-  hr = profiles->QueryInterface(IID_ITfInputProcessorProfileMgr,
-                                getter_AddRefs(profileMgr));
+  HRESULT hr =
+    sInputProcessorProfiles->QueryInterface(IID_ITfInputProcessorProfileMgr,
+                                            getter_AddRefs(profileMgr));
   if (FAILED(hr) || !profileMgr) {
     // On Windows Vista or later, ImmIsIME() API always returns true.
     // If we failed to obtain the profile manager, we cannot know if current
     // keyboard layout has IME.
     if (IsVistaOrLater()) {
       PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-        ("TSF: nsTextStore::CurrentKeyboardLayoutHasIME() FAILED to query "
+        ("TSF:   nsTextStore::CurrentKeyboardLayoutHasIME() FAILED to query "
          "ITfInputProcessorProfileMgr"));
       return false;
     }
@@ -3622,7 +5086,7 @@ nsTextStore::CurrentKeyboardLayoutHasIME()
   }
   if (FAILED(hr)) {
     PR_LOG(sTextStoreLog, PR_LOG_ERROR,
-      ("TSF: nsTextStore::CurrentKeyboardLayoutHasIME() FAILED to retreive "
+      ("TSF:   nsTextStore::CurrentKeyboardLayoutHasIME() FAILED to retreive "
        "active profile"));
     return false;
   }

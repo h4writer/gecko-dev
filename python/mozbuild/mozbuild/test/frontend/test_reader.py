@@ -33,13 +33,13 @@ class TestBuildReader(unittest.TestCase):
 
         return MockConfig(path, **kwargs)
 
-    def reader(self, name, enable_tests=False):
+    def reader(self, name, enable_tests=False, **kwargs):
         extra = {}
         if enable_tests:
             extra['ENABLE_TESTS'] = '1'
         config = self.config(name, extra_substs=extra)
 
-        return BuildReader(config)
+        return BuildReader(config, **kwargs)
 
     def file_path(self, name, *args):
         return mozpath.join(data_path, name, *args)
@@ -47,60 +47,40 @@ class TestBuildReader(unittest.TestCase):
     def test_dirs_traversal_simple(self):
         reader = self.reader('traversal-simple')
 
-        sandboxes = list(reader.read_topsrcdir())
+        contexts = list(reader.read_topsrcdir())
 
-        self.assertEqual(len(sandboxes), 4)
+        self.assertEqual(len(contexts), 4)
 
     def test_dirs_traversal_no_descend(self):
         reader = self.reader('traversal-simple')
 
-        path = mozpath.join(reader.topsrcdir, 'moz.build')
+        path = mozpath.join(reader.config.topsrcdir, 'moz.build')
         self.assertTrue(os.path.exists(path))
 
-        sandboxes = list(reader.read_mozbuild(path,
-            filesystem_absolute=True, descend=False))
+        contexts = list(reader.read_mozbuild(path, reader.config,
+            descend=False))
 
-        self.assertEqual(len(sandboxes), 1)
+        self.assertEqual(len(contexts), 1)
 
     def test_dirs_traversal_all_variables(self):
         reader = self.reader('traversal-all-vars', enable_tests=True)
 
-        sandboxes = list(reader.read_topsrcdir())
-        self.assertEqual(len(sandboxes), 6)
-
-    def test_tiers_traversal(self):
-        reader = self.reader('traversal-tier-simple')
-
-        sandboxes = list(reader.read_topsrcdir())
-        self.assertEqual(len(sandboxes), 4)
-
-        for sandbox in sandboxes:
-            self.assertIsInstance(sandbox.metadata, dict)
-            self.assertIn('tier', sandbox.metadata)
-
-            if sandbox['RELATIVEDIR'].startswith('foo'):
-                self.assertEqual(sandbox.metadata['tier'], 't1')
-
-    def test_tier_subdir(self):
-        # add_tier_dir() should fail when not in the top directory.
-        reader = self.reader('traversal-tier-fails-in-subdir')
-
-        with self.assertRaises(Exception):
-            list(reader.read_topsrcdir())
+        contexts = list(reader.read_topsrcdir())
+        self.assertEqual(len(contexts), 3)
 
     def test_relative_dirs(self):
         # Ensure relative directories are traversed.
         reader = self.reader('traversal-relative-dirs')
 
-        sandboxes = list(reader.read_topsrcdir())
-        self.assertEqual(len(sandboxes), 3)
+        contexts = list(reader.read_topsrcdir())
+        self.assertEqual(len(contexts), 3)
 
     def test_repeated_dirs_ignored(self):
         # Ensure repeated directories are ignored.
         reader = self.reader('traversal-repeated-dirs')
 
-        sandboxes = list(reader.read_topsrcdir())
-        self.assertEqual(len(sandboxes), 3)
+        contexts = list(reader.read_topsrcdir())
+        self.assertEqual(len(contexts), 3)
 
     def test_outside_topsrcdir(self):
         # References to directories outside the topsrcdir should fail.
@@ -246,25 +226,32 @@ class TestBuildReader(unittest.TestCase):
         self.assertIn('A moz.build file called the error() function.', str(e))
         self.assertIn('    Some error.', str(e))
 
-    def test_error_traversal_tools(self):
-        reader = self.reader('reader-error-traversal-tools')
-
-        with self.assertRaises(BuildReaderError) as bre:
-            list(reader.read_topsrcdir())
-
-        e = bre.exception
-        self.assertIn('The DIRS variable is not allowed in such directories.', str(e))
-
     def test_inheriting_variables(self):
         reader = self.reader('inheriting-variables')
 
-        sandboxes = list(reader.read_topsrcdir())
+        contexts = list(reader.read_topsrcdir())
 
-        self.assertEqual(len(sandboxes), 4)
-        self.assertEqual([sandbox['RELATIVEDIR'] for sandbox in sandboxes],
+        self.assertEqual(len(contexts), 4)
+        self.assertEqual([context.relsrcdir for context in contexts],
             ['', 'foo', 'foo/baz', 'bar'])
-        self.assertEqual([sandbox['XPIDL_MODULE'] for sandbox in sandboxes],
-            ['foobar', 'foobar', 'foobar', 'foobar'])
+        self.assertEqual([context['XPIDL_MODULE'] for context in contexts],
+            ['foobar', 'foobar', 'baz', 'foobar'])
+
+    def test_process_eval_callback(self):
+        def strip_dirs(context):
+            context['DIRS'][:] = []
+            count[0] += 1
+
+        reader = self.reader('traversal-simple',
+            sandbox_post_eval_cb=strip_dirs)
+
+        count = [0]
+
+        contexts = list(reader.read_topsrcdir())
+
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(len(count), 1)
+
 
 if __name__ == '__main__':
     main()

@@ -8,11 +8,10 @@
 
 #include "jit/Ion.h"
 #include "jit/IonAnalysis.h"
-#include "jit/IonSpewer.h"
+#include "jit/JitSpewer.h"
 #include "jit/MIR.h"
 #include "jit/MIRGenerator.h"
 #include "jit/MIRGraph.h"
-#include "jit/UnreachableCodeElimination.h"
 
 #include "jsinferinlines.h"
 #include "jsobjinlines.h"
@@ -65,15 +64,15 @@ using parallel::SpewCompile;
         return insertWriteGuard(prop, prop->obj());                           \
     }
 
-class ParallelSafetyVisitor : public MInstructionVisitor
+class ParallelSafetyVisitor : public MDefinitionVisitor
 {
     MIRGraph &graph_;
     bool unsafe_;
-    MDefinition *slice_;
+    MDefinition *cx_;
 
     bool insertWriteGuard(MInstruction *writeInstruction, MDefinition *valueBeingWritten);
 
-    bool replaceWithNewPar(MInstruction *newInstruction, JSObject *templateObject);
+    bool replaceWithNewPar(MInstruction *newInstruction, NativeObject *templateObject);
     bool replace(MInstruction *oldInstruction, MInstruction *replacementInstruction);
 
     bool visitSpecializedInstruction(MInstruction *ins, MIRType spec, uint32_t flags);
@@ -82,7 +81,7 @@ class ParallelSafetyVisitor : public MInstructionVisitor
     // markUnsafe()".  Sets the unsafe flag and returns true (since
     // this does not indicate an unrecoverable compilation failure).
     bool markUnsafe() {
-        JS_ASSERT(!unsafe_);
+        MOZ_ASSERT(!unsafe_);
         unsafe_ = true;
         return true;
     }
@@ -92,28 +91,46 @@ class ParallelSafetyVisitor : public MInstructionVisitor
     }
 
   public:
-    ParallelSafetyVisitor(MIRGraph &graph)
+    explicit ParallelSafetyVisitor(MIRGraph &graph)
       : graph_(graph),
         unsafe_(false),
-        slice_(nullptr)
+        cx_(nullptr)
     { }
 
     void clearUnsafe() { unsafe_ = false; }
     bool unsafe() { return unsafe_; }
-    MDefinition *forkJoinSlice() {
-        if (!slice_)
-            slice_ = graph_.forkJoinSlice();
-        return slice_;
+    MDefinition *ForkJoinContext() {
+        if (!cx_)
+            cx_ = graph_.forkJoinContext();
+        return cx_;
     }
 
-    bool convertToBailout(MBasicBlock *block, MInstruction *ins);
+    bool convertToBailout(MInstructionIterator &iter);
 
     // I am taking the policy of blacklisting everything that's not
     // obviously safe for now.  We can loosen as we need.
 
     SAFE_OP(Constant)
+    SAFE_OP(SimdValueX4)
+    SAFE_OP(SimdSplatX4)
+    SAFE_OP(SimdConstant)
+    SAFE_OP(SimdConvert)
+    SAFE_OP(SimdReinterpretCast)
+    SAFE_OP(SimdExtractElement)
+    SAFE_OP(SimdInsertElement)
+    SAFE_OP(SimdSignMask)
+    SAFE_OP(SimdSwizzle)
+    SAFE_OP(SimdShuffle)
+    SAFE_OP(SimdUnaryArith)
+    SAFE_OP(SimdBinaryComp)
+    SAFE_OP(SimdBinaryArith)
+    SAFE_OP(SimdBinaryBitwise)
+    SAFE_OP(SimdShift)
+    SAFE_OP(SimdTernaryBitwise)
+    UNSAFE_OP(CloneLiteral)
     SAFE_OP(Parameter)
     SAFE_OP(Callee)
+    SAFE_OP(IsConstructing)
     SAFE_OP(TableSwitch)
     SAFE_OP(Goto)
     SAFE_OP(Test)
@@ -135,18 +152,19 @@ class ParallelSafetyVisitor : public MInstructionVisitor
     UNSAFE_OP(GetArgumentsObjectArg)
     UNSAFE_OP(SetArgumentsObjectArg)
     UNSAFE_OP(ComputeThis)
-    SAFE_OP(PrepareCall)
-    SAFE_OP(PassArg)
+    UNSAFE_OP(LoadArrowThis)
     CUSTOM_OP(Call)
     UNSAFE_OP(ApplyArgs)
-    UNSAFE_OP(Bail)
+    UNSAFE_OP(ArraySplice)
+    SAFE_OP(Bail)
+    SAFE_OP(Unreachable)
     UNSAFE_OP(AssertFloat32)
     UNSAFE_OP(GetDynamicName)
     UNSAFE_OP(FilterArgumentsOrEval)
     UNSAFE_OP(CallDirectEval)
     SAFE_OP(BitNot)
-    UNSAFE_OP(TypeOf)
-    SAFE_OP(ToId)
+    SAFE_OP(TypeOf)
+    UNSAFE_OP(ToId)
     SAFE_OP(BitAnd)
     SAFE_OP(BitOr)
     SAFE_OP(BitXor)
@@ -155,6 +173,7 @@ class ParallelSafetyVisitor : public MInstructionVisitor
     SAFE_OP(Ursh)
     SPECIALIZED_OP(MinMax, PERMIT_NUMERIC)
     SAFE_OP(Abs)
+    SAFE_OP(Clz)
     SAFE_OP(Sqrt)
     UNSAFE_OP(Atan2)
     UNSAFE_OP(Hypot)
@@ -180,28 +199,33 @@ class ParallelSafetyVisitor : public MInstructionVisitor
     SAFE_OP(TruncateToInt32)
     SAFE_OP(MaybeToDoubleElement)
     CUSTOM_OP(ToString)
-    SAFE_OP(NewSlots)
     CUSTOM_OP(NewArray)
+    UNSAFE_OP(NewArrayCopyOnWrite)
     CUSTOM_OP(NewObject)
     CUSTOM_OP(NewCallObject)
-    CUSTOM_OP(NewParallelArray)
-    UNSAFE_OP(NewDerivedTypedObject)
+    CUSTOM_OP(NewRunOnceCallObject)
+    CUSTOM_OP(NewDerivedTypedObject)
+    SAFE_OP(ObjectState)
+    SAFE_OP(ArrayState)
     UNSAFE_OP(InitElem)
     UNSAFE_OP(InitElemGetterSetter)
+    UNSAFE_OP(MutateProto)
     UNSAFE_OP(InitProp)
     UNSAFE_OP(InitPropGetterSetter)
     SAFE_OP(Start)
     UNSAFE_OP(OsrEntry)
     SAFE_OP(Nop)
+    SAFE_OP(LimitedTruncate)
     UNSAFE_OP(RegExp)
     CUSTOM_OP(Lambda)
-    UNSAFE_OP(ImplicitThis)
+    UNSAFE_OP(LambdaArrow)
     SAFE_OP(Slots)
     SAFE_OP(Elements)
     SAFE_OP(ConstantElements)
     SAFE_OP(LoadSlot)
     WRITE_GUARDED_OP(StoreSlot, slots)
     SAFE_OP(FunctionEnvironment) // just a load of func env ptr
+    SAFE_OP(FilterTypeSet)
     SAFE_OP(TypeBarrier) // causes a bailout if the type is not found: a-ok with us
     SAFE_OP(MonitorTypes) // causes a bailout if the type is not found: a-ok with us
     UNSAFE_OP(PostWriteBarrier)
@@ -212,6 +236,7 @@ class ParallelSafetyVisitor : public MInstructionVisitor
     WRITE_GUARDED_OP(SetElementCache, object)
     UNSAFE_OP(BindNameCache)
     SAFE_OP(GuardShape)
+    SAFE_OP(GuardShapePolymorphic)
     SAFE_OP(GuardObjectType)
     SAFE_OP(GuardObjectIdentity)
     SAFE_OP(GuardClass)
@@ -220,10 +245,14 @@ class ParallelSafetyVisitor : public MInstructionVisitor
     WRITE_GUARDED_OP(SetArrayLength, elements)
     SAFE_OP(TypedArrayLength)
     SAFE_OP(TypedArrayElements)
+    SAFE_OP(TypedObjectProto)
+    SAFE_OP(TypedObjectUnsizedLength)
     SAFE_OP(TypedObjectElements)
+    SAFE_OP(SetTypedObjectOffset)
     SAFE_OP(InitializedLength)
     WRITE_GUARDED_OP(SetInitializedLength, elements)
     SAFE_OP(Not)
+    SAFE_OP(NeuterCheck)
     SAFE_OP(BoundsCheck)
     SAFE_OP(BoundsCheckLower)
     SAFE_OP(LoadElement)
@@ -253,8 +282,8 @@ class ParallelSafetyVisitor : public MInstructionVisitor
     UNSAFE_OP(DeleteElement)
     WRITE_GUARDED_OP(SetPropertyCache, object)
     UNSAFE_OP(IteratorStart)
-    UNSAFE_OP(IteratorNext)
     UNSAFE_OP(IteratorMore)
+    UNSAFE_OP(IsNoIter)
     UNSAFE_OP(IteratorEnd)
     SAFE_OP(StringLength)
     SAFE_OP(ArgumentsLength)
@@ -264,37 +293,45 @@ class ParallelSafetyVisitor : public MInstructionVisitor
     CUSTOM_OP(Rest)
     SAFE_OP(RestPar)
     SAFE_OP(Floor)
+    SAFE_OP(Ceil)
     SAFE_OP(Round)
     UNSAFE_OP(InstanceOf)
     CUSTOM_OP(InterruptCheck)
-    SAFE_OP(ForkJoinSlice)
+    UNSAFE_OP(AsmJSInterruptCheck)
+    SAFE_OP(ForkJoinContext)
+    SAFE_OP(ForkJoinGetSlice)
     SAFE_OP(NewPar)
     SAFE_OP(NewDenseArrayPar)
     SAFE_OP(NewCallObjectPar)
     SAFE_OP(LambdaPar)
-    SAFE_OP(AbortPar)
     UNSAFE_OP(ArrayConcat)
+    UNSAFE_OP(ArrayJoin)
     UNSAFE_OP(GetDOMProperty)
     UNSAFE_OP(GetDOMMember)
     UNSAFE_OP(SetDOMProperty)
     UNSAFE_OP(NewStringObject)
     UNSAFE_OP(Random)
-    UNSAFE_OP(Pow)
-    UNSAFE_OP(PowHalf)
+    SAFE_OP(Pow)
+    SAFE_OP(PowHalf)
     UNSAFE_OP(RegExpTest)
+    UNSAFE_OP(RegExpExec)
+    UNSAFE_OP(RegExpReplace)
+    UNSAFE_OP(StringReplace)
     UNSAFE_OP(CallInstanceOf)
-    UNSAFE_OP(FunctionBoundary)
+    UNSAFE_OP(ProfilerStackOp)
     UNSAFE_OP(GuardString)
     UNSAFE_OP(NewDeclEnvObject)
     UNSAFE_OP(In)
     UNSAFE_OP(InArray)
-    SAFE_OP(GuardThreadLocalObject)
-    SAFE_OP(CheckInterruptPar)
+    SAFE_OP(GuardThreadExclusive)
+    SAFE_OP(InterruptCheckPar)
     SAFE_OP(CheckOverRecursedPar)
     SAFE_OP(FunctionDispatch)
     SAFE_OP(TypeObjectDispatch)
     SAFE_OP(IsCallable)
+    SAFE_OP(IsObject)
     SAFE_OP(HaveSameClass)
+    SAFE_OP(HasClass)
     UNSAFE_OP(EffectiveAddress)
     UNSAFE_OP(AsmJSUnsignedToDouble)
     UNSAFE_OP(AsmJSUnsignedToFloat32)
@@ -310,11 +347,26 @@ class ParallelSafetyVisitor : public MInstructionVisitor
     UNSAFE_OP(AsmJSPassStackArg)
     UNSAFE_OP(AsmJSParameter)
     UNSAFE_OP(AsmJSCall)
-    UNSAFE_OP(AsmJSCheckOverRecursed)
+    DROP_OP(RecompileCheck)
+    UNSAFE_OP(CompareExchangeTypedArrayElement)
+    UNSAFE_OP(AtomicTypedArrayElementBinop)
+    UNSAFE_OP(MemoryBarrier)
+    UNSAFE_OP(UnknownValue)
+    UNSAFE_OP(LexicalCheck)
+    UNSAFE_OP(ThrowUninitializedLexical)
 
-    // It looks like this could easily be made safe:
+    // It looks like these could easily be made safe:
     UNSAFE_OP(ConvertElementsToDoubles)
+    UNSAFE_OP(MaybeCopyElementsForWrite)
 };
+
+static void
+TransplantResumePoint(MInstruction *oldInstruction, MInstruction *replacementInstruction)
+{
+    MOZ_ASSERT(!oldInstruction->isDiscarded());
+    if (oldInstruction->resumePoint())
+        replacementInstruction->stealResumePoint(oldInstruction);
+}
 
 bool
 ParallelSafetyAnalysis::analyze()
@@ -334,36 +386,35 @@ ParallelSafetyAnalysis::analyze()
             return false;
 
         if (block->isMarked()) {
+            // Count the number of reachable blocks.
+            marked++;
+
             // Iterate through and transform the instructions.  Stop
             // if we encounter an inherently unsafe operation, in
             // which case we will transform this block into a bailout
             // block.
-            MInstruction *instr = nullptr;
-            for (MInstructionIterator ins(block->begin());
-                 ins != block->end() && !visitor.unsafe();)
-            {
+            MInstruction *ins = nullptr;
+            MInstructionIterator iter(block->begin());
+            while (iter != block->end() && !visitor.unsafe()) {
                 if (mir_->shouldCancel("ParallelSafetyAnalysis"))
                     return false;
 
                 // We may be removing or replacing the current
-                // instruction, so advance `ins` now.  Remember the
+                // instruction, so advance `iter` now.  Remember the
                 // last instr. we looked at for use later if it should
                 // prove unsafe.
-                instr = *ins++;
+                ins = *iter++;
 
-                if (!instr->accept(&visitor)) {
-                    SpewMIR(instr, "Unaccepted");
+                if (!ins->accept(&visitor)) {
+                    SpewMIR(ins, "Unaccepted");
                     return false;
                 }
             }
 
             if (!visitor.unsafe()) {
-                // Count the number of reachable blocks.
-                marked++;
-
                 // Block consists of only safe instructions.  Visit its successors.
                 for (uint32_t i = 0; i < block->numSuccessors(); i++)
-                    block->getSuccessor(i)->mark();
+                    block->getSuccessor(i)->markUnchecked();
             } else {
                 // Block contains an unsafe instruction.  That means that once
                 // we enter this block, we are guaranteed to bailout.
@@ -373,14 +424,16 @@ ParallelSafetyAnalysis::analyze()
                 // always bailout.
                 if (*block == graph_.entryBlock()) {
                     Spew(SpewCompile, "Entry block contains unsafe MIR");
+                    mir_->disable();
                     return false;
                 }
 
-                // Otherwise, create a replacement that will.
-                if (!visitor.convertToBailout(*block, instr))
+                // Otherwise, create a replacement that will. We seek back one
+                // position on the instruction iterator, as we will be
+                // discarding all instructions starting at the unsafe
+                // instruction.
+                if (!visitor.convertToBailout(--iter))
                     return false;
-
-                JS_ASSERT(!block->isMarked());
             }
         }
     }
@@ -388,118 +441,44 @@ ParallelSafetyAnalysis::analyze()
     Spew(SpewCompile, "Safe");
     IonSpewPass("ParallelSafetyAnalysis");
 
-    UnreachableCodeElimination uce(mir_, graph_);
-    if (!uce.removeUnmarkedBlocks(marked))
+    // Sweep away any unmarked blocks. Note that this doesn't preserve
+    // AliasAnalysis dependencies, but we're not expected to at this point.
+    if (!RemoveUnmarkedBlocks(mir_, graph_, marked))
         return false;
     IonSpewPass("UCEAfterParallelSafetyAnalysis");
     AssertExtendedGraphCoherency(graph_);
 
-    if (!removeResumePointOperands())
-        return false;
-    IonSpewPass("RemoveResumePointOperands");
-    AssertExtendedGraphCoherency(graph_);
-
     return true;
 }
 
 bool
-ParallelSafetyAnalysis::removeResumePointOperands()
+ParallelSafetyVisitor::convertToBailout(MInstructionIterator &iter)
 {
-    // In parallel exec mode, nothing is effectful, therefore we do
-    // not need to reconstruct interpreter state and can simply
-    // bailout by returning a special code.  Ideally we'd either
-    // remove the unused resume points or else never generate them in
-    // the first place, but I encountered various assertions and
-    // crashes attempting to do that, so for the time being I simply
-    // replace their operands with undefined.  This prevents them from
-    // interfering with DCE and other optimizations.  It is also *necessary*
-    // to handle cases like this:
-    //
-    //     foo(a, b, c.bar())
-    //
-    // where `foo` was deemed to be an unsafe function to call.  This
-    // is because without neutering the ResumePoints, they would still
-    // refer to the MPassArg nodes generated for the call to foo().
-    // But the call to foo() is dead and has been removed, leading to
-    // an inconsistent IR and assertions at codegen time.
+    // We expect iter to be settled on the unsafe instruction.
+    MInstruction *ins = *iter;
+    MBasicBlock *block = ins->block();
+    MOZ_ASSERT(unsafe()); // `block` must have contained unsafe items
+    MOZ_ASSERT(block->isMarked()); // `block` must have been reachable to get here
 
-    MConstant *udef = nullptr;
-    for (ReversePostorderIterator block(graph_.rpoBegin()); block != graph_.rpoEnd(); block++) {
-        if (udef)
-            replaceOperandsOnResumePoint(block->entryResumePoint(), udef);
-
-        for (MInstructionIterator ins(block->begin()); ins != block->end(); ins++) {
-            if (ins->isStart()) {
-                JS_ASSERT(udef == nullptr);
-                udef = MConstant::New(graph_.alloc(), UndefinedValue());
-                block->insertAfter(*ins, udef);
-            } else if (udef) {
-                if (MResumePoint *resumePoint = ins->resumePoint())
-                    replaceOperandsOnResumePoint(resumePoint, udef);
-            }
-        }
-    }
-    return true;
-}
-
-void
-ParallelSafetyAnalysis::replaceOperandsOnResumePoint(MResumePoint *resumePoint,
-                                                     MDefinition *withDef)
-{
-    for (size_t i = 0, e = resumePoint->numOperands(); i < e; i++)
-        resumePoint->replaceOperand(i, withDef);
-}
-
-bool
-ParallelSafetyVisitor::convertToBailout(MBasicBlock *block, MInstruction *ins)
-{
-    JS_ASSERT(unsafe()); // `block` must have contained unsafe items
-    JS_ASSERT(block->isMarked()); // `block` must have been reachable to get here
-
-    // Clear the unsafe flag for subsequent blocks.
     clearUnsafe();
 
-    // This block is no longer reachable.
-    block->unmark();
+    // Allocate a new bailout instruction.
+    MBail *bail = MBail::New(graph_.alloc(), Bailout_ParallelUnsafe);
 
-    // Create a bailout block for each predecessor.  In principle, we
-    // only need one bailout block--in fact, only one per graph! But I
-    // found this approach easier to implement given the design of the
-    // MIR Graph construction routines.  Besides, most often `block`
-    // has only one predecessor.  Also, using multiple blocks helps to
-    // keep the PC information more accurate (though replacing `block`
-    // with exactly one bailout would be just as good).
-    for (size_t i = 0; i < block->numPredecessors(); i++) {
-        MBasicBlock *pred = block->getPredecessor(i);
+    // Discard the rest of the block and sever its link to its successors in
+    // the CFG.
+    for (size_t i = 0; i < block->numSuccessors(); i++)
+        block->getSuccessor(i)->removePredecessor(block);
+    block->discardAllInstructionsStartingAt(iter);
 
-        // We only care about incoming edges from reachable predecessors.
-        if (!pred->isMarked())
-            continue;
+    // No more successors are reachable, so the current block can no longer be
+    // the parent of an inlined function.
+    if (block->outerResumePoint())
+        block->clearOuterResumePoint();
 
-        // create bailout block to insert on this edge
-        MBasicBlock *bailBlock = MBasicBlock::NewAbortPar(graph_, block->info(), pred,
-                                                               block->pc(),
-                                                               block->entryResumePoint());
-        if (!bailBlock)
-            return false;
-
-        // if `block` had phis, we are replacing it with `bailBlock` which does not
-        if (pred->successorWithPhis() == block)
-            pred->setSuccessorWithPhis(nullptr, 0);
-
-        // redirect the predecessor to the bailout block
-        uint32_t succIdx = pred->getSuccessorIndex(block);
-        pred->replaceSuccessor(succIdx, bailBlock);
-
-        // Insert the bailout block after `block` in the execution
-        // order.  This should satisfy the RPO requirements and
-        // moreover ensures that we will visit this block in our outer
-        // walk, thus allowing us to keep the count of marked blocks
-        // accurate.
-        graph_.insertBlockAfter(block, bailBlock);
-        bailBlock->mark();
-    }
-
+    // End the block in a bail.
+    block->add(bail);
+    block->end(MUnreachable::New(alloc()));
     return true;
 }
 
@@ -518,16 +497,25 @@ ParallelSafetyVisitor::visitCreateThisWithTemplate(MCreateThisWithTemplate *ins)
 }
 
 bool
-ParallelSafetyVisitor::visitNewParallelArray(MNewParallelArray *ins)
+ParallelSafetyVisitor::visitNewCallObject(MNewCallObject *ins)
 {
-    return replaceWithNewPar(ins, ins->templateObject());
+    if (ins->templateObject()->hasDynamicSlots()) {
+        SpewMIR(ins, "call with dynamic slots");
+        return markUnsafe();
+    }
+
+    return replace(ins, MNewCallObjectPar::New(alloc(), ForkJoinContext(), ins));
 }
 
 bool
-ParallelSafetyVisitor::visitNewCallObject(MNewCallObject *ins)
+ParallelSafetyVisitor::visitNewRunOnceCallObject(MNewRunOnceCallObject *ins)
 {
-    replace(ins, MNewCallObjectPar::New(alloc(), forkJoinSlice(), ins));
-    return true;
+    if (ins->templateObject()->hasDynamicSlots()) {
+        SpewMIR(ins, "call with dynamic slots");
+        return markUnsafe();
+    }
+
+    return replace(ins, MNewCallObjectPar::New(alloc(), ForkJoinContext(), ins));
 }
 
 bool
@@ -539,8 +527,7 @@ ParallelSafetyVisitor::visitLambda(MLambda *ins)
     }
 
     // fast path: replace with LambdaPar op
-    replace(ins, MLambdaPar::New(alloc(), forkJoinSlice(), ins));
-    return true;
+    return replace(ins, MLambdaPar::New(alloc(), ForkJoinContext(), ins));
 }
 
 bool
@@ -566,9 +553,23 @@ ParallelSafetyVisitor::visitNewArray(MNewArray *newInstruction)
 }
 
 bool
+ParallelSafetyVisitor::visitNewDerivedTypedObject(MNewDerivedTypedObject *ins)
+{
+    // FIXME(Bug 984090) -- There should really be a parallel-safe
+    // version of NewDerivedTypedObject. However, until that is
+    // implemented, let's just ignore those with 0 uses, since they
+    // will be stripped out by DCE later.
+    if (!ins->hasUses())
+        return true;
+
+    SpewMIR(ins, "visitNewDerivedTypedObject");
+    return markUnsafe();
+}
+
+bool
 ParallelSafetyVisitor::visitRest(MRest *ins)
 {
-    return replace(ins, MRestPar::New(alloc(), forkJoinSlice(), ins));
+    return replace(ins, MRestPar::New(alloc(), ForkJoinContext(), ins));
 }
 
 bool
@@ -580,7 +581,7 @@ ParallelSafetyVisitor::visitMathFunction(MMathFunction *ins)
 bool
 ParallelSafetyVisitor::visitConcat(MConcat *ins)
 {
-    return replace(ins, MConcatPar::New(alloc(), forkJoinSlice(), ins));
+    return replace(ins, MConcatPar::New(alloc(), ForkJoinContext(), ins));
 }
 
 bool
@@ -594,20 +595,34 @@ ParallelSafetyVisitor::visitToString(MToString *ins)
 
 bool
 ParallelSafetyVisitor::replaceWithNewPar(MInstruction *newInstruction,
-                                         JSObject *templateObject)
+                                         NativeObject *templateObject)
 {
-    replace(newInstruction, MNewPar::New(alloc(), forkJoinSlice(), templateObject));
-    return true;
+    return replace(newInstruction, MNewPar::New(alloc(), ForkJoinContext(), templateObject));
 }
 
 bool
 ParallelSafetyVisitor::replace(MInstruction *oldInstruction,
                                MInstruction *replacementInstruction)
 {
+    TransplantResumePoint(oldInstruction, replacementInstruction);
+
     MBasicBlock *block = oldInstruction->block();
     block->insertBefore(oldInstruction, replacementInstruction);
     oldInstruction->replaceAllUsesWith(replacementInstruction);
     block->discard(oldInstruction);
+
+    // We may have replaced a specialized Float32 instruction by its
+    // non-specialized version, so just retry to specialize it. This relies on
+    // the fact that Phis' types don't change during the ParallelSafetyAnalysis;
+    // otherwise we'd have to run the entire TypeAnalyzer Float32 analysis once
+    // instructions have been replaced.
+    if (replacementInstruction->isFloat32Commutative() &&
+        replacementInstruction->type() != MIRType_Float32)
+    {
+        replacementInstruction->trySpecializeFloat32(alloc());
+    }
+    MOZ_ASSERT(oldInstruction->type() == replacementInstruction->type());
+
     return true;
 }
 
@@ -640,11 +655,6 @@ ParallelSafetyVisitor::insertWriteGuard(MInstruction *writeInstruction,
             object = valueBeingWritten->toSlots()->object();
             break;
 
-          case MDefinition::Op_NewSlots:
-            // Values produced by new slots will ALWAYS be
-            // thread-local.
-            return true;
-
           default:
             SpewMIR(writeInstruction, "cannot insert write guard for %s",
                     valueBeingWritten->opName());
@@ -660,6 +670,10 @@ ParallelSafetyVisitor::insertWriteGuard(MInstruction *writeInstruction,
 
           case MDefinition::Op_TypedArrayElements:
             object = valueBeingWritten->toTypedArrayElements()->object();
+            break;
+
+          case MDefinition::Op_TypedObjectElements:
+            object = valueBeingWritten->toTypedObjectElements()->object();
             break;
 
           default:
@@ -688,10 +702,10 @@ ParallelSafetyVisitor::insertWriteGuard(MInstruction *writeInstruction,
     }
 
     MBasicBlock *block = writeInstruction->block();
-    MGuardThreadLocalObject *writeGuard =
-        MGuardThreadLocalObject::New(alloc(), forkJoinSlice(), object);
+    MGuardThreadExclusive *writeGuard =
+        MGuardThreadExclusive::New(alloc(), ForkJoinContext(), object);
     block->insertBefore(writeInstruction, writeGuard);
-    writeGuard->adjustInputs(alloc(), writeGuard);
+    writeGuard->typePolicy()->adjustInputs(alloc(), writeGuard);
     return true;
 }
 
@@ -705,7 +719,7 @@ bool
 ParallelSafetyVisitor::visitCall(MCall *ins)
 {
     // DOM? Scary.
-    if (ins->isDOMFunction()) {
+    if (ins->isCallDOMNative()) {
         SpewMIR(ins, "call to dom function");
         return markUnsafe();
     }
@@ -739,13 +753,13 @@ ParallelSafetyVisitor::visitCall(MCall *ins)
 bool
 ParallelSafetyVisitor::visitCheckOverRecursed(MCheckOverRecursed *ins)
 {
-    return replace(ins, MCheckOverRecursedPar::New(alloc(), forkJoinSlice()));
+    return replace(ins, MCheckOverRecursedPar::New(alloc(), ForkJoinContext()));
 }
 
 bool
 ParallelSafetyVisitor::visitInterruptCheck(MInterruptCheck *ins)
 {
-    return replace(ins, MCheckInterruptPar::New(alloc(), forkJoinSlice()));
+    return replace(ins, MInterruptCheckPar::New(alloc(), ForkJoinContext()));
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -776,12 +790,11 @@ bool
 ParallelSafetyVisitor::visitThrow(MThrow *thr)
 {
     MBasicBlock *block = thr->block();
-    JS_ASSERT(block->lastIns() == thr);
+    MOZ_ASSERT(block->lastIns() == thr);
+    MBail *bail = MBail::New(alloc(), Bailout_ParallelUnsafe);
     block->discardLastIns();
-    MAbortPar *bailout = MAbortPar::New(alloc());
-    if (!bailout)
-        return false;
-    block->end(bailout);
+    block->add(bail);
+    block->end(MUnreachable::New(alloc()));
     return true;
 }
 
@@ -810,7 +823,7 @@ jit::AddPossibleCallees(JSContext *cx, MIRGraph &graph, CallTargetVector &target
 
             RootedFunction target(cx, callIns->getSingleTarget());
             if (target) {
-                JS_ASSERT_IF(!target->isInterpreted(), target->hasParallelNative());
+                MOZ_ASSERT_IF(!target->isInterpreted(), target->hasParallelNative());
 
                 if (target->isInterpreted()) {
                     RootedScript script(cx, target->getOrCreateScript(cx));

@@ -7,15 +7,16 @@
 /* Per JSRuntime object */
 
 #include "mozilla/MemoryReporting.h"
+#include "mozilla/UniquePtr.h"
 
 #include "xpcprivate.h"
 #include "xpcpublic.h"
 #include "XPCWrapper.h"
 #include "XPCJSMemoryReporter.h"
 #include "WrapperFactory.h"
-#include "dom_quickstubs.h"
 #include "mozJSComponentLoader.h"
 
+#include "nsIMemoryInfoDumper.h"
 #include "nsIMemoryReporter.h"
 #include "nsIObserverService.h"
 #include "nsIDebug2.h"
@@ -27,24 +28,24 @@
 #include "mozilla/Services.h"
 
 #include "nsContentUtils.h"
-#include "nsCxPusher.h"
 #include "nsCCUncollectableMarker.h"
 #include "nsCycleCollectionNoteRootCallback.h"
 #include "nsScriptLoader.h"
 #include "jsfriendapi.h"
 #include "jsprf.h"
 #include "js/MemoryMetrics.h"
-#include "js/OldDebugAPI.h"
 #include "mozilla/dom/GeneratedAtomList.h"
 #include "mozilla/dom/BindingUtils.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/WindowBinding.h"
+#include "mozilla/Atomics.h"
 #include "mozilla/Attributes.h"
 #include "AccessCheck.h"
 #include "nsGlobalWindow.h"
 #include "nsAboutProtocolUtils.h"
 
 #include "GeckoProfiler.h"
+#include "nsIXULRuntime.h"
 #include "nsJSPrincipals.h"
 
 #ifdef MOZ_CRASHREPORTER
@@ -77,15 +78,32 @@ const char* const XPCJSRuntime::mStrings[] = {
     "__iterator__",         // IDX_ITERATOR
     "__exposedProps__",     // IDX_EXPOSEDPROPS
     "eval",                 // IDX_EVAL
+    "controllers",          // IDX_CONTROLLERS
+    "realFrameElement",     // IDX_REALFRAMEELEMENT
+    "length",               // IDX_LENGTH
+    "name",                 // IDX_NAME
+    "undefined",            // IDX_UNDEFINED
+    "",                     // IDX_EMPTYSTRING
+    "fileName",             // IDX_FILENAME
+    "lineNumber",           // IDX_LINENUMBER
+    "columnNumber",         // IDX_COLUMNNUMBER
+    "stack",                // IDX_STACK
+    "message"               // IDX_MESSAGE
 };
 
 /***************************************************************************/
 
-struct CX_AND_XPCRT_Data
-{
-    JSContext* cx;
-    XPCJSRuntime* rt;
-};
+static mozilla::Atomic<bool> sDiscardSystemSource(false);
+
+bool
+xpc::ShouldDiscardSystemSource() { return sDiscardSystemSource; }
+
+#ifdef DEBUG
+static mozilla::Atomic<bool> sExtraWarningsForSystemJS(false);
+bool xpc::ExtraWarningsForSystemJS() { return sExtraWarningsForSystemJS; }
+#else
+bool xpc::ExtraWarningsForSystemJS() { return false; }
+#endif
 
 static void * const UNMARK_ONLY = nullptr;
 static void * const UNMARK_AND_SWEEP = (void *)1;
@@ -238,32 +256,9 @@ public:
 
 namespace xpc {
 
-static uint32_t kLivingAdopters = 0;
-
-void
-RecordAdoptedNode(JSCompartment *c)
-{
-    CompartmentPrivate *priv = EnsureCompartmentPrivate(c);
-    if (!priv->adoptedNode) {
-        priv->adoptedNode = true;
-        ++kLivingAdopters;
-    }
-}
-
-void
-RecordDonatedNode(JSCompartment *c)
-{
-    EnsureCompartmentPrivate(c)->donatedNode = true;
-}
-
 CompartmentPrivate::~CompartmentPrivate()
 {
     MOZ_COUNT_DTOR(xpc::CompartmentPrivate);
-
-    Telemetry::Accumulate(Telemetry::COMPARTMENT_ADOPTED_NODE, adoptedNode);
-    Telemetry::Accumulate(Telemetry::COMPARTMENT_DONATED_NODE, donatedNode);
-    if (adoptedNode)
-        --kLivingAdopters;
 }
 
 static bool
@@ -367,45 +362,15 @@ bool CompartmentPrivate::TryParseLocationURI(CompartmentPrivate::LocationHint aL
         // Strip current item and continue.
         chain = Substring(chain, 0, idx);
     }
-    MOZ_ASSUME_UNREACHABLE("Chain parser loop does not terminate");
-}
 
-CompartmentPrivate*
-EnsureCompartmentPrivate(JSObject *obj)
-{
-    return EnsureCompartmentPrivate(js::GetObjectCompartment(obj));
-}
-
-CompartmentPrivate*
-EnsureCompartmentPrivate(JSCompartment *c)
-{
-    CompartmentPrivate *priv = GetCompartmentPrivate(c);
-    if (priv)
-        return priv;
-    priv = new CompartmentPrivate(c);
-    JS_SetCompartmentPrivate(c, priv);
-    return priv;
-}
-
-XPCWrappedNativeScope*
-MaybeGetObjectScope(JSObject *obj)
-{
-    MOZ_ASSERT(obj);
-    JSCompartment *compartment = js::GetObjectCompartment(obj);
-
-    MOZ_ASSERT(compartment);
-    CompartmentPrivate *priv = GetCompartmentPrivate(compartment);
-    if (!priv)
-        return nullptr;
-
-    return priv->scope;
+    MOZ_CRASH("Chain parser loop does not terminate");
 }
 
 static bool
 PrincipalImmuneToScriptPolicy(nsIPrincipal* aPrincipal)
 {
     // System principal gets a free pass.
-    if (XPCWrapper::GetSecurityManager()->IsSystemPrincipal(aPrincipal))
+    if (nsXPConnect::SecurityManager()->IsSystemPrincipal(aPrincipal))
         return true;
 
     // nsExpandedPrincipal gets a free pass.
@@ -446,12 +411,11 @@ Scriptability::Scriptability(JSCompartment *c) : mScriptBlocks(0)
     // If we're not immune, we should have a real principal with a codebase URI.
     // Check the URI against the new-style domain policy.
     if (!mImmuneToScriptPolicy) {
-        nsIScriptSecurityManager* ssm = XPCWrapper::GetSecurityManager();
         nsCOMPtr<nsIURI> codebase;
         nsresult rv = prin->GetURI(getter_AddRefs(codebase));
         bool policyAllows;
         if (NS_SUCCEEDED(rv) && codebase &&
-            NS_SUCCEEDED(ssm->PolicyAllowsScript(codebase, &policyAllows)))
+            NS_SUCCEEDED(nsXPConnect::SecurityManager()->PolicyAllowsScript(codebase, &policyAllows)))
         {
             mScriptBlockedByPolicy = !policyAllows;
         } else {
@@ -490,36 +454,42 @@ Scriptability::Unblock()
 void
 Scriptability::SetDocShellAllowsScript(bool aAllowed)
 {
-    mDocShellAllowsScript = aAllowed;
+    mDocShellAllowsScript = aAllowed || mImmuneToScriptPolicy;
 }
 
 /* static */
 Scriptability&
 Scriptability::Get(JSObject *aScope)
 {
-    return EnsureCompartmentPrivate(aScope)->scriptability;
+    return CompartmentPrivate::Get(aScope)->scriptability;
 }
 
 bool
-IsXBLScope(JSCompartment *compartment)
+IsContentXBLScope(JSCompartment *compartment)
 {
     // We always eagerly create compartment privates for XBL scopes.
-    CompartmentPrivate *priv = GetCompartmentPrivate(compartment);
+    CompartmentPrivate *priv = CompartmentPrivate::Get(compartment);
     if (!priv || !priv->scope)
         return false;
-    return priv->scope->IsXBLScope();
+    return priv->scope->IsContentXBLScope();
 }
 
 bool
-IsInXBLScope(JSObject *obj)
+IsInContentXBLScope(JSObject *obj)
 {
-    return IsXBLScope(js::GetObjectCompartment(obj));
+    return IsContentXBLScope(js::GetObjectCompartment(obj));
+}
+
+bool
+IsInAddonScope(JSObject *obj)
+{
+    return ObjectScope(obj)->IsAddonScope();
 }
 
 bool
 IsUniversalXPConnectEnabled(JSCompartment *compartment)
 {
-    CompartmentPrivate *priv = GetCompartmentPrivate(compartment);
+    CompartmentPrivate *priv = CompartmentPrivate::Get(compartment);
     if (!priv)
         return false;
     return priv->universalXPConnectEnabled;
@@ -544,7 +514,7 @@ EnableUniversalXPConnect(JSContext *cx)
     // the security wrapping code.
     if (AccessCheck::isChrome(compartment))
         return true;
-    CompartmentPrivate *priv = GetCompartmentPrivate(compartment);
+    CompartmentPrivate *priv = CompartmentPrivate::Get(compartment);
     if (!priv)
         return true;
     priv->universalXPConnectEnabled = true;
@@ -561,26 +531,37 @@ EnableUniversalXPConnect(JSContext *cx)
     XPCWrappedNativeScope *scope = priv->scope;
     if (!scope)
         return true;
-    return nsXPCComponents::AttachComponentsObject(cx, scope);
+    scope->ForcePrivilegedComponents();
+    return scope->AttachComponentsObject(cx);
 }
 
 JSObject *
-GetJunkScope()
+UnprivilegedJunkScope()
 {
-    XPCJSRuntime *self = nsXPConnect::GetRuntimeInstance();
-    NS_ENSURE_TRUE(self, nullptr);
-    return self->GetJunkScope();
+    return XPCJSRuntime::Get()->UnprivilegedJunkScope();
 }
 
-nsIGlobalObject *
-GetJunkScopeGlobal()
+JSObject *
+PrivilegedJunkScope()
 {
-    JSObject *junkScope = GetJunkScope();
-    // GetJunkScope would ideally never fail, currently it is not yet the case
-    // unfortunately...(see Bug 874158)
-    if (!junkScope)
-        return nullptr;
-    return GetNativeForGlobal(junkScope);
+    return XPCJSRuntime::Get()->PrivilegedJunkScope();
+}
+
+JSObject *
+CompilationScope()
+{
+    return XPCJSRuntime::Get()->CompilationScope();
+}
+
+nsGlobalWindow*
+WindowOrNull(JSObject *aObj)
+{
+    MOZ_ASSERT(aObj);
+    MOZ_ASSERT(!js::IsWrapper(aObj));
+
+    nsGlobalWindow* win = nullptr;
+    UNWRAP_OBJECT(Window, aObj, win);
+    return win;
 }
 
 nsGlobalWindow*
@@ -588,21 +569,28 @@ WindowGlobalOrNull(JSObject *aObj)
 {
     MOZ_ASSERT(aObj);
     JSObject *glob = js::GetGlobalForObjectCrossCompartment(aObj);
-    MOZ_ASSERT(glob);
 
-    // This will always return null until we have Window on WebIDL bindings,
-    // at which point it will do the right thing.
-    if (!IS_WN_CLASS(js::GetObjectClass(glob))) {
-        nsGlobalWindow* win = nullptr;
-        UNWRAP_OBJECT(Window, glob, win);
-        return win;
-    }
+    return WindowOrNull(glob);
+}
 
-    nsISupports* supports = XPCWrappedNative::Get(glob)->GetIdentityObject();
-    nsCOMPtr<nsPIDOMWindow> piWin = do_QueryInterface(supports);
-    if (!piWin)
+nsGlobalWindow*
+AddonWindowOrNull(JSObject *aObj)
+{
+    if (!IsInAddonScope(aObj))
         return nullptr;
-    return static_cast<nsGlobalWindow*>(piWin.get());
+
+    JSObject *global = js::GetGlobalForObjectCrossCompartment(aObj);
+    JSObject *proto = js::GetPrototypeNoProxy(global);
+
+    // Addons could theoretically change the prototype of the addon scope, but
+    // we pretty much just want to crash if that happens so that we find out
+    // about it and get them to change their code.
+    MOZ_RELEASE_ASSERT(js::IsCrossCompartmentWrapper(proto) ||
+                       xpc::IsSandboxPrototypeProxy(proto));
+    JSObject *mainGlobal = js::UncheckedUnwrap(proto, /* stopAtOuter = */ false);
+    MOZ_RELEASE_ASSERT(JS_IsGlobalObject(mainGlobal));
+
+    return WindowOrNull(mainGlobal);
 }
 
 }
@@ -615,7 +603,7 @@ CompartmentDestroyedCallback(JSFreeOp *fop, JSCompartment *compartment)
 
     // Get the current compartment private into an AutoPtr (which will do the
     // cleanup for us), and null out the private (which may already be null).
-    nsAutoPtr<CompartmentPrivate> priv(GetCompartmentPrivate(compartment));
+    nsAutoPtr<CompartmentPrivate> priv(CompartmentPrivate::Get(compartment));
     JS_SetCompartmentPrivate(compartment, nullptr);
 }
 
@@ -668,35 +656,6 @@ XPCJSRuntime::SuspectWrappedNative(XPCWrappedNative *wrapper,
         cb.NoteJSRoot(obj);
 }
 
-bool
-CanSkipWrappedJS(nsXPCWrappedJS *wrappedJS)
-{
-    JSObject *obj = wrappedJS->GetJSObjectPreserveColor();
-    // If traversing wrappedJS wouldn't release it, nor
-    // cause any other objects to be added to the graph, no
-    // need to add it to the graph at all.
-    bool isRootWrappedJS = wrappedJS->IsRootWrapper();
-    if (nsCCUncollectableMarker::sGeneration &&
-        (!obj || !xpc_IsGrayGCThing(obj)) &&
-        !wrappedJS->IsSubjectToFinalization() &&
-        (isRootWrappedJS || CanSkipWrappedJS(wrappedJS->GetRootWrapper()))) {
-        if (!wrappedJS->IsAggregatedToNative() || !isRootWrappedJS) {
-            return true;
-        } else {
-            nsISupports* agg = wrappedJS->GetAggregatedNativeObject();
-            nsXPCOMCycleCollectionParticipant* cp = nullptr;
-            CallQueryInterface(agg, &cp);
-            nsISupports* canonical = nullptr;
-            agg->QueryInterface(NS_GET_IID(nsCycleCollectionISupports),
-                                reinterpret_cast<void**>(&canonical));
-            if (cp && canonical && cp->CanSkipInCC(canonical)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 void
 XPCJSRuntime::TraverseAdditionalNativeRoots(nsCycleCollectionNoteRootCallback &cb)
 {
@@ -714,13 +673,7 @@ XPCJSRuntime::TraverseAdditionalNativeRoots(nsCycleCollectionNoteRootCallback &c
     }
 
     for (XPCRootSetElem *e = mWrappedJSRoots; e ; e = e->GetNextRoot()) {
-        nsXPCWrappedJS *wrappedJS = static_cast<nsXPCWrappedJS*>(e);
-        if (!cb.WantAllTraces() &&
-            CanSkipWrappedJS(wrappedJS)) {
-            continue;
-        }
-
-        cb.NoteXPCOMRoot(static_cast<nsIXPConnectWrappedJS *>(wrappedJS));
+        cb.NoteXPCOMRoot(ToSupports(static_cast<nsXPCWrappedJS*>(e)));
     }
 }
 
@@ -754,6 +707,11 @@ void
 XPCJSRuntime::EndCycleCollectionCallback(CycleCollectorResults &aResults)
 {
     nsJSContext::EndCycleCollectionCallback(aResults);
+
+    nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
+    if (obs) {
+        obs->NotifyObservers(nullptr, "cycle-collector-end", nullptr);
+    }
 }
 
 void
@@ -806,20 +764,16 @@ XPCJSRuntime::GCSliceCallback(JSRuntime *rt,
 void
 XPCJSRuntime::CustomGCCallback(JSGCStatus status)
 {
-    // Record kLivingAdopters once per GC to approximate time sampling during
-    // periods of activity.
-    if (status == JSGC_BEGIN) {
-        Telemetry::Accumulate(Telemetry::COMPARTMENT_LIVING_ADOPTERS,
-                              kLivingAdopters);
-    }
-
     nsTArray<xpcGCCallback> callbacks(extraGCCallbacks);
     for (uint32_t i = 0; i < callbacks.Length(); ++i)
         callbacks[i](status);
 }
 
 /* static */ void
-XPCJSRuntime::FinalizeCallback(JSFreeOp *fop, JSFinalizeStatus status, bool isCompartmentGC)
+XPCJSRuntime::FinalizeCallback(JSFreeOp *fop,
+                               JSFinalizeStatus status,
+                               bool isCompartmentGC,
+                               void *data)
 {
     XPCJSRuntime* self = nsXPConnect::GetRuntimeInstance();
     if (!self)
@@ -832,20 +786,6 @@ XPCJSRuntime::FinalizeCallback(JSFreeOp *fop, JSFinalizeStatus status, bool isCo
 
             MOZ_ASSERT(!self->mGCIsRunning, "bad state");
             self->mGCIsRunning = true;
-
-            nsTArray<nsXPCWrappedJS*>* dyingWrappedJSArray =
-                &self->mWrappedJSToReleaseArray;
-
-            // Add any wrappers whose JSObjects are to be finalized to
-            // this array. Note that we do not want to be changing the
-            // refcount of these wrappers.
-            // We add them to the array now and Release the array members
-            // later to avoid the posibility of doing any JS GCThing
-            // allocations during the gc cycle.
-            self->mWrappedJSMap->FindDyingJSObjects(dyingWrappedJSArray);
-
-            // Find dying scopes.
-            XPCWrappedNativeScope::StartFinalizationPhaseOfGC(fop, self);
 
             self->mDoingFinalization = true;
             break;
@@ -860,7 +800,7 @@ XPCJSRuntime::FinalizeCallback(JSFreeOp *fop, JSFinalizeStatus status, bool isCo
             DoDeferredRelease(self->mWrappedJSToReleaseArray);
 
             // Sweep scopes needing cleanup
-            XPCWrappedNativeScope::FinishedFinalizationPhaseOfGC();
+            XPCWrappedNativeScope::KillDyingScopes();
 
             MOZ_ASSERT(self->mGCIsRunning, "bad state");
             self->mGCIsRunning = false;
@@ -880,8 +820,6 @@ XPCJSRuntime::FinalizeCallback(JSFreeOp *fop, JSFinalizeStatus status, bool isCo
 
             self->mDetachedWrappedNativeProtoMap->
                 Enumerate(DetachedWrappedNativeProtoMarker, nullptr);
-
-            DOM_MarkInterfaces();
 
             // Mark the sets used in the call contexts. There is a small
             // chance that a wrapper's set will change *while* a call is
@@ -1015,20 +953,33 @@ XPCJSRuntime::FinalizeCallback(JSFreeOp *fop, JSFinalizeStatus status, bool isCo
     }
 }
 
+/* static */ void
+XPCJSRuntime::WeakPointerCallback(JSRuntime *rt, void *data)
+{
+    // Called to remove any weak pointers to GC things that are about to be
+    // finalized and fixup any pointers that may have been moved.
+
+    XPCJSRuntime *self = static_cast<XPCJSRuntime *>(data);
+
+    self->mWrappedJSMap->UpdateWeakPointersAfterGC(self);
+
+    XPCWrappedNativeScope::UpdateWeakPointersAfterGC(self);
+}
+
 static void WatchdogMain(void *arg);
 class Watchdog;
 class WatchdogManager;
 class AutoLockWatchdog {
     Watchdog* const mWatchdog;
   public:
-    AutoLockWatchdog(Watchdog* aWatchdog);
+    explicit AutoLockWatchdog(Watchdog* aWatchdog);
     ~AutoLockWatchdog();
 };
 
 class Watchdog
 {
   public:
-    Watchdog(WatchdogManager *aManager)
+    explicit Watchdog(WatchdogManager *aManager)
       : mManager(aManager)
       , mLock(nullptr)
       , mWakeup(nullptr)
@@ -1070,7 +1021,7 @@ class Watchdog
             AutoLockWatchdog lock(this);
 
             mThread = PR_CreateThread(PR_USER_THREAD, WatchdogMain, this,
-                                      PR_PRIORITY_NORMAL, PR_LOCAL_THREAD,
+                                      PR_PRIORITY_NORMAL, PR_GLOBAL_THREAD,
                                       PR_UNJOINABLE_THREAD, 0);
             if (!mThread)
                 NS_RUNTIMEABORT("PR_CreateThread failed!");
@@ -1151,8 +1102,8 @@ class WatchdogManager : public nsIObserver
   public:
 
     NS_DECL_ISUPPORTS
-    WatchdogManager(XPCJSRuntime *aRuntime) : mRuntime(aRuntime)
-                                            , mRuntimeState(RUNTIME_INACTIVE)
+    explicit WatchdogManager(XPCJSRuntime *aRuntime) : mRuntime(aRuntime)
+                                                     , mRuntimeState(RUNTIME_INACTIVE)
     {
         // All the timestamps start at zero except for runtime state change.
         PodArrayZero(mTimestamps);
@@ -1164,6 +1115,9 @@ class WatchdogManager : public nsIObserver
         // Register ourselves as an observer to get updates on the pref.
         mozilla::Preferences::AddStrongObserver(this, "dom.use_watchdog");
     }
+
+  protected:
+
     virtual ~WatchdogManager()
     {
         // Shutting down the watchdog requires context-switching to the watchdog
@@ -1173,8 +1127,10 @@ class WatchdogManager : public nsIObserver
         mozilla::Preferences::RemoveObserver(this, "dom.use_watchdog");
     }
 
+  public:
+
     NS_IMETHOD Observe(nsISupports* aSubject, const char* aTopic,
-                       const PRUnichar* aData)
+                       const char16_t* aData)
     {
         RefreshWatchdog();
         return NS_OK;
@@ -1190,7 +1146,7 @@ class WatchdogManager : public nsIObserver
         MOZ_ASSERT(NS_IsMainThread());
         Maybe<AutoLockWatchdog> lock;
         if (mWatchdog)
-            lock.construct(mWatchdog);
+            lock.emplace(mWatchdog);
 
         // Write state.
         mTimestamps[TimestampRuntimeStateChange] = PR_Now();
@@ -1214,7 +1170,7 @@ class WatchdogManager : public nsIObserver
         // The watchdog thread always holds the lock when it runs.
         Maybe<AutoLockWatchdog> maybeLock;
         if (NS_IsMainThread() && mWatchdog)
-            maybeLock.construct(mWatchdog);
+            maybeLock.emplace(mWatchdog);
         mTimestamps[aCategory] = PR_Now();
     }
     PRTime GetTimestamp(WatchdogTimestampCategory aCategory)
@@ -1222,7 +1178,7 @@ class WatchdogManager : public nsIObserver
         // The watchdog thread always holds the lock when it runs.
         Maybe<AutoLockWatchdog> maybeLock;
         if (NS_IsMainThread() && mWatchdog)
-            maybeLock.construct(mWatchdog);
+            maybeLock.emplace(mWatchdog);
         return mTimestamps[aCategory];
     }
 
@@ -1262,7 +1218,7 @@ class WatchdogManager : public nsIObserver
     PRTime mTimestamps[TimestampCount];
 };
 
-NS_IMPL_ISUPPORTS1(WatchdogManager, nsIObserver)
+NS_IMPL_ISUPPORTS(WatchdogManager, nsIObserver)
 
 AutoLockWatchdog::AutoLockWatchdog(Watchdog *aWatchdog) : mWatchdog(aWatchdog)
 {
@@ -1311,7 +1267,7 @@ WatchdogMain(void *arg)
         // Rise and shine.
         manager->RecordTimestamp(TimestampWatchdogWakeup);
 
-        // Don't trigger the operation callback if activity started less than one second ago.
+        // Don't request an interrupt callback if activity started less than one second ago.
         // The callback is only used for detecting long running scripts, and triggering the
         // callback from off the main thread can be expensive.
         if (manager->IsRuntimeActive() &&
@@ -1322,7 +1278,7 @@ WatchdogMain(void *arg)
             if (dbg)
                 dbg->GetIsDebuggerAttached(&debuggerAttached);
             if (!debuggerAttached)
-                JS_TriggerOperationCallback(manager->Runtime()->Runtime());
+                JS_RequestInterruptCallback(manager->Runtime()->Runtime());
         }
     }
 
@@ -1336,7 +1292,7 @@ XPCJSRuntime::GetWatchdogTimestamp(WatchdogTimestampCategory aCategory)
     return mWatchdogManager->GetTimestamp(aCategory);
 }
 
-NS_EXPORT_(void)
+void
 xpc::SimulateActivityCallback(bool aActive)
 {
     XPCJSRuntime::ActivityCallback(XPCJSRuntime::Get(), aActive);
@@ -1376,23 +1332,27 @@ XPCJSRuntime::CTypesActivityCallback(JSContext *cx, js::CTypesActivityType type)
 
 // static
 bool
-XPCJSRuntime::OperationCallback(JSContext *cx)
+XPCJSRuntime::InterruptCallback(JSContext *cx)
 {
     XPCJSRuntime *self = XPCJSRuntime::Get();
 
-    // If this is the first time the operation callback has fired since we last
+    // If this is the first time the interrupt callback has fired since we last
     // returned to the event loop, mark the checkpoint.
     if (self->mSlowScriptCheckpoint.IsNull()) {
         self->mSlowScriptCheckpoint = TimeStamp::NowLoRes();
         return true;
     }
 
-    // This is at least the second operation callback we've received since
+    // Sometimes we get called back during XPConnect initialization, before Gecko
+    // has finished bootstrapping. Avoid crashing in nsContentUtils below.
+    if (!nsContentUtils::IsInitialized())
+        return true;
+
+    // This is at least the second interrupt callback we've received since
     // returning to the event loop. See how long it's been, and what the limit
     // is.
     TimeDuration duration = TimeStamp::NowLoRes() - self->mSlowScriptCheckpoint;
-    bool chrome =
-      nsContentUtils::IsSystemPrincipal(nsContentUtils::GetSubjectPrincipal());
+    bool chrome = nsContentUtils::IsCallerChrome();
     const char *prefName = chrome ? "dom.max_chrome_script_run_time"
                                   : "dom.max_script_run_time";
     int32_t limit = Preferences::GetInt(prefName, chrome ? 20 : 10);
@@ -1408,15 +1368,25 @@ XPCJSRuntime::OperationCallback(JSContext *cx)
     // Get the DOM window associated with the running script. If the script is
     // running in a non-DOM scope, we have to just let it keep running.
     RootedObject global(cx, JS::CurrentGlobalOrNull(cx));
-    nsCOMPtr<nsPIDOMWindow> win;
-    if (IS_WN_REFLECTOR(global))
-        win = do_QueryWrappedNative(XPCWrappedNative::Get(global));
+    nsRefPtr<nsGlobalWindow> win = WindowOrNull(global);
+    if (!win && IsSandbox(global)) {
+        // If this is a sandbox associated with a DOMWindow via a
+        // sandboxPrototype, use that DOMWindow. This supports GreaseMonkey
+        // and JetPack content scripts.
+        JS::Rooted<JSObject*> proto(cx);
+        if (!JS_GetPrototype(cx, global, &proto))
+            return false;
+        if (proto && IsSandboxPrototypeProxy(proto) &&
+            (proto = js::CheckedUnwrap(proto, /* stopAtOuter = */ false)))
+        {
+            win = WindowGlobalOrNull(proto);
+        }
+    }
     if (!win)
         return true;
 
     // Show the prompt to the user, and kill if requested.
-    nsGlobalWindow::SlowScriptResponse response =
-      static_cast<nsGlobalWindow*>(win.get())->ShowSlowScriptDialog();
+    nsGlobalWindow::SlowScriptResponse response = win->ShowSlowScriptDialog();
     if (response == nsGlobalWindow::KillSlowScript)
         return false;
 
@@ -1427,6 +1397,34 @@ XPCJSRuntime::OperationCallback(JSContext *cx)
         Preferences::SetInt(prefName, 0);
 
     return true;
+}
+
+void
+XPCJSRuntime::CustomOutOfMemoryCallback()
+{
+    if (!Preferences::GetBool("memory.dump_reports_on_oom")) {
+        return;
+    }
+
+    nsCOMPtr<nsIMemoryInfoDumper> dumper =
+        do_GetService("@mozilla.org/memory-info-dumper;1");
+    if (!dumper) {
+        return;
+    }
+
+    // If this fails, it fails silently.
+    dumper->DumpMemoryInfoToTempDir(NS_LITERAL_STRING("due-to-JS-OOM"),
+                                    /* anonymize = */ false,
+                                    /* minimizeMemoryUsage = */ false);
+}
+
+void
+XPCJSRuntime::CustomLargeAllocationFailureCallback()
+{
+    nsCOMPtr<nsIObserverService> os = mozilla::services::GetObserverService();
+    if (os) {
+        os->NotifyObservers(nullptr, "memory-pressure", MOZ_UTF16("heap-minimize"));
+    }
 }
 
 size_t
@@ -1446,47 +1444,6 @@ XPCJSRuntime::SizeOfIncludingThis(MallocSizeOf mallocSizeOf)
     // added later.
 
     return n;
-}
-
-XPCReadableJSStringWrapper *
-XPCJSRuntime::NewStringWrapper(const PRUnichar *str, uint32_t len)
-{
-    for (uint32_t i = 0; i < XPCCCX_STRING_CACHE_SIZE; ++i) {
-        StringWrapperEntry& ent = mScratchStrings[i];
-
-        if (!ent.mInUse) {
-            ent.mInUse = true;
-
-            // Construct the string using placement new.
-
-            return new (ent.mString.addr()) XPCReadableJSStringWrapper(str, len);
-        }
-    }
-
-    // All our internal string wrappers are used, allocate a new string.
-
-    return new XPCReadableJSStringWrapper(str, len);
-}
-
-void
-XPCJSRuntime::DeleteString(nsAString *string)
-{
-    for (uint32_t i = 0; i < XPCCCX_STRING_CACHE_SIZE; ++i) {
-        StringWrapperEntry& ent = mScratchStrings[i];
-        if (string == ent.mString.addr()) {
-            // One of our internal strings is no longer in use, mark
-            // it as such and destroy the string.
-
-            ent.mInUse = false;
-            ent.mString.addr()->~XPCReadableJSStringWrapper();
-
-            return;
-        }
-    }
-
-    // We're done with a string that's not one of our internal
-    // strings, delete it.
-    delete string;
 }
 
 /***************************************************************************/
@@ -1510,11 +1467,59 @@ void XPCJSRuntime::DestroyJSContextStack()
 
 void XPCJSRuntime::SystemIsBeingShutDown()
 {
-    DOM_ClearInterfaces();
-
     if (mDetachedWrappedNativeProtoMap)
         mDetachedWrappedNativeProtoMap->
             Enumerate(DetachedWrappedNativeProtoShutdownMarker, nullptr);
+}
+
+#define JS_OPTIONS_DOT_STR "javascript.options."
+
+static void
+ReloadPrefsCallback(const char *pref, void *data)
+{
+    XPCJSRuntime *runtime = reinterpret_cast<XPCJSRuntime *>(data);
+    JSRuntime *rt = runtime->Runtime();
+
+    bool safeMode = false;
+    nsCOMPtr<nsIXULRuntime> xr = do_GetService("@mozilla.org/xre/runtime;1");
+    if (xr) {
+        xr->GetInSafeMode(&safeMode);
+    }
+
+    bool useBaseline = Preferences::GetBool(JS_OPTIONS_DOT_STR "baselinejit") && !safeMode;
+    bool useIon = Preferences::GetBool(JS_OPTIONS_DOT_STR "ion") && !safeMode;
+    bool useAsmJS = Preferences::GetBool(JS_OPTIONS_DOT_STR "asmjs") && !safeMode;
+    bool useNativeRegExp = Preferences::GetBool(JS_OPTIONS_DOT_STR "native_regexp") && !safeMode;
+
+    bool parallelParsing = Preferences::GetBool(JS_OPTIONS_DOT_STR "parallel_parsing");
+    bool offthreadIonCompilation = Preferences::GetBool(JS_OPTIONS_DOT_STR
+                                                       "ion.offthread_compilation");
+    bool useBaselineEager = Preferences::GetBool(JS_OPTIONS_DOT_STR
+                                                 "baselinejit.unsafe_eager_compilation");
+    bool useIonEager = Preferences::GetBool(JS_OPTIONS_DOT_STR "ion.unsafe_eager_compilation");
+
+    sDiscardSystemSource = Preferences::GetBool(JS_OPTIONS_DOT_STR "discardSystemSource");
+
+    bool werror = Preferences::GetBool(JS_OPTIONS_DOT_STR "werror");
+
+    bool extraWarnings = Preferences::GetBool(JS_OPTIONS_DOT_STR "strict");
+#ifdef DEBUG
+    sExtraWarningsForSystemJS = Preferences::GetBool(JS_OPTIONS_DOT_STR "strict.debug");
+#endif
+
+    JS::RuntimeOptionsRef(rt).setBaseline(useBaseline)
+                             .setIon(useIon)
+                             .setAsmJS(useAsmJS)
+                             .setNativeRegExp(useNativeRegExp)
+                             .setWerror(werror)
+                             .setExtraWarnings(extraWarnings);
+
+    JS_SetParallelParsingEnabled(rt, parallelParsing);
+    JS_SetOffthreadIonCompilationEnabled(rt, offthreadIonCompilation);
+    JS_SetGlobalJitCompilerOption(rt, JSJITCOMPILER_BASELINE_WARMUP_TRIGGER,
+                                  useBaselineEager ? 0 : -1);
+    JS_SetGlobalJitCompilerOption(rt, JSJITCOMPILER_ION_WARMUP_TRIGGER,
+                                  useIonEager ? 0 : -1);
 }
 
 XPCJSRuntime::~XPCJSRuntime()
@@ -1524,7 +1529,8 @@ XPCJSRuntime::~XPCJSRuntime()
     // one final GC, which can call back into the runtime with various
     // callback if we aren't careful. Null out the relevant callbacks.
     js::SetActivityCallback(Runtime(), nullptr, nullptr);
-    JS_SetFinalizeCallback(Runtime(), nullptr);
+    JS_RemoveFinalizeCallback(Runtime(), FinalizeCallback);
+    JS_RemoveWeakPointerCallback(Runtime(), WeakPointerCallback);
 
     // Clear any pending exception.  It might be an XPCWrappedJS, and if we try
     // to destroy it later we will crash.
@@ -1597,18 +1603,20 @@ XPCJSRuntime::~XPCJSRuntime()
         stack->sampleRuntime(nullptr);
 #endif
 
-#ifdef DEBUG
-    for (uint32_t i = 0; i < XPCCCX_STRING_CACHE_SIZE; ++i) {
-        MOZ_ASSERT(!mScratchStrings[i].mInUse, "Uh, string wrapper still in use!");
-    }
-#endif
+    Preferences::UnregisterCallback(ReloadPrefsCallback, JS_OPTIONS_DOT_STR, this);
 }
 
+// If |*anonymizeID| is non-zero and this is a user compartment, the name will
+// be anonymized.
 static void
-GetCompartmentName(JSCompartment *c, nsCString &name, bool replaceSlashes)
+GetCompartmentName(JSCompartment *c, nsCString &name, int *anonymizeID,
+                   bool replaceSlashes)
 {
     if (js::IsAtomsCompartment(c)) {
         name.AssignLiteral("atoms");
+    } else if (*anonymizeID && !js::IsSystemCompartment(c)) {
+        name.AppendPrintf("<anonymized-%d>", *anonymizeID);
+        *anonymizeID += 1;
     } else if (JSPrincipals *principals = JS_GetCompartmentPrincipals(c)) {
         nsJSPrincipals::get(principals)->GetScriptLocation(name);
 
@@ -1616,12 +1624,55 @@ GetCompartmentName(JSCompartment *c, nsCString &name, bool replaceSlashes)
         // script location, append the compartment's location to allow
         // differentiation of multiple compartments owned by the same principal
         // (e.g. components owned by the system or null principal).
-        CompartmentPrivate *compartmentPrivate = GetCompartmentPrivate(c);
+        CompartmentPrivate *compartmentPrivate = CompartmentPrivate::Get(c);
         if (compartmentPrivate) {
             const nsACString& location = compartmentPrivate->GetLocation();
             if (!location.IsEmpty() && !location.Equals(name)) {
                 name.AppendLiteral(", ");
                 name.Append(location);
+            }
+        }
+
+        if (*anonymizeID) {
+            // We might have a file:// URL that includes a path from the local
+            // filesystem, which should be omitted if we're anonymizing.
+            static const char *filePrefix = "file://";
+            int filePos = name.Find(filePrefix);
+            if (filePos >= 0) {
+                int pathPos = filePos + strlen(filePrefix);
+                int lastSlashPos = -1;
+                for (int i = pathPos; i < int(name.Length()); i++) {
+                    if (name[i] == '/' || name[i] == '\\') {
+                        lastSlashPos = i;
+                    }
+                }
+                if (lastSlashPos != -1) {
+                    name.ReplaceASCII(pathPos, lastSlashPos - pathPos,
+                                      "<anonymized>");
+                } else {
+                    // Something went wrong. Anonymize the entire path to be
+                    // safe.
+                    name.Truncate(pathPos);
+                    name += "<anonymized?!>";
+                }
+            }
+
+            // We might have a location like this:
+            //   inProcessTabChildGlobal?ownedBy=http://www.example.com/
+            // The owner should be omitted if it's not a chrome: URI and we're
+            // anonymizing.
+            static const char *ownedByPrefix =
+                "inProcessTabChildGlobal?ownedBy=";
+            int ownedByPos = name.Find(ownedByPrefix);
+            if (ownedByPos >= 0) {
+                const char *chrome = "chrome:";
+                int ownerPos = ownedByPos + strlen(ownedByPrefix);
+                const nsDependentCSubstring& ownerFirstPart =
+                    Substring(name, ownerPos, strlen(chrome));
+                if (!ownerFirstPart.EqualsASCII(chrome)) {
+                    name.Truncate(ownerPos);
+                    name += "<anonymized>";
+                }
             }
         }
 
@@ -1664,21 +1715,26 @@ JSMainRuntimeCompartmentsUserDistinguishedAmount()
     return JS::UserCompartmentCount(rt);
 }
 
-class JSMainRuntimeTemporaryPeakReporter MOZ_FINAL : public MemoryUniReporter
+class JSMainRuntimeTemporaryPeakReporter MOZ_FINAL : public nsIMemoryReporter
 {
-public:
-    JSMainRuntimeTemporaryPeakReporter()
-      : MemoryUniReporter("js-main-runtime-temporary-peak",
-                           KIND_OTHER, UNITS_BYTES,
-"The peak size of the transient storage in the main JSRuntime (the current "
-"size of which is reported as 'explicit/js-non-window/runtime/temporary').")
-    {}
-private:
-    int64_t Amount() MOZ_OVERRIDE
+    ~JSMainRuntimeTemporaryPeakReporter() {}
+
+  public:
+    NS_DECL_ISUPPORTS
+
+    NS_IMETHOD CollectReports(nsIHandleReportCallback* aHandleReport,
+                              nsISupports* aData, bool aAnonymize)
     {
-        return JSMainRuntimeTemporaryPeakDistinguishedAmount();
+        return MOZ_COLLECT_REPORT("js-main-runtime-temporary-peak",
+            KIND_OTHER, UNITS_BYTES,
+            JSMainRuntimeTemporaryPeakDistinguishedAmount(),
+            "Peak transient data size in the main JSRuntime (the current size "
+            "of which is reported as "
+            "'explicit/js-non-window/runtime/temporary').");
     }
 };
+
+NS_IMPL_ISUPPORTS(JSMainRuntimeTemporaryPeakReporter, nsIMemoryReporter)
 
 // The REPORT* macros do an unconditional report.  The ZCREPORT* macros are for
 // compartments and zones; they aggregate any entries smaller than
@@ -1702,24 +1758,6 @@ private:
 #define REPORT_BYTES(_path, _kind, _amount, _desc)                            \
     REPORT(_path, _kind, UNITS_BYTES, _amount, _desc);
 
-// REPORT2 and REPORT_BYTES2 are just like REPORT and REPORT_BYTES, except the
-// description is an nsCString, instead of a literal string.
-
-#define REPORT2(_path, _kind, _units, _amount, _desc)                         \
-    do {                                                                      \
-        nsresult rv;                                                          \
-        rv = cb->Callback(EmptyCString(), _path,                              \
-                          nsIMemoryReporter::_kind,                           \
-                          nsIMemoryReporter::_units,                          \
-                          _amount,                                            \
-                          _desc,                                              \
-                          closure);                                           \
-        NS_ENSURE_SUCCESS(rv, rv);                                            \
-    } while (0)
-
-#define REPORT_BYTES2(_path, _kind, _amount, _desc)                           \
-    REPORT2(_path, _kind, UNITS_BYTES, _amount, _desc);
-
 #define REPORT_GC_BYTES(_path, _amount, _desc)                                \
     do {                                                                      \
         size_t amount = _amount;  /* evaluate _amount only once */            \
@@ -1732,37 +1770,25 @@ private:
         gcTotal += amount;                                                    \
     } while (0)
 
-// Report compartment/zone bytes.  Note that _descLiteral must be a literal
-// string.
-//
-// Nb: all non-GC compartment reports are currently KIND_HEAP, and this macro
-// relies on that.
-#define ZCREPORT_BYTES(_path, _amount, _descLiteral)                          \
+// Report compartment/zone non-GC (KIND_HEAP) bytes.
+#define ZCREPORT_BYTES(_path, _amount, _desc)                                 \
     do {                                                                      \
         /* Assign _descLiteral plus "" into a char* to prove that it's */     \
         /* actually a literal. */                                             \
-        const char* unusedDesc = _descLiteral "";                             \
-        (void) unusedDesc;                                                    \
-        ZCREPORT_BYTES2(_path, _amount, NS_LITERAL_CSTRING(_descLiteral));    \
-    } while (0)
-
-// ZCREPORT_BYTES2 is identical to ZCREPORT_BYTES, except the description is a
-// nsCString instead of a literal string.
-#define ZCREPORT_BYTES2(_path, _amount, _desc)                                \
-    do {                                                                      \
         size_t amount = _amount;  /* evaluate _amount only once */            \
         if (amount >= SUNDRIES_THRESHOLD) {                                   \
             nsresult rv;                                                      \
             rv = cb->Callback(EmptyCString(), _path,                          \
                               nsIMemoryReporter::KIND_HEAP,                   \
                               nsIMemoryReporter::UNITS_BYTES, amount,         \
-                              _desc, closure);                                \
+                              NS_LITERAL_CSTRING(_desc), closure);            \
             NS_ENSURE_SUCCESS(rv, rv);                                        \
         } else {                                                              \
             sundriesMallocHeap += amount;                                     \
         }                                                                     \
     } while (0)
 
+// Report compartment/zone GC bytes.
 #define ZCREPORT_GC_BYTES(_path, _amount, _desc)                              \
     do {                                                                      \
         size_t amount = _amount;  /* evaluate _amount only once */            \
@@ -1779,6 +1805,7 @@ private:
         }                                                                     \
     } while (0)
 
+// Report runtime bytes.
 #define RREPORT_BYTES(_path, _kind, _amount, _desc)                           \
     do {                                                                      \
         size_t amount = _amount;  /* evaluate _amount only once */            \
@@ -1799,59 +1826,72 @@ static nsresult
 ReportZoneStats(const JS::ZoneStats &zStats,
                 const xpc::ZoneStatsExtras &extras,
                 nsIMemoryReporterCallback *cb,
-                nsISupports *closure, size_t *gcTotalOut = nullptr)
+                nsISupports *closure,
+                bool anonymize,
+                size_t *gcTotalOut = nullptr)
 {
     const nsAutoCString& pathPrefix = extras.pathPrefix;
     size_t gcTotal = 0, sundriesGCHeap = 0, sundriesMallocHeap = 0;
 
+    MOZ_ASSERT(!gcTotalOut == zStats.isTotals);
+
+    ZCREPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("symbols/gc-heap"),
+        zStats.symbolsGCHeap,
+        "Symbols.");
+
     ZCREPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("gc-heap-arena-admin"),
-                      zStats.gcHeapArenaAdmin,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap, within arenas, that is used (a) to hold internal "
-                      "bookkeeping information, and (b) to provide padding to "
-                      "align GC things.");
+        zStats.gcHeapArenaAdmin,
+        "Bookkeeping information and alignment padding within GC arenas.");
 
     ZCREPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("unused-gc-things"),
-                      zStats.unusedGCThings,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap taken by empty GC thing slots within non-empty "
-                      "arenas.");
+        zStats.unusedGCThings,
+        "Empty GC thing cells within non-empty arenas.");
 
     ZCREPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("lazy-scripts/gc-heap"),
-                      zStats.lazyScriptsGCHeap,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that represents scripts which haven't executed yet.");
+        zStats.lazyScriptsGCHeap,
+        "Scripts that haven't executed yet.");
 
     ZCREPORT_BYTES(pathPrefix + NS_LITERAL_CSTRING("lazy-scripts/malloc-heap"),
-                   zStats.lazyScriptsMallocHeap,
-                   "Memory holding miscellaneous additional information associated with lazy "
-                   "scripts.  This memory is allocated on the malloc heap.");
+        zStats.lazyScriptsMallocHeap,
+        "Lazy script tables containing free variables or inner functions.");
 
-    ZCREPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("ion-codes-gc-heap"),
-                      zStats.ionCodesGCHeap,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds references to executable code pools "
-                      "used by the IonMonkey JIT.");
+    ZCREPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("jit-codes-gc-heap"),
+        zStats.jitCodesGCHeap,
+        "References to executable code pools used by the JITs.");
 
     ZCREPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("type-objects/gc-heap"),
-                      zStats.typeObjectsGCHeap,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds type inference information.");
+        zStats.typeObjectsGCHeap,
+        "Type inference information about objects.");
 
     ZCREPORT_BYTES(pathPrefix + NS_LITERAL_CSTRING("type-objects/malloc-heap"),
-                   zStats.typeObjectsMallocHeap,
-                   "Memory holding miscellaneous additional information associated with type "
-                   "objects.");
+        zStats.typeObjectsMallocHeap,
+        "Type object addenda.");
 
     ZCREPORT_BYTES(pathPrefix + NS_LITERAL_CSTRING("type-pool"),
-                   zStats.typePool,
-                   "Memory holding contents of type sets and related data.");
+        zStats.typePool,
+        "Type sets and related data.");
+
+    ZCREPORT_BYTES(pathPrefix + NS_LITERAL_CSTRING("baseline/optimized-stubs"),
+        zStats.baselineStubsOptimized,
+        "The Baseline JIT's optimized IC stubs (excluding code).");
 
     size_t stringsNotableAboutMemoryGCHeap = 0;
     size_t stringsNotableAboutMemoryMallocHeap = 0;
 
+    #define MAYBE_INLINE \
+        "The characters may be inline or on the malloc heap."
+    #define MAYBE_OVERALLOCATED \
+        "Sometimes over-allocated to simplify string concatenation."
+
     for (size_t i = 0; i < zStats.notableStrings.length(); i++) {
         const JS::NotableStringInfo& info = zStats.notableStrings[i];
+
+        MOZ_ASSERT(!zStats.isTotals);
+
+        // We don't do notable string detection when anonymizing, because
+        // there's a good chance its for crash submission, and the memory
+        // required for notable string detection is high.
+        MOZ_ASSERT(!anonymize);
 
         nsDependentCString notableString(info.buffer);
 
@@ -1861,12 +1901,13 @@ ReportZoneStats(const JS::ZoneStats &zStats,
         // there's a GC in the meantime), and so on ad infinitum.
         //
         // To avoid cluttering up about:memory like this, we stick notable
-        // strings which contain "strings/notable/string(length=" into their own
-        // bucket.
+        // strings which contain "string(length=" into their own bucket.
 #       define STRING_LENGTH "string(length="
         if (FindInReadable(NS_LITERAL_CSTRING(STRING_LENGTH), notableString)) {
-            stringsNotableAboutMemoryGCHeap += info.gcHeap;
-            stringsNotableAboutMemoryMallocHeap += info.mallocHeap;
+            stringsNotableAboutMemoryGCHeap += info.gcHeapLatin1;
+            stringsNotableAboutMemoryGCHeap += info.gcHeapTwoByte;
+            stringsNotableAboutMemoryMallocHeap += info.mallocHeapLatin1;
+            stringsNotableAboutMemoryMallocHeap += info.mallocHeapTwoByte;
             continue;
         }
 
@@ -1879,95 +1920,101 @@ ReportZoneStats(const JS::ZoneStats &zStats,
         bool truncated = notableString.Length() < info.length;
 
         nsCString path = pathPrefix +
-            nsPrintfCString("strings/notable/" STRING_LENGTH "%d, copies=%d, \"%s\"%s)/",
+            nsPrintfCString("strings/" STRING_LENGTH "%d, copies=%d, \"%s\"%s)/",
                             info.length, info.numCopies, escapedString.get(),
                             truncated ? " (truncated)" : "");
 
-        REPORT_BYTES2(path + NS_LITERAL_CSTRING("gc-heap"),
-            KIND_NONHEAP,
-            info.gcHeap,
-            nsPrintfCString("Memory allocated to hold headers for copies of "
-            "the given notable string.  A string is notable if all of its copies "
-            "together use more than %d bytes total of JS GC heap and malloc heap "
-            "memory.\n\n"
-            "These headers may contain the string data itself, if the string "
-            "is short enough.  If so, the string won't have any memory reported "
-            "under 'string-chars'.",
-            JS::NotableStringInfo::notableSize()));
-        gcTotal += info.gcHeap;
+        if (info.gcHeapLatin1 > 0) {
+            REPORT_GC_BYTES(path + NS_LITERAL_CSTRING("gc-heap/latin1"),
+                info.gcHeapLatin1,
+                "Latin1 strings. " MAYBE_INLINE);
+        }
 
-        if (info.mallocHeap > 0) {
-            REPORT_BYTES2(path + NS_LITERAL_CSTRING("malloc-heap"),
-                KIND_HEAP,
-                info.mallocHeap,
-                nsPrintfCString("Memory allocated on the malloc heap to hold "
-                "string data for copies of the given notable string.  A string is "
-                "notable if all of its copies together use more than %d bytes "
-                "total of JS GC heap and malloc heap memory.",
-                JS::NotableStringInfo::notableSize()));
+        if (info.gcHeapTwoByte > 0) {
+            REPORT_GC_BYTES(path + NS_LITERAL_CSTRING("gc-heap/two-byte"),
+                info.gcHeapTwoByte,
+                "TwoByte strings. " MAYBE_INLINE);
+        }
+
+        if (info.mallocHeapLatin1 > 0) {
+            REPORT_BYTES(path + NS_LITERAL_CSTRING("malloc-heap/latin1"),
+                KIND_HEAP, info.mallocHeapLatin1,
+                "Non-inline Latin1 string characters. " MAYBE_OVERALLOCATED);
+        }
+
+        if (info.mallocHeapTwoByte > 0) {
+            REPORT_BYTES(path + NS_LITERAL_CSTRING("malloc-heap/two-byte"),
+                KIND_HEAP, info.mallocHeapTwoByte,
+                "Non-inline TwoByte string characters. " MAYBE_OVERALLOCATED);
         }
     }
 
-    ZCREPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("strings/short-gc-heap"),
-                      zStats.stringsShortGCHeap,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds headers for strings which are short "
-                      "enough to be stored completely within the header.  That "
-                      "is, a 'short' string uses no string-chars.");
+    nsCString nonNotablePath = pathPrefix;
+    nonNotablePath += (zStats.isTotals || anonymize)
+                    ? NS_LITERAL_CSTRING("strings/")
+                    : NS_LITERAL_CSTRING("strings/string(<non-notable strings>)/");
 
-    ZCREPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("strings/normal/gc-heap"),
-                      zStats.stringsNormalGCHeap,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds string headers for strings which are too "
-                      "long to fit entirely within the header.  The character "
-                      "data for such strings is counted under "
-                      "strings/normal/malloc-heap.");
+    if (zStats.stringInfo.gcHeapLatin1 > 0) {
+        REPORT_GC_BYTES(nonNotablePath + NS_LITERAL_CSTRING("gc-heap/latin1"),
+            zStats.stringInfo.gcHeapLatin1,
+            "Latin1 strings. " MAYBE_INLINE);
+    }
 
-    ZCREPORT_BYTES(pathPrefix + NS_LITERAL_CSTRING("strings/normal/malloc-heap"),
-                   zStats.stringsNormalMallocHeap,
-                   "Memory allocated to hold characters for strings which are too long "
-                   "to fit entirely within their string headers.\n\n"
-                   "Sometimes more memory is allocated than necessary, to "
-                   "simplify string concatenation.");
+    if (zStats.stringInfo.gcHeapTwoByte > 0) {
+        REPORT_GC_BYTES(nonNotablePath + NS_LITERAL_CSTRING("gc-heap/two-byte"),
+            zStats.stringInfo.gcHeapTwoByte,
+            "TwoByte strings. " MAYBE_INLINE);
+    }
+
+    if (zStats.stringInfo.mallocHeapLatin1 > 0) {
+        REPORT_BYTES(nonNotablePath + NS_LITERAL_CSTRING("malloc-heap/latin1"),
+            KIND_HEAP, zStats.stringInfo.mallocHeapLatin1,
+            "Non-inline Latin1 string characters. " MAYBE_OVERALLOCATED);
+    }
+
+    if (zStats.stringInfo.mallocHeapTwoByte > 0) {
+        REPORT_BYTES(nonNotablePath + NS_LITERAL_CSTRING("malloc-heap/two-byte"),
+            KIND_HEAP, zStats.stringInfo.mallocHeapTwoByte,
+            "Non-inline TwoByte string characters. " MAYBE_OVERALLOCATED);
+    }
 
     if (stringsNotableAboutMemoryGCHeap > 0) {
-        ZCREPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("strings/notable/about-memory/gc-heap"),
-                          stringsNotableAboutMemoryGCHeap,
-                          "Memory allocated on the garbage-collected JavaScript "
-                          "heap that holds headers for notable strings which "
-                          "contain the string '" STRING_LENGTH "'.  These "
-                          "strings are likely from about:memory itself.  We "
-                          "filter them out rather than display them, because "
-                          "displaying them would create even more strings every "
-                          "time you refresh about:memory.");
+        MOZ_ASSERT(!zStats.isTotals);
+        REPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("strings/string(<about-memory>)/gc-heap"),
+            stringsNotableAboutMemoryGCHeap,
+            "Strings that contain the characters '" STRING_LENGTH "', which "
+            "are probably from about:memory itself." MAYBE_INLINE
+            " We filter them out rather than display them, because displaying "
+            "them would create even more such strings every time about:memory "
+            "is refreshed.");
     }
 
     if (stringsNotableAboutMemoryMallocHeap > 0) {
-        ZCREPORT_BYTES(pathPrefix +
-                       NS_LITERAL_CSTRING("strings/notable/about-memory/malloc-heap"),
-                       stringsNotableAboutMemoryMallocHeap,
-                       "Memory allocated to hold characters of notable strings "
-                       "which contain the string '" STRING_LENGTH "'.  These "
-                       "strings are likely from about:memory itself.  We filter "
-                       "them out rather than display them, because displaying "
-                       "them would create even more strings every time you "
-                       "refresh about:memory.");
+        MOZ_ASSERT(!zStats.isTotals);
+        REPORT_BYTES(pathPrefix + NS_LITERAL_CSTRING("strings/string(<about-memory>)/malloc-heap"),
+            KIND_HEAP, stringsNotableAboutMemoryMallocHeap,
+            "Non-inline string characters of strings that contain the "
+            "characters '" STRING_LENGTH "', which are probably from "
+            "about:memory itself. " MAYBE_OVERALLOCATED
+            " We filter them out rather than display them, because displaying "
+            "them would create even more such strings every time about:memory "
+            "is refreshed.");
     }
 
     if (sundriesGCHeap > 0) {
         // We deliberately don't use ZCREPORT_GC_BYTES here.
         REPORT_GC_BYTES(pathPrefix + NS_LITERAL_CSTRING("sundries/gc-heap"),
-                        sundriesGCHeap,
-                        "The sum of all the 'gc-heap' measurements that are too "
-                        "small to be worth showing individually.");
+            sundriesGCHeap,
+            "The sum of all 'gc-heap' measurements that are too small to be "
+            "worth showing individually.");
     }
 
     if (sundriesMallocHeap > 0) {
         // We deliberately don't use ZCREPORT_BYTES here.
         REPORT_BYTES(pathPrefix + NS_LITERAL_CSTRING("sundries/malloc-heap"),
-                     KIND_HEAP, sundriesMallocHeap,
-                     "The sum of all the 'malloc-heap' measurements that are too "
-                     "small to be worth showing individually.");
+            KIND_HEAP, sundriesMallocHeap,
+            "The sum of all 'malloc-heap' measurements that are too small to "
+            "be worth showing individually.");
     }
 
     if (gcTotalOut)
@@ -1976,6 +2023,109 @@ ReportZoneStats(const JS::ZoneStats &zStats,
     return NS_OK;
 
 #   undef STRING_LENGTH
+}
+
+static nsresult
+ReportClassStats(const ClassInfo &classInfo, const nsACString &path,
+                 nsIHandleReportCallback *cb, nsISupports *closure,
+                 size_t &gcTotal)
+{
+    // We deliberately don't use ZCREPORT_BYTES, so that these per-class values
+    // don't go into sundries.
+
+    if (classInfo.objectsGCHeap > 0) {
+        REPORT_GC_BYTES(path + NS_LITERAL_CSTRING("objects/gc-heap"),
+            classInfo.objectsGCHeap,
+            "Objects, including fixed slots.");
+    }
+
+    if (classInfo.objectsMallocHeapSlots > 0) {
+        REPORT_BYTES(path + NS_LITERAL_CSTRING("objects/malloc-heap/slots"),
+            KIND_HEAP, classInfo.objectsMallocHeapSlots,
+            "Non-fixed object slots.");
+    }
+
+    if (classInfo.objectsMallocHeapElementsNonAsmJS > 0) {
+        REPORT_BYTES(path + NS_LITERAL_CSTRING("objects/malloc-heap/elements/non-asm.js"),
+            KIND_HEAP, classInfo.objectsMallocHeapElementsNonAsmJS,
+            "Non-asm.js indexed elements.");
+    }
+
+    // asm.js arrays are heap-allocated on some platforms and
+    // non-heap-allocated on others.  We never put them under sundries,
+    // because (a) in practice they're almost always larger than the sundries
+    // threshold, and (b) we'd need a third category of sundries ("non-heap"),
+    // which would be a pain.
+    size_t mallocHeapElementsAsmJS = classInfo.objectsMallocHeapElementsAsmJS;
+    size_t nonHeapElementsAsmJS    = classInfo.objectsNonHeapElementsAsmJS;
+    MOZ_ASSERT(mallocHeapElementsAsmJS == 0 || nonHeapElementsAsmJS == 0);
+    if (mallocHeapElementsAsmJS > 0) {
+        REPORT_BYTES(path + NS_LITERAL_CSTRING("objects/malloc-heap/elements/asm.js"),
+            KIND_HEAP, mallocHeapElementsAsmJS,
+            "asm.js array buffer elements on the malloc heap.");
+    }
+    if (nonHeapElementsAsmJS > 0) {
+        REPORT_BYTES(path + NS_LITERAL_CSTRING("objects/non-heap/elements/asm.js"),
+            KIND_NONHEAP, nonHeapElementsAsmJS,
+            "asm.js array buffer elements outside both the malloc heap and "
+            "the GC heap.");
+    }
+
+    if (classInfo.objectsNonHeapElementsMapped > 0) {
+        REPORT_BYTES(path + NS_LITERAL_CSTRING("objects/non-heap/elements/mapped"),
+            KIND_NONHEAP, classInfo.objectsNonHeapElementsMapped,
+            "Memory-mapped array buffer elements.");
+    }
+
+    if (classInfo.objectsNonHeapCodeAsmJS > 0) {
+        REPORT_BYTES(path + NS_LITERAL_CSTRING("objects/non-heap/code/asm.js"),
+            KIND_NONHEAP, classInfo.objectsNonHeapCodeAsmJS,
+            "AOT-compiled asm.js code.");
+    }
+
+    if (classInfo.objectsMallocHeapMisc > 0) {
+        REPORT_BYTES(path + NS_LITERAL_CSTRING("objects/malloc-heap/misc"),
+            KIND_HEAP, classInfo.objectsMallocHeapMisc,
+            "Miscellaneous object data.");
+    }
+
+    if (classInfo.shapesGCHeapTree > 0) {
+        REPORT_GC_BYTES(path + NS_LITERAL_CSTRING("shapes/gc-heap/tree"),
+            classInfo.shapesGCHeapTree,
+        "Shapes in a property tree.");
+    }
+
+    if (classInfo.shapesGCHeapDict > 0) {
+        REPORT_GC_BYTES(path + NS_LITERAL_CSTRING("shapes/gc-heap/dict"),
+            classInfo.shapesGCHeapDict,
+        "Shapes in dictionary mode.");
+    }
+
+    if (classInfo.shapesGCHeapBase > 0) {
+        REPORT_GC_BYTES(path + NS_LITERAL_CSTRING("shapes/gc-heap/base"),
+            classInfo.shapesGCHeapBase,
+            "Base shapes, which collate data common to many shapes.");
+    }
+
+    if (classInfo.shapesMallocHeapTreeTables > 0) {
+        REPORT_BYTES(path + NS_LITERAL_CSTRING("shapes/malloc-heap/tree-tables"),
+            KIND_HEAP, classInfo.shapesMallocHeapTreeTables,
+            "Property tables of shapes in a property tree.");
+    }
+
+    if (classInfo.shapesMallocHeapDictTables > 0) {
+        REPORT_BYTES(path + NS_LITERAL_CSTRING("shapes/malloc-heap/dict-tables"),
+            KIND_HEAP, classInfo.shapesMallocHeapDictTables,
+            "Property tables of shapes in dictionary mode.");
+    }
+
+    if (classInfo.shapesMallocHeapTreeKids > 0) {
+        REPORT_BYTES(path + NS_LITERAL_CSTRING("shapes/malloc-heap/tree-kids"),
+            KIND_HEAP, classInfo.shapesMallocHeapTreeKids,
+            "Kid hashes of shapes in a property tree.");
+    }
+
+    return NS_OK;
 }
 
 static nsresult
@@ -1990,6 +2140,9 @@ ReportCompartmentStats(const JS::CompartmentStats &cStats,
     size_t gcTotal = 0, sundriesGCHeap = 0, sundriesMallocHeap = 0;
     nsAutoCString cJSPathPrefix = extras.jsPathPrefix;
     nsAutoCString cDOMPathPrefix = extras.domPathPrefix;
+    nsresult rv;
+
+    MOZ_ASSERT(!gcTotalOut == cStats.isTotals);
 
     // Only attempt to prefix if we got a location and the path wasn't already
     // prefixed.
@@ -2010,222 +2163,105 @@ ReportCompartmentStats(const JS::CompartmentStats &cStats,
         }
     }
 
-    ZCREPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/gc-heap/ordinary"),
-                      cStats.objectsGCHeapOrdinary,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds ordinary (i.e. not otherwise distinguished "
-                      "my memory reporters) objects.");
+    nsCString nonNotablePath = cJSPathPrefix;
+    nonNotablePath += cStats.isTotals
+                    ? NS_LITERAL_CSTRING("classes/")
+                    : NS_LITERAL_CSTRING("classes/class(<non-notable classes>)/");
 
-    ZCREPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/gc-heap/function"),
-                      cStats.objectsGCHeapFunction,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds function objects.");
+    rv = ReportClassStats(cStats.classInfo, nonNotablePath, cb, closure,
+                          gcTotal);
+    NS_ENSURE_SUCCESS(rv, rv);
 
-    ZCREPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/gc-heap/dense-array"),
-                      cStats.objectsGCHeapDenseArray,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds dense array objects.");
+    for (size_t i = 0; i < cStats.notableClasses.length(); i++) {
+        MOZ_ASSERT(!cStats.isTotals);
+        const JS::NotableClassInfo& classInfo = cStats.notableClasses[i];
 
-    ZCREPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/gc-heap/slow-array"),
-                      cStats.objectsGCHeapSlowArray,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds slow array objects.");
+        nsCString classPath = cJSPathPrefix +
+            nsPrintfCString("classes/class(%s)/", classInfo.className_);
 
-    ZCREPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/gc-heap/cross-compartment-wrapper"),
-                      cStats.objectsGCHeapCrossCompartmentWrapper,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds cross-compartment wrapper objects.");
+        rv = ReportClassStats(classInfo, classPath, cb, closure, gcTotal);
+        NS_ENSURE_SUCCESS(rv, rv);
+    }
 
     // Note that we use cDOMPathPrefix here.  This is because we measure orphan
     // DOM nodes in the JS reporter, but we want to report them in a "dom"
     // sub-tree rather than a "js" sub-tree.
     ZCREPORT_BYTES(cDOMPathPrefix + NS_LITERAL_CSTRING("orphan-nodes"),
-                   cStats.objectsPrivate,
-                   "Memory used by orphan DOM nodes that are only reachable "
-                   "from JavaScript objects.");
-
-    ZCREPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("shapes/gc-heap/tree/global-parented"),
-                      cStats.shapesGCHeapTreeGlobalParented,
-                      "Memory on the garbage-collected JavaScript heap that "
-                      "holds shapes that (a) are in a property tree, and (b) "
-                      "represent an object whose parent is the global object.");
-
-    ZCREPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("shapes/gc-heap/tree/non-global-parented"),
-                      cStats.shapesGCHeapTreeNonGlobalParented,
-                      "Memory on the garbage-collected JavaScript heap that "
-                      "holds shapes that (a) are in a property tree, and (b) "
-                      "represent an object whose parent is not the global object.");
-
-    ZCREPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("shapes/gc-heap/dict"),
-                      cStats.shapesGCHeapDict,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds shapes that are in dictionary mode.");
-
-    ZCREPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("shapes/gc-heap/base"),
-                      cStats.shapesGCHeapBase,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that collates data common to many shapes.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("shapes/malloc-heap/tree-tables"),
-                   cStats.shapesMallocHeapTreeTables,
-                   "Memory allocated on the malloc heap for the property tables "
-                   "that belong to shapes that are in a property tree.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("shapes/malloc-heap/dict-tables"),
-                   cStats.shapesMallocHeapDictTables,
-                   "Memory allocated on the malloc heap for the property tables "
-                   "that belong to shapes that are in dictionary mode.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("shapes/malloc-heap/tree-shape-kids"),
-                   cStats.shapesMallocHeapTreeShapeKids,
-                   "Memory allocated on the malloc heap for the kid hashes that "
-                   "belong to shapes that are in a property tree.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("shapes/malloc-heap/compartment-tables"),
-                   cStats.shapesMallocHeapCompartmentTables,
-                   "Memory on the malloc heap used by compartment-wide tables storing shape "
-                   "information for use during object construction.");
+        cStats.objectsPrivate,
+        "Orphan DOM nodes, i.e. those that are only reachable from JavaScript "
+        "objects.");
 
     ZCREPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("scripts/gc-heap"),
-                      cStats.scriptsGCHeap,
-                      "Memory on the garbage-collected JavaScript "
-                      "heap that holds JSScript instances. A JSScript is "
-                      "created for each user-defined function in a script. One "
-                      "is also created for the top-level code in a script.");
+        cStats.scriptsGCHeap,
+        "JSScript instances. There is one per user-defined function in a "
+        "script, and one for the top-level code in a script.");
 
     ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("scripts/malloc-heap/data"),
-                   cStats.scriptsMallocHeapData,
-                   "Memory on the malloc heap allocated for various variable-length tables in "
-                   "JSScript.");
+        cStats.scriptsMallocHeapData,
+        "Various variable-length tables in JSScripts.");
 
     ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("baseline/data"),
-                   cStats.baselineData,
-                   "Memory used by the Baseline JIT for compilation data: "
-                   "BaselineScripts.");
+        cStats.baselineData,
+        "The Baseline JIT's compilation data (BaselineScripts).");
 
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("baseline/stubs/fallback"),
-                   cStats.baselineStubsFallback,
-                   "Memory used by the Baseline JIT for fallback IC stubs "
-                   "(excluding code).");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("baseline/stubs/optimized"),
-                   cStats.baselineStubsOptimized,
-                   "Memory used by the Baseline JIT for optimized IC stubs "
-                   "(excluding code).");
+    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("baseline/fallback-stubs"),
+        cStats.baselineStubsFallback,
+        "The Baseline JIT's fallback IC stubs (excluding code).");
 
     ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("ion-data"),
-                   cStats.ionData,
-                   "Memory used by the IonMonkey JIT for compilation data: "
-                   "IonScripts.");
+        cStats.ionData,
+        "The IonMonkey JIT's compilation data (IonScripts).");
 
     ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("type-inference/type-scripts"),
-                   cStats.typeInferenceTypeScripts,
-                   "Memory used by type sets associated with scripts.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("type-inference/pending-arrays"),
-                   cStats.typeInferencePendingArrays,
-                   "Memory used for solving constraints during type inference.");
+        cStats.typeInferenceTypeScripts,
+        "Type sets associated with scripts.");
 
     ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("type-inference/allocation-site-tables"),
-                   cStats.typeInferenceAllocationSiteTables,
-                   "Memory indexing type objects associated with allocation sites.");
+        cStats.typeInferenceAllocationSiteTables,
+        "Tables of type objects associated with allocation sites.");
 
     ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("type-inference/array-type-tables"),
-                   cStats.typeInferenceArrayTypeTables,
-                   "Memory indexing type objects associated with array literals.");
+        cStats.typeInferenceArrayTypeTables,
+        "Tables of type objects associated with array literals.");
 
     ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("type-inference/object-type-tables"),
-                   cStats.typeInferenceObjectTypeTables,
-                   "Memory indexing type objects associated with object literals.");
+        cStats.typeInferenceObjectTypeTables,
+        "Tables of type objects associated with object literals.");
 
     ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("compartment-object"),
-                   cStats.compartmentObject,
-                   "Memory used for the JSCompartment object itself.");
+        cStats.compartmentObject,
+        "The JSCompartment object itself.");
+
+    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("compartment-tables"),
+        cStats.compartmentTables,
+        "Compartment-wide tables storing shape and type object information.");
+
+    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("inner-views"),
+        cStats.innerViewsTable,
+        "The table for array buffer inner views.");
 
     ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("cross-compartment-wrapper-table"),
-                   cStats.crossCompartmentWrappersTable,
-                   "Memory used by the cross-compartment wrapper table.");
+        cStats.crossCompartmentWrappersTable,
+        "The cross-compartment wrapper table.");
 
     ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("regexp-compartment"),
-                   cStats.regexpCompartment,
-                   "Memory used by the regexp compartment.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("debuggees-set"),
-                   cStats.debuggeesSet,
-                   "Memory used by the debuggees set.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/malloc-heap/slots"),
-                   cStats.objectsExtra.mallocHeapSlots,
-                   "Memory allocated on the malloc heap for the non-fixed object "
-                   "slot arrays, which are used to represent object properties. "
-                   "Some objects also contain a fixed number of slots which are "
-                   "stored on the JavaScript heap; those slots "
-                   "are not counted here, but in 'objects/gc-heap/*' instead.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/malloc-heap/elements/non-asm.js"),
-                   cStats.objectsExtra.mallocHeapElementsNonAsmJS,
-                   "Memory allocated on the malloc heap for non-asm.js object element arrays, "
-                   "which are used to represent indexed object properties.");
-
-    // asm.js arrays are heap-allocated on some platforms and
-    // non-heap-allocated on others.  We never put them under sundries,
-    // because (a) in practice they're almost always larger than the sundries
-    // threshold, and (b) we'd need a third category of sundries ("non-heap"),
-    // which would be a pain.
-    size_t mallocHeapElementsAsmJS = cStats.objectsExtra.mallocHeapElementsAsmJS;
-    size_t nonHeapElementsAsmJS    = cStats.objectsExtra.nonHeapElementsAsmJS;
-    MOZ_ASSERT(mallocHeapElementsAsmJS == 0 || nonHeapElementsAsmJS == 0);
-    if (mallocHeapElementsAsmJS > 0) {
-        REPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/malloc-heap/elements/asm.js"),
-                     KIND_HEAP, mallocHeapElementsAsmJS,
-                     "Memory allocated on the malloc heap for object element arrays used as asm.js "
-                     "array buffers.");
-    }
-    if (nonHeapElementsAsmJS > 0) {
-        REPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/non-heap/elements/asm.js"),
-                     KIND_NONHEAP, nonHeapElementsAsmJS,
-                     "Memory allocated for object element arrays used as asm.js array buffers. "
-                     "This memory lives outside both the malloc heap and the JS heap.");
-    }
-
-    REPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/non-heap/code/asm.js"),
-                 KIND_NONHEAP, cStats.objectsExtra.nonHeapCodeAsmJS,
-                 "Memory allocated for AOT-compiled asm.js code.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/malloc-heap/asm.js-module-data"),
-                   cStats.objectsExtra.mallocHeapAsmJSModuleData,
-                   "Memory allocated for asm.js module data.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/malloc-heap/arguments-data"),
-                   cStats.objectsExtra.mallocHeapArgumentsData,
-                   "Memory allocated on the malloc heap for data belonging to arguments objects.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/malloc-heap/regexp-statics"),
-                   cStats.objectsExtra.mallocHeapRegExpStatics,
-                   "Memory allocated for data belonging to the RegExpStatics object.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/malloc-heap/property-iterator-data"),
-                   cStats.objectsExtra.mallocHeapPropertyIteratorData,
-                   "Memory allocated on the malloc heap for data belonging to property iterator objects.");
-
-    ZCREPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("objects/malloc-heap/ctypes-data"),
-                   cStats.objectsExtra.mallocHeapCtypesData,
-                   "Memory allocated on the malloc heap for data belonging to ctypes objects.");
+        cStats.regexpCompartment,
+        "The regexp compartment and regexp data.");
 
     if (sundriesGCHeap > 0) {
         // We deliberately don't use ZCREPORT_GC_BYTES here.
         REPORT_GC_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("sundries/gc-heap"),
-                        sundriesGCHeap,
-                        "The sum of all the 'gc-heap' measurements that are too "
-                        "small to be worth showing individually.");
+            sundriesGCHeap,
+            "The sum of all 'gc-heap' measurements that are too small to be "
+            "worth showing individually.");
     }
 
     if (sundriesMallocHeap > 0) {
         // We deliberately don't use ZCREPORT_BYTES here.
         REPORT_BYTES(cJSPathPrefix + NS_LITERAL_CSTRING("sundries/malloc-heap"),
-                     KIND_HEAP, sundriesMallocHeap,
-                     "The sum of all the 'malloc-heap' measurements that are too "
-                     "small to be worth showing individually.");
+            KIND_HEAP, sundriesMallocHeap,
+            "The sum of all 'malloc-heap' measurements that are too small to "
+            "be worth showing individually.");
     }
 
     if (gcTotalOut)
@@ -2235,11 +2271,40 @@ ReportCompartmentStats(const JS::CompartmentStats &cStats,
 }
 
 static nsresult
+ReportScriptSourceStats(const ScriptSourceInfo &scriptSourceInfo,
+                        const nsACString &path,
+                        nsIHandleReportCallback *cb, nsISupports *closure,
+                        size_t &rtTotal)
+{
+    if (scriptSourceInfo.compressed > 0) {
+        RREPORT_BYTES(path + NS_LITERAL_CSTRING("compressed"),
+            KIND_HEAP, scriptSourceInfo.compressed,
+            "Compressed JavaScript source code.");
+    }
+
+    if (scriptSourceInfo.uncompressed > 0) {
+        RREPORT_BYTES(path + NS_LITERAL_CSTRING("uncompressed"),
+            KIND_HEAP, scriptSourceInfo.uncompressed,
+            "Uncompressed JavaScript source code.");
+    }
+
+    if (scriptSourceInfo.misc > 0) {
+        RREPORT_BYTES(path + NS_LITERAL_CSTRING("misc"),
+            KIND_HEAP, scriptSourceInfo.misc,
+            "Miscellaneous data relating to JavaScript source code.");
+    }
+
+    return NS_OK;
+}
+
+static nsresult
 ReportJSRuntimeExplicitTreeStats(const JS::RuntimeStats &rtStats,
                                  const nsACString &rtPath,
                                  amIAddonManager* addonManager,
                                  nsIMemoryReporterCallback *cb,
-                                 nsISupports *closure, size_t *rtTotalOut)
+                                 nsISupports *closure,
+                                 bool anonymize,
+                                 size_t *rtTotalOut)
 {
     nsresult rv;
 
@@ -2249,14 +2314,15 @@ ReportJSRuntimeExplicitTreeStats(const JS::RuntimeStats &rtStats,
         const JS::ZoneStats &zStats = rtStats.zoneStatsVector[i];
         const xpc::ZoneStatsExtras *extras =
           static_cast<const xpc::ZoneStatsExtras*>(zStats.extra);
-        rv = ReportZoneStats(zStats, *extras, cb, closure, &gcTotal);
+        rv = ReportZoneStats(zStats, *extras, cb, closure, anonymize, &gcTotal);
         NS_ENSURE_SUCCESS(rv, rv);
     }
 
     for (size_t i = 0; i < rtStats.compartmentStatsVector.length(); i++) {
-        JS::CompartmentStats cStats = rtStats.compartmentStatsVector[i];
+        const JS::CompartmentStats &cStats = rtStats.compartmentStatsVector[i];
         const xpc::CompartmentStatsExtras *extras =
             static_cast<const xpc::CompartmentStatsExtras*>(cStats.extra);
+
         rv = ReportCompartmentStats(cStats, *extras, addonManager, cb, closure,
                                     &gcTotal);
         NS_ENSURE_SUCCESS(rv, rv);
@@ -2268,74 +2334,143 @@ ReportJSRuntimeExplicitTreeStats(const JS::RuntimeStats &rtStats,
     size_t rtTotal = 0;
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/runtime-object"),
-                  KIND_HEAP, rtStats.runtime.object,
-                  "Memory used by the JSRuntime object.");
+        KIND_HEAP, rtStats.runtime.object,
+        "The JSRuntime object.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/atoms-table"),
-                  KIND_HEAP, rtStats.runtime.atomsTable,
-                  "Memory used by the atoms table.");
+        KIND_HEAP, rtStats.runtime.atomsTable,
+        "The atoms table.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/contexts"),
-                  KIND_HEAP, rtStats.runtime.contexts,
-                  "Memory used by JSContext objects and certain structures "
-                  "hanging off them.");
+        KIND_HEAP, rtStats.runtime.contexts,
+        "JSContext objects and structures that belong to them.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/dtoa"),
-                  KIND_HEAP, rtStats.runtime.dtoa,
-                  "Memory used by DtoaState, which is used for converting "
-                  "strings to numbers and vice versa.");
+        KIND_HEAP, rtStats.runtime.dtoa,
+        "The DtoaState object, which is used for converting strings to "
+        "numbers and vice versa.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/temporary"),
-                  KIND_HEAP, rtStats.runtime.temporary,
-                  "Memory held transiently in JSRuntime and used during "
-                  "compilation.  It mostly holds parse nodes.");
-
-    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/regexp-data"),
-                  KIND_NONHEAP, rtStats.runtime.regexpData,
-                  "Memory used by the regexp JIT to hold data.");
+        KIND_HEAP, rtStats.runtime.temporary,
+        "Transient data (mostly parse nodes) held by the JSRuntime during "
+        "compilation.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/interpreter-stack"),
-                  KIND_HEAP, rtStats.runtime.interpreterStack,
-                  "Memory used for JS interpreter frames.");
-
-    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc-marker"),
-                  KIND_HEAP, rtStats.runtime.gcMarker,
-                  "Memory used for the GC mark stack and gray roots.");
+        KIND_HEAP, rtStats.runtime.interpreterStack,
+        "JS interpreter frames.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/math-cache"),
-                  KIND_HEAP, rtStats.runtime.mathCache,
-                  "Memory used for the math cache.");
+        KIND_HEAP, rtStats.runtime.mathCache,
+        "The math cache.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/uncompressed-source-cache"),
+        KIND_HEAP, rtStats.runtime.uncompressedSourceCache,
+        "The uncompressed source code cache.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/compressed-source-sets"),
+        KIND_HEAP, rtStats.runtime.compressedSourceSet,
+        "The table indexing compressed source code in the runtime.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/script-data"),
-                  KIND_HEAP, rtStats.runtime.scriptData,
-                  "Memory used for the table holding script data shared in "
-                  "the runtime.");
+        KIND_HEAP, rtStats.runtime.scriptData,
+        "The table holding script data shared in the runtime.");
 
-    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/script-sources"),
-                  KIND_HEAP, rtStats.runtime.scriptSources,
-                  "Memory use for storing JavaScript source code and filenames.");
+    nsCString nonNotablePath =
+        rtPath + nsPrintfCString("runtime/script-sources/source(scripts=%d, <non-notable files>)/",
+                                 rtStats.runtime.scriptSourceInfo.numScripts);
+
+    rv = ReportScriptSourceStats(rtStats.runtime.scriptSourceInfo,
+                                 nonNotablePath, cb, closure, rtTotal);
+    NS_ENSURE_SUCCESS(rv, rv);
+
+    for (size_t i = 0; i < rtStats.runtime.notableScriptSources.length(); i++) {
+        const JS::NotableScriptSourceInfo& scriptSourceInfo =
+            rtStats.runtime.notableScriptSources[i];
+
+        // Escape / to \ before we put the filename into the memory reporter
+        // path, because we don't want any forward slashes in the string to
+        // count as path separators. Consumers of memory reporters (e.g.
+        // about:memory) will convert them back to / after doing path
+        // splitting.
+        nsCString escapedFilename;
+        if (anonymize) {
+            escapedFilename.AppendPrintf("<anonymized-source-%d>", int(i));
+        } else {
+            nsDependentCString filename(scriptSourceInfo.filename_);
+            escapedFilename.Append(filename);
+            escapedFilename.ReplaceSubstring("/", "\\");
+        }
+
+        nsCString notablePath = rtPath +
+            nsPrintfCString("runtime/script-sources/source(scripts=%d, %s)/",
+                            scriptSourceInfo.numScripts, escapedFilename.get());
+
+        rv = ReportScriptSourceStats(scriptSourceInfo, notablePath,
+                                     cb, closure, rtTotal);
+        NS_ENSURE_SUCCESS(rv, rv);
+    }
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/code/ion"),
-                  KIND_NONHEAP, rtStats.runtime.code.ion,
-                  "Memory used by the IonMonkey JIT to hold generated code.");
+        KIND_NONHEAP, rtStats.runtime.code.ion,
+        "Code generated by the IonMonkey JIT.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/code/baseline"),
-                  KIND_NONHEAP, rtStats.runtime.code.baseline,
-                  "Memory used by the Baseline JIT to hold generated code.");
+        KIND_NONHEAP, rtStats.runtime.code.baseline,
+        "Code generated by the Baseline JIT.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/code/regexp"),
-                  KIND_NONHEAP, rtStats.runtime.code.regexp,
-                  "Memory used by the regexp JIT to hold generated code.");
+        KIND_NONHEAP, rtStats.runtime.code.regexp,
+        "Code generated by the regexp JIT.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/code/other"),
-                  KIND_NONHEAP, rtStats.runtime.code.other,
-                  "Memory used by the JITs to hold generated code for "
-                  "wrappers and trampolines.");
+        KIND_NONHEAP, rtStats.runtime.code.other,
+        "Code generated by the JITs for wrappers and trampolines.");
 
     RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/code/unused"),
-                  KIND_NONHEAP, rtStats.runtime.code.unused,
-                  "Memory allocated by one of the JITs to hold code, "
-                  "but which is currently unused.");
+        KIND_NONHEAP, rtStats.runtime.code.unused,
+        "Memory allocated by one of the JITs to hold code, but which is "
+        "currently unused.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc/marker"),
+        KIND_HEAP, rtStats.runtime.gc.marker,
+        "The GC mark stack and gray roots.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc/nursery-committed"),
+        KIND_NONHEAP, rtStats.runtime.gc.nurseryCommitted,
+        "Memory being used by the GC's nursery.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc/nursery-huge-slots"),
+        KIND_NONHEAP, rtStats.runtime.gc.nurseryHugeSlots,
+        "Out-of-line slots and elements belonging to objects in the "
+        "nursery.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc/store-buffer/vals"),
+        KIND_HEAP, rtStats.runtime.gc.storeBufferVals,
+        "Values in the store buffer.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc/store-buffer/cells"),
+        KIND_HEAP, rtStats.runtime.gc.storeBufferCells,
+        "Cells in the store buffer.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc/store-buffer/slots"),
+        KIND_HEAP, rtStats.runtime.gc.storeBufferSlots,
+        "Slots in the store buffer.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc/store-buffer/whole-cells"),
+        KIND_HEAP, rtStats.runtime.gc.storeBufferWholeCells,
+        "Whole cells in the store buffer.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc/store-buffer/reloc-vals"),
+        KIND_HEAP, rtStats.runtime.gc.storeBufferRelocVals,
+        "Relocatable values in the store buffer.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc/store-buffer/reloc-cells"),
+        KIND_HEAP, rtStats.runtime.gc.storeBufferRelocCells,
+        "Relocatable cells in the store buffer.");
+
+    RREPORT_BYTES(rtPath + NS_LITERAL_CSTRING("runtime/gc/store-buffer/generics"),
+        KIND_HEAP, rtStats.runtime.gc.storeBufferGenerics,
+        "Generic things in the store buffer.");
 
     if (rtTotalOut)
         *rtTotalOut = rtTotal;
@@ -2347,28 +2482,27 @@ ReportJSRuntimeExplicitTreeStats(const JS::RuntimeStats &rtStats,
     nsCString rtPath2(rtPath);
     rtPath2.Replace(0, strlen("explicit"), NS_LITERAL_CSTRING("decommitted"));
     REPORT_GC_BYTES(rtPath2 + NS_LITERAL_CSTRING("gc-heap/decommitted-arenas"),
-                    rtStats.gcHeapDecommittedArenas,
-                    "Memory on the garbage-collected JavaScript heap, in "
-                    "arenas in non-empty chunks, that is returned to the OS. "
-                    "This means it takes up address space but no physical "
-                    "memory or swap space.");
+        rtStats.gcHeapDecommittedArenas,
+        "GC arenas in non-empty chunks that is decommitted, i.e. it takes up "
+        "address space but no physical memory or swap space.");
+
+    REPORT_BYTES(rtPath2 + NS_LITERAL_CSTRING("runtime/gc/nursery-decommitted"),
+        KIND_NONHEAP, rtStats.runtime.gc.nurseryDecommitted,
+        "Memory allocated to the GC's nursery this is decommitted, i.e. it takes up "
+        "address space but no physical memory or swap space.");
 
     REPORT_GC_BYTES(rtPath + NS_LITERAL_CSTRING("gc-heap/unused-chunks"),
-                    rtStats.gcHeapUnusedChunks,
-                    "Memory on the garbage-collected JavaScript heap taken by "
-                    "empty chunks, which will soon be released unless claimed "
-                    "for new allocations.");
+        rtStats.gcHeapUnusedChunks,
+        "Empty GC chunks which will soon be released unless claimed for new "
+        "allocations.");
 
     REPORT_GC_BYTES(rtPath + NS_LITERAL_CSTRING("gc-heap/unused-arenas"),
-                    rtStats.gcHeapUnusedArenas,
-                    "Memory on the garbage-collected JavaScript heap taken by "
-                    "empty arenas within non-empty chunks.");
+        rtStats.gcHeapUnusedArenas,
+        "Empty GC arenas within non-empty chunks.");
 
     REPORT_GC_BYTES(rtPath + NS_LITERAL_CSTRING("gc-heap/chunk-admin"),
-                    rtStats.gcHeapChunkAdmin,
-                    "Memory on the garbage-collected JavaScript heap, within "
-                    "chunks, that is used to hold internal bookkeeping "
-                    "information.");
+        rtStats.gcHeapChunkAdmin,
+        "Bookkeeping information within GC chunks.");
 
     // gcTotal is the sum of everything we've reported for the GC heap.  It
     // should equal rtStats.gcHeapChunkTotal.
@@ -2381,15 +2515,17 @@ nsresult
 ReportJSRuntimeExplicitTreeStats(const JS::RuntimeStats &rtStats,
                                  const nsACString &rtPath,
                                  nsIMemoryReporterCallback *cb,
-                                 nsISupports *closure, size_t *rtTotalOut)
+                                 nsISupports *closure,
+                                 bool anonymize,
+                                 size_t *rtTotalOut)
 {
     nsCOMPtr<amIAddonManager> am;
     if (XRE_GetProcessType() == GeckoProcessType_Default) {
         // Only try to access the service from the main process.
         am = do_GetService("@mozilla.org/addons/integration;1");
     }
-    return ReportJSRuntimeExplicitTreeStats(rtStats, rtPath, am.get(), cb,
-                                            closure, rtTotalOut);
+    return ReportJSRuntimeExplicitTreeStats(rtStats, rtPath, am.get(),
+                                            cb, closure, anonymize, rtTotalOut);
 }
 
 
@@ -2397,47 +2533,50 @@ ReportJSRuntimeExplicitTreeStats(const JS::RuntimeStats &rtStats,
 
 class JSMainRuntimeCompartmentsReporter MOZ_FINAL : public nsIMemoryReporter
 {
+
+    ~JSMainRuntimeCompartmentsReporter() {}
+
   public:
     NS_DECL_ISUPPORTS
 
-    typedef js::Vector<nsCString, 0, js::SystemAllocPolicy> Paths;
+    struct Data {
+        int anonymizeID;
+        js::Vector<nsCString, 0, js::SystemAllocPolicy> paths;
+    };
 
-    static void CompartmentCallback(JSRuntime *rt, void* data, JSCompartment *c) {
+    static void CompartmentCallback(JSRuntime *rt, void* vdata, JSCompartment *c) {
         // silently ignore OOM errors
-        Paths *paths = static_cast<Paths *>(data);
+        Data *data = static_cast<Data *>(vdata);
         nsCString path;
-        GetCompartmentName(c, path, true);
+        GetCompartmentName(c, path, &data->anonymizeID, /* replaceSlashes = */ true);
         path.Insert(js::IsSystemCompartment(c)
                     ? NS_LITERAL_CSTRING("js-main-runtime-compartments/system/")
                     : NS_LITERAL_CSTRING("js-main-runtime-compartments/user/"),
                     0);
-        paths->append(path);
+        data->paths.append(path);
     }
 
     NS_IMETHOD CollectReports(nsIMemoryReporterCallback *cb,
-                              nsISupports *closure)
+                              nsISupports *closure, bool anonymize)
     {
         // First we collect the compartment paths.  Then we report them.  Doing
         // the two steps interleaved is a bad idea, because calling |cb|
         // from within CompartmentCallback() leads to all manner of assertions.
 
-        // Collect.
-
-        Paths paths;
+        Data data;
+        data.anonymizeID = anonymize ? 1 : 0;
         JS_IterateCompartments(nsXPConnect::GetRuntimeInstance()->Runtime(),
-                               &paths, CompartmentCallback);
+                               &data, CompartmentCallback);
 
-        // Report.
-        for (size_t i = 0; i < paths.length(); i++)
-            // These ones don't need a description, hence the "".
-            REPORT(nsCString(paths[i]), KIND_OTHER, UNITS_COUNT, 1,
-                   "A live compartment in the main JSRuntime.");
+        for (size_t i = 0; i < data.paths.length(); i++)
+            REPORT(nsCString(data.paths[i]), KIND_OTHER, UNITS_COUNT, 1,
+                "A live compartment in the main JSRuntime.");
 
         return NS_OK;
     }
 };
 
-NS_IMPL_ISUPPORTS1(JSMainRuntimeCompartmentsReporter, nsIMemoryReporter)
+NS_IMPL_ISUPPORTS(JSMainRuntimeCompartmentsReporter, nsIMemoryReporter)
 
 MOZ_DEFINE_MALLOC_SIZE_OF(OrphanMallocSizeOf)
 
@@ -2456,7 +2595,7 @@ SizeOfTreeIncludingThis(nsINode *tree)
 class OrphanReporter : public JS::ObjectPrivateVisitor
 {
   public:
-    OrphanReporter(GetISupportsFun aGetISupports)
+    explicit OrphanReporter(GetISupportsFun aGetISupports)
       : JS::ObjectPrivateVisitor(aGetISupports)
     {
     }
@@ -2486,19 +2625,30 @@ class OrphanReporter : public JS::ObjectPrivateVisitor
     nsTHashtable <nsISupportsHashKey> mAlreadyMeasuredOrphanTrees;
 };
 
+#ifdef DEBUG
+static bool
+StartsWithExplicit(nsACString& s)
+{
+    const char* e = "explicit/";
+    return Substring(s, 0, strlen(e)).Equals(e);
+}
+#endif
+
 class XPCJSRuntimeStats : public JS::RuntimeStats
 {
     WindowPaths *mWindowPaths;
     WindowPaths *mTopWindowPaths;
     bool mGetLocations;
+    int mAnonymizeID;
 
   public:
     XPCJSRuntimeStats(WindowPaths *windowPaths, WindowPaths *topWindowPaths,
-                      bool getLocations)
+                      bool getLocations, bool anonymize)
       : JS::RuntimeStats(JSMallocSizeOf),
         mWindowPaths(windowPaths),
         mTopWindowPaths(topWindowPaths),
-        mGetLocations(getLocations)
+        mGetLocations(getLocations),
+        mAnonymizeID(anonymize ? 1 : 0)
     {}
 
     ~XPCJSRuntimeStats() {
@@ -2534,6 +2684,8 @@ class XPCJSRuntimeStats : public JS::RuntimeStats
 
         extras->pathPrefix += nsPrintfCString("zone(0x%p)/", (void *)zone);
 
+        MOZ_ASSERT(StartsWithExplicit(extras->pathPrefix));
+
         zStats->extra = extras;
     }
 
@@ -2542,9 +2694,9 @@ class XPCJSRuntimeStats : public JS::RuntimeStats
     {
         xpc::CompartmentStatsExtras *extras = new xpc::CompartmentStatsExtras;
         nsCString cName;
-        GetCompartmentName(c, cName, true);
+        GetCompartmentName(c, cName, &mAnonymizeID, /* replaceSlashes = */ true);
         if (mGetLocations) {
-            CompartmentPrivate *cp = GetCompartmentPrivate(c);
+            CompartmentPrivate *cp = CompartmentPrivate::Get(c);
             if (cp)
               cp->GetLocationURI(CompartmentPrivate::LocationHintAddon,
                                  getter_AddRefs(extras->location));
@@ -2602,6 +2754,9 @@ class XPCJSRuntimeStats : public JS::RuntimeStats
         // be used, because non-nsGlobalWindow compartments shouldn't have
         // orphan DOM nodes).
 
+        MOZ_ASSERT(StartsWithExplicit(extras->jsPathPrefix));
+        MOZ_ASSERT(StartsWithExplicit(extras->domPathPrefix));
+
         cstats->extra = extras;
     }
 };
@@ -2610,7 +2765,8 @@ nsresult
 JSReporter::CollectReports(WindowPaths *windowPaths,
                            WindowPaths *topWindowPaths,
                            nsIMemoryReporterCallback *cb,
-                           nsISupports *closure)
+                           nsISupports *closure,
+                           bool anonymize)
 {
     XPCJSRuntime *xpcrt = nsXPConnect::GetRuntimeInstance();
 
@@ -2626,12 +2782,18 @@ JSReporter::CollectReports(WindowPaths *windowPaths,
         addonManager = do_GetService("@mozilla.org/addons/integration;1");
     }
     bool getLocations = !!addonManager;
-    XPCJSRuntimeStats rtStats(windowPaths, topWindowPaths, getLocations);
+    XPCJSRuntimeStats rtStats(windowPaths, topWindowPaths, getLocations,
+                              anonymize);
     OrphanReporter orphanReporter(XPCConvert::GetISupportsFromJSObject);
-    if (!JS::CollectRuntimeStats(xpcrt->Runtime(), &rtStats, &orphanReporter))
+    if (!JS::CollectRuntimeStats(xpcrt->Runtime(), &rtStats, &orphanReporter,
+                                 anonymize))
+    {
         return NS_ERROR_FAILURE;
+    }
 
-    size_t xpconnect = xpcrt->SizeOfIncludingThis(JSMallocSizeOf);
+    size_t xpcJSRuntimeSize = xpcrt->SizeOfIncludingThis(JSMallocSizeOf);
+
+    size_t wrappedJSSize = xpcrt->GetWrappedJSMap()->SizeOfWrappedJS(JSMallocSizeOf);
 
     XPCWrappedNativeScope::ScopeSizeInfo sizeInfo(JSMallocSizeOf);
     XPCWrappedNativeScope::AddSizeOfAllScopesIncludingThis(&sizeInfo);
@@ -2647,7 +2809,7 @@ JSReporter::CollectReports(WindowPaths *windowPaths,
     rv = xpc::ReportJSRuntimeExplicitTreeStats(rtStats,
                                                NS_LITERAL_CSTRING("explicit/js-non-window/"),
                                                addonManager, cb, closure,
-                                               &rtTotal);
+                                               anonymize, &rtTotal);
     NS_ENSURE_SUCCESS(rv, rv);
 
     // Report the sums of the compartment numbers.
@@ -2660,81 +2822,75 @@ JSReporter::CollectReports(WindowPaths *windowPaths,
 
     xpc::ZoneStatsExtras zExtrasTotal;
     zExtrasTotal.pathPrefix.AssignLiteral("js-main-runtime/zones/");
-    rv = ReportZoneStats(rtStats.zTotals, zExtrasTotal, cb, closure);
+    rv = ReportZoneStats(rtStats.zTotals, zExtrasTotal, cb, closure, anonymize);
     NS_ENSURE_SUCCESS(rv, rv);
 
     // Report the sum of the runtime/ numbers.
     REPORT_BYTES(NS_LITERAL_CSTRING("js-main-runtime/runtime"),
-                 KIND_OTHER, rtTotal,
-                 "The sum of all measurements under 'explicit/js-non-window/runtime/'.");
+        KIND_OTHER, rtTotal,
+        "The sum of all measurements under 'explicit/js-non-window/runtime/'.");
 
     // Report the numbers for memory outside of compartments.
 
     REPORT_BYTES(NS_LITERAL_CSTRING("js-main-runtime/gc-heap/unused-chunks"),
-                 KIND_OTHER,
-                 rtStats.gcHeapUnusedChunks,
-                 "The same as 'explicit/js-non-window/gc-heap/unused-chunks'.");
+        KIND_OTHER, rtStats.gcHeapUnusedChunks,
+        "The same as 'explicit/js-non-window/gc-heap/unused-chunks'.");
 
     REPORT_BYTES(NS_LITERAL_CSTRING("js-main-runtime/gc-heap/unused-arenas"),
-                 KIND_OTHER,
-                 rtStats.gcHeapUnusedArenas,
-                 "The same as 'explicit/js-non-window/gc-heap/unused-arenas'.");
+        KIND_OTHER, rtStats.gcHeapUnusedArenas,
+        "The same as 'explicit/js-non-window/gc-heap/unused-arenas'.");
 
     REPORT_BYTES(NS_LITERAL_CSTRING("js-main-runtime/gc-heap/chunk-admin"),
-                 KIND_OTHER,
-                 rtStats.gcHeapChunkAdmin,
-                 "The same as 'explicit/js-non-window/gc-heap/chunk-admin'.");
+        KIND_OTHER, rtStats.gcHeapChunkAdmin,
+        "The same as 'explicit/js-non-window/gc-heap/chunk-admin'.");
 
     // Report a breakdown of the committed GC space.
 
     REPORT_BYTES(NS_LITERAL_CSTRING("js-main-runtime-gc-heap-committed/unused/chunks"),
-                 KIND_OTHER,
-                 rtStats.gcHeapUnusedChunks,
-                 "The same as 'explicit/js-non-window/gc-heap/unused-chunks'.");
+        KIND_OTHER, rtStats.gcHeapUnusedChunks,
+        "The same as 'explicit/js-non-window/gc-heap/unused-chunks'.");
 
     REPORT_BYTES(NS_LITERAL_CSTRING("js-main-runtime-gc-heap-committed/unused/arenas"),
-                 KIND_OTHER,
-                 rtStats.gcHeapUnusedArenas,
-                 "The same as 'explicit/js-non-window/gc-heap/unused-arenas'.");
+        KIND_OTHER, rtStats.gcHeapUnusedArenas,
+        "The same as 'explicit/js-non-window/gc-heap/unused-arenas'.");
 
     REPORT_BYTES(NS_LITERAL_CSTRING("js-main-runtime-gc-heap-committed/unused/gc-things"),
-                 KIND_OTHER,
-                 rtStats.zTotals.unusedGCThings,
-                 "The same as 'js-main-runtime/zones/unused-gc-things'.");
+        KIND_OTHER, rtStats.zTotals.unusedGCThings,
+        "The same as 'js-main-runtime/zones/unused-gc-things'.");
 
     REPORT_BYTES(NS_LITERAL_CSTRING("js-main-runtime-gc-heap-committed/used/chunk-admin"),
-                 KIND_OTHER,
-                 rtStats.gcHeapChunkAdmin,
-                 "The same as 'explicit/js-non-window/gc-heap/chunk-admin'.");
+        KIND_OTHER, rtStats.gcHeapChunkAdmin,
+        "The same as 'explicit/js-non-window/gc-heap/chunk-admin'.");
 
     REPORT_BYTES(NS_LITERAL_CSTRING("js-main-runtime-gc-heap-committed/used/arena-admin"),
-                 KIND_OTHER,
-                 rtStats.zTotals.gcHeapArenaAdmin,
-                 "The same as 'js-main-runtime/zones/gc-heap-arena-admin'.");
+        KIND_OTHER, rtStats.zTotals.gcHeapArenaAdmin,
+        "The same as 'js-main-runtime/zones/gc-heap-arena-admin'.");
 
     REPORT_BYTES(NS_LITERAL_CSTRING("js-main-runtime-gc-heap-committed/used/gc-things"),
-                 KIND_OTHER,
-                 rtStats.gcHeapGCThings,
-                 "Memory on the garbage-collected JavaScript heap that holds GC things such "
-                 "as objects, strings, scripts, etc.");
+        KIND_OTHER, rtStats.gcHeapGCThings,
+        "GC things: objects, strings, scripts, etc.");
 
     // Report xpconnect.
 
     REPORT_BYTES(NS_LITERAL_CSTRING("explicit/xpconnect/runtime"),
-                 KIND_HEAP, xpconnect,
-                 "Memory used by XPConnect runtime.");
+        KIND_HEAP, xpcJSRuntimeSize,
+        "The XPConnect runtime.");
+
+    REPORT_BYTES(NS_LITERAL_CSTRING("explicit/xpconnect/wrappedjs"),
+        KIND_HEAP, wrappedJSSize,
+        "Wrappers used to implement XPIDL interfaces with JS.");
 
     REPORT_BYTES(NS_LITERAL_CSTRING("explicit/xpconnect/scopes"),
-                 KIND_HEAP, sizeInfo.mScopeAndMapSize,
-                 "Memory used by XPConnect scopes.");
+        KIND_HEAP, sizeInfo.mScopeAndMapSize,
+        "XPConnect scopes.");
 
     REPORT_BYTES(NS_LITERAL_CSTRING("explicit/xpconnect/proto-iface-cache"),
-                 KIND_HEAP, sizeInfo.mProtoAndIfaceCacheSize,
-                 "Memory used for prototype and interface binding caches.");
+        KIND_HEAP, sizeInfo.mProtoAndIfaceCacheSize,
+        "Prototype and interface binding caches.");
 
     REPORT_BYTES(NS_LITERAL_CSTRING("explicit/xpconnect/js-component-loader"),
-                 KIND_HEAP, jsComponentLoaderSize,
-                 "Memory used by XPConnect's JS component loader.");
+        KIND_HEAP, jsComponentLoaderSize,
+        "XPConnect's JS component loader.");
 
     return NS_OK;
 }
@@ -2818,6 +2974,12 @@ AccumulateTelemetryCallback(int id, uint32_t sample)
       case JS_TELEMETRY_GC_SCC_SWEEP_MAX_PAUSE_MS:
         Telemetry::Accumulate(Telemetry::GC_SCC_SWEEP_MAX_PAUSE_MS, sample);
         break;
+      case JS_TELEMETRY_DEPRECATED_LANGUAGE_EXTENSIONS_IN_CONTENT:
+        MOZ_ASSERT(sample <= 3);
+        Telemetry::Accumulate(Telemetry::JS_DEPRECATED_LANGUAGE_EXTENSIONS_IN_CONTENT, sample);
+        break;
+      default:
+        MOZ_ASSERT_UNREACHABLE("Unexpected JS_TELEMETRY id");
     }
 }
 
@@ -2826,7 +2988,10 @@ CompartmentNameCallback(JSRuntime *rt, JSCompartment *comp,
                         char *buf, size_t bufsize)
 {
     nsCString name;
-    GetCompartmentName(comp, name, false);
+    // This is called via the JSAPI and isn't involved in memory reporting, so
+    // we don't need to anonymize compartment names.
+    int anonymizeID = 0;
+    GetCompartmentName(comp, name, &anonymizeID, /* replaceSlashes = */ false);
     if (name.Length() >= bufsize)
         name.Truncate(bufsize - 1);
     memcpy(buf, name.get(), name.Length() + 1);
@@ -2843,7 +3008,7 @@ PreserveWrapper(JSContext *cx, JSObject *obj)
 }
 
 static nsresult
-ReadSourceFromFilename(JSContext *cx, const char *filename, jschar **src, size_t *len)
+ReadSourceFromFilename(JSContext *cx, const char *filename, char16_t **src, size_t *len)
 {
     nsresult rv;
 
@@ -2859,7 +3024,11 @@ ReadSourceFromFilename(JSContext *cx, const char *filename, jschar **src, size_t
     NS_ENSURE_SUCCESS(rv, rv);
 
     nsCOMPtr<nsIChannel> scriptChannel;
-    rv = NS_NewChannel(getter_AddRefs(scriptChannel), uri);
+    rv = NS_NewChannel(getter_AddRefs(scriptChannel),
+                       uri,
+                       nsContentUtils::GetSystemPrincipal(),
+                       nsILoadInfo::SEC_NORMAL,
+                       nsIContentPolicy::TYPE_OTHER);
     NS_ENSURE_SUCCESS(rv, rv);
 
     // Only allow local reading.
@@ -2903,17 +3072,17 @@ ReadSourceFromFilename(JSContext *cx, const char *filename, jschar **src, size_t
         ptr += bytesRead;
     }
 
-    nsString decoded;
     rv = nsScriptLoader::ConvertToUTF16(scriptChannel, buf, rawLen, EmptyString(),
-                                        nullptr, decoded);
+                                        nullptr, *src, *len);
     NS_ENSURE_SUCCESS(rv, rv);
 
-    // Copy to JS engine.
-    *len = decoded.Length();
-    *src = static_cast<jschar *>(JS_malloc(cx, decoded.Length()*sizeof(jschar)));
     if (!*src)
         return NS_ERROR_FAILURE;
-    memcpy(*src, decoded.get(), decoded.Length()*sizeof(jschar));
+
+    // Historically this method used JS_malloc() which updates the GC memory
+    // accounting.  Since ConvertToUTF16() now uses js_malloc() instead we
+    // update the accounting manually after the fact.
+    JS_updateMallocCounter(cx, *len);
 
     return NS_OK;
 }
@@ -2922,7 +3091,7 @@ ReadSourceFromFilename(JSContext *cx, const char *filename, jschar **src, size_t
 // the source for a chrome JS function. See the comment in the XPCJSRuntime
 // constructor.
 class XPCJSSourceHook: public js::SourceHook {
-    bool load(JSContext *cx, const char *filename, jschar **src, size_t *length) {
+    bool load(JSContext *cx, const char *filename, char16_t **src, size_t *length) {
         *src = nullptr;
         *length = 0;
 
@@ -2942,22 +3111,27 @@ class XPCJSSourceHook: public js::SourceHook {
     }
 };
 
+static const JSWrapObjectCallbacks WrapObjectCallbacks = {
+    xpc::WrapperFactory::Rewrap,
+    xpc::WrapperFactory::PrepareForWrapping
+};
+
 XPCJSRuntime::XPCJSRuntime(nsXPConnect* aXPConnect)
-   : CycleCollectedJSRuntime(32L * 1024L * 1024L, JS_USE_HELPER_THREADS),
-   mJSContextStack(new XPCJSContextStack()),
+   : CycleCollectedJSRuntime(nullptr, JS::DefaultHeapMaxBytes, JS::DefaultNurseryBytes),
+   mJSContextStack(new XPCJSContextStack(MOZ_THIS_IN_INITIALIZER_LIST())),
    mCallContext(nullptr),
    mAutoRoots(nullptr),
    mResolveName(JSID_VOID),
    mResolvingWrapper(nullptr),
-   mWrappedJSMap(JSObject2WrappedJSMap::newMap(XPC_JS_MAP_SIZE)),
-   mWrappedJSClassMap(IID2WrappedJSClassMap::newMap(XPC_JS_CLASS_MAP_SIZE)),
-   mIID2NativeInterfaceMap(IID2NativeInterfaceMap::newMap(XPC_NATIVE_INTERFACE_MAP_SIZE)),
-   mClassInfo2NativeSetMap(ClassInfo2NativeSetMap::newMap(XPC_NATIVE_SET_MAP_SIZE)),
-   mNativeSetMap(NativeSetMap::newMap(XPC_NATIVE_SET_MAP_SIZE)),
-   mThisTranslatorMap(IID2ThisTranslatorMap::newMap(XPC_THIS_TRANSLATOR_MAP_SIZE)),
-   mNativeScriptableSharedMap(XPCNativeScriptableSharedMap::newMap(XPC_NATIVE_JSCLASS_MAP_SIZE)),
-   mDyingWrappedNativeProtoMap(XPCWrappedNativeProtoMap::newMap(XPC_DYING_NATIVE_PROTO_MAP_SIZE)),
-   mDetachedWrappedNativeProtoMap(XPCWrappedNativeProtoMap::newMap(XPC_DETACHED_NATIVE_PROTO_MAP_SIZE)),
+   mWrappedJSMap(JSObject2WrappedJSMap::newMap(XPC_JS_MAP_LENGTH)),
+   mWrappedJSClassMap(IID2WrappedJSClassMap::newMap(XPC_JS_CLASS_MAP_LENGTH)),
+   mIID2NativeInterfaceMap(IID2NativeInterfaceMap::newMap(XPC_NATIVE_INTERFACE_MAP_LENGTH)),
+   mClassInfo2NativeSetMap(ClassInfo2NativeSetMap::newMap(XPC_NATIVE_SET_MAP_LENGTH)),
+   mNativeSetMap(NativeSetMap::newMap(XPC_NATIVE_SET_MAP_LENGTH)),
+   mThisTranslatorMap(IID2ThisTranslatorMap::newMap(XPC_THIS_TRANSLATOR_MAP_LENGTH)),
+   mNativeScriptableSharedMap(XPCNativeScriptableSharedMap::newMap(XPC_NATIVE_JSCLASS_MAP_LENGTH)),
+   mDyingWrappedNativeProtoMap(XPCWrappedNativeProtoMap::newMap(XPC_DYING_NATIVE_PROTO_MAP_LENGTH)),
+   mDetachedWrappedNativeProtoMap(XPCWrappedNativeProtoMap::newMap(XPC_DETACHED_NATIVE_PROTO_MAP_LENGTH)),
    mGCIsRunning(false),
    mWrappedJSToReleaseArray(),
    mNativesToReleaseArray(),
@@ -2966,11 +3140,11 @@ XPCJSRuntime::XPCJSRuntime(nsXPConnect* aXPConnect)
    mWrappedJSRoots(nullptr),
    mObjectHolderRoots(nullptr),
    mWatchdogManager(new WatchdogManager(MOZ_THIS_IN_INITIALIZER_LIST())),
-   mJunkScope(nullptr),
+   mUnprivilegedJunkScope(MOZ_THIS_IN_INITIALIZER_LIST()->Runtime(), nullptr),
+   mPrivilegedJunkScope(MOZ_THIS_IN_INITIALIZER_LIST()->Runtime(), nullptr),
+   mCompilationScope(MOZ_THIS_IN_INITIALIZER_LIST()->Runtime(), nullptr),
    mAsyncSnowWhiteFreer(new AsyncFreeSnowWhite())
 {
-    DOM_InitInterfaces();
-
     // these jsids filled in later when we have a JSContext to work with.
     mStrIDs[0] = JSID_VOID;
 
@@ -3016,8 +3190,8 @@ XPCJSRuntime::XPCJSRuntime(nsXPConnect* aXPConnect)
     const size_t kSystemCodeBuffer = 10 * 1024;
 
     // Our "default" stack is what we use in configurations where we don't have
-    // a compelling reason to do things differently. This is effectively 1MB on
-    // 32-bit platforms and 2MB on 64-bit platforms.
+    // a compelling reason to do things differently. This is effectively 512KB
+    // on 32-bit platforms and 1MB on 64-bit platforms.
     const size_t kDefaultStackQuota = 128 * sizeof(size_t) * 1024;
 
     // Set stack sizes for different configurations. It's probably not great for
@@ -3026,24 +3200,24 @@ XPCJSRuntime::XPCJSRuntime(nsXPConnect* aXPConnect)
 
 #if defined(XP_MACOSX) || defined(DARWIN)
     // MacOS has a gargantuan default stack size of 8MB. Go wild with 7MB,
-    // and give trusted script 140k extra. The stack is huge on mac anyway.
+    // and give trusted script 180k extra. The stack is huge on mac anyway.
     const size_t kStackQuota = 7 * 1024 * 1024;
-    const size_t kTrustedScriptBuffer = 140 * 1024;
+    const size_t kTrustedScriptBuffer = 180 * 1024;
 #elif defined(MOZ_ASAN)
     // ASan requires more stack space due to red-zones, so give it double the
-    // default (2MB on 32-bit, 4MB on 64-bit). ASAN stack frame measurements
+    // default (1MB on 32-bit, 2MB on 64-bit). ASAN stack frame measurements
     // were not taken at the time of this writing, so we hazard a guess that
-    // ASAN builds have roughly twice the stack overhead as normal builds.
+    // ASAN builds have roughly thrice the stack overhead as normal builds.
     // On normal builds, the largest stack frame size we might encounter is
-    // 8.2k, so let's use a buffer of 8.2 * 2 * 10 = 164k.
+    // 8.2k, so let's use a buffer of 8.2 * 3 * 10 = 246k.
     const size_t kStackQuota =  2 * kDefaultStackQuota;
-    const size_t kTrustedScriptBuffer = 164 * 1024;
+    const size_t kTrustedScriptBuffer = 246 * 1024;
 #elif defined(XP_WIN)
-    // 1MB is the default stack size on Windows, so the default 1MB stack quota
-    // we'd get on win32 is slightly too large. Use 900k instead. And since
-    // windows stack frames are 3.4k each, let's use a buffer of 40k.
+    // 1MB is the default stack size on Windows, so use 900k.
+    // Windows PGO stack frames have unfortunately gotten pretty large lately. :-(
     const size_t kStackQuota = 900 * 1024;
-    const size_t kTrustedScriptBuffer = 40 * 1024;
+    const size_t kTrustedScriptBuffer = (sizeof(size_t) == 8) ? 120 * 1024
+                                                              : 80 * 1024;
     // The following two configurations are linux-only. Given the numbers above,
     // we use 50k and 100k trusted buffers on 32-bit and 64-bit respectively.
 #elif defined(DEBUG)
@@ -3066,14 +3240,13 @@ XPCJSRuntime::XPCJSRuntime(nsXPConnect* aXPConnect)
                            kStackQuota - kSystemCodeBuffer,
                            kStackQuota - kSystemCodeBuffer - kTrustedScriptBuffer);
 
+    JS_SetErrorReporter(runtime, xpc::SystemErrorReporter);
     JS_SetDestroyCompartmentCallback(runtime, CompartmentDestroyedCallback);
     JS_SetCompartmentNameCallback(runtime, CompartmentNameCallback);
     mPrevGCSliceCallback = JS::SetGCSliceCallback(runtime, GCSliceCallback);
-    JS_SetFinalizeCallback(runtime, FinalizeCallback);
-    JS_SetWrapObjectCallbacks(runtime,
-                              xpc::WrapperFactory::Rewrap,
-                              xpc::WrapperFactory::WrapForSameCompartment,
-                              xpc::WrapperFactory::PrepareForWrapping);
+    JS_AddFinalizeCallback(runtime, FinalizeCallback, nullptr);
+    JS_AddWeakPointerCallback(runtime, WeakPointerCallback, this);
+    JS_SetWrapObjectCallbacks(runtime, &WrapObjectCallbacks);
     js::SetPreserveWrapperCallback(runtime, PreserveWrapper);
 #ifdef MOZ_CRASHREPORTER
     JS_EnumerateDiagnosticMemoryRegions(DiagnosticMemoryCallback);
@@ -3086,7 +3259,7 @@ XPCJSRuntime::XPCJSRuntime(nsXPConnect* aXPConnect)
     js::SetDefaultJSContextCallback(runtime, DefaultJSContextCallback);
     js::SetActivityCallback(runtime, ActivityCallback, this);
     js::SetCTypesActivityCallback(runtime, CTypesActivityCallback);
-    JS_SetOperationCallback(runtime, OperationCallback);
+    JS_SetInterruptCallback(runtime, InterruptCallback);
 
     // The JS engine needs to keep the source code around in order to implement
     // Function.prototype.toSource(). It'd be nice to not have to do this for
@@ -3104,7 +3277,8 @@ XPCJSRuntime::XPCJSRuntime(nsXPConnect* aXPConnect)
     // compileAndGo mode and compiled function bodies (from
     // JS_CompileFunction*). In practice, this means content scripts and event
     // handlers.
-    js::SetSourceHook(runtime, new XPCJSSourceHook);
+    UniquePtr<XPCJSSourceHook> hook(new XPCJSSourceHook);
+    js::SetSourceHook(runtime, Move(hook));
 
     // Set up locale information and callbacks for the newly-created runtime so
     // that the various toLocaleString() methods, localeCompare(), and other
@@ -3121,11 +3295,9 @@ XPCJSRuntime::XPCJSRuntime(nsXPConnect* aXPConnect)
     RegisterJSMainRuntimeCompartmentsUserDistinguishedAmount(JSMainRuntimeCompartmentsUserDistinguishedAmount);
     mozilla::RegisterJSSizeOfTab(JSSizeOfTab);
 
-    // Install a JavaScript 'debugger' keyword handler in debug builds only
-#ifdef DEBUG
-    if (!JS_GetGlobalDebugHooks(runtime)->debuggerHandler)
-        xpc_InstallJSDebuggerKeywordHandler(runtime);
-#endif
+    // Watch for the JS boolean options.
+    ReloadPrefsCallback(nullptr, this);
+    Preferences::RegisterCallback(ReloadPrefsCallback, JS_OPTIONS_DOT_STR, this);
 }
 
 // static
@@ -3156,9 +3328,6 @@ XPCJSRuntime::newXPCJSRuntime(nsXPConnect* aXPConnect)
     return nullptr;
 }
 
-// InternStaticDictionaryJSVals is automatically generated.
-bool InternStaticDictionaryJSVals(JSContext* aCx);
-
 bool
 XPCJSRuntime::OnJSContextNew(JSContext *cx)
 {
@@ -3180,8 +3349,7 @@ XPCJSRuntime::OnJSContextNew(JSContext *cx)
             mStrJSVals[i] = STRING_TO_JSVAL(str);
         }
 
-        if (!mozilla::dom::DefineStaticJSVals(cx) ||
-            !InternStaticDictionaryJSVals(cx)) {
+        if (!mozilla::dom::DefineStaticJSVals(cx)) {
             return false;
         }
     }
@@ -3394,30 +3562,46 @@ XPCJSRuntime::RemoveContextCallback(xpcContextCallback cb)
     }
 }
 
-JSObject *
-XPCJSRuntime::GetJunkScope()
+void
+XPCJSRuntime::InitSingletonScopes()
 {
-    if (!mJunkScope) {
-        AutoSafeJSContext cx;
-        SandboxOptions options;
-        options.sandboxName.AssignASCII("XPConnect Junk Compartment");
-        RootedValue v(cx);
-        nsresult rv = CreateSandboxObject(cx, &v, nsContentUtils::GetSystemPrincipal(), options);
-        NS_ENSURE_SUCCESS(rv, nullptr);
+    // This all happens very early, so we don't bother with cx pushing.
+    JSContext *cx = GetJSContextStack()->GetSafeJSContext();
+    JSAutoRequest ar(cx);
+    RootedValue v(cx);
+    nsresult rv;
 
-        mJunkScope = js::UncheckedUnwrap(&v.toObject());
-        JS_AddNamedObjectRoot(cx, &mJunkScope, "XPConnect Junk Compartment");
-    }
-    return mJunkScope;
+    // Create the Unprivileged Junk Scope.
+    SandboxOptions unprivilegedJunkScopeOptions;
+    unprivilegedJunkScopeOptions.sandboxName.AssignLiteral("XPConnect Junk Compartment");
+    unprivilegedJunkScopeOptions.invisibleToDebugger = true;
+    rv = CreateSandboxObject(cx, &v, nullptr, unprivilegedJunkScopeOptions);
+    MOZ_RELEASE_ASSERT(NS_SUCCEEDED(rv));
+    mUnprivilegedJunkScope = js::UncheckedUnwrap(&v.toObject());
+
+    // Create the Privileged Junk Scope.
+    SandboxOptions privilegedJunkScopeOptions;
+    privilegedJunkScopeOptions.sandboxName.AssignLiteral("XPConnect Privileged Junk Compartment");
+    privilegedJunkScopeOptions.invisibleToDebugger = true;
+    privilegedJunkScopeOptions.wantComponents = false;
+    rv = CreateSandboxObject(cx, &v, nsXPConnect::SystemPrincipal(), privilegedJunkScopeOptions);
+    MOZ_RELEASE_ASSERT(NS_SUCCEEDED(rv));
+    mPrivilegedJunkScope = js::UncheckedUnwrap(&v.toObject());
+
+    // Create the Compilation Scope.
+    SandboxOptions compilationScopeOptions;
+    compilationScopeOptions.sandboxName.AssignLiteral("XPConnect Compilation Compartment");
+    compilationScopeOptions.invisibleToDebugger = true;
+    compilationScopeOptions.discardSource = ShouldDiscardSystemSource();
+    rv = CreateSandboxObject(cx, &v, /* principal = */ nullptr, compilationScopeOptions);
+    MOZ_RELEASE_ASSERT(NS_SUCCEEDED(rv));
+    mCompilationScope = js::UncheckedUnwrap(&v.toObject());
 }
 
 void
-XPCJSRuntime::DeleteJunkScope()
+XPCJSRuntime::DeleteSingletonScopes()
 {
-    if(!mJunkScope)
-        return;
-
-    AutoSafeJSContext cx;
-    JS_RemoveObjectRoot(cx, &mJunkScope);
-    mJunkScope = nullptr;
+    mUnprivilegedJunkScope = nullptr;
+    mPrivilegedJunkScope = nullptr;
+    mCompilationScope = nullptr;
 }

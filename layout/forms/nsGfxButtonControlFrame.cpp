@@ -22,7 +22,7 @@ nsGfxButtonControlFrame::nsGfxButtonControlFrame(nsStyleContext* aContext):
 {
 }
 
-nsIFrame*
+nsContainerFrame*
 NS_NewGfxButtonControlFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
 {
   return new (aPresShell) nsGfxButtonControlFrame(aContext);
@@ -42,8 +42,8 @@ nsGfxButtonControlFrame::GetType() const
   return nsGkAtoms::gfxButtonControlFrame;
 }
 
-#ifdef DEBUG
-NS_IMETHODIMP
+#ifdef DEBUG_FRAME_DUMP
+nsresult
 nsGfxButtonControlFrame::GetFrameName(nsAString& aResult) const
 {
   return MakeFrameName(NS_LITERAL_STRING("ButtonControl"), aResult);
@@ -69,10 +69,12 @@ nsGfxButtonControlFrame::CreateAnonymousContent(nsTArray<ContentInfo>& aElements
 }
 
 void
-nsGfxButtonControlFrame::AppendAnonymousContentTo(nsBaseContentList& aElements,
+nsGfxButtonControlFrame::AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
                                                   uint32_t aFilter)
 {
-  aElements.MaybeAppendElement(mTextContent);
+  if (mTextContent) {
+    aElements.AppendElement(mTextContent);
+  }
 }
 
 // Create the text content used as label for the button.
@@ -83,7 +85,7 @@ nsGfxButtonControlFrame::CreateFrameFor(nsIContent*      aContent)
   nsIFrame * newFrame = nullptr;
 
   if (aContent == mTextContent) {
-    nsIFrame * parentFrame = mFrames.FirstChild();
+    nsContainerFrame* parentFrame = do_QueryFrame(mFrames.FirstChild());
 
     nsPresContext* presContext = PresContext();
     nsRefPtr<nsStyleContext> textStyleContext;
@@ -178,7 +180,7 @@ nsGfxButtonControlFrame::GetLabel(nsXPIDLString& aLabel)
   return NS_OK;
 }
 
-NS_IMETHODIMP
+nsresult
 nsGfxButtonControlFrame::AttributeChanged(int32_t         aNameSpaceID,
                                           nsIAtom*        aAttribute,
                                           int32_t         aModType)
@@ -210,13 +212,13 @@ nsGfxButtonControlFrame::IsLeaf() const
   return true;
 }
 
-nsIFrame*
+nsContainerFrame*
 nsGfxButtonControlFrame::GetContentInsertionFrame()
 {
   return this;
 }
 
-NS_IMETHODIMP
+nsresult
 nsGfxButtonControlFrame::HandleEvent(nsPresContext* aPresContext, 
                                      WidgetGUIEvent* aEvent,
                                      nsEventStatus* aEventStatus)

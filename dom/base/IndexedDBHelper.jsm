@@ -19,8 +19,10 @@ const Ci = Components.interfaces;
 this.EXPORTED_SYMBOLS = ["IndexedDBHelper"];
 
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
-Cu.import("resource://gre/modules/Services.jsm");
 Cu.importGlobalProperties(["indexedDB"]);
+
+XPCOMUtils.defineLazyModuleGetter(this, 'Services',
+  'resource://gre/modules/Services.jsm');
 
 this.IndexedDBHelper = function IndexedDBHelper() {}
 
@@ -56,7 +58,7 @@ IndexedDBHelper.prototype = {
       self._db.onversionchange = function(event) {
         if (DEBUG) debug("WARNING: DB modified from a different window.");
       }
-      aSuccessCb();
+      aSuccessCb && aSuccessCb();
     };
 
     req.onupgradeneeded = function (aEvent) {
@@ -70,7 +72,7 @@ IndexedDBHelper.prototype = {
     };
     req.onerror = function (aEvent) {
       if (DEBUG) debug("Failed to open database: " + self.dbName);
-      aFailureCb(aEvent.target.error.name);
+      aFailureCb && aFailureCb(aEvent.target.error.name);
     };
     req.onblocked = function (aEvent) {
       if (DEBUG) debug("Opening database request is blocked.");
@@ -88,7 +90,10 @@ IndexedDBHelper.prototype = {
   ensureDB: function ensureDB(aSuccessCb, aFailureCb) {
     if (this._db) {
       if (DEBUG) debug("ensureDB: already have a database, returning early.");
-      aSuccessCb();
+      if (aSuccessCb) {
+        Services.tm.currentThread.dispatch(aSuccessCb,
+                                           Ci.nsIThread.DISPATCH_NORMAL);
+      }
       return;
     }
     this.open(aSuccessCb, aFailureCb);

@@ -2,15 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// Copied from the proposed JS library for Bedrock (ie, www.mozilla.org).
-
 // create namespace
 if (typeof Mozilla == 'undefined') {
 	var Mozilla = {};
 }
 
-(function($) {
-  'use strict';
+;(function($) {
+	'use strict';
 
 	// create namespace
 	if (typeof Mozilla.UITour == 'undefined') {
@@ -25,7 +23,6 @@ if (typeof Mozilla == 'undefined') {
 		}
 	}
 
-
 	function _sendEvent(action, data) {
 		var event = new CustomEvent('mozUITour', {
 			bubbles: true,
@@ -34,11 +31,41 @@ if (typeof Mozilla == 'undefined') {
 				data: data || {}
 			}
 		});
-		console.log("Sending mozUITour event: ", event);
+
 		document.dispatchEvent(event);
 	}
 
+	function _generateCallbackID() {
+		return Math.random().toString(36).replace(/[^a-z]+/g, '');
+	}
+
+	function _waitForCallback(callback) {
+		var id = _generateCallbackID();
+
+		function listener(event) {
+			if (typeof event.detail != "object")
+				return;
+			if (event.detail.callbackID != id)
+				return;
+
+			document.removeEventListener("mozUITourResponse", listener);
+			callback(event.detail.data);
+		}
+		document.addEventListener("mozUITourResponse", listener);
+
+		return id;
+	}
+
 	Mozilla.UITour.DEFAULT_THEME_CYCLE_DELAY = 10 * 1000;
+
+	Mozilla.UITour.CONFIGNAME_SYNC = "sync";
+	Mozilla.UITour.CONFIGNAME_AVAILABLETARGETS = "availableTargets";
+
+	Mozilla.UITour.registerPageID = function(pageID) {
+		_sendEvent('registerPageID', {
+			pageID: pageID
+		});
+	};
 
 	Mozilla.UITour.showHighlight = function(target, effect) {
 		_sendEvent('showHighlight', {
@@ -51,11 +78,33 @@ if (typeof Mozilla == 'undefined') {
 		_sendEvent('hideHighlight');
 	};
 
-	Mozilla.UITour.showInfo = function(target, title, text) {
+	Mozilla.UITour.showInfo = function(target, title, text, icon, buttons, options) {
+		var buttonData = [];
+		if (Array.isArray(buttons)) {
+			for (var i = 0; i < buttons.length; i++) {
+				buttonData.push({
+					label: buttons[i].label,
+					icon: buttons[i].icon,
+					style: buttons[i].style,
+					callbackID: _waitForCallback(buttons[i].callback)
+				});
+			}
+		}
+
+		var closeButtonCallbackID, targetCallbackID;
+		if (options && options.closeButtonCallback)
+			closeButtonCallbackID = _waitForCallback(options.closeButtonCallback);
+		if (options && options.targetCallback)
+			targetCallbackID = _waitForCallback(options.targetCallback);
+
 		_sendEvent('showInfo', {
 			target: target,
 			title: title,
-			text: text
+			text: text,
+			icon: icon,
+			buttons: buttonData,
+			closeButtonCallbackID: closeButtonCallbackID,
+			targetCallbackID: targetCallbackID
 		});
 	};
 
@@ -108,9 +157,14 @@ if (typeof Mozilla == 'undefined') {
 		_sendEvent('removePinnedTab');
 	};
 
-	Mozilla.UITour.showMenu = function(name) {
+	Mozilla.UITour.showMenu = function(name, callback) {
+		var showCallbackID;
+		if (callback)
+			showCallbackID = _waitForCallback(callback);
+
 		_sendEvent('showMenu', {
-			name: name
+			name: name,
+			showCallbackID: showCallbackID,
 		});
 	};
 
@@ -119,4 +173,38 @@ if (typeof Mozilla == 'undefined') {
 			name: name
 		});
 	};
+
+	Mozilla.UITour.startUrlbarCapture = function(text, url) {
+		_sendEvent('startUrlbarCapture', {
+			text: text,
+			url: url
+		});
+	};
+
+	Mozilla.UITour.endUrlbarCapture = function() {
+		_sendEvent('endUrlbarCapture');
+	};
+
+	Mozilla.UITour.getConfiguration = function(configName, callback) {
+		_sendEvent('getConfiguration', {
+			callbackID: _waitForCallback(callback),
+			configuration: configName,
+		});
+	};
+
+	Mozilla.UITour.showFirefoxAccounts = function() {
+		_sendEvent('showFirefoxAccounts');
+	};
+
+	Mozilla.UITour.resetFirefox = function() {
+		_sendEvent('resetFirefox');
+	};
+
+	Mozilla.UITour.addNavBarWidget= function(name, callback) {
+		_sendEvent('addNavBarWidget', {
+			name: name,
+			callbackID: _waitForCallback(callback),
+		});
+	};
+
 })();

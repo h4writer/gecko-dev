@@ -8,7 +8,7 @@ body {
     padding: 0;
     background-color: #ced7de;
     -moz-user-select: none;
-    font-family: "Open Sans", sans-serif;
+    font-family: "Clear Sans",sans-serif;
     -moz-text-size-adjust: none;
 }
 
@@ -57,7 +57,7 @@ body {
     min-width: 0;
     color: #000000;
     opacity: 1;
-    flex: 1 1 auto;
+    flex: 1 1 main-size;
 }
 
 #filter-input:-moz-placeholder {
@@ -68,7 +68,7 @@ body {
     display: inline-block;
     height: 100%;
     min-width: 3em;
-    -moz-box-sizing: border-box;
+    box-sizing: border-box;
     opacity: 0.75;
 }
 
@@ -132,7 +132,7 @@ ul {
     padding-top: 0;
     margin: 0;
     padding-left: 0;
-    -moz-box-sizing: border-box;
+    box-sizing: border-box;
     box-shadow: 0 0 5px #000000;
     overflow-x: hidden;
 }
@@ -141,7 +141,7 @@ ul {
     width: 100%;
     margin: 0;
     background-color: #ffffff;
-    -moz-box-sizing: border-box;
+    box-sizing: border-box;
     box-shadow: 0 0 5px #000000;
     overflow-x: hidden;
     max-width: 40em;
@@ -193,7 +193,7 @@ li {
 
 .pref-value {
     color: rgba(0,0,0,0.5);
-    flex: 1 1 auto;
+    flex: 1 1 main-size;
     border: none;
     -moz-appearance: none;
     background-image: none;
@@ -227,13 +227,13 @@ li {
 }
 
 #new-pref-value-boolean {
-    flex: 1 1 auto;
+    flex: 1 1 main-size;
 }
 
 #new-pref-container .pref-button.toggle {
     display: inline-block;
     opacity: 1;
-    flex: 0 1 auto;
+    flex: 0 1 main-size;
     float: right;
 }
 
@@ -241,7 +241,7 @@ li {
 #new-pref-container .pref-button.create {
     display: inline-block;
     opacity: 1;
-    flex: 1 1 auto;
+    flex: 1 1 main-size;
 }
 
 .pref-item-line {
@@ -264,7 +264,7 @@ li {
 
 .pref-button {
     display: inline-block;
-    -moz-box-sizing: border-box;
+    box-sizing: border-box;
     text-align: center;
     padding: 10px 1em;
     border-left: 1px solid rgba(0,0,0,0.1);

@@ -1,4 +1,4 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim:set ts=2 sw=2 sts=2 et: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -152,8 +152,6 @@ function task_populateDB(aArray)
             let folderId = PlacesUtils.bookmarks.createFolder(qdata.parentFolder,
                                                               qdata.title,
                                                               qdata.index);
-            if (qdata.readOnly)
-              PlacesUtils.bookmarks.setFolderReadonly(folderId, true);
           }
 
           if (qdata.isLivemark) {
@@ -162,7 +160,7 @@ function task_populateDB(aArray)
                                               , index: qdata.index
                                               , feedURI: uri(qdata.feedURI)
                                               , siteURI: uri(qdata.uri)
-                                              });
+                                              }).then(null, do_throw);
           }
 
           if (qdata.isBookmark) {
@@ -246,7 +244,6 @@ function queryData(obj) {
   this.dateAdded = obj.dateAdded ? obj.dateAdded : today;
   this.keyword = obj.keyword ? obj.keyword : "";
   this.visitCount = obj.visitCount ? obj.visitCount : 0;
-  this.readOnly = obj.readOnly ? obj.readOnly : false;
   this.isSeparator = obj.hasOwnProperty("isSeparator") && obj.isSeparator;
 
   // And now, the attribute for whether or not this object should appear in the
@@ -277,7 +274,6 @@ function compareArrayToResult(aArray, aRoot) {
     // Debugging code for failures.
     dump_table("moz_places");
     dump_table("moz_historyvisits");
-    dump_table("moz_bookmarks");
     LOG("Found children:");
     for (let i = 0; i < aRoot.childCount; i++) {
       LOG(aRoot.getChild(i).uri);

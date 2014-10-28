@@ -8,7 +8,6 @@
 
 #include <stdint.h>                     // for uint64_t
 #include <stdio.h>                      // for FILE
-#include "gfxPoint.h"                   // for gfxSize
 #include "gfxRect.h"                    // for gfxRect
 #include "mozilla/Assertions.h"         // for MOZ_ASSERT, etc
 #include "mozilla/Attributes.h"         // for MOZ_OVERRIDE
@@ -17,9 +16,12 @@
 #include "mozilla/gfx/Rect.h"           // for Rect
 #include "mozilla/gfx/Types.h"          // for Filter
 #include "mozilla/ipc/ProtocolUtils.h"
+#include "mozilla/layers/Compositor.h"  // for Compositor
 #include "mozilla/layers/CompositorTypes.h"  // for TextureInfo, etc
+#include "mozilla/layers/Effects.h"     // for Texture Effect
 #include "mozilla/layers/LayersTypes.h"  // for LayerRenderState, etc
-#include "mozilla/layers/PCompositableParent.h"
+#include "mozilla/layers/LayersMessages.h"
+#include "mozilla/layers/TextureHost.h" // for TextureHost
 #include "mozilla/mozalloc.h"           // for operator delete
 #include "nsCOMPtr.h"                   // for already_AddRefed
 #include "nsRegion.h"                   // for nsIntRegion
@@ -37,40 +39,50 @@ class DataSourceSurface;
 
 namespace layers {
 
-// Some properties of a Layer required for tiling
-struct TiledLayerProperties
-{
-  nsIntRegion mVisibleRegion;
-  nsIntRegion mValidRegion;
-  CSSToScreenScale mEffectiveResolution;
-};
-
 class Layer;
-class DeprecatedTextureHost;
-class TextureHost;
 class SurfaceDescriptor;
 class Compositor;
 class ISurfaceAllocator;
 class ThebesBufferData;
 class TiledLayerComposer;
+class CompositableParentManager;
+class PCompositableParent;
 struct EffectChain;
 
 /**
  * A base class for doing CompositableHost and platform dependent task on TextureHost.
  */
-class CompositableBackendSpecificData : public RefCounted<CompositableBackendSpecificData>
+class CompositableBackendSpecificData
 {
+protected:
+  virtual ~CompositableBackendSpecificData() {}
+
 public:
-  CompositableBackendSpecificData()
-  {
-    MOZ_COUNT_CTOR(CompositableBackendSpecificData);
-  }
-  virtual ~CompositableBackendSpecificData()
-  {
-    MOZ_COUNT_DTOR(CompositableBackendSpecificData);
-  }
-  virtual void SetCompositor(Compositor* aCompositor) {}
+  NS_INLINE_DECL_REFCOUNTING(CompositableBackendSpecificData)
+
+  CompositableBackendSpecificData();
+
   virtual void ClearData() {}
+  virtual void SetCompositor(Compositor* aCompositor) {}
+
+  bool IsAllowingSharingTextureHost()
+  {
+    return mAllowSharingTextureHost;
+  }
+
+  void SetAllowSharingTextureHost(bool aAllow)
+  {
+    mAllowSharingTextureHost = aAllow;
+  }
+
+  uint64_t GetId()
+  {
+    return mId;
+  }
+
+public:
+  bool mAllowSharingTextureHost;
+  uint64_t mId;
 };
 
 /**
@@ -87,12 +99,14 @@ public:
  * will use its TextureHost(s) and call Compositor::DrawQuad to do the actual
  * rendering.
  */
-class CompositableHost : public RefCounted<CompositableHost>
+class CompositableHost
 {
-public:
-  CompositableHost(const TextureInfo& aTextureInfo);
-
+protected:
   virtual ~CompositableHost();
+
+public:
+  NS_INLINE_DECL_REFCOUNTING(CompositableHost)
+  explicit CompositableHost(const TextureInfo& aTextureInfo);
 
   static TemporaryRef<CompositableHost> Create(const TextureInfo& aTextureInfo);
 
@@ -117,26 +131,20 @@ public:
                          const gfx::Matrix4x4& aTransform,
                          const gfx::Filter& aFilter,
                          const gfx::Rect& aClipRect,
-                         const nsIntRegion* aVisibleRegion = nullptr,
-                         TiledLayerProperties* aLayerProperties = nullptr) = 0;
-
-  /**
-   * @return true if we should schedule a composition.
-   */
-  virtual bool Update(const SurfaceDescriptor& aImage,
-                      SurfaceDescriptor* aResult = nullptr);
+                         const nsIntRegion* aVisibleRegion = nullptr) = 0;
 
   /**
    * Update the content host.
    * aUpdated is the region which should be updated
    * aUpdatedRegionBack is the region in aNewBackResult which has been updated
    */
-  virtual void UpdateThebes(const ThebesBufferData& aData,
+  virtual bool UpdateThebes(const ThebesBufferData& aData,
                             const nsIntRegion& aUpdated,
                             const nsIntRegion& aOldValidRegionBack,
                             nsIntRegion* aUpdatedRegionBack)
   {
-    MOZ_ASSERT(false, "should be implemented or not used");
+    NS_ERROR("should be implemented or not used");
+    return false;
   }
 
   /**
@@ -162,29 +170,6 @@ public:
   }
 
   /**
-   * Ensure that a suitable texture host exists in this compositable. The
-   * compositable host may or may not create a new texture host. If a texture
-   * host is replaced, then the compositable is responsible for enusring it is
-   * destroyed correctly (without leaking resources).
-   * aTextureId - identifies the texture within the compositable, how the
-   * compositable chooses to use this is between the compositable client and
-   * host and will vary between types of compositable.
-   * aSurface - the new or existing texture host should support surface
-   * descriptors of the same type and, if necessary, this specific surface
-   * descriptor. Whether it is necessary or not depends on the protocol between
-   * the compositable client and host.
-   * aAllocator - the allocator used to allocate and de-allocate resources.
-   * aTextureInfo - contains flags for the texture.
-   */
-  virtual void EnsureDeprecatedTextureHost(TextureIdentifier aTextureId,
-                                 const SurfaceDescriptor& aSurface,
-                                 ISurfaceAllocator* aAllocator,
-                                 const TextureInfo& aTextureInfo)
-  {
-    MOZ_ASSERT(false, "should be implemented or not used");
-  }
-
-  /**
    * Ensure that a suitable texture host exists in this compsitable.
    *
    * Only used with ContentHostIncremental.
@@ -193,14 +178,13 @@ public:
    * don't have a single surface for the texture contents, and we
    * need to allocate our own one to be updated later.
    */
-  virtual void EnsureDeprecatedTextureHostIncremental(ISurfaceAllocator* aAllocator,
-                                            const TextureInfo& aTextureInfo,
-                                            const nsIntRect& aBufferRect)
+  virtual bool CreatedIncrementalTexture(ISurfaceAllocator* aAllocator,
+                                         const TextureInfo& aTextureInfo,
+                                         const nsIntRect& aBufferRect)
   {
-    MOZ_ASSERT(false, "should be implemented or not used");
+    NS_ERROR("should be implemented or not used");
+    return false;
   }
-
-  virtual DeprecatedTextureHost* GetDeprecatedTextureHost() { return nullptr; }
 
   /**
    * Returns the front buffer.
@@ -260,13 +244,12 @@ public:
   // detached in any case. if aLayer is null, then we will only detach if we are
   // not async.
   // Only force detach if the IPDL tree is being shutdown.
-  void Detach(Layer* aLayer = nullptr, AttachFlags aFlags = NO_FLAGS)
+  virtual void Detach(Layer* aLayer = nullptr, AttachFlags aFlags = NO_FLAGS)
   {
     if (!mKeepAttached ||
         aLayer == mLayer ||
         aFlags & FORCE_DETACH) {
       SetLayer(nullptr);
-      SetCompositor(nullptr);
       mAttached = false;
       mKeepAttached = false;
       if (mBackendData) {
@@ -277,86 +260,88 @@ public:
   bool IsAttached() { return mAttached; }
 
 #ifdef MOZ_DUMP_PAINTING
-  virtual void Dump(FILE* aFile=nullptr,
+  virtual void Dump(std::stringstream& aStream,
                     const char* aPrefix="",
                     bool aDumpHtml=false) { }
-  static void DumpDeprecatedTextureHost(FILE* aFile, DeprecatedTextureHost* aTexture);
-  static void DumpTextureHost(FILE* aFile, TextureHost* aTexture);
+  static void DumpTextureHost(std::stringstream& aStream, TextureHost* aTexture);
 
   virtual TemporaryRef<gfx::DataSourceSurface> GetAsSurface() { return nullptr; }
 #endif
 
-  virtual void PrintInfo(nsACString& aTo, const char* aPrefix) { }
+  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix) = 0;
 
   virtual void UseTextureHost(TextureHost* aTexture);
+  virtual void UseComponentAlphaTextures(TextureHost* aTextureOnBlack,
+                                         TextureHost* aTextureOnWhite);
+  virtual void UseOverlaySource(OverlaySource aOverlay) { }
+
+  virtual void RemoveTextureHost(TextureHost* aTexture);
+
+  // Called every time this is composited
+  void BumpFlashCounter() {
+    mFlashCounter = mFlashCounter >= DIAGNOSTIC_FLASH_COUNTER_MAX
+                  ? DIAGNOSTIC_FLASH_COUNTER_MAX : mFlashCounter + 1;
+  }
+
+  static PCompositableParent*
+  CreateIPDLActor(CompositableParentManager* mgr,
+                  const TextureInfo& textureInfo,
+                  uint64_t asyncID);
+
+  static bool DestroyIPDLActor(PCompositableParent* actor);
+
+  static CompositableHost* FromIPDLActor(PCompositableParent* actor);
+
+  uint64_t GetCompositorID() const { return mCompositorID; }
+
+  uint64_t GetAsyncID() const { return mAsyncID; }
+
+  void SetCompositorID(uint64_t aID) { mCompositorID = aID; }
+
+  void SetAsyncID(uint64_t aID) { mAsyncID = aID; }
+
+  virtual bool Lock() { return false; }
+
+  virtual void Unlock() { }
+
+  virtual TemporaryRef<TexturedEffect> GenEffect(const gfx::Filter& aFilter) {
+    return nullptr;
+  }
 
 protected:
   TextureInfo mTextureInfo;
-  Compositor* mCompositor;
+  uint64_t mAsyncID;
+  uint64_t mCompositorID;
+  RefPtr<Compositor> mCompositor;
   Layer* mLayer;
   RefPtr<CompositableBackendSpecificData> mBackendData;
+  uint32_t mFlashCounter; // used when the pref "layers.flash-borders" is true.
   bool mAttached;
   bool mKeepAttached;
 };
 
-class CompositableParentManager;
-
-/**
- * IPDL actor used by CompositableHost to match with its corresponding
- * CompositableClient on the content side.
- *
- * CompositableParent is owned by the IPDL system. It's deletion is triggered
- * by either the CompositableChild's deletion, or by the IPDL communication
- * goind down.
- */
-class CompositableParent : public PCompositableParent
+class AutoLockCompositableHost MOZ_FINAL
 {
 public:
-  CompositableParent(CompositableParentManager* aMgr,
-                     const TextureInfo& aTextureInfo,
-                     uint64_t aID = 0);
-  ~CompositableParent();
-
-  virtual void ActorDestroy(ActorDestroyReason why) MOZ_OVERRIDE;
-
-  CompositableHost* GetCompositableHost() const
+  explicit AutoLockCompositableHost(CompositableHost* aHost)
+    : mHost(aHost)
   {
-    return mHost;
+    mSucceeded = mHost->Lock();
   }
 
-  void SetCompositableHost(CompositableHost* aHost)
+  ~AutoLockCompositableHost()
   {
-    mHost = aHost;
+    if (mSucceeded) {
+      mHost->Unlock();
+    }
   }
 
-  CompositableType GetType() const
-  {
-    return mType;
-  }
-
-  CompositableParentManager* GetCompositableManager() const
-  {
-    return mManager;
-  }
-
-  void SetCompositorID(uint64_t aCompositorID)
-  {
-    mCompositorID = aCompositorID;
-  }
-
-  uint64_t GetCompositorID() const
-  {
-    return mCompositorID;
-  }
+  bool Failed() const { return !mSucceeded; }
 
 private:
   RefPtr<CompositableHost> mHost;
-  CompositableParentManager* mManager;
-  CompositableType mType;
-  uint64_t mID;
-  uint64_t mCompositorID;
+  bool mSucceeded;
 };
-
 
 /**
  * Global CompositableMap, to use in the compositor thread only.
@@ -388,8 +373,8 @@ private:
 namespace CompositableMap {
   void Create();
   void Destroy();
-  CompositableParent* Get(uint64_t aID);
-  void Set(uint64_t aID, CompositableParent* aParent);
+  PCompositableParent* Get(uint64_t aID);
+  void Set(uint64_t aID, PCompositableParent* aParent);
   void Erase(uint64_t aID);
   void Clear();
 } // CompositableMap

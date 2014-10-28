@@ -5,7 +5,6 @@
 var PackagedTestHelper = (function PackagedTestHelper() {
   "use strict";
 
-  var launchableValue;
   var steps;
   var index = -1;
   var gSJSPath = "tests/dom/apps/tests/file_packaged_app.sjs";
@@ -36,8 +35,8 @@ var PackagedTestHelper = (function PackagedTestHelper() {
   }
 
   function finish() {
-    SpecialPowers.setAllAppsLaunchable(launchableValue);
     SpecialPowers.removePermission("webapps-manage", document);
+    SpecialPowers.removePermission("browser", document);
     SimpleTest.finish();
   }
 
@@ -58,13 +57,20 @@ var PackagedTestHelper = (function PackagedTestHelper() {
     finish();
   }
 
-  function setAppVersion(aVersion, aCb, aDontUpdatePackage) {
+  function setAppVersion(aVersion, aCb, aDontUpdatePackage, aAllowCancel, aRole) {
     var xhr = new XMLHttpRequest();
     var dontUpdate = "";
+    var allowCancel = "";
     if (aDontUpdatePackage) {
       dontUpdate = "&dontUpdatePackage=1";
     }
-    var url = gSJS + "?setVersion=" + aVersion + dontUpdate;
+    if (aAllowCancel) {
+      allowCancel= "&allowCancel=1";
+    }
+    var url = gSJS + "?setVersion=" + aVersion + dontUpdate + allowCancel;
+    if (aRole) {
+      url += "&role=" + aRole;
+    }
     xhr.addEventListener("load", function() {
                            is(xhr.responseText, "OK", "setAppVersion OK");
                            aCb();
@@ -99,6 +105,7 @@ var PackagedTestHelper = (function PackagedTestHelper() {
       var aApp = evt.application;
       aApp.ondownloaderror = function(evt) {
         var error = aApp.downloadError.name;
+        ok(true, "Got downloaderror " + error);
         if (error == aExpectedError) {
           ok(true, "Got expected " + aExpectedError);
           var expected = {
@@ -151,7 +158,7 @@ var PackagedTestHelper = (function PackagedTestHelper() {
       is(aApp.manifest.size, aExpectedApp.size, "Check size");
     }
     if (aApp.manifest) {
-      is(aApp.manifest.launch_path, gSJSPath, "Check launch path");
+      is(aApp.manifest.launch_path, aExpectedApp.launch_path || gSJSPath, "Check launch path");
     }
     if (aExpectedApp.manifestURL) {
       is(aApp.manifestURL, aExpectedApp.manifestURL, "Check manifestURL");
@@ -179,6 +186,9 @@ var PackagedTestHelper = (function PackagedTestHelper() {
     if (typeof aExpectedApp.readyToApplyDownload !== "undefined") {
       is(aApp.readyToApplyDownload, aExpectedApp.readyToApplyDownload,
          "Check readyToApplyDownload");
+    }
+    if (typeof aExpectedApp.origin !== "undefined") {
+      is(aApp.origin, aExpectedApp.origin, "Check origin");
     }
     if (aLaunchable) {
       if (aUninstall) {
@@ -218,12 +228,12 @@ var PackagedTestHelper = (function PackagedTestHelper() {
     checkAppState: checkAppState,
     checkAppDownloadError: checkAppDownloadError,
     get gSJSPath() { return gSJSPath; },
+    set gSJSPath(aValue) { gSJSPath = aValue },
     get gSJS() { return gSJS; },
     get gAppName() { return gAppName;},
     get gApp() { return gApp; },
     set gApp(aValue) { gApp = aValue; },
-    gInstallOrigin: gInstallOrigin,
-    launchableValue: launchableValue
+    gInstallOrigin: gInstallOrigin
   };
 
 })();

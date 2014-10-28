@@ -64,7 +64,10 @@ ClearImageHashSet(nsPtrHashKey<ImageLoader::Image>* aKey, void* aClosure)
 void
 ImageLoader::DropDocumentReference()
 {
-  ClearFrames();
+  // It's okay if GetPresContext returns null here (due to the presshell pointer
+  // on the document being null) as that means the presshell has already
+  // been destroyed, and it also calls ClearFrames when it is destroyed.
+  ClearFrames(GetPresContext());
   mImages.EnumerateEntries(&ClearImageHashSet, mDocument);
   mDocument = nullptr;
 }
@@ -232,9 +235,33 @@ ImageLoader::SetAnimationMode(uint16_t aMode)
   mRequestToFrameMap.EnumerateRead(SetAnimationModeEnumerator, &aMode);
 }
 
-void
-ImageLoader::ClearFrames()
+/* static */ PLDHashOperator
+ImageLoader::DeregisterRequestEnumerator(nsISupports* aKey, FrameSet* aValue,
+                                         void* aClosure)
 {
+  imgIRequest* request = static_cast<imgIRequest*>(aKey);
+
+#ifdef DEBUG
+  {
+    nsCOMPtr<imgIRequest> debugRequest = do_QueryInterface(aKey);
+    NS_ASSERTION(debugRequest == request, "This is bad");
+  }
+#endif
+
+  nsPresContext* presContext = static_cast<nsPresContext*>(aClosure);
+  if (presContext) {
+    nsLayoutUtils::DeregisterImageRequest(presContext,
+                                          request,
+                                          nullptr);
+  }
+
+  return PL_DHASH_NEXT;
+}
+
+void
+ImageLoader::ClearFrames(nsPresContext* aPresContext)
+{
+  mRequestToFrameMap.EnumerateRead(DeregisterRequestEnumerator, aPresContext);
   mRequestToFrameMap.Clear();
   mFrameToRequestMap.Clear();
 }
@@ -259,6 +286,7 @@ ImageLoader::LoadImage(nsIURI* aURI, nsIPrincipal* aOriginPrincipal,
   nsRefPtr<imgRequestProxy> request;
   nsContentUtils::LoadImage(aURI, mDocument, aOriginPrincipal, aReferrer,
                             nullptr, nsIRequest::LOAD_NORMAL,
+                            NS_LITERAL_STRING("css"),
                             getter_AddRefs(request));
 
   if (!request) {
@@ -322,7 +350,6 @@ void InvalidateImagesCallback(nsIFrame* aFrame,
   }
 
   aItem->Invalidate();
-  aFrame->SchedulePaint();
 
   // Update ancestor rendering observers (-moz-element etc)
   nsIFrame *f = aFrame;
@@ -350,6 +377,7 @@ ImageLoader::DoRedraw(FrameSet* aFrameSet)
         frame->InvalidateFrame();
       } else {
         FrameLayerBuilder::IterateRetainedDataFor(frame, InvalidateImagesCallback);
+        frame->SchedulePaint();
       }
     }
   }

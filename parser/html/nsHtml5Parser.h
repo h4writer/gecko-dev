@@ -25,9 +25,10 @@
 #include "nsHtml5StreamParser.h"
 #include "nsHtml5AtomTable.h"
 #include "nsWeakReference.h"
+#include "nsHtml5StreamListener.h"
 
-class nsHtml5Parser : public nsIParser,
-                      public nsSupportsWeakReference
+class nsHtml5Parser MOZ_FINAL : public nsIParser,
+                                public nsSupportsWeakReference
 {
   public:
     NS_DECL_AND_IMPL_ZEROING_OPERATOR_NEW
@@ -36,7 +37,6 @@ class nsHtml5Parser : public nsIParser,
     NS_DECL_CYCLE_COLLECTION_CLASS_AMBIGUOUS(nsHtml5Parser, nsIParser)
 
     nsHtml5Parser();
-    virtual ~nsHtml5Parser();
 
     /* Start nsIParser */
     /**
@@ -237,10 +237,12 @@ class nsHtml5Parser : public nsIParser,
 
     void InitializeDocWriteParserState(nsAHtml5TreeBuilderState* aState, int32_t aLine);
 
-    void DropStreamParser() {
-      if (mStreamParser) {
-        mStreamParser->DropTimer();
-        mStreamParser = nullptr;
+    void DropStreamParser()
+    {
+      if (GetStreamParser()) {
+        GetStreamParser()->DropTimer();
+        mStreamListener->DropDelegate();
+        mStreamListener = nullptr;
       }
     }
     
@@ -248,8 +250,12 @@ class nsHtml5Parser : public nsIParser,
     
     void ContinueAfterFailedCharsetSwitch();
 
-    nsHtml5StreamParser* GetStreamParser() {
-      return mStreamParser;
+    nsHtml5StreamParser* GetStreamParser()
+    {
+      if (!mStreamListener) {
+        return nullptr;
+      }
+      return mStreamListener->GetDelegate();
     }
 
     /**
@@ -258,6 +264,8 @@ class nsHtml5Parser : public nsIParser,
     void ParseUntilBlocked();
 
   private:
+
+    virtual ~nsHtml5Parser();
 
     // State variables
 
@@ -332,9 +340,9 @@ class nsHtml5Parser : public nsIParser,
     nsAutoPtr<nsHtml5Tokenizer>   mDocWriteSpeculativeTokenizer;
 
     /**
-     * The stream parser.
+     * The stream listener holding the stream parser.
      */
-    nsRefPtr<nsHtml5StreamParser>       mStreamParser;
+    nsRefPtr<nsHtml5StreamListener>     mStreamListener;
 
     /**
      *

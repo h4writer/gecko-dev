@@ -6,15 +6,13 @@
 
 MOCHITEST_MANIFESTS += ['tests/mochitest.ini']
 
-XPIDL_MODULE = 'dom_speakermanager'
-
 EXPORTS += [
     'SpeakerManager.h',
     'SpeakerManagerService.h',
     'SpeakerManagerServiceChild.h',
 ]
 
-SOURCES += [
+UNIFIED_SOURCES += [
     'SpeakerManager.cpp',
     'SpeakerManagerService.cpp',
     'SpeakerManagerServiceChild.cpp',
@@ -24,4 +22,4 @@ FAIL_ON_WARNINGS = True
 
 include('/ipc/chromium/chromium-config.mozbuild')
 
-FINAL_LIBRARY = 'gklayout'
+FINAL_LIBRARY = 'xul'

@@ -11,13 +11,13 @@
 .devtools-monospace {
 %ifdef XP_MACOSX
   font-family: Menlo, monospace;
-%endif
-%ifdef XP_LINUX
-  font-family: monospace;
-  font-size: 80%;
-%endif
-%ifdef XP_WIN
+%elifdef XP_WIN
   font-family: Consolas, monospace;
+%else
+  font-family: monospace;
+%endif
+%if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_QT)
+  font-size: 80%;
 %endif
 }
 
@@ -26,23 +26,23 @@
   -moz-appearance: none;
   background-image: none;
   background-color: transparent;
-  border: 1px solid black;
-  border-width: 1px 0 0 0;
+  border: 0;
+  border-bottom: 1px solid rgba(118, 121, 125, .5);
   min-height: 3px;
   height: 3px;
-  margin-bottom: -3px;
+  margin-top: -3px;
   position: relative;
 }
 
 .devtools-side-splitter {
   -moz-appearance: none;
   background-image: none;
-  border: 0;
-  -moz-border-start: 1px solid black;
-  min-width: 0;
-  width: 3px;
   background-color: transparent;
-  -moz-margin-end: -3px;
+  border: 0;
+  -moz-border-end: 1px solid rgba(118, 121, 125, .5);
+  min-width: 3px;
+  width: 3px;
+  -moz-margin-start: -3px;
   position: relative;
   cursor: e-resize;
 }
@@ -56,13 +56,11 @@
 
 .devtools-autocomplete-popup {
   -moz-appearance: none !important;
-  border: 1px solid hsl(210,11%,10%);
   box-shadow: 0 1px 0 hsla(209,29%,72%,.25) inset;
   background-color: transparent;
-  background-image: linear-gradient(to bottom, hsla(209,18%,18%,0.9), hsl(210,11%,16%));
   border-radius: 3px;
   overflow-x: hidden;
-%ifdef XP_LINUX
+%if defined(MOZ_WIDGET_GTK) || defined(MOZ_WIDGET_QT)
   max-height: 32rem;
 %else
   max-height: 40rem;
@@ -107,15 +105,27 @@
 }
 
 .devtools-autocomplete-listbox > richlistitem > .autocomplete-count {
-  text-align: right;
+  text-align: end;
 }
 
-/* Rest of the light theme */
+/* Rest of the dark and light theme */
+
+.devtools-autocomplete-popup,
+.theme-dark .CodeMirror-hints,
+.theme-dark .CodeMirror-Tern-tooltip {
+  border: 1px solid hsl(210,11%,10%);
+  background-image: linear-gradient(to bottom, hsla(209,18%,18%,0.9), hsl(210,11%,16%));
+}
+
+.devtools-autocomplete-popup.light-theme,
+.light-theme .CodeMirror-hints,
+.light-theme .CodeMirror-Tern-tooltip {
+  border: 1px solid hsl(210,24%,90%);
+  background-image: linear-gradient(to bottom, hsla(209,18%,100%,0.9), hsl(210,24%,95%));
+}
 
 .devtools-autocomplete-popup.light-theme {
-  border: 1px solid hsl(210,24%,90%);
   box-shadow: 0 1px 0 hsla(209,29%,90%,.25) inset;
-  background-image: linear-gradient(to bottom, hsla(209,18%,100%,0.9), hsl(210,24%,95%));
 }
 
 .devtools-autocomplete-listbox.light-theme > richlistitem[selected],
@@ -130,34 +140,6 @@
 
 .devtools-autocomplete-listbox.light-theme > richlistitem > label {
   color: #666;
-}
-
-/* Responsive container */
-
-.devtools-responsive-container {
-  -moz-box-orient: horizontal;
-}
-
-@media (max-width: 700px) {
-  .devtools-responsive-container {
-    -moz-box-orient: vertical;
-  }
-
-  .devtools-responsive-container > .devtools-side-splitter {
-    border: 0;
-    margin: 0;
-    border-top: 1px solid black;
-    min-height: 3px;
-    height: 3px;
-    margin-bottom: -3px;
-    /* In some edge case the cursor is not changed to n-resize */
-    cursor: n-resize;
-  }
-
-  .devtools-responsive-container > .devtools-sidebar-tabs {
-    min-height: 35vh;
-    max-height: 75vh;
-  }
 }
 
 /* Tooltip widget (see browser/devtools/shared/widgets/Tooltip.js) */
@@ -176,11 +158,28 @@
 }
 
 .devtools-tooltip[clamped-dimensions] {
+  min-height: 100px;
   max-height: 400px;
+  min-width: 100px;
   max-width: 400px;
 }
-.devtools-tooltip[clamped-dimensions] .panel-arrowcontent {
+.devtools-tooltip[clamped-dimensions-no-min-height] {
+  min-height: 0;
+  max-height: 400px;
+  min-width: 100px;
+  max-width: 400px;
+}
+.devtools-tooltip[clamped-dimensions-no-max-or-min-height] {
+  min-width: 400px;
+  max-width: 400px;
+}
+.devtools-tooltip[clamped-dimensions] .panel-arrowcontent,
+.devtools-tooltip[clamped-dimensions-no-min-height] .panel-arrowcontent,
+.devtools-tooltip[clamped-dimensions-no-max-or-min-height] .panel-arrowcontent {
   overflow: hidden;
+}
+.devtools-tooltip[wide] {
+  max-width: 600px;
 }
 
 /* Tooltip: Simple Text */
@@ -200,10 +199,27 @@
   margin-bottom: -4px;
 }
 
+/* Tooltip: Alert Icon */
+
+.devtools-tooltip-alert-icon {
+  width: 32px;
+  height: 32px;
+  margin: 6px;
+  -moz-margin-end: 20px;
+}
+
+.devtools-tooltip-alert-icon {
+  list-style-image: url("chrome://global/skin/icons/warning-32.png");
+}
+
 /* Tooltip: Variables View */
 
 .devtools-tooltip-variables-view-box {
   margin: -4px; /* Compensate for the .panel-arrowcontent padding. */
+}
+
+.devtools-tooltip-variables-view-box .variable-or-property > .title {
+  -moz-padding-end: 6px;
 }
 
 /* Tooltip: Tiles */
@@ -219,4 +235,15 @@
 .devtools-tooltip-iframe {
   border: none;
   background: transparent;
+}
+
+/* Eyedropper Widget */
+
+.devtools-eyedropper-panel {
+  pointer-events: none;
+  -moz-appearance: none;
+  width: 156px;
+  height: 120px;
+  background-color: transparent;
+  border: none;
 }

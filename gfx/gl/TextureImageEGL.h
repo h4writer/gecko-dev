@@ -11,7 +11,7 @@
 namespace mozilla {
 namespace gl {
 
-class TextureImageEGL
+class TextureImageEGL MOZ_FINAL
     : public TextureImage
 {
 public:
@@ -22,17 +22,17 @@ public:
                     GLContext* aContext,
                     Flags aFlags = TextureImage::NoFlags,
                     TextureState aTextureState = Created,
-                    TextureImage::ImageFormat aImageFormat = gfxImageFormatUnknown);
+                    TextureImage::ImageFormat aImageFormat = gfxImageFormat::Unknown);
 
     virtual ~TextureImageEGL();
 
     virtual void GetUpdateRegion(nsIntRegion& aForRegion);
 
-    virtual gfxASurface* BeginUpdate(nsIntRegion& aRegion);
+    virtual gfx::DrawTarget* BeginUpdate(nsIntRegion& aRegion);
 
     virtual void EndUpdate();
 
-    virtual bool DirectUpdate(gfxASurface* aSurf, const nsIntRegion& aRegion, const nsIntPoint& aFrom /* = nsIntPoint(0, 0) */);
+    virtual bool DirectUpdate(gfx::DataSourceSurface* aSurf, const nsIntRegion& aRegion, const gfx::IntPoint& aFrom = gfx::IntPoint(0,0));
 
     virtual void BindTexture(GLenum aTextureUnit);
 
@@ -45,9 +45,9 @@ public:
         return mTexture;
     };
 
-    virtual bool InUpdate() const { return !!mUpdateSurface; }
+    virtual bool InUpdate() const { return !!mUpdateDrawTarget; }
 
-    virtual void Resize(const nsIntSize& aSize);
+    virtual void Resize(const gfx::IntSize& aSize);
 
     bool BindTexImage();
 
@@ -66,8 +66,8 @@ protected:
     GLContext* mGLContext;
 
     nsIntRect mUpdateRect;
-    ImageFormat mUpdateFormat;
-    nsRefPtr<gfxASurface> mUpdateSurface;
+    gfx::SurfaceFormat mUpdateFormat;
+    RefPtr<gfx::DrawTarget> mUpdateDrawTarget;
     EGLImage mEGLImage;
     GLuint mTexture;
     EGLSurface mSurface;
@@ -79,7 +79,7 @@ protected:
 
 already_AddRefed<TextureImage>
 CreateTextureImageEGL(GLContext *gl,
-                      const nsIntSize& aSize,
+                      const gfx::IntSize& aSize,
                       TextureImage::ContentType aContentType,
                       GLenum aWrapMode,
                       TextureImage::Flags aFlags,

@@ -14,14 +14,9 @@
 #include "base/logging.h"
 #include "base/platform_thread.h"
 #include "base/string_util.h"
+#include "mozilla/UniquePtr.h"
 
 namespace base {
-
-namespace {
-// Paranoia. Semaphores and shared memory segments should live in different
-// namespaces, but who knows what's out there.
-const char kSemaphoreSuffix[] = "-sem";
-}
 
 SharedMemory::SharedMemory()
     : mapped_file_(-1),
@@ -148,7 +143,7 @@ class ScopedFILEClose {
   }
 };
 
-typedef scoped_ptr_malloc<FILE, ScopedFILEClose> ScopedFILE;
+typedef mozilla::UniquePtr<FILE, ScopedFILEClose> ScopedFILE;
 
 }
 

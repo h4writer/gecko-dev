@@ -7,11 +7,16 @@
 #ifndef NS_CSS_RENDERING_BORDERS_H
 #define NS_CSS_RENDERING_BORDERS_H
 
+#include "gfxRect.h"
+#include "mozilla/gfx/2D.h"
+#include "mozilla/RefPtr.h"
 #include "nsColor.h"
+#include "nsCOMPtr.h"
+#include "nsStyleConsts.h"
 
 class gfxContext;
-class gfxPattern;
 struct gfxRGBA;
+struct nsBorderColors;
 
 namespace mozilla {
 namespace gfx {
@@ -79,7 +84,6 @@ struct nsCSSBorderRenderer {
                       gfxCornerSizes& aBorderRadii,
                       const nscolor* aBorderColors,
                       nsBorderColors* const* aCompositeColors,
-                      int aSkipSides,
                       nscolor aBackgroundColor);
 
   gfxCornerSizes mBorderCornerDimensions;
@@ -105,8 +109,7 @@ struct nsCSSBorderRenderer {
   // core app units per pixel
   int32_t mAUPP;
 
-  // misc -- which sides to skip, the background color
-  int mSkipSides;
+  // the background color
   nscolor mBackgroundColor;
 
   // calculated values
@@ -175,7 +178,7 @@ struct nsCSSBorderRenderer {
 
   // draw the given dashed side
   void DrawDashedSide (mozilla::css::Side aSide);
-  
+
   // Setup the stroke style for a given side
   void SetupStrokeStyle(mozilla::css::Side aSize);
 
@@ -186,12 +189,6 @@ struct nsCSSBorderRenderer {
   // borders because they can be considered 'solid' borders of 0 width and
   // with no color effect.
   bool AllBordersSolid(bool *aHasCompositeColors);
-
-  // Create a gradient pattern that will handle the color transition for a
-  // corner.
-  already_AddRefed<gfxPattern> CreateCornerGradient(mozilla::css::Corner aCorner,
-                                                    const gfxRGBA &aFirstColor,
-                                                    const gfxRGBA &aSecondColor);
 
   // Azure variant of CreateCornerGradient.
   mozilla::TemporaryRef<mozilla::gfx::GradientStops>
@@ -205,9 +202,6 @@ struct nsCSSBorderRenderer {
   // Draw any border which is solid on all sides and does not use
   // CompositeColors.
   void DrawNoCompositeColorSolidBorder();
-  // Draw any border which is solid on all sides and does not use
-  // CompositeColors. Using Azure.
-  void DrawNoCompositeColorSolidBorderAzure();
 
   // Draw a solid border that has no border radius (i.e. is rectangular) and
   // uses CompositeColors.
@@ -231,45 +225,44 @@ struct nsCSSBorderRenderer {
 };
 
 namespace mozilla {
-
 #ifdef DEBUG_NEW_BORDERS
 #include <stdarg.h>
 
-static inline void S(const gfxPoint& p) {
+static inline void PrintAsString(const gfxPoint& p) {
   fprintf (stderr, "[%f,%f]", p.x, p.y);
 }
 
-static inline void S(const gfxSize& s) {
+static inline void PrintAsString(const gfxSize& s) {
   fprintf (stderr, "[%f %f]", s.width, s.height);
 }
 
-static inline void S(const gfxRect& r) {
-  fprintf (stderr, "[%f %f %f %f]", r.pos.x, r.pos.y, r.size.width, r.size.height);
+static inline void PrintAsString(const gfxRect& r) {
+  fprintf (stderr, "[%f %f %f %f]", r.X(), r.Y(), r.Width(), r.Height());
 }
 
-static inline void S(const gfxFloat f) {
+static inline void PrintAsString(const gfxFloat f) {
   fprintf (stderr, "%f", f);
 }
 
-static inline void S(const char *s) {
+static inline void PrintAsString(const char *s) {
   fprintf (stderr, "%s", s);
 }
 
-static inline void SN(const char *s = nullptr) {
+static inline void PrintAsStringNewline(const char *s = nullptr) {
   if (s)
     fprintf (stderr, "%s", s);
   fprintf (stderr, "\n");
   fflush (stderr);
 }
 
-static inline void SF(const char *fmt, ...) {
+static inline void PrintAsFormatString(const char *fmt, ...) {
   va_list vl;
   va_start(vl, fmt);
   vfprintf (stderr, fmt, vl);
   va_end(vl);
 }
 
-static inline void SX(gfxContext *ctx) {
+static inline void PrintGfxContext(gfxContext *ctx) {
   gfxPoint p = ctx->CurrentPoint();
   fprintf (stderr, "p: %f %f\n", p.x, p.y);
   return;
@@ -280,14 +273,14 @@ static inline void SX(gfxContext *ctx) {
 
 
 #else
-static inline void S(const gfxPoint& p) {}
-static inline void S(const gfxSize& s) {}
-static inline void S(const gfxRect& r) {}
-static inline void S(const gfxFloat f) {}
-static inline void S(const char *s) {}
-static inline void SN(const char *s = nullptr) {}
-static inline void SF(const char *fmt, ...) {}
-static inline void SX(gfxContext *ctx) {}
+static inline void PrintAsString(const gfxPoint& p) {}
+static inline void PrintAsString(const gfxSize& s) {}
+static inline void PrintAsString(const gfxRect& r) {}
+static inline void PrintAsString(const gfxFloat f) {}
+static inline void PrintAsString(const char *s) {}
+static inline void PrintAsStringNewline(const char *s = nullptr) {}
+static inline void PrintAsFormatString(const char *fmt, ...) {}
+static inline void PrintGfxContext(gfxContext *ctx) {}
 #endif
 
 }

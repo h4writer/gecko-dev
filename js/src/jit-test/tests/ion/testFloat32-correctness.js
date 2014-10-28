@@ -1,4 +1,4 @@
-setJitCompilerOption("ion.usecount.trigger", 50);
+setJitCompilerOption("ion.warmup.trigger", 50);
 
 var f32 = new Float32Array(10);
 
@@ -88,6 +88,38 @@ function sqrt() {
     }
 }
 test(setupSqrt, sqrt);
+
+// MMinMax
+function setupMinMax() {
+    f32[0] = -0;
+    f32[1] = 0;
+    f32[2] = 1;
+    f32[3] = 4;
+    f32[4] = -1;
+    f32[5] = Infinity;
+    f32[6] = NaN;
+    f32[7] = 13.37;
+    f32[8] = -Infinity;
+    f32[9] = Math.pow(2,31) - 1;
+}
+function minMax() {
+    for(var i = 0; i < 9; ++i) {
+        for(var j = 0; j < 9; j++) {
+            var minf = Math.fround(Math.min(f32[i], f32[j]));
+            var mind = 1 / (1 / Math.min(f32[i], f32[j])); // force no float32 by chaining arith ops
+            assertFloat32(minf, true);
+            assertFloat32(mind, false);
+            assertEq( minf, Math.fround(mind) );
+
+            var maxf = Math.fround(Math.max(f32[i], f32[j]));
+            var maxd = 1 / (1 / Math.max(f32[i], f32[j])); // force no float32 by chaining arith ops
+            assertFloat32(maxf, true);
+            assertFloat32(maxd, false);
+            assertEq( maxf, Math.fround(maxd) );
+        }
+    }
+}
+test(setupMinMax, minMax);
 
 // MTruncateToInt32
 // The only way to get a MTruncateToInt32 with a Float32 input is to use Math.imul
@@ -208,7 +240,7 @@ function setupFloorDouble() {
 function testFloor() {
     for (var i = 0; i < 4; ++i) {
         var f = Math.floor(f32[i]);
-        assertFloat32(g, false); // f is an int32
+        assertFloat32(f, false); // f is an int32
 
         var g = Math.floor(-0 + f32[i]);
         assertFloat32(g, false);
@@ -229,3 +261,80 @@ function testFloorDouble() {
 }
 test(setupFloor, testFloor);
 test(setupFloorDouble, testFloorDouble);
+
+function setupRound() {
+    f32[0] = -5.5;
+    f32[1] = -0.6;
+    f32[2] = 1.5;
+    f32[3] = 1;
+}
+function setupRoundDouble() {
+    f32[4] = NaN;
+    f32[5] = -0.49;          // rounded to -0
+    f32[6] = Infinity;
+    f32[7] = -Infinity;
+    f32[8] = Math.pow(2,31); // too big to fit into a int
+    f32[9] = -0;
+}
+function testRound() {
+    for (var i = 0; i < 4; ++i) {
+        var r32 = Math.round(f32[i]);
+        assertFloat32(r32, false); // r32 is an int32
+
+        var r64 = Math.round(-0 + f32[i]);
+        assertFloat32(r64, false);
+
+        assertEq(r32, r64);
+    }
+}
+function testRoundDouble() {
+    for (var i = 4; i < 10; ++i) {
+        var r32 = Math.fround(Math.round(f32[i]));
+        assertFloat32(r32, true);
+
+        var r64 = Math.round(-0 + f32[i]);
+        assertFloat32(r64, false);
+
+        assertEq(r32, r64);
+    }
+}
+test(setupRound, testRound);
+test(setupRoundDouble, testRoundDouble);
+
+function setupCeil() {
+    f32[0] = -5.5;
+    f32[1] = -1.5;
+    f32[2] = 0;
+    f32[3] = 1.5;
+}
+function setupCeilDouble() {
+    f32[4] = NaN;
+    f32[5] = -0;
+    f32[6] = Infinity;
+    f32[7] = -Infinity;
+    f32[8] = Math.pow(2,31); // too big to fit into a int
+}
+function testCeil() {
+    for(var i = 0; i < 2; ++i) {
+        var f = Math.ceil(f32[i]);
+        assertFloat32(f, false);
+
+        var g = Math.ceil(-0 + f32[i]);
+        assertFloat32(g, false);
+
+        assertEq(f, g);
+    }
+}
+function testCeilDouble() {
+    for(var i = 4; i < 9; ++i) {
+        var f = Math.fround(Math.ceil(f32[i]));
+        assertFloat32(f, true);
+
+        var g = Math.ceil(-0 + f32[i]);
+        assertFloat32(g, false);
+
+        assertEq(f, g);
+    }
+}
+test(setupCeil, testCeil);
+test(setupCeilDouble, testCeilDouble);

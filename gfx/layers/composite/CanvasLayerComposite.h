@@ -28,10 +28,12 @@ class CanvasLayerComposite : public CanvasLayer,
                              public LayerComposite
 {
 public:
-  CanvasLayerComposite(LayerManagerComposite* aManager);
+  explicit CanvasLayerComposite(LayerManagerComposite* aManager);
 
+protected:
   virtual ~CanvasLayerComposite();
 
+public:
   // CanvasLayer impl
   virtual void Initialize(const Data& aData) MOZ_OVERRIDE
   {
@@ -40,17 +42,21 @@ public:
 
   virtual LayerRenderState GetRenderState() MOZ_OVERRIDE;
 
-  virtual void SetCompositableHost(CompositableHost* aHost) MOZ_OVERRIDE;
+  virtual bool SetCompositableHost(CompositableHost* aHost) MOZ_OVERRIDE;
 
   virtual void Disconnect() MOZ_OVERRIDE
   {
     Destroy();
   }
 
+  virtual void SetLayerManager(LayerManagerComposite* aManager) MOZ_OVERRIDE;
+
   virtual Layer* GetLayer() MOZ_OVERRIDE;
   virtual void RenderLayer(const nsIntRect& aClipRect) MOZ_OVERRIDE;
 
   virtual void CleanupResources() MOZ_OVERRIDE;
+
+  virtual void GenEffectChain(EffectChain& aEffect) MOZ_OVERRIDE;
 
   CompositableHost* GetCompositableHost() MOZ_OVERRIDE;
 
@@ -61,7 +67,10 @@ public:
   virtual const char* Name() const MOZ_OVERRIDE { return "CanvasLayerComposite"; }
 
 protected:
-  virtual nsACString& PrintInfo(nsACString& aTo, const char* aPrefix) MOZ_OVERRIDE;
+  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix) MOZ_OVERRIDE;
+
+private:
+  gfx::Filter GetEffectFilter();
 
 private:
   RefPtr<CompositableHost> mImageHost;

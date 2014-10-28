@@ -55,23 +55,43 @@ function openWindowAndWaitForInit(callback) {
 function test() {
   waitForExplicitFinish();
 
-  Services.prefs.setBoolPref("social.allowMultipleWorkers", true);
   let toolbar = document.getElementById("nav-bar");
   let currentsetAtStart = toolbar.currentSet;
-  runSocialTestWithProvider(manifest, function () {
+  runSocialTestWithProvider(manifest, function (finishcb) {
     runSocialTests(tests, undefined, undefined, function () {
       Services.prefs.clearUserPref("social.remote-install.enabled");
       // just in case the tests failed, clear these here as well
-      Services.prefs.clearUserPref("social.allowMultipleWorkers");
       Services.prefs.clearUserPref("social.whitelist");
       ok(CustomizableUI.inDefaultState, "Should be in the default state when we finish");
       CustomizableUI.reset();
-      finish();
+      finishcb();
     });
   });
 }
 
 var tests = {
+  testButtonDisabledOnActivate: function(next) {
+    // starting on about:blank page, share should be visible but disabled when
+    // adding provider
+    is(gBrowser.selectedTab.linkedBrowser.currentURI.spec, "about:blank");
+    SocialService.addProvider(manifest2, function(provider) {
+      is(provider.origin, manifest2.origin, "provider is installed");
+      let id = SocialMarks._toolbarHelper.idFromOrigin(manifest2.origin);
+      let widget = CustomizableUI.getWidget(id).forWindow(window)
+      ok(widget.node, "button added to widget set");
+
+      // bypass widget go directly to dom, check attribute states
+      let button = document.getElementById(id);
+      is(button.disabled, true, "mark button is disabled");
+      // verify the attribute for proper css
+      is(button.getAttribute("disabled"), "true", "mark button attribute is disabled");
+      // button should be visible
+      is(button.hidden, false, "mark button is visible");
+
+      checkSocialUI(window);
+      SocialService.disableProvider(manifest2.origin, next);
+    });
+  },
   testNoButtonOnEnable: function(next) {
     // we expect the addon install dialog to appear, we need to accept the
     // install from the dialog.
@@ -87,7 +107,7 @@ var tests = {
       let doc = tab.linkedBrowser.contentDocument;
       Social.installProvider(doc, manifest3, function(addonManifest) {
         // enable the provider so we know the button would have appeared
-        SocialService.addBuiltinProvider(manifest3.origin, function(provider) {
+        SocialService.enableProvider(manifest3.origin, function(provider) {
           is(provider.origin, manifest3.origin, "provider is installed");
           let id = SocialMarks._toolbarHelper.idFromOrigin(provider.origin);
           let widget = CustomizableUI.getWidget(id);
@@ -114,11 +134,20 @@ var tests = {
     addTab(activationURL, function(tab) {
       let doc = tab.linkedBrowser.contentDocument;
       Social.installProvider(doc, manifest2, function(addonManifest) {
-        SocialService.addBuiltinProvider(manifest2.origin, function(provider) {
+        SocialService.enableProvider(manifest2.origin, function(provider) {
           is(provider.origin, manifest2.origin, "provider is installed");
           let id = SocialMarks._toolbarHelper.idFromOrigin(manifest2.origin);
           let widget = CustomizableUI.getWidget(id).forWindow(window)
           ok(widget.node, "button added to widget set");
+
+          // bypass widget go directly to dom, check attribute states
+          let button = document.getElementById(id);
+          is(button.disabled, false, "mark button is disabled");
+          // verify the attribute for proper css
+          ok(!button.hasAttribute("disabled"), "mark button attribute is disabled");
+          // button should be visible
+          is(button.hidden, false, "mark button is visible");
+
           checkSocialUI(window);
           gBrowser.removeTab(tab);
           next();
@@ -251,11 +280,61 @@ var tests = {
     });
   },
 
+  testMarkMicrodata: function(next) {
+    let provider = Social._getProviderFromOrigin(manifest2.origin);
+    let port = provider.getWorkerPort();
+    let target, testTab;
+
+    // browser_share tests microdata on the full page, this is testing a
+    // specific target element.
+    let expecting = JSON.stringify({
+      "url": "https://example.com/browser/browser/base/content/test/social/microdata.html",
+      "microdata": {
+        "items": [{
+            "types": ["http://schema.org/UserComments"],
+            "properties": {
+              "url": ["https://example.com/browser/browser/base/content/test/social/microdata.html#c2"],
+              "creator": [{
+                  "types": ["http://schema.org/Person"],
+                  "properties": {
+                    "name": ["Charlotte"]
+                  }
+                }
+              ],
+              "commentTime": ["2013-08-29"]
+            }
+          }
+        ]
+      }
+    });
+
+    port.onmessage = function (e) {
+      let topic = e.data.topic;
+      switch (topic) {
+        case "got-share-data-message":
+          is(JSON.stringify(e.data.result), expecting, "microdata data ok");
+          gBrowser.removeTab(testTab);
+          port.close();
+          next();
+          break;
+      }
+    }
+    port.postMessage({topic: "test-init"});
+
+    let url = "https://example.com/browser/browser/base/content/test/social/microdata.html"
+    addTab(url, function(tab) {
+      testTab = tab;
+      let doc = tab.linkedBrowser.contentDocument;
+      target = doc.getElementById("test-comment");
+      SocialMarks.markLink(manifest2.origin, url, target);
+    });
+  },
+
   testButtonOnDisable: function(next) {
     // enable the provider now
     let provider = Social._getProviderFromOrigin(manifest2.origin);
     ok(provider, "provider is installed");
-    SocialService.removeProvider(manifest2.origin, function() {
+    SocialService.disableProvider(manifest2.origin, function() {
       let id = SocialMarks._toolbarHelper.idFromOrigin(manifest2.origin);
       waitForCondition(function() {
                         // getWidget now returns null since we've destroyed the widget
@@ -302,7 +381,7 @@ var tests = {
         let doc = tab.linkedBrowser.contentDocument;
         Social.installProvider(doc, manifest, function(addonManifest) {
           // enable the provider so we know the button would have appeared
-          SocialService.addBuiltinProvider(manifest.origin, function(provider) {
+          SocialService.enableProvider(manifest.origin, function(provider) {
             waitForCondition(function() { return CustomizableUI.getWidget(id) },
                              function() {
               gBrowser.removeTab(tab);

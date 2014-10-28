@@ -12,7 +12,7 @@
 
 class nsITimer;
 namespace JS {
-class Value;
+class CallArgs;
 }
 
 namespace mozilla { namespace net {
@@ -31,9 +31,10 @@ public:
 
   nsresult Init(const nsCString &aPACURI,
                 const nsCString &aPACScript);
+  void     SetThreadLocalIndex(uint32_t index);
   void     Shutdown();
   void     GC();
-  bool     MyIPAddress(JS::Value *vp);
+  bool     MyIPAddress(const JS::CallArgs &aArgs);
   bool     ResolveAddress(const nsCString &aHostName,
                           NetAddr *aNetAddr, unsigned int aTimeout);
 
@@ -44,7 +45,7 @@ public:
    *   result      = proxy-spec *( proxy-sep proxy-spec )
    *   proxy-spec  = direct-type | proxy-type LWS proxy-host [":" proxy-port]
    *   direct-type = "DIRECT"
-   *   proxy-type  = "PROXY" | "SOCKS" | "SOCKS4" | "SOCKS5"
+   *   proxy-type  = "PROXY" | "HTTP" | "HTTPS" | "SOCKS" | "SOCKS4" | "SOCKS5"
    *   proxy-sep   = ";" LWS
    *   proxy-host  = hostname | ipv4-address-literal
    *   proxy-port  = <any 16-bit unsigned integer>
@@ -76,14 +77,15 @@ public:
                           nsACString &result);
 
 private:
-  const static unsigned int kTimeout = 1000; // ms to allow for myipaddress dns queries
+  // allow 665ms for myipaddress dns queries. That's 95th percentile.
+  const static unsigned int kTimeout = 665;
 
   // used to compile the PAC file and setup the execution context
   nsresult SetupJS();
 
   bool SrcAddress(const NetAddr *remoteAddress, nsCString &localAddress);
   bool MyIPAddressTryHost(const nsCString &hostName, unsigned int timeout,
-                          JS::Value *vp);
+                          const JS::CallArgs &aArgs, bool* aResult);
 
   JSRuntimeWrapper *mJSRuntime;
   bool              mJSNeedsSetup;

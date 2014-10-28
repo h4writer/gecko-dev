@@ -15,28 +15,21 @@ const Cu = Components.utils;
 const Cc = Components.classes;
 const Ci = Components.interfaces;
 
+Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/IndexedDBHelper.jsm");
-Cu.import("resource://gre/modules/PhoneNumberUtils.jsm");
+XPCOMUtils.defineLazyModuleGetter(this, "PhoneNumberUtils",
+                                  "resource://gre/modules/PhoneNumberUtils.jsm");
 Cu.importGlobalProperties(["indexedDB"]);
 
-const DB_NAME = "contacts";
-const DB_VERSION = 18;
-const STORE_NAME = "contacts";
-const SAVED_GETALL_STORE_NAME = "getallcache";
+/* all exported symbols need to be bound to this on B2G - Bug 961777 */
+this.DB_NAME = "contacts";
+this.DB_VERSION = 20;
+this.STORE_NAME = "contacts";
+this.SAVED_GETALL_STORE_NAME = "getallcache";
 const CHUNK_SIZE = 20;
-const REVISION_STORE = "revision";
+this.REVISION_STORE = "revision";
 const REVISION_KEY = "revision";
-
-function optionalDate(aValue) {
-  if (aValue) {
-    if (!(aValue instanceof Date)) {
-      return new Date(aValue);
-    }
-    return aValue;
-  }
-  return undefined;
-}
 
 function exportContact(aRecord) {
   if (aRecord) {
@@ -178,11 +171,24 @@ ContactDB.prototype = {
       objectStore.createIndex("category", "properties.category", { multiEntry: true });
       objectStore.createIndex("email", "search.email", { multiEntry: true });
       objectStore.createIndex("telMatch", "search.parsedTel", {multiEntry: true});
+      objectStore.createIndex("phoneticFamilyName", "properties.phoneticFamilyName", { multiEntry: true });
+      objectStore.createIndex("phoneticGivenName", "properties.phoneticGivenName", { multiEntry: true });
+      objectStore.createIndex("phoneticFamilyNameLowerCase", "search.phoneticFamilyName", { multiEntry: true });
+      objectStore.createIndex("phoneticGivenNameLowerCase",  "search.phoneticGivenName",  { multiEntry: true });
       aDb.createObjectStore(SAVED_GETALL_STORE_NAME);
       aDb.createObjectStore(REVISION_STORE).put(0, REVISION_KEY);
     }
 
-    if (DEBUG) debug("upgrade schema from: " + aOldVersion + " to " + aNewVersion + " called!");
+    let valueUpgradeSteps = [];
+
+    function scheduleValueUpgrade(upgradeFunc) {
+      var length = valueUpgradeSteps.push(upgradeFunc);
+      if (DEBUG) debug("Scheduled a value upgrade function, index " + (length - 1));
+    }
+
+    // We always output this debug line because it's useful and the noise ratio
+    // very low.
+    debug("upgrade schema from: " + aOldVersion + " to " + aNewVersion + " called!");
     let db = aDb;
     let objectStore;
 
@@ -491,45 +497,34 @@ ContactDB.prototype = {
       function upgrade12to13() {
         if (DEBUG) debug("Add phone substring to the search index if appropriate for country");
         if (this.substringMatching) {
-          if (!objectStore) {
-            objectStore = aTransaction.objectStore(STORE_NAME);
-          }
-          objectStore.openCursor().onsuccess = function(event) {
-            let cursor = event.target.result;
-            if (cursor) {
-              if (cursor.value.properties.tel) {
-                cursor.value.search.parsedTel = cursor.value.search.parsedTel || [];
-                cursor.value.properties.tel.forEach(
-                  function(tel) {
-                    let normalized = PhoneNumberUtils.normalize(tel.value.toString());
-                    if (normalized) {
-                      if (this.substringMatching && normalized.length > this.substringMatching) {
-                        let sub = normalized.slice(-this.substringMatching);
-                        if (cursor.value.search.parsedTel.indexOf(sub) === -1) {
-                          if (DEBUG) debug("Adding substring index: " + tel + ", " + sub);
-                          cursor.value.search.parsedTel.push(sub);
-                        }
+          scheduleValueUpgrade(function upgradeValue12to13(value) {
+            if (value.properties.tel) {
+              value.search.parsedTel = value.search.parsedTel || [];
+              value.properties.tel.forEach(
+                function(tel) {
+                  let normalized = PhoneNumberUtils.normalize(tel.value.toString());
+                  if (normalized) {
+                    if (this.substringMatching && normalized.length > this.substringMatching) {
+                      let sub = normalized.slice(-this.substringMatching);
+                      if (value.search.parsedTel.indexOf(sub) === -1) {
+                        if (DEBUG) debug("Adding substring index: " + tel + ", " + sub);
+                        value.search.parsedTel.push(sub);
                       }
                     }
-                  }.bind(this)
-                );
-                cursor.update(cursor.value);
-              }
-              cursor.continue();
+                  }
+                }.bind(this)
+              );
+              return true;
             } else {
-              next();
+              return false;
             }
-          }.bind(this);
-        } else {
-          next();
+          }.bind(this));
         }
+        next();
       },
       function upgrade13to14() {
         if (DEBUG) debug("Cleaning up empty substring entries in telMatch index");
-        if (!objectStore) {
-          objectStore = aTransaction.objectStore(STORE_NAME);
-        }
-        objectStore.openCursor().onsuccess = function(event) {
+        scheduleValueUpgrade(function upgradeValue13to14(value) {
           function removeEmptyStrings(value) {
             if (value) {
               const oldLength = value.length;
@@ -542,92 +537,70 @@ ContactDB.prototype = {
             }
           }
 
-          let cursor = event.target.result;
-          if (cursor) {
-            let modified = removeEmptyStrings(cursor.value.search.parsedTel);
-            let modified2 = removeEmptyStrings(cursor.value.search.tel);
-            if (modified || modified2) {
-              cursor.update(cursor.value);
-            }
-            cursor.continue();
-          } else {
-            next();
-          }
-        };
+          let modified = removeEmptyStrings(value.search.parsedTel);
+          let modified2 = removeEmptyStrings(value.search.tel);
+          return (modified || modified2);
+        });
+
+        next();
       },
       function upgrade14to15() {
         if (DEBUG) debug("Fix array properties saved as scalars");
-        if (!objectStore) {
-          objectStore = aTransaction.objectStore(STORE_NAME);
-        }
         const ARRAY_PROPERTIES = ["photo", "adr", "email", "url", "impp", "tel",
                                  "name", "honorificPrefix", "givenName",
                                  "additionalName", "familyName", "honorificSuffix",
                                  "nickname", "category", "org", "jobTitle",
                                  "note", "key"];
         const PROPERTIES_WITH_TYPE = ["adr", "email", "url", "impp", "tel"];
-        objectStore.openCursor().onsuccess = function(event) {
-          let cursor = event.target.result;
+
+        scheduleValueUpgrade(function upgradeValue14to15(value) {
           let changed = false;
-          if (cursor) {
-            let props = cursor.value.properties;
-            for (let prop of ARRAY_PROPERTIES) {
-              if (props[prop]) {
-                if (!Array.isArray(props[prop])) {
-                  cursor.value.properties[prop] = [props[prop]];
-                  changed = true;
-                }
-                if (PROPERTIES_WITH_TYPE.indexOf(prop) !== -1) {
-                  let subprop = cursor.value.properties[prop];
-                  for (let i = 0; i < subprop.length; ++i) {
-                    if (!Array.isArray(subprop[i].type)) {
-                      cursor.value.properties[prop][i].type = [subprop[i].type];
-                      changed = true;
-                    }
+
+          let props = value.properties;
+          for (let prop of ARRAY_PROPERTIES) {
+            if (props[prop]) {
+              if (!Array.isArray(props[prop])) {
+                value.properties[prop] = [props[prop]];
+                changed = true;
+              }
+              if (PROPERTIES_WITH_TYPE.indexOf(prop) !== -1) {
+                let subprop = value.properties[prop];
+                for (let i = 0; i < subprop.length; ++i) {
+                  if (!Array.isArray(subprop[i].type)) {
+                    value.properties[prop][i].type = [subprop[i].type];
+                    changed = true;
                   }
                 }
               }
             }
-            if (changed) {
-              cursor.update(cursor.value);
-            }
-            cursor.continue();
-          } else {
-           next();
           }
-        };
+
+          return changed;
+        });
+
+        next();
       },
       function upgrade15to16() {
         if (DEBUG) debug("Fix Date properties");
-        if (!objectStore) {
-          objectStore = aTransaction.objectStore(STORE_NAME);
-        }
         const DATE_PROPERTIES = ["bday", "anniversary"];
-        objectStore.openCursor().onsuccess = function(event) {
-          let cursor = event.target.result;
+
+        scheduleValueUpgrade(function upgradeValue15to16(value) {
           let changed = false;
-          if (cursor) {
-            let props = cursor.value.properties;
-            for (let prop of DATE_PROPERTIES) {
-              if (props[prop] && !(props[prop] instanceof Date)) {
-                cursor.value.properties[prop] = new Date(props[prop]);
-                changed = true;
-              }
+          let props = value.properties;
+          for (let prop of DATE_PROPERTIES) {
+            if (props[prop] && !(props[prop] instanceof Date)) {
+              value.properties[prop] = new Date(props[prop]);
+              changed = true;
             }
-            if (changed) {
-              cursor.update(cursor.value);
-            }
-            cursor.continue();
-          } else {
-           next();
           }
-        };
+
+          return changed;
+        });
+
+        next();
       },
       function upgrade16to17() {
         if (DEBUG) debug("Fix array with null values");
-        if (!objectStore) {
-          objectStore = aTransaction.objectStore(STORE_NAME);
-        }
         const ARRAY_PROPERTIES = ["photo", "adr", "email", "url", "impp", "tel",
                                  "name", "honorificPrefix", "givenName",
                                  "additionalName", "familyName", "honorificSuffix",
@@ -638,7 +611,9 @@ ContactDB.prototype = {
 
         const DATE_PROPERTIES = ["bday", "anniversary"];
 
-        objectStore.openCursor().onsuccess = function(event) {
+        scheduleValueUpgrade(function upgradeValue16to17(value) {
+          let changed;
+
           function filterInvalidValues(val) {
             let shouldKeep = val != null; // null or undefined
             if (!shouldKeep) {
@@ -651,58 +626,60 @@ ContactDB.prototype = {
             return array.filter(filterInvalidValues);
           }
 
-          let cursor = event.target.result;
-          let changed = false;
-          if (cursor) {
-            let props = cursor.value.properties;
+          let props = value.properties;
 
-            for (let prop of ARRAY_PROPERTIES) {
+          for (let prop of ARRAY_PROPERTIES) {
 
-              // properties that were empty strings weren't converted to arrays
-              // in upgrade14to15
-              if (props[prop] != null && !Array.isArray(props[prop])) {
-                props[prop] = [props[prop]];
-                changed = true;
-              }
+            // properties that were empty strings weren't converted to arrays
+            // in upgrade14to15
+            if (props[prop] != null && !Array.isArray(props[prop])) {
+              props[prop] = [props[prop]];
+              changed = true;
+            }
 
-              if (props[prop] && props[prop].length) {
-                props[prop] = filteredArray(props[prop]);
+            if (props[prop] && props[prop].length) {
+              props[prop] = filteredArray(props[prop]);
 
-                if (PROPERTIES_WITH_TYPE.indexOf(prop) !== -1) {
-                  let subprop = props[prop];
+              if (PROPERTIES_WITH_TYPE.indexOf(prop) !== -1) {
+                let subprop = props[prop];
 
-                  for (let i = 0; i < subprop.length; ++i) {
-                    let curSubprop = subprop[i];
-                    // upgrade14to15 transformed type props into an array
-                    // without checking invalid values
-                    if (curSubprop.type) {
-                      curSubprop.type = filteredArray(curSubprop.type);
-                    }
+                for (let i = 0; i < subprop.length; ++i) {
+                  let curSubprop = subprop[i];
+                  // upgrade14to15 transformed type props into an array
+                  // without checking invalid values
+                  if (curSubprop.type) {
+                    curSubprop.type = filteredArray(curSubprop.type);
                   }
                 }
               }
             }
-
-            for (let prop of DATE_PROPERTIES) {
-              if (props[prop] != null && !(props[prop] instanceof Date)) {
-                // props[prop] is probably '' and wasn't converted
-                // in upgrade15to16
-                props[prop] = null;
-                changed = true;
-              }
-            }
-
-            if (changed) {
-              cursor.value.properties = props;
-              cursor.update(cursor.value);
-            }
-            cursor.continue();
-          } else {
-           next();
           }
-        }
+
+          for (let prop of DATE_PROPERTIES) {
+            if (props[prop] != null && !(props[prop] instanceof Date)) {
+              // props[prop] is probably '' and wasn't converted
+              // in upgrade15to16
+              props[prop] = null;
+              changed = true;
+            }
+          }
+
+          if (changed) {
+            value.properties = props;
+            return true;
+          } else {
+            return false;
+          }
+        });
+
+        next();
       },
       function upgrade17to18() {
+        // this upgrade function has been moved to the next upgrade path because
+        // a previous version of it had a bug
+        next();
+      },
+      function upgrade18to19() {
         if (DEBUG) {
           debug("Adding the name index");
         }
@@ -711,34 +688,104 @@ ContactDB.prototype = {
           objectStore = aTransaction.objectStore(STORE_NAME);
         }
 
-        objectStore.createIndex("name", "properties.name", { multiEntry: true });
-        objectStore.createIndex("nameLowerCase", "search.name", { multiEntry: true });
+        // an earlier version of this code could have run, so checking whether
+        // the index exists
+        if (!objectStore.indexNames.contains("name")) {
+          objectStore.createIndex("name", "properties.name", { multiEntry: true });
+          objectStore.createIndex("nameLowerCase", "search.name", { multiEntry: true });
+        }
 
-        objectStore.openCursor().onsuccess = function(event) {
-          let cursor = event.target.result;
-          if (cursor) {
-            let value = cursor.value;
-            value.search.name = [];
-            if (value.properties.name) {
-              value.properties.name.forEach(function addNameIndex(name) {
-                value.search.name.push(name.toLowerCase());
-              });
-            }
-            cursor.update(value);
-          } else {
-            next();
+        scheduleValueUpgrade(function upgradeValue18to19(value) {
+          value.search.name = [];
+          if (value.properties.name) {
+            value.properties.name.forEach(function addNameIndex(name) {
+              var lowerName = name.toLowerCase();
+              // an earlier version of this code could have added it already
+              if (value.search.name.indexOf(lowerName) === -1) {
+                value.search.name.push(lowerName);
+              }
+            });
           }
-        };
+          return true;
+        });
+
+        next();
+      },
+      function upgrade19to20() {
+        if (DEBUG) debug("upgrade19to20 create schema(phonetic)");
+        if (!objectStore) {
+          objectStore = aTransaction.objectStore(STORE_NAME);
+        }
+        objectStore.createIndex("phoneticFamilyName", "properties.phoneticFamilyName", { multiEntry: true });
+        objectStore.createIndex("phoneticGivenName", "properties.phoneticGivenName", { multiEntry: true });
+        objectStore.createIndex("phoneticFamilyNameLowerCase", "search.phoneticFamilyName", { multiEntry: true });
+        objectStore.createIndex("phoneticGivenNameLowerCase",  "search.phoneticGivenName",  { multiEntry: true });
+        next();
       },
     ];
 
     let index = aOldVersion;
     let outer = this;
+
+    /* This function runs all upgrade functions that are in the
+     * valueUpgradeSteps array. These functions have the following properties:
+     * - they must be synchronous
+     * - they must take the value as parameter and modify it directly. They
+     *   must not create a new object.
+     * - they must return a boolean true/false; true if the value was actually
+     *   changed
+     */
+    function runValueUpgradeSteps(done) {
+      if (DEBUG) debug("Running the value upgrade functions.");
+      if (!objectStore) {
+        objectStore = aTransaction.objectStore(STORE_NAME);
+      }
+      objectStore.openCursor().onsuccess = function(event) {
+        let cursor = event.target.result;
+        if (cursor) {
+          let changed = false;
+          let oldValue;
+          let value = cursor.value;
+          if (DEBUG) {
+            oldValue = JSON.stringify(value);
+          }
+          valueUpgradeSteps.forEach(function(upgradeFunc, i) {
+            if (DEBUG) debug("Running upgrade function " + i);
+            changed = upgradeFunc(value) || changed;
+          });
+
+          if (changed) {
+            cursor.update(value);
+          } else if (DEBUG) {
+            let newValue = JSON.stringify(value);
+            if (newValue !== oldValue) {
+              // oops something went wrong
+              debug("upgrade: `changed` was false and still the value changed! Aborting.");
+              aTransaction.abort();
+              return;
+            }
+          }
+          cursor.continue();
+        } else {
+          done();
+        }
+      };
+    }
+
+    function finish() {
+      // We always output this debug line because it's useful and the noise ratio
+      // very low.
+      debug("Upgrade finished");
+
+      outer.incrementRevision(aTransaction);
+    }
+
     function next() {
       if (index == aNewVersion) {
-        outer.incrementRevision(aTransaction);
+        runValueUpgradeSteps(finish);
         return;
       }
+
       try {
         var i = index++;
         if (DEBUG) debug("Upgrade step: " + i + "\n");
@@ -748,7 +795,7 @@ ContactDB.prototype = {
         aTransaction.abort();
         return;
       }
-    };
+    }
 
     function fail(why) {
       why = why || "";
@@ -763,6 +810,21 @@ ContactDB.prototype = {
     if (aNewVersion > steps.length) {
       fail("No migration steps for the new version!");
     }
+
+    this.cpuLock = Cc["@mozilla.org/power/powermanagerservice;1"]
+                     .getService(Ci.nsIPowerManagerService)
+                     .newWakeLock("cpu");
+
+    function unlockCPU() {
+      if (outer.cpuLock) {
+        if (DEBUG) debug("unlocking cpu wakelock");
+        outer.cpuLock.unlock();
+        outer.cpuLock = null;
+      }
+    }
+
+    aTransaction.addEventListener("complete", unlockCPU);
+    aTransaction.addEventListener("abort", unlockCPU);
 
     next();
   },
@@ -779,6 +841,8 @@ ContactDB.prototype = {
       tel:             [],
       exactTel:        [],
       parsedTel:       [],
+      phoneticFamilyName:   [],
+      phoneticGivenName:    [],
     };
 
     for (let field in aContact.properties) {
@@ -880,7 +944,7 @@ ContactDB.prototype = {
       if (DEBUG) debug("No object ID passed");
       return;
     }
-    this.newTxn("readwrite", SAVED_GETALL_STORE_NAME, function(txn, store) {
+    this.newTxn("readwrite", STORE_NAME, function(txn, store) {
       store.openCursor().onsuccess = function(e) {
         let cursor = e.target.result;
         if (cursor) {
@@ -894,22 +958,13 @@ ContactDB.prototype = {
           }
           cursor.continue();
         } else {
-          aCallback();
+          aCallback(txn);
         }
       }.bind(this);
     }.bind(this), null,
     function(errorMsg) {
       aFailureCb(errorMsg);
     });
-  },
-
-  // Invalidate the entire cache. It will be incrementally regenerated on demand
-  // See getCacheForQuery
-  invalidateCache: function CDB_invalidateCache(aErrorCb) {
-    if (DEBUG) debug("invalidate cache");
-    this.newTxn("readwrite", SAVED_GETALL_STORE_NAME, function (txn, store) {
-      store.clear();
-    }, aErrorCb);
   },
 
   incrementRevision: function CDB_incrementRevision(txn) {
@@ -921,8 +976,9 @@ ContactDB.prototype = {
 
   saveContact: function CDB_saveContact(aContact, successCb, errorCb) {
     let contact = this.makeImport(aContact);
-    this.newTxn("readwrite", STORE_NAME, function (txn, store) {
+    this.newTxn("readwrite", this.dbStoreNames, function (txn, stores) {
       if (DEBUG) debug("Going to update" + JSON.stringify(contact));
+      let store = txn.objectStore(STORE_NAME);
 
       // Look up the existing record and compare the update timestamp.
       // If no record exists, just add the new entry.
@@ -945,7 +1001,11 @@ ContactDB.prototype = {
             store.put(contact);
           }
         }
-        this.invalidateCache(errorCb);
+        // Invalidate the entire cache. It will be incrementally regenerated on demand
+        // See getCacheForQuery
+        let (getAllStore = txn.objectStore(SAVED_GETALL_STORE_NAME)) {
+          getAllStore.clear().onerror = errorCb;
+        }
       }.bind(this);
 
       this.incrementRevision(txn);
@@ -954,13 +1014,12 @@ ContactDB.prototype = {
 
   removeContact: function removeContact(aId, aSuccessCb, aErrorCb) {
     if (DEBUG) debug("removeContact: " + aId);
-    this.removeObjectFromCache(aId, function() {
-      this.newTxn("readwrite", STORE_NAME, function(txn, store) {
-        store.delete(aId).onsuccess = function() {
-          aSuccessCb();
-        };
-        this.incrementRevision(txn);
-      }.bind(this), null, aErrorCb);
+    this.removeObjectFromCache(aId, function(txn) {
+      let store = txn.objectStore(STORE_NAME)
+      store.delete(aId).onsuccess = function() {
+        aSuccessCb();
+      };
+      this.incrementRevision(txn);
     }.bind(this), aErrorCb);
   },
 
@@ -980,9 +1039,11 @@ ContactDB.prototype = {
           contactsArray.push(aContacts[i]);
         }
 
+        let contactIdsArray = contactsArray.map(function(el) el.id);
+
         // save contact ids in cache
         this.newTxn("readwrite", SAVED_GETALL_STORE_NAME, function(txn, store) {
-          store.put(contactsArray.map(function(el) el.id), aQuery);
+          store.put(contactIdsArray, aQuery);
         }, null, aFailureCb);
 
         // send full contacts
@@ -1070,6 +1131,21 @@ ContactDB.prototype = {
     }, null, aErrorCb);
   },
 
+  getSortByParam: function CDB_getSortByParam(aFindOptions) {
+    switch (aFindOptions.sortBy) {
+      case "familyName":
+        return [ "familyName", "givenName" ];
+      case "givenName":
+        return [ "givenName" , "familyName" ];
+      case "phoneticFamilyName":
+        return [ "phoneticFamilyName" , "phoneticGivenName" ];
+      case "phoneticGivenName":
+        return [ "phoneticGivenName" , "phoneticFamilyName" ];
+      default:
+        return [ "givenName" , "familyName" ];
+    }
+  },
+
   /*
    * Sorting the contacts by sortBy field. aSortBy can either be familyName or givenName.
    * If 2 entries have the same sortyBy field or no sortBy field is present, we continue
@@ -1080,7 +1156,7 @@ ContactDB.prototype = {
       return;
     if (aFindOptions.sortBy != "undefined") {
       const sortOrder = aFindOptions.sortOrder;
-      const sortBy = aFindOptions.sortBy == "familyName" ? [ "familyName", "givenName" ] : [ "givenName" , "familyName" ];
+      const sortBy = this.getSortByParam(aFindOptions);
 
       aResults.sort(function (a, b) {
         let x, y;
@@ -1164,7 +1240,7 @@ ContactDB.prototype = {
     for (let key in fields) {
       if (DEBUG) debug("key: " + fields[key]);
       if (!store.indexNames.contains(fields[key]) && fields[key] != "id") {
-        if (DEBUG) debug("Key not valid!" + fields[key] + ", " + store.indexNames);
+        if (DEBUG) debug("Key not valid!" + fields[key] + ", " + JSON.stringify(store.indexNames));
         txn.abort();
         return;
       }

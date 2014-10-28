@@ -8,7 +8,6 @@
 include LayersSurfaces;
 include protocol PLayerTransaction;
 include protocol PImageBridge;
-include protocol PGrallocBuffer;
 include "mozilla/GfxMessageUtils.h";
 
 using struct mozilla::layers::FrameMetrics from "FrameMetrics.h";
@@ -25,21 +24,21 @@ sync protocol PTexture {
 child:
     async __delete__();
 
+    async CompositorRecycle();
+
 parent:
+
+    async ClientRecycle();
+
     /**
-     * Set the shared data and create the TextureHost on the parent side.
+     * Synchronously tell the TextureChild to clear TextureHost.
      */
-    async Init(SurfaceDescriptor aSharedData, uint32_t aTextureFlags);
+    sync ClearTextureHostSync();
 
     /**
      * Asynchronously tell the Compositor side to remove the texture.
      */
     async RemoveTexture();
-
-    /**
-     * Synchronously tell the compositor side to remove the texture.
-     */
-    sync RemoveTextureSync();
 };
 
 } // layers

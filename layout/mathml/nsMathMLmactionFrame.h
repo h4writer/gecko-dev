@@ -22,18 +22,18 @@ public:
   friend nsIFrame* NS_NewMathMLmactionFrame(nsIPresShell* aPresShell, nsStyleContext* aContext);
 
   virtual void
-  Init(nsIContent*      aContent,
-       nsIFrame*        aParent,
-       nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  Init(nsIContent*       aContent,
+       nsContainerFrame* aParent,
+       nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 
-  NS_IMETHOD
+  virtual void
   SetInitialChildList(ChildListID     aListID,
                       nsFrameList&    aChildList) MOZ_OVERRIDE;
 
   virtual nsresult
   ChildListChanged(int32_t aModType) MOZ_OVERRIDE;
 
-  NS_IMETHOD
+  virtual nsresult
   AttributeChanged(int32_t  aNameSpaceID,
                    nsIAtom* aAttribute,
                    int32_t  aModType) MOZ_OVERRIDE;
@@ -45,16 +45,20 @@ private:
 
   class MouseListener MOZ_FINAL : public nsIDOMEventListener
   {
+  private:
+    ~MouseListener() {}
+
+  public:
     NS_DECL_ISUPPORTS
     NS_DECL_NSIDOMEVENTLISTENER
 
-    MouseListener(nsMathMLmactionFrame* aOwner) : mOwner(aOwner) { }
+    explicit MouseListener(nsMathMLmactionFrame* aOwner) : mOwner(aOwner) { }
 
     nsMathMLmactionFrame* mOwner;
   };
 
 protected:
-  nsMathMLmactionFrame(nsStyleContext* aContext) :
+  explicit nsMathMLmactionFrame(nsStyleContext* aContext) :
     nsMathMLSelectedFrame(aContext) {}
   virtual ~nsMathMLmactionFrame();
   
@@ -62,7 +66,7 @@ private:
   int32_t         mActionType;
   int32_t         mChildCount;
   int32_t         mSelection;
-  nsCOMPtr<MouseListener> mListener;
+  nsRefPtr<MouseListener> mListener;
 
   // helper to return the frame for the attribute selection="number"
   nsIFrame* 

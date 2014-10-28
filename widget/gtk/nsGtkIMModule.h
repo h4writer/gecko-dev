@@ -13,6 +13,7 @@
 
 #include "nsString.h"
 #include "nsAutoPtr.h"
+#include "nsCOMPtr.h"
 #include "nsTArray.h"
 #include "nsIWidget.h"
 #include "mozilla/EventForwards.h"
@@ -53,7 +54,7 @@ public:
     // aOwnerWindow is a pointer of the owner window.  When aOwnerWindow is
     // destroyed, the related IME contexts are released (i.e., IME cannot be
     // used with the instance after that).
-    nsGtkIMModule(nsWindow* aOwnerWindow);
+    explicit nsGtkIMModule(nsWindow* aOwnerWindow);
     ~nsGtkIMModule();
 
     // "Enabled" means the users can use all IMEs.
@@ -68,6 +69,9 @@ public:
     void OnDestroyWindow(nsWindow* aWindow);
     // OnFocusChangeInGecko is a notification that an editor gets focus.
     void OnFocusChangeInGecko(bool aFocus);
+    // OnSelectionChange is a notification that selection (caret) is changed
+    // in the focused editor.
+    void OnSelectionChange(nsWindow* aCaller);
 
     // OnKeyEvent is called when aWindow gets a native key press event or a
     // native key release event.  If this returns TRUE, the key event was
@@ -78,12 +82,12 @@ public:
                       bool aKeyDownEventWasSent = false);
 
     // IME related nsIWidget methods.
-    nsresult CommitIMEComposition(nsWindow* aCaller);
+    nsresult EndIMEComposition(nsWindow* aCaller);
     void SetInputContext(nsWindow* aCaller,
                          const InputContext* aContext,
                          const InputContextAction* aAction);
     InputContext GetInputContext();
-    nsresult CancelIMEComposition(nsWindow* aCaller);
+    void OnUpdateComposition();
 
     // If a software keyboard has been opened, this returns TRUE.
     // Otherwise, FALSE.
@@ -105,9 +109,9 @@ protected:
     GtkIMContext       *mContext;
 
     // mSimpleContext is used for the password field and
-    // the |ime-mode: disabled;| editors.  These editors disable IME.
-    // But dead keys should work.  Fortunately, the simple IM context of
-    // GTK2 support only them.
+    // the |ime-mode: disabled;| editors if sUseSimpleContext is true.
+    // These editors disable IME.  But dead keys should work.  Fortunately,
+    // the simple IM context of GTK2 support only them.
     GtkIMContext       *mSimpleContext;
 
     // mDummyContext is a dummy context and will be used in Focus()
@@ -130,19 +134,22 @@ protected:
     nsString mDispatchedCompositionString;
 
     // mSelectedString is the selected string which was removed by first
-    // text event.
+    // compositionchange event.
     nsString mSelectedString;
 
     // OnKeyEvent() temporarily sets mProcessingKeyEvent to the given native
     // event.
     GdkEventKey* mProcessingKeyEvent;
 
+    // current target offset of IME composition
+    uint32_t mCompositionTargetOffset;
+
     // mCompositionState indicates current status of composition.
     enum eCompositionState {
         eCompositionState_NotComposing,
         eCompositionState_CompositionStartDispatched,
-        eCompositionState_TextEventDispatched,
-        eCompositionState_CommitTextEventDispatched
+        eCompositionState_CompositionChangeEventDispatched,
+        eCompositionState_CommitCompositionChangeEventDispatched
     };
     eCompositionState mCompositionState;
 
@@ -153,8 +160,19 @@ protected:
 
     bool EditorHasCompositionString()
     {
-        return (mCompositionState == eCompositionState_TextEventDispatched);
+        return (mCompositionState ==
+                    eCompositionState_CompositionChangeEventDispatched);
     }
+
+    /**
+     * Checks if aContext is valid context for handling composition.
+     *
+     * @param aContext          An IM context which is specified by native
+     *                          composition events.
+     * @return                  true if the context is valid context for
+     *                          handling composition.  Otherwise, false.
+     */
+    bool IsValidContext(GtkIMContext* aContext) const;
 
 #ifdef PR_LOGGING
     const char* GetCompositionStateName()
@@ -164,10 +182,10 @@ protected:
                 return "NotComposing";
             case eCompositionState_CompositionStartDispatched:
                 return "CompositionStartDispatched";
-            case eCompositionState_TextEventDispatched:
-                return "TextEventDispatched";
-            case eCompositionState_CommitTextEventDispatched:
-                return "CommitTextEventDispatched";
+            case eCompositionState_CompositionChangeEventDispatched:
+                return "CompositionChangeEventDispatched";
+            case eCompositionState_CommitCompositionChangeEventDispatched:
+                return "CommitCompositionChangeEventDispatched";
             default:
                 return "InvaildState";
         }
@@ -182,11 +200,6 @@ protected:
     // be processed as simple key event, this is set to TRUE by the commit
     // handler.
     bool mFilterKeyEvent;
-    // When mIgnoreNativeCompositionEvent is TRUE, all native composition
-    // should be ignored except that the compositon should be restarted in
-    // another content (nsIContent).  Don't refer this value directly, use
-    // ShouldIgnoreNativeCompositionEvent().
-    bool mIgnoreNativeCompositionEvent;
     // mKeyDownEventWasSent is used by OnKeyEvent() and
     // DispatchCompositionStart().  DispatchCompositionStart() dispatches
     // a keydown event if the composition start is caused by a native
@@ -198,6 +211,11 @@ protected:
     // class.  When a instance is destroyed and sLastFocusedModule refers it,
     // this is cleared.  So, this refers valid pointer always.
     static nsGtkIMModule* sLastFocusedModule;
+
+    // sUseSimpleContext indeicates if password editors and editors with
+    // |ime-mode: disabled;| should use GtkIMContextSimple.
+    // If true, they use GtkIMContextSimple.  Otherwise, not.
+    static bool sUseSimpleContext;
 
     // Callback methods for native IME events.  These methods should call
     // the related instance methods simply.
@@ -256,10 +274,11 @@ protected:
     void ResetIME();
 
     // Gets the current composition string by the native APIs.
-    void GetCompositionString(nsAString &aCompositionString);
+    void GetCompositionString(GtkIMContext* aContext,
+                              nsAString& aCompositionString);
 
-    // Generates our text range list from current composition string.
-    void SetTextRangeList(nsTArray<mozilla::TextRange>& aTextRangeList);
+    // Generates our text range array from current composition string.
+    already_AddRefed<mozilla::TextRangeArray> CreateTextRangeArray();
 
     // Sets the offset's cursor position to IME.
     void SetCursorPosition(uint32_t aTargetOffset);
@@ -279,8 +298,6 @@ protected:
     // Called before destroying the context to work around some platform bugs.
     void PrepareToDestroyContext(GtkIMContext *aContext);
 
-    bool ShouldIgnoreNativeCompositionEvent();
-
     /**
      *  WARNING:
      *    Following methods dispatch gecko events.  Then, the focused widget
@@ -289,7 +306,7 @@ protected:
      *      - CommitCompositionBy
      *      - DispatchCompositionStart
      *      - DispatchCompositionEnd
-     *      - DispatchTextEvent
+     *      - DispatchCompositionChangeEvent
      */
 
     // Commits the current composition by the aString.
@@ -299,10 +316,11 @@ protected:
     bool DispatchCompositionStart();
     bool DispatchCompositionEnd();
 
-    // Dispatches a text event.  If aIsCommit is TRUE, dispatches a committed
-    // text event.  Otherwise, dispatches a composing text event.
-    bool DispatchTextEvent(const nsAString& aCompositionString,
-                           bool aIsCommit);
+    // Dispatches a compositionchange event.  If aIsCommit is TRUE, dispatches
+    // a committed compositionchange event.  Otherwise, dispatches a composing
+    // compositionchange event.
+    bool DispatchCompositionChangeEvent(const nsAString& aCompositionString,
+                                        bool aIsCommit);
 
 };
 

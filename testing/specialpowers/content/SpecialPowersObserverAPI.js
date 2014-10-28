@@ -1,11 +1,16 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+"use strict";
 
 Components.utils.import("resource://gre/modules/Services.jsm");
 
 if (typeof(Ci) == 'undefined') {
   var Ci = Components.interfaces;
+}
+
+if (typeof(Cc) == 'undefined') {
+  var Cc = Components.classes;
 }
 
 /**
@@ -65,17 +70,21 @@ function parseKeyValuePairsFromFile(file) {
 SpecialPowersObserverAPI.prototype = {
 
   _observe: function(aSubject, aTopic, aData) {
+    function addDumpIDToMessage(propertyName) {
+      try {
+        var id = aSubject.getPropertyAsAString(propertyName);
+      } catch(ex) {
+        var id = null;
+      }
+      if (id) {
+        message.dumpIDs.push({id: id, extension: "dmp"});
+        message.dumpIDs.push({id: id, extension: "extra"});
+      }
+    }
+
     switch(aTopic) {
       case "plugin-crashed":
       case "ipc:content-shutdown":
-        function addDumpIDToMessage(propertyName) {
-          var id = aSubject.getPropertyAsAString(propertyName);
-          if (id) {
-            message.dumpIDs.push({id: id, extension: "dmp"});
-            message.dumpIDs.push({id: id, extension: "extra"});
-          }
-        }
-
         var message = { type: "crash-observed", dumpIDs: [] };
         aSubject = aSubject.QueryInterface(Ci.nsIPropertyBag2);
         if (aTopic == "plugin-crashed") {
@@ -156,17 +165,62 @@ SpecialPowersObserverAPI.prototype = {
     return Services.io.newURI(url, null, null);
   },
 
+  _readUrlAsString: function(aUrl) {
+    // Fetch script content as we can't use scriptloader's loadSubScript
+    // to evaluate http:// urls...
+    var scriptableStream = Cc["@mozilla.org/scriptableinputstream;1"]
+                             .getService(Ci.nsIScriptableInputStream);
+    var channel = Services.io.newChannel(aUrl, null, null);
+    var input = channel.open();
+    scriptableStream.init(input);
+
+    var str;
+    var buffer = [];
+
+    while ((str = scriptableStream.read(4096))) {
+      buffer.push(str);
+    }
+
+    var output = buffer.join("");
+
+    scriptableStream.close();
+    input.close();
+
+    var status;
+    try {
+      channel.QueryInterface(Ci.nsIHttpChannel);
+      status = channel.responseStatus;
+    } catch(e) {
+      /* The channel is not a nsIHttpCHannel, but that's fine */
+      dump("-*- _readUrlAsString: Got an error while fetching " +
+           "chrome script '" + aUrl + "': (" + e.name + ") " + e.message + ". " +
+           "Ignoring.\n");
+    }
+
+    if (status == 404) {
+      throw new SpecialPowersException(
+        "Error while executing chrome script '" + aUrl + "':\n" +
+        "The script doesn't exists. Ensure you have registered it in " +
+        "'support-files' in your mochitest.ini.");
+    }
+
+    return output;
+  },
+
   /**
    * messageManager callback function
    * This will get requests from our API in the window and process them in chrome for it
    **/
   _receiveMessageAPI: function(aMessage) {
+    // We explicitly return values in the below code so that this function
+    // doesn't trigger a flurry of warnings about "does not always return
+    // a value".
     switch(aMessage.name) {
-      case "SPPrefService":
-        var prefs = Services.prefs;
-        var prefType = aMessage.json.prefType.toUpperCase();
-        var prefName = aMessage.json.prefName;
-        var prefValue = "prefValue" in aMessage.json ? aMessage.json.prefValue : null;
+      case "SPPrefService": {
+        let prefs = Services.prefs;
+        let prefType = aMessage.json.prefType.toUpperCase();
+        let prefName = aMessage.json.prefName;
+        let prefValue = "prefValue" in aMessage.json ? aMessage.json.prefValue : null;
 
         if (aMessage.json.op == "get") {
           if (!prefName || !prefType)
@@ -174,7 +228,7 @@ SpecialPowersObserverAPI.prototype = {
 
           // return null if the pref doesn't exist
           if (prefs.getPrefType(prefName) == prefs.PREF_INVALID)
-            return;
+            return null;
         } else if (aMessage.json.op == "set") {
           if (!prefName || !prefType  || prefValue === null)
             throw new SpecialPowersException("Invalid parameters for set in SPPrefService");
@@ -210,12 +264,13 @@ SpecialPowersObserverAPI.prototype = {
           case "":
             if (aMessage.json.op == "clear") {
               prefs.clearUserPref(prefName);
-              return;
+              return undefined;
             }
         }
-        break;
+        return undefined;	// See comment at the beginning of this function.
+      }
 
-      case "SPProcessCrashService":
+      case "SPProcessCrashService": {
         switch (aMessage.json.op) {
           case "register-observer":
             this._addProcessCrashObservers();
@@ -230,9 +285,10 @@ SpecialPowersObserverAPI.prototype = {
           default:
             throw new SpecialPowersException("Invalid operation for SPProcessCrashService");
         }
-        break;
+        return undefined;	// See comment at the beginning of this function.
+      }
 
-      case "SPPermissionManager":
+      case "SPPermissionManager": {
         let msg = aMessage.json;
 
         let secMan = Services.scriptSecurityManager;
@@ -262,9 +318,10 @@ SpecialPowersObserverAPI.prototype = {
             throw new SpecialPowersException("Invalid operation for " +
                                              "SPPermissionManager");
         }
-        break;
+        return undefined;	// See comment at the beginning of this function.
+      }
 
-      case "SPWebAppService":
+      case "SPWebAppService": {
         let Webapps = {};
         Components.utils.import("resource://gre/modules/Webapps.jsm", Webapps);
         switch (aMessage.json.op) {
@@ -275,9 +332,10 @@ SpecialPowersObserverAPI.prototype = {
           default:
             throw new SpecialPowersException("Invalid operation for SPWebAppsService");
         }
-        break;
+        return undefined;	// See comment at the beginning of this function.
+      }
 
-      case "SPObserverService":
+      case "SPObserverService": {
         switch (aMessage.json.op) {
           case "notify":
             let topic = aMessage.json.observerTopic;
@@ -287,29 +345,21 @@ SpecialPowersObserverAPI.prototype = {
           default:
             throw new SpecialPowersException("Invalid operation for SPObserverervice");
         }
-        break;
+        return undefined;	// See comment at the beginning of this function.
+      }
 
-      case "SPLoadChromeScript":
-        var url = aMessage.json.url;
-        var id = aMessage.json.id;
+      case "SPLoadChromeScript": {
+        let url = aMessage.json.url;
+        let id = aMessage.json.id;
 
-        // Fetch script content as we can't use scriptloader's loadSubScript
-        // to evaluate http:// urls...
-        var scriptableStream = Cc["@mozilla.org/scriptableinputstream;1"]
-                                 .getService(Ci.nsIScriptableInputStream);
-        var channel = Services.io.newChannel(url, null, null);
-        var input = channel.open();
-        scriptableStream.init(input);
-        var jsScript = scriptableStream.read(input.available());
-        scriptableStream.close();
-        input.close();
+        let jsScript = this._readUrlAsString(url);
 
         // Setup a chrome sandbox that has access to sendAsyncMessage
         // and addMessageListener in order to communicate with
         // the mochitest.
-        var systemPrincipal = Services.scriptSecurityManager.getSystemPrincipal();
-        var sb = Components.utils.Sandbox(systemPrincipal);
-        var mm = aMessage.target
+        let systemPrincipal = Services.scriptSecurityManager.getSystemPrincipal();
+        let sb = Components.utils.Sandbox(systemPrincipal);
+        let mm = aMessage.target
                          .QueryInterface(Ci.nsIFrameLoaderOwner)
                          .frameLoader
                          .messageManager;
@@ -320,27 +370,105 @@ SpecialPowersObserverAPI.prototype = {
         sb.addMessageListener = (name, listener) => {
           this._chromeScriptListeners.push({ id: id, name: name, listener: listener });
         };
+
+        // Also expose assertion functions
+        let reporter = function (err, message, stack) {
+          // Pipe assertions back to parent process
+          mm.sendAsyncMessage("SPChromeScriptAssert",
+                              { id: id, url: url, err: err, message: message,
+                                stack: stack });
+        };
+        Object.defineProperty(sb, "assert", {
+          get: function () {
+            let scope = Components.utils.createObjectIn(sb);
+            Services.scriptloader.loadSubScript("resource://specialpowers/Assert.jsm",
+                                                scope);
+
+            let assert = new scope.Assert(reporter);
+            delete sb.assert;
+            return sb.assert = assert;
+          },
+          configurable: true
+        });
+
         // Evaluate the chrome script
         try {
           Components.utils.evalInSandbox(jsScript, sb, "1.8", url, 1);
         } catch(e) {
           throw new SpecialPowersException("Error while executing chrome " +
-                                           "script '" + url + "':\n" + e);
+                                           "script '" + url + "':\n" + e + "\n" +
+                                           e.fileName + ":" + e.lineNumber);
         }
-        break;
+        return undefined;	// See comment at the beginning of this function.
+      }
 
-      case "SPChromeScriptMessage":
-        var id = aMessage.json.id;
-        var name = aMessage.json.name;
-        var message = aMessage.json.message;
+      case "SPChromeScriptMessage": {
+        let id = aMessage.json.id;
+        let name = aMessage.json.name;
+        let message = aMessage.json.message;
         this._chromeScriptListeners
             .filter(o => (o.name == name && o.id == id))
             .forEach(o => o.listener(message));
-        break;
+        return undefined;	// See comment at the beginning of this function.
+      }
+
+      case 'SPQuotaManager': {
+        let qm = Cc['@mozilla.org/dom/quota/manager;1']
+                   .getService(Ci.nsIQuotaManager);
+        let mm = aMessage.target
+                         .QueryInterface(Ci.nsIFrameLoaderOwner)
+                         .frameLoader
+                         .messageManager;
+        let msg = aMessage.data;
+        let op = msg.op;
+
+        if (op != 'clear' && op != 'getUsage') {
+          throw new SpecialPowersException('Invalid operation for SPQuotaManager');
+        }
+
+        let uri = this._getURI(msg.uri);
+
+        if (op == 'clear') {
+          if (('inBrowser' in msg) && msg.inBrowser !== undefined) {
+            qm.clearStoragesForURI(uri, msg.appId, msg.inBrowser);
+          } else if (('appId' in msg) && msg.appId !== undefined) {
+            qm.clearStoragesForURI(uri, msg.appId);
+          } else {
+            qm.clearStoragesForURI(uri);
+          }
+        }
+
+        // We always use the getUsageForURI callback even if we're clearing
+        // since we know that clear and getUsageForURI are synchronized by the
+        // QuotaManager.
+        let callback = function(uri, usage, fileUsage) {
+          let reply = { id: msg.id };
+          if (op == 'getUsage') {
+            reply.usage = usage;
+            reply.fileUsage = fileUsage;
+          }
+          mm.sendAsyncMessage(aMessage.name, reply);
+        };
+
+        if (('inBrowser' in msg) && msg.inBrowser !== undefined) {
+          qm.getUsageForURI(uri, callback, msg.appId, msg.inBrowser);
+        } else if (('appId' in msg) && msg.appId !== undefined) {
+          qm.getUsageForURI(uri, callback, msg.appId);
+        } else {
+          qm.getUsageForURI(uri, callback);
+        }
+
+        return undefined;	// See comment at the beginning of this function.
+      }
 
       default:
         throw new SpecialPowersException("Unrecognized Special Powers API");
     }
+
+    // We throw an exception before reaching this explicit return because
+    // we should never be arriving here anyway.
+    throw new SpecialPowersException("Unreached code");
+    return undefined;
   }
 };
 

@@ -1,22 +1,21 @@
-/* -*- Mode: js; js-indent-level: 2; -*- */
+/* -*- js-indent-level: 2; indent-tabs-mode: nil -*- */
 /* Any copyright is dedicated to the Public Domain.
    http://creativecommons.org/publicdomain/zero/1.0/ */
 
 // Test the functionality of the BreakpointStore object.
 
+const { BreakpointStore, ThreadActor } = devtools.require("devtools/server/actors/script");
+
 function run_test()
 {
   Cu.import("resource://gre/modules/jsdebugger.jsm");
   addDebuggerToGlobal(this);
-  let loader = Cc["@mozilla.org/moz/jssubscript-loader;1"]
-    .getService(Components.interfaces.mozIJSSubScriptLoader);
-  loader.loadSubScript("resource://gre/modules/devtools/server/actors/script.js");
 
   test_has_breakpoint();
-  test_bug_754251();
   test_add_breakpoint();
   test_remove_breakpoint();
   test_find_breakpoints();
+  test_duplicate_breakpoints();
 }
 
 function test_has_breakpoint() {
@@ -54,16 +53,6 @@ function test_has_breakpoint() {
   bpStore.removeBreakpoint(columnLocation);
   do_check_eq(null, bpStore.hasBreakpoint(columnLocation),
               "Breakpoint with column removed but still exists in Breakpoint Store.");
-}
-
-// Note: Removing this test will regress bug 754251. See comment above
-// ThreadActor.breakpointStore.
-function test_bug_754251() {
-  let instance1 = new ThreadActor();
-  let instance2 = new ThreadActor();
-  do_check_true(instance1.breakpointStore instanceof BreakpointStore);
-  do_check_eq(instance1.breakpointStore, ThreadActor.breakpointStore);
-  do_check_eq(instance2.breakpointStore, ThreadActor.breakpointStore);
 }
 
 function test_add_breakpoint() {
@@ -165,4 +154,29 @@ function test_find_breakpoints() {
   }
   do_check_eq(bpSet.size, 0,
               "Should be able to filter the iteration by url and line");
+}
+
+function test_duplicate_breakpoints() {
+  let bpStore = new BreakpointStore();
+
+  // Breakpoint with column
+  let location = {
+    url: "http://example.com/foo.js",
+    line: 10,
+    column: 9
+  };
+  bpStore.addBreakpoint(location);
+  bpStore.addBreakpoint(location);
+  do_check_eq(bpStore.size, 1, "We should have only 1 column breakpoint");
+  bpStore.removeBreakpoint(location);
+
+  // Breakpoint without column (whole line breakpoint)
+  location = {
+    url: "http://example.com/foo.js",
+    line: 15
+  };
+  bpStore.addBreakpoint(location);
+  bpStore.addBreakpoint(location);
+  do_check_eq(bpStore.size, 1, "We should have only 1 whole line breakpoint");
+  bpStore.removeBreakpoint(location);
 }

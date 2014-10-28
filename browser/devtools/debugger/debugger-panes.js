@@ -1,9 +1,19 @@
-/* -*- Mode: javascript; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim: set ft=javascript ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 "use strict";
+
+// Used to detect minification for automatic pretty printing
+const SAMPLE_SIZE = 50; // no of lines
+const INDENT_COUNT_THRESHOLD = 5; // percentage
+const CHARACTER_LIMIT = 250; // line character limit
+
+// Maps known URLs to friendly source group names
+const KNOWN_SOURCE_GROUPS = {
+  "Add-on SDK": "resource://gre/modules/commonjs/",
+};
 
 /**
  * Functions handling the sources UI.
@@ -19,7 +29,6 @@ function SourcesView() {
   this._onEditorUnload = this._onEditorUnload.bind(this);
   this._onEditorCursorActivity = this._onEditorCursorActivity.bind(this);
   this._onSourceSelect = this._onSourceSelect.bind(this);
-  this._onSourceClick = this._onSourceClick.bind(this);
   this._onStopBlackBoxing = this._onStopBlackBoxing.bind(this);
   this._onBreakpointRemoved = this._onBreakpointRemoved.bind(this);
   this._onBreakpointClick = this._onBreakpointClick.bind(this);
@@ -27,10 +36,7 @@ function SourcesView() {
   this._onConditionalPopupShowing = this._onConditionalPopupShowing.bind(this);
   this._onConditionalPopupShown = this._onConditionalPopupShown.bind(this);
   this._onConditionalPopupHiding = this._onConditionalPopupHiding.bind(this);
-  this._onConditionalTextboxInput = this._onConditionalTextboxInput.bind(this);
   this._onConditionalTextboxKeyPress = this._onConditionalTextboxKeyPress.bind(this);
-
-  this.updateToolbarButtonsState = this.updateToolbarButtonsState.bind(this);
 }
 
 SourcesView.prototype = Heritage.extend(WidgetMethods, {
@@ -64,18 +70,27 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
     window.on(EVENTS.EDITOR_LOADED, this._onEditorLoad, false);
     window.on(EVENTS.EDITOR_UNLOADED, this._onEditorUnload, false);
     this.widget.addEventListener("select", this._onSourceSelect, false);
-    this.widget.addEventListener("click", this._onSourceClick, false);
     this._stopBlackBoxButton.addEventListener("click", this._onStopBlackBoxing, false);
     this._cbPanel.addEventListener("popupshowing", this._onConditionalPopupShowing, false);
     this._cbPanel.addEventListener("popupshown", this._onConditionalPopupShown, false);
     this._cbPanel.addEventListener("popuphiding", this._onConditionalPopupHiding, false);
-    this._cbTextbox.addEventListener("input", this._onConditionalTextboxInput, false);
     this._cbTextbox.addEventListener("keypress", this._onConditionalTextboxKeyPress, false);
 
     this.autoFocusOnSelection = false;
 
-    // Show an empty label by default.
-    this.empty();
+    // Sort the contents by the displayed label.
+    this.sortContents((aFirst, aSecond) => {
+      return +(aFirst.attachment.label.toLowerCase() >
+               aSecond.attachment.label.toLowerCase());
+    });
+
+    // Sort known source groups towards the end of the list
+    this.widget.groupSortPredicate = function(a, b) {
+      if ((a in KNOWN_SOURCE_GROUPS) == (b in KNOWN_SOURCE_GROUPS)) {
+        return a.localeCompare(b);
+      }
+      return (a in KNOWN_SOURCE_GROUPS) ? 1 : -1;
+    };
   },
 
   /**
@@ -87,12 +102,10 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
     window.off(EVENTS.EDITOR_LOADED, this._onEditorLoad, false);
     window.off(EVENTS.EDITOR_UNLOADED, this._onEditorUnload, false);
     this.widget.removeEventListener("select", this._onSourceSelect, false);
-    this.widget.removeEventListener("click", this._onSourceClick, false);
     this._stopBlackBoxButton.removeEventListener("click", this._onStopBlackBoxing, false);
     this._cbPanel.removeEventListener("popupshowing", this._onConditionalPopupShowing, false);
     this._cbPanel.removeEventListener("popupshowing", this._onConditionalPopupShown, false);
     this._cbPanel.removeEventListener("popuphiding", this._onConditionalPopupHiding, false);
-    this._cbTextbox.removeEventListener("input", this._onConditionalTextboxInput, false);
     this._cbTextbox.removeEventListener("keypress", this._onConditionalTextboxKeyPress, false);
   },
 
@@ -120,14 +133,30 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
    *        - staged: true to stage the item to be appended later
    */
   addSource: function(aSource, aOptions = {}) {
-    let url = aSource.url;
-    let label = SourceUtils.getSourceLabel(url.split(" -> ").pop());
-    let group = SourceUtils.getSourceGroup(url.split(" -> ").pop());
+    let fullUrl = aSource.url;
+    let url = fullUrl.split(" -> ").pop();
+    let label = aSource.addonPath ? aSource.addonPath : SourceUtils.getSourceLabel(url);
+    let group = aSource.addonID ? aSource.addonID : SourceUtils.getSourceGroup(url);
+    let unicodeUrl = NetworkHelper.convertToUnicode(unescape(fullUrl));
+
+    let contents = document.createElement("label");
+    contents.className = "plain dbg-source-item";
+    contents.setAttribute("value", label);
+    contents.setAttribute("crop", "start");
+    contents.setAttribute("flex", "1");
+    contents.setAttribute("tooltiptext", unicodeUrl);
+
+    // If the source is blackboxed, apply the appropriate style.
+    if (gThreadClient.source(aSource).isBlackBoxed) {
+      contents.classList.add("black-boxed");
+    }
 
     // Append a source item to this container.
-    this.push([label, url, group], {
+    this.push([contents, fullUrl], {
       staged: aOptions.staged, /* stage the item to be appended later? */
       attachment: {
+        label: label,
+        group: group,
         checkboxState: !aSource.isBlackBoxed,
         checkboxTooltip: this._blackBoxCheckboxTooltip,
         source: aSource
@@ -185,6 +214,8 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
     if (aOptions.openPopup || !aOptions.noEditorUpdate) {
       this.highlightBreakpoint(location, aOptions);
     }
+
+    window.emit(EVENTS.BREAKPOINT_SHOWN_IN_PANE);
   },
 
   /**
@@ -208,6 +239,8 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
 
     // Clear the breakpoint view.
     sourceItem.remove(breakpointItem);
+
+    window.emit(EVENTS.BREAKPOINT_HIDDEN_IN_PANE);
   },
 
   /**
@@ -384,11 +417,22 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
   },
 
   /**
+   * Highlight the breakpoint on the current currently focused line/column
+   * if it exists.
+   */
+  highlightBreakpointAtCursor: function() {
+    let url = DebuggerView.Sources.selectedValue;
+    let line = DebuggerView.editor.getCursor().line + 1;
+    let location = { url: url, line: line };
+    this.highlightBreakpoint(location, { noEditorUpdate: true });
+  },
+
+  /**
    * Unhighlights the current breakpoint in this sources container.
    */
   unhighlightBreakpoint: function() {
-    this._unselectBreakpoint();
     this._hideConditionalPopup();
+    this._unselectBreakpoint();
   },
 
   /**
@@ -417,7 +461,7 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
   /**
    * Toggle the pretty printing of the selected source.
    */
-  togglePrettyPrint: function() {
+  togglePrettyPrint: Task.async(function*() {
     if (this._prettyPrintButton.hasAttribute("disabled")) {
       return;
     }
@@ -444,25 +488,29 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
       this._prettyPrintButton.removeAttribute("checked");
     }
 
-    DebuggerController.SourceScripts.togglePrettyPrint(source)
-      .then(resetEditor, printError)
-      .then(DebuggerView.showEditor)
-      .then(this.updateToolbarButtonsState);
-  },
+    try {
+      let resolution = yield DebuggerController.SourceScripts.togglePrettyPrint(source);
+      resetEditor(resolution);
+    } catch (rejection) {
+      printError(rejection);
+    }
+
+    DebuggerView.showEditor();
+    this.updateToolbarButtonsState();
+  }),
 
   /**
    * Toggle the black boxed state of the selected source.
    */
-  toggleBlackBoxing: function() {
+  toggleBlackBoxing: Task.async(function*() {
     const { source } = this.selectedItem.attachment;
     const sourceClient = gThreadClient.source(source);
     const shouldBlackBox = !sourceClient.isBlackBoxed;
 
     // Be optimistic that the (un-)black boxing will succeed, so enable/disable
-    // the pretty print button and check/uncheck the black box button
-    // immediately. Then, once we actually get the results from the server, make
-    // sure that it is in the correct state again by calling
-    // `updateToolbarButtonsState`.
+    // the pretty print button and check/uncheck the black box button immediately.
+    // Then, once we actually get the results from the server, make sure that
+    // it is in the correct state again by calling `updateToolbarButtonsState`.
 
     if (shouldBlackBox) {
       this._prettyPrintButton.setAttribute("disabled", true);
@@ -472,10 +520,14 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
       this._blackBoxButton.removeAttribute("checked");
     }
 
-    DebuggerController.SourceScripts.setBlackBoxing(source, shouldBlackBox)
-      .then(this.updateToolbarButtonsState,
-            this.updateToolbarButtonsState);
-  },
+    try {
+      yield DebuggerController.SourceScripts.setBlackBoxing(source, shouldBlackBox);
+    } catch (e) {
+      // Continue execution in this task even if blackboxing failed.
+    }
+
+    this.updateToolbarButtonsState();
+  }),
 
   /**
    * Toggles all breakpoints enabled/disabled.
@@ -529,15 +581,14 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
   _openConditionalPopup: function() {
     let breakpointItem = this._selectedBreakpointItem;
     let attachment = breakpointItem.attachment;
-
     // Check if this is an enabled conditional breakpoint, and if so,
     // retrieve the current conditional epression.
     let breakpointPromise = DebuggerController.Breakpoints._getAdded(attachment);
     if (breakpointPromise) {
       breakpointPromise.then(aBreakpointClient => {
-        let isConditionalBreakpoint = "conditionalExpression" in aBreakpointClient;
-        let conditionalExpression = aBreakpointClient.conditionalExpression;
-        doOpen.call(this, isConditionalBreakpoint ? conditionalExpression : "")
+        let isConditionalBreakpoint = aBreakpointClient.hasCondition();
+        let condition = aBreakpointClient.getCondition();
+        doOpen.call(this, isConditionalBreakpoint ? condition : "")
       });
     } else {
       doOpen.call(this, "")
@@ -717,7 +768,7 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
    *        The corresponding item.
    */
   _onBreakpointRemoved: function(aItem) {
-    dumpn("Finalizing breakpoint item: " + aItem);
+    dumpn("Finalizing breakpoint item: " + aItem.stringify());
 
     // Destroy the context menu for the breakpoint.
     let contextMenu = aItem.attachment.popup;
@@ -765,12 +816,23 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
   /**
    * The select listener for the sources container.
    */
-  _onSourceSelect: function({ detail: sourceItem }) {
+  _onSourceSelect: Task.async(function*({ detail: sourceItem }) {
     if (!sourceItem) {
       return;
     }
+    const { source } = sourceItem.attachment;
+    const sourceClient = gThreadClient.source(source);
+
     // The container is not empty and an actual item was selected.
     DebuggerView.setEditorLocation(sourceItem.value);
+
+    // Attempt to automatically pretty print minified source code.
+    if (Prefs.autoPrettyPrint && !sourceClient.isPrettyPrinted) {
+      let isMinified = yield SourceUtils.isMinified(sourceClient);
+      if (isMinified) {
+        this.togglePrettyPrint();
+      }
+    }
 
     // Set window title. No need to split the url by " -> " here, because it was
     // already sanitized when the source was added.
@@ -778,26 +840,22 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
 
     DebuggerView.maybeShowBlackBoxMessage();
     this.updateToolbarButtonsState();
-  },
-
-  /**
-   * The click listener for the sources container.
-   */
-  _onSourceClick: function() {
-    // Use this container as a filtering target.
-    DebuggerView.Filtering.target = this;
-  },
+  }),
 
   /**
    * The click listener for the "stop black boxing" button.
    */
-  _onStopBlackBoxing: function() {
+  _onStopBlackBoxing: Task.async(function*() {
     const { source } = this.selectedItem.attachment;
 
-    DebuggerController.SourceScripts.setBlackBoxing(source, false)
-      .then(this.updateToolbarButtonsState,
-            this.updateToolbarButtonsState);
-  },
+    try {
+      yield DebuggerController.SourceScripts.setBlackBoxing(source, false);
+    } catch (e) {
+      // Continue execution in this task even if blackboxing failed.
+    }
+
+    this.updateToolbarButtonsState();
+  }),
 
   /**
    * The click listener for a breakpoint container.
@@ -811,7 +869,7 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
     let breakpointPromise = DebuggerController.Breakpoints._getAdded(attachment);
     if (breakpointPromise) {
       breakpointPromise.then(aBreakpointClient => {
-        doHighlight.call(this, "conditionalExpression" in aBreakpointClient);
+        doHighlight.call(this, aBreakpointClient.hasCondition());
       });
     } else {
       doHighlight.call(this, false);
@@ -867,15 +925,9 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
   /**
    * The popup hiding listener for the breakpoints conditional expression panel.
    */
-  _onConditionalPopupHiding: function() {
+  _onConditionalPopupHiding: Task.async(function*() {
     this._conditionalPopupVisible = false; // Used in tests.
-    window.emit(EVENTS.CONDITIONAL_BREAKPOINT_POPUP_HIDING);
-  },
 
-  /**
-   * The input listener for the breakpoints conditional expression textbox.
-   */
-  _onConditionalTextboxInput: function() {
     let breakpointItem = this._selectedBreakpointItem;
     let attachment = breakpointItem.attachment;
 
@@ -883,17 +935,19 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
     // save the current conditional epression.
     let breakpointPromise = DebuggerController.Breakpoints._getAdded(attachment);
     if (breakpointPromise) {
-      breakpointPromise.then(aBreakpointClient => {
-        aBreakpointClient.conditionalExpression = this._cbTextbox.value;
-      });
+      let { location } = yield breakpointPromise;
+      let condition = this._cbTextbox.value;
+      yield DebuggerController.Breakpoints.updateCondition(location, condition);
     }
-  },
+
+    window.emit(EVENTS.CONDITIONAL_BREAKPOINT_POPUP_HIDING);
+  }),
 
   /**
    * The keypress listener for the breakpoints conditional expression textbox.
    */
   _onConditionalTextboxKeyPress: function(e) {
-    if (e.keyCode == e.DOM_VK_RETURN || e.keyCode == e.DOM_VK_ENTER) {
+    if (e.keyCode == e.DOM_VK_RETURN) {
       this._hideConditionalPopup();
     }
   },
@@ -901,9 +955,11 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
   /**
    * Called when the add breakpoint key sequence was pressed.
    */
-  _onCmdAddBreakpoint: function() {
+  _onCmdAddBreakpoint: function(e) {
     let url = DebuggerView.Sources.selectedValue;
-    let line = DebuggerView.editor.getCursor().line + 1;
+    let line = (e && e.sourceEvent.target.tagName == 'menuitem' ?
+                DebuggerView.clickedLine + 1 :
+                DebuggerView.editor.getCursor().line + 1);
     let location = { url: url, line: line };
     let breakpointItem = this.getBreakpoint(location);
 
@@ -920,9 +976,11 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
   /**
    * Called when the add conditional breakpoint key sequence was pressed.
    */
-  _onCmdAddConditionalBreakpoint: function() {
+  _onCmdAddConditionalBreakpoint: function(e) {
     let url =  DebuggerView.Sources.selectedValue;
-    let line = DebuggerView.editor.getCursor().line + 1;
+    let line = (e && e.sourceEvent.target.tagName == 'menuitem' ?
+                DebuggerView.clickedLine + 1 :
+                DebuggerView.editor.getCursor().line + 1);
     let location = { url: url, line: line };
     let breakpointItem = this.getBreakpoint(location);
 
@@ -1057,11 +1115,402 @@ SourcesView.prototype = Heritage.extend(WidgetMethods, {
 });
 
 /**
+ * Functions handling the traces UI.
+ */
+function TracerView() {
+  this._selectedItem = null;
+  this._matchingItems = null;
+  this.widget = null;
+
+  this._highlightItem = this._highlightItem.bind(this);
+  this._isNotSelectedItem = this._isNotSelectedItem.bind(this);
+
+  this._unhighlightMatchingItems =
+    DevToolsUtils.makeInfallible(this._unhighlightMatchingItems.bind(this));
+  this._onToggleTracing =
+    DevToolsUtils.makeInfallible(this._onToggleTracing.bind(this));
+  this._onStartTracing =
+    DevToolsUtils.makeInfallible(this._onStartTracing.bind(this));
+  this._onClear =
+    DevToolsUtils.makeInfallible(this._onClear.bind(this));
+  this._onSelect =
+    DevToolsUtils.makeInfallible(this._onSelect.bind(this));
+  this._onMouseOver =
+    DevToolsUtils.makeInfallible(this._onMouseOver.bind(this));
+  this._onSearch =
+    DevToolsUtils.makeInfallible(this._onSearch.bind(this));
+}
+
+TracerView.MAX_TRACES = 200;
+
+TracerView.prototype = Heritage.extend(WidgetMethods, {
+  /**
+   * Initialization function, called when the debugger is started.
+   */
+  initialize: function() {
+    dumpn("Initializing the TracerView");
+
+    this._traceButton = document.getElementById("trace");
+    this._tracerTab = document.getElementById("tracer-tab");
+
+    // Remove tracer related elements from the dom and tear everything down if
+    // the tracer isn't enabled.
+    if (!Prefs.tracerEnabled) {
+      this._traceButton.remove();
+      this._traceButton = null;
+      this._tracerTab.remove();
+      this._tracerTab = null;
+      return;
+    }
+
+    this.widget = new FastListWidget(document.getElementById("tracer-traces"));
+    this._traceButton.removeAttribute("hidden");
+    this._tracerTab.removeAttribute("hidden");
+
+    this._search = document.getElementById("tracer-search");
+    this._template = document.getElementsByClassName("trace-item-template")[0];
+    this._templateItem = this._template.getElementsByClassName("trace-item")[0];
+    this._templateTypeIcon = this._template.getElementsByClassName("trace-type")[0];
+    this._templateNameNode = this._template.getElementsByClassName("trace-name")[0];
+
+    this.widget.addEventListener("select", this._onSelect, false);
+    this.widget.addEventListener("mouseover", this._onMouseOver, false);
+    this.widget.addEventListener("mouseout", this._unhighlightMatchingItems, false);
+    this._search.addEventListener("input", this._onSearch, false);
+
+    this._startTooltip = L10N.getStr("startTracingTooltip");
+    this._stopTooltip = L10N.getStr("stopTracingTooltip");
+    this._tracingNotStartedString = L10N.getStr("tracingNotStartedText");
+    this._noFunctionCallsString = L10N.getStr("noFunctionCallsText");
+
+    this._traceButton.setAttribute("tooltiptext", this._startTooltip);
+    this.emptyText = this._tracingNotStartedString;
+  },
+
+  /**
+   * Destruction function, called when the debugger is closed.
+   */
+  destroy: function() {
+    dumpn("Destroying the TracerView");
+
+    if (!this.widget) {
+      return;
+    }
+
+    this.widget.removeEventListener("select", this._onSelect, false);
+    this.widget.removeEventListener("mouseover", this._onMouseOver, false);
+    this.widget.removeEventListener("mouseout", this._unhighlightMatchingItems, false);
+    this._search.removeEventListener("input", this._onSearch, false);
+  },
+
+  /**
+   * Function invoked by the "toggleTracing" command to switch the tracer state.
+   */
+  _onToggleTracing: function() {
+    if (DebuggerController.Tracer.tracing) {
+      this._onStopTracing();
+    } else {
+      this._onStartTracing();
+    }
+  },
+
+  /**
+   * Function invoked either by the "startTracing" command or by
+   * _onToggleTracing to start execution tracing in the backend.
+   *
+   * @return object
+   *         A promise resolved once the tracing has successfully started.
+   */
+  _onStartTracing: function() {
+    this._traceButton.setAttribute("checked", true);
+    this._traceButton.setAttribute("tooltiptext", this._stopTooltip);
+
+    this.empty();
+    this.emptyText = this._noFunctionCallsString;
+
+    let deferred = promise.defer();
+    DebuggerController.Tracer.startTracing(deferred.resolve);
+    return deferred.promise;
+  },
+
+  /**
+   * Function invoked by _onToggleTracing to stop execution tracing in the
+   * backend.
+   *
+   * @return object
+   *         A promise resolved once the tracing has successfully stopped.
+   */
+  _onStopTracing: function() {
+    this._traceButton.removeAttribute("checked");
+    this._traceButton.setAttribute("tooltiptext", this._startTooltip);
+
+    this.emptyText = this._tracingNotStartedString;
+
+    let deferred = promise.defer();
+    DebuggerController.Tracer.stopTracing(deferred.resolve);
+    return deferred.promise;
+  },
+
+  /**
+   * Function invoked by the "clearTraces" command to empty the traces pane.
+   */
+  _onClear: function() {
+    this.empty();
+  },
+
+  /**
+   * Populate the given parent scope with the variable with the provided name
+   * and value.
+   *
+   * @param String aName
+   *        The name of the variable.
+   * @param Object aParent
+   *        The parent scope.
+   * @param Object aValue
+   *        The value of the variable.
+   */
+  _populateVariable: function(aName, aParent, aValue) {
+    let item = aParent.addItem(aName, { value: aValue });
+
+    if (aValue) {
+      let wrappedValue = new DebuggerController.Tracer.WrappedObject(aValue);
+      DebuggerView.Variables.controller.populate(item, wrappedValue);
+      item.expand();
+      item.twisty = false;
+    }
+  },
+
+  /**
+   * Handler for the widget's "select" event. Displays parameters, exception, or
+   * return value depending on whether the selected trace is a call, throw, or
+   * return respectively.
+   *
+   * @param Object traceItem
+   *        The selected trace item.
+   */
+  _onSelect: function _onSelect({ detail: traceItem }) {
+    if (!traceItem) {
+      return;
+    }
+
+    const data = traceItem.attachment.trace;
+    const { location: { url, line } } = data;
+    DebuggerView.setEditorLocation(url, line, { noDebug: true });
+
+    DebuggerView.Variables.empty();
+    const scope = DebuggerView.Variables.addScope();
+
+    if (data.type == "call") {
+      const params = DevToolsUtils.zip(data.parameterNames, data.arguments);
+      for (let [name, val] of params) {
+        if (val === undefined) {
+          scope.addItem(name, { value: "<value not available>" });
+        } else {
+          this._populateVariable(name, scope, val);
+        }
+      }
+    } else {
+      const varName = "<" + (data.type == "throw" ? "exception" : data.type) + ">";
+      this._populateVariable(varName, scope, data.returnVal);
+    }
+
+    scope.expand();
+    DebuggerView.showInstrumentsPane();
+  },
+
+  /**
+   * Add the hover frame enter/exit highlighting to a given item.
+   */
+  _highlightItem: function(aItem) {
+    if (!aItem || !aItem.target) {
+      return;
+    }
+    const trace = aItem.target.querySelector(".trace-item");
+    trace.classList.add("selected-matching");
+  },
+
+  /**
+   * Remove the hover frame enter/exit highlighting to a given item.
+   */
+  _unhighlightItem: function(aItem) {
+    if (!aItem || !aItem.target) {
+      return;
+    }
+    const match = aItem.target.querySelector(".selected-matching");
+    if (match) {
+      match.classList.remove("selected-matching");
+    }
+  },
+
+  /**
+   * Remove the frame enter/exit pair highlighting we do when hovering.
+   */
+  _unhighlightMatchingItems: function() {
+    if (this._matchingItems) {
+      this._matchingItems.forEach(this._unhighlightItem);
+      this._matchingItems = null;
+    }
+  },
+
+  /**
+   * Returns true if the given item is not the selected item.
+   */
+  _isNotSelectedItem: function(aItem) {
+    return aItem !== this.selectedItem;
+  },
+
+  /**
+   * Highlight the frame enter/exit pair of items for the given item.
+   */
+  _highlightMatchingItems: function(aItem) {
+    const frameId = aItem.attachment.trace.frameId;
+    const predicate = e => e.attachment.trace.frameId == frameId;
+
+    this._unhighlightMatchingItems();
+    this._matchingItems = this.items.filter(predicate);
+    this._matchingItems
+      .filter(this._isNotSelectedItem)
+      .forEach(this._highlightItem);
+  },
+
+  /**
+   * Listener for the mouseover event.
+   */
+  _onMouseOver: function({ target }) {
+    const traceItem = this.getItemForElement(target);
+    if (traceItem) {
+      this._highlightMatchingItems(traceItem);
+    }
+  },
+
+  /**
+   * Listener for typing in the search box.
+   */
+  _onSearch: function() {
+    const query = this._search.value.trim().toLowerCase();
+    const predicate = name => name.toLowerCase().contains(query);
+    this.filterContents(item => predicate(item.attachment.trace.name));
+  },
+
+  /**
+   * Select the traces tab in the sidebar.
+   */
+  selectTab: function() {
+    const tabs = this._tracerTab.parentElement;
+    tabs.selectedIndex = Array.indexOf(tabs.children, this._tracerTab);
+  },
+
+  /**
+   * Commit all staged items to the widget. Overridden so that we can call
+   * |FastListWidget.prototype.flush|.
+   */
+  commit: function() {
+    WidgetMethods.commit.call(this);
+    // TODO: Accessing non-standard widget properties. Figure out what's the
+    // best way to expose such things. Bug 895514.
+    this.widget.flush();
+  },
+
+  /**
+   * Adds the trace record provided as an argument to the view.
+   *
+   * @param object aTrace
+   *        The trace record coming from the tracer actor.
+   */
+  addTrace: function(aTrace) {
+    // Create the element node for the trace item.
+    let view = this._createView(aTrace);
+
+    // Append a source item to this container.
+    this.push([view], {
+      staged: true,
+      attachment: {
+        trace: aTrace
+      }
+    });
+  },
+
+  /**
+   * Customization function for creating an item's UI.
+   *
+   * @return nsIDOMNode
+   *         The network request view.
+   */
+  _createView: function(aTrace) {
+    let { type, name, location, blackBoxed, depth, frameId } = aTrace;
+    let { parameterNames, returnVal, arguments: args } = aTrace;
+    let fragment = document.createDocumentFragment();
+
+    this._templateItem.classList.toggle("black-boxed", blackBoxed);
+    this._templateItem.setAttribute("tooltiptext", SourceUtils.trimUrl(location.url));
+    this._templateItem.style.MozPaddingStart = depth + "em";
+
+    const TYPES = ["call", "yield", "return", "throw"];
+    for (let t of TYPES) {
+      this._templateTypeIcon.classList.toggle("trace-" + t, t == type);
+    }
+    this._templateTypeIcon.setAttribute("value", {
+      call: "\u2192",
+      yield: "Y",
+      return: "\u2190",
+      throw: "E",
+      terminated: "TERMINATED"
+    }[type]);
+
+    this._templateNameNode.setAttribute("value", name);
+
+    // All extra syntax and parameter nodes added.
+    const addedNodes = [];
+
+    if (parameterNames) {
+      const syntax = (p) => {
+        const el = document.createElement("label");
+        el.setAttribute("value", p);
+        el.classList.add("trace-syntax");
+        el.classList.add("plain");
+        addedNodes.push(el);
+        return el;
+      };
+
+      this._templateItem.appendChild(syntax("("));
+
+      for (let i = 0, n = parameterNames.length; i < n; i++) {
+        let param = document.createElement("label");
+        param.setAttribute("value", parameterNames[i]);
+        param.classList.add("trace-param");
+        param.classList.add("plain");
+        addedNodes.push(param);
+        this._templateItem.appendChild(param);
+
+        if (i + 1 !== n) {
+          this._templateItem.appendChild(syntax(", "));
+        }
+      }
+
+      this._templateItem.appendChild(syntax(")"));
+    }
+
+    // Flatten the DOM by removing one redundant box (the template container).
+    for (let node of this._template.childNodes) {
+      fragment.appendChild(node.cloneNode(true));
+    }
+
+    // Remove any added nodes from the template.
+    for (let node of addedNodes) {
+      this._templateItem.removeChild(node);
+    }
+
+    return fragment;
+  }
+});
+
+/**
  * Utility functions for handling sources.
  */
 let SourceUtils = {
   _labelsCache: new Map(), // Can't use WeakMaps because keys are strings.
   _groupsCache: new Map(),
+  _minifiedCache: new WeakMap(),
 
   /**
    * Returns true if the specified url and/or content type are specific to
@@ -1076,13 +1525,60 @@ let SourceUtils = {
   },
 
   /**
-   * Clears the labels cache, populated by methods like
+   * Determines if the source text is minified by using
+   * the percentage indented of a subset of lines
+   *
+   * @return object
+   *         A promise that resolves to true if source text is minified.
+   */
+  isMinified: Task.async(function*(sourceClient) {
+    if (this._minifiedCache.has(sourceClient)) {
+      return this._minifiedCache.get(sourceClient);
+    }
+
+    let [, text] = yield DebuggerController.SourceScripts.getText(sourceClient);
+    let isMinified;
+    let lineEndIndex = 0;
+    let lineStartIndex = 0;
+    let lines = 0;
+    let indentCount = 0;
+    let overCharLimit = false;
+
+    // Strip comments.
+    text = text.replace(/\/\*[\S\s]*?\*\/|\/\/(.+|\n)/g, "");
+
+    while (lines++ < SAMPLE_SIZE) {
+      lineEndIndex = text.indexOf("\n", lineStartIndex);
+      if (lineEndIndex == -1) {
+         break;
+      }
+      if (/^\s+/.test(text.slice(lineStartIndex, lineEndIndex))) {
+        indentCount++;
+      }
+      // For files with no indents but are not minified.
+      if ((lineEndIndex - lineStartIndex) > CHARACTER_LIMIT) {
+        overCharLimit = true;
+        break;
+      }
+      lineStartIndex = lineEndIndex + 1;
+    }
+
+    isMinified =
+      ((indentCount / lines) * 100) < INDENT_COUNT_THRESHOLD || overCharLimit;
+
+    this._minifiedCache.set(sourceClient, isMinified);
+    return isMinified;
+  }),
+
+  /**
+   * Clears the labels, groups and minify cache, populated by methods like
    * SourceUtils.getSourceLabel or Source Utils.getSourceGroup.
    * This should be done every time the content location changes.
    */
   clearCache: function() {
     this._labelsCache.clear();
     this._groupsCache.clear();
+    this._minifiedCache.clear();
   },
 
   /**
@@ -1099,7 +1595,18 @@ let SourceUtils = {
       return cachedLabel;
     }
 
-    let sourceLabel = this.trimUrl(aUrl);
+    let sourceLabel = null;
+
+    for (let name of Object.keys(KNOWN_SOURCE_GROUPS)) {
+      if (aUrl.startsWith(KNOWN_SOURCE_GROUPS[name])) {
+        sourceLabel = aUrl.substring(KNOWN_SOURCE_GROUPS[name].length);
+      }
+    }
+
+    if (!sourceLabel) {
+      sourceLabel = this.trimUrl(aUrl);
+    }
+
     let unicodeLabel = NetworkHelper.convertToUnicode(unescape(sourceLabel));
     this._labelsCache.set(aUrl, unicodeLabel);
     return unicodeLabel;
@@ -1122,14 +1629,20 @@ let SourceUtils = {
 
     try {
       // Use an nsIURL to parse all the url path parts.
-      let url = aUrl.split(" -> ").pop();
-      var uri = Services.io.newURI(url, null, null).QueryInterface(Ci.nsIURL);
+      var uri = Services.io.newURI(aUrl, null, null).QueryInterface(Ci.nsIURL);
     } catch (e) {
       // This doesn't look like a url, or nsIURL can't handle it.
       return "";
     }
 
     let groupLabel = uri.prePath;
+
+    for (let name of Object.keys(KNOWN_SOURCE_GROUPS)) {
+      if (aUrl.startsWith(KNOWN_SOURCE_GROUPS[name])) {
+        groupLabel = name;
+      }
+    }
+
     let unicodeLabel = NetworkHelper.convertToUnicode(unescape(groupLabel));
     this._groupsCache.set(aUrl, unicodeLabel)
     return unicodeLabel;
@@ -1232,7 +1745,7 @@ let SourceUtils = {
     if (aLabel && aLabel.indexOf("?") != 0) {
       // A page may contain multiple requests to the same url but with different
       // queries. It is *not* redundant to show each one.
-      if (!DebuggerView.Sources.containsLabel(aLabel)) {
+      if (!DebuggerView.Sources.getItemForAttachment(e => e.label == aLabel)) {
         return aLabel;
       }
     }
@@ -1285,8 +1798,7 @@ function VariableBubbleView() {
   dumpn("VariableBubbleView was instantiated");
 
   this._onMouseMove = this._onMouseMove.bind(this);
-  this._onMouseLeave = this._onMouseLeave.bind(this);
-  this._onMouseScroll = this._onMouseScroll.bind(this);
+  this._onMouseOut = this._onMouseOut.bind(this);
   this._onPopupHiding = this._onPopupHiding.bind(this);
 }
 
@@ -1297,16 +1809,23 @@ VariableBubbleView.prototype = {
   initialize: function() {
     dumpn("Initializing the VariableBubbleView");
 
-    this._tooltip = new Tooltip(document);
     this._editorContainer = document.getElementById("editor");
+    this._editorContainer.addEventListener("mousemove", this._onMouseMove, false);
+    this._editorContainer.addEventListener("mouseout", this._onMouseOut, false);
 
+    this._tooltip = new Tooltip(document, {
+      closeOnEvents: [{
+        emitter: DebuggerController._toolbox,
+        event: "select"
+      }, {
+        emitter: this._editorContainer,
+        event: "scroll",
+        useCapture: true
+      }]
+    });
     this._tooltip.defaultPosition = EDITOR_VARIABLE_POPUP_POSITION;
     this._tooltip.defaultShowDelay = EDITOR_VARIABLE_HOVER_DELAY;
-
     this._tooltip.panel.addEventListener("popuphiding", this._onPopupHiding);
-    this._editorContainer.addEventListener("mousemove", this._onMouseMove, false);
-    this._editorContainer.addEventListener("mouseleave", this._onMouseLeave, false);
-    this._editorContainer.addEventListener("scroll", this._onMouseScroll, true);
   },
 
   /**
@@ -1317,9 +1836,14 @@ VariableBubbleView.prototype = {
 
     this._tooltip.panel.removeEventListener("popuphiding", this._onPopupHiding);
     this._editorContainer.removeEventListener("mousemove", this._onMouseMove, false);
-    this._editorContainer.removeEventListener("mouseleave", this._onMouseLeave, false);
-    this._editorContainer.removeEventListener("scroll", this._onMouseScroll, true);
+    this._editorContainer.removeEventListener("mouseout", this._onMouseOut, false);
   },
+
+  /**
+   * Specifies whether literals can be (redundantly) inspected in a popup.
+   * This behavior is deprecated, but still tested in a few places.
+   */
+  _ignoreLiterals: true,
 
   /**
    * Searches for an identifier underneath the specified position in the
@@ -1357,7 +1881,12 @@ VariableBubbleView.prototype = {
 
     let scriptLine = hoveredLine - scriptLineOffset;
     let scriptColumn = hoveredColumn - scriptColumnOffset;
-    let identifierInfo = parsedSource.getIdentifierAt(scriptLine + 1, scriptColumn);
+    let identifierInfo = parsedSource.getIdentifierAt({
+      line: scriptLine + 1,
+      column: scriptColumn,
+      scriptIndex: scriptInfo.index,
+      ignoreLiterals: this._ignoreLiterals
+    });
 
     // If the info is null, we're not hovering any identifier.
     if (!identifierInfo) {
@@ -1420,13 +1949,25 @@ VariableBubbleView.prototype = {
     if (VariablesView.isPrimitive({ value: objectActor })) {
       let className = VariablesView.getClass(objectActor);
       let textContent = VariablesView.getString(objectActor);
-      this._tooltip.setTextContent([textContent], className, "plain");
+      this._tooltip.setTextContent({
+        messages: [textContent],
+        messagesClass: className,
+        containerClass: "plain"
+      }, [{
+        label: L10N.getStr('addWatchExpressionButton'),
+        className: "dbg-expression-button",
+        command: () => {
+          DebuggerView.VariableBubble.hideContents();
+          DebuggerView.WatchExpressions.addExpression(evalPrefix, true);
+        }
+      }]);
     } else {
       this._tooltip.setVariableContent(objectActor, {
         searchPlaceholder: L10N.getStr("emptyPropertiesFilterText"),
         searchEnabled: Prefs.variablesSearchboxVisible,
-        eval: aString => {
-          DebuggerController.StackFrames.evaluate(aString);
+        eval: (variable, value) => {
+          let string = variable.evaluationMacro(variable, value);
+          DebuggerController.StackFrames.evaluate(string);
           DebuggerView.VariableBubble.hideContents();
         }
       }, {
@@ -1441,16 +1982,17 @@ VariableBubbleView.prototype = {
             window.emit(EVENTS.FETCHED_BUBBLE_PROPERTIES);
           }
         }
-      });
+      }, [{
+        label: L10N.getStr("addWatchExpressionButton"),
+        className: "dbg-expression-button",
+        command: () => {
+          DebuggerView.VariableBubble.hideContents();
+          DebuggerView.WatchExpressions.addExpression(evalPrefix, true);
+        }
+      }], DebuggerController._toolbox);
     }
 
-    // Calculate the x, y coordinates for the variable bubble anchor.
-    let identifierCenter = { line: line - 1, ch: column + length / 2 };
-    let anchor = editor.getCoordsFromPosition(identifierCenter);
-
-    this._tooltip.defaultOffsetX = anchor.left + EDITOR_VARIABLE_POPUP_OFFSET_X;
-    this._tooltip.defaultOffsetY = anchor.top + EDITOR_VARIABLE_POPUP_OFFSET_Y;
-    this._tooltip.show(this._editorContainer);
+    this._tooltip.show(this._markedText.anchor);
   },
 
   /**
@@ -1459,6 +2001,16 @@ VariableBubbleView.prototype = {
   hideContents: function() {
     clearNamedTimeout("editor-mouse-move");
     this._tooltip.hide();
+  },
+
+  /**
+   * Checks whether the inspection popup is shown.
+   *
+   * @return boolean
+   *         True if the panel is shown or showing, false otherwise.
+   */
+  contentsShown: function() {
+    return this._tooltip.isShown();
   },
 
   /**
@@ -1483,31 +2035,28 @@ VariableBubbleView.prototype = {
   /**
    * The mousemove listener for the source editor.
    */
-  _onMouseMove: function({ clientX: x, clientY: y }) {
+  _onMouseMove: function(e) {
     // Prevent the variable inspection popup from showing when the thread client
-    // is not paused, or while a popup is already visible.
-    if (gThreadClient && gThreadClient.state != "paused" || !this._tooltip.isHidden()) {
+    // is not paused, or while a popup is already visible, or when the user tries
+    // to select text in the editor.
+    let isResumed = gThreadClient && gThreadClient.state != "paused";
+    let isSelecting = DebuggerView.editor.somethingSelected() && e.buttons > 0;
+    let isPopupVisible = !this._tooltip.isHidden();
+    if (isResumed || isSelecting || isPopupVisible) {
       clearNamedTimeout("editor-mouse-move");
       return;
     }
     // Allow events to settle down first. If the mouse hovers over
     // a certain point in the editor long enough, try showing a variable bubble.
     setNamedTimeout("editor-mouse-move",
-      EDITOR_VARIABLE_HOVER_DELAY, () => this._findIdentifier(x, y));
+      EDITOR_VARIABLE_HOVER_DELAY, () => this._findIdentifier(e.clientX, e.clientY));
   },
 
   /**
-   * The mouseleave listener for the source editor container node.
+   * The mouseout listener for the source editor container node.
    */
-  _onMouseLeave: function() {
+  _onMouseOut: function() {
     clearNamedTimeout("editor-mouse-move");
-  },
-
-  /**
-   * The mousescroll listener for the source editor container node.
-   */
-  _onMouseScroll: function() {
-    this.hideContents();
   },
 
   /**
@@ -1553,11 +2102,11 @@ WatchExpressionsView.prototype = Heritage.extend(WidgetMethods, {
   initialize: function() {
     dumpn("Initializing the WatchExpressionsView");
 
-    this.widget = new ListWidget(document.getElementById("expressions"));
-    this.widget.permaText = L10N.getStr("addWatchExpressionText");
-    this.widget.itemFactory = this._createItemView;
+    this.widget = new SimpleListWidget(document.getElementById("expressions"));
     this.widget.setAttribute("context", "debuggerWatchExpressionsContextMenu");
     this.widget.addEventListener("click", this._onClick, false);
+
+    this.headerText = L10N.getStr("addWatchExpressionText");
   },
 
   /**
@@ -1574,25 +2123,39 @@ WatchExpressionsView.prototype = Heritage.extend(WidgetMethods, {
    *
    * @param string aExpression [optional]
    *        An optional initial watch expression text.
+   * @param boolean aSkipUserInput [optional]
+   *        Pass true to avoid waiting for additional user input
+   *        on the watch expression.
    */
-  addExpression: function(aExpression = "") {
+  addExpression: function(aExpression = "", aSkipUserInput = false) {
     // Watch expressions are UI elements which benefit from visible panes.
     DebuggerView.showInstrumentsPane();
 
+    // Create the element node for the watch expression item.
+    let itemView = this._createItemView(aExpression);
+
     // Append a watch expression item to this container.
-    let expressionItem = this.push([, aExpression], {
+    let expressionItem = this.push([itemView.container], {
       index: 0, /* specifies on which position should the item be appended */
-      relaxed: true, /* this container should allow dupes & degenerates */
       attachment: {
+        view: itemView,
         initialExpression: aExpression,
-        currentExpression: ""
+        currentExpression: "",
       }
     });
 
-    // Automatically focus the new watch expression input.
-    expressionItem.attachment.inputNode.select();
-    expressionItem.attachment.inputNode.focus();
-    DebuggerView.Variables.parentNode.scrollTop = 0;
+    // Automatically focus the new watch expression input
+    // if additional user input is desired.
+    if (!aSkipUserInput) {
+      expressionItem.attachment.view.inputNode.select();
+      expressionItem.attachment.view.inputNode.focus();
+      DebuggerView.Variables.parentNode.scrollTop = 0;
+    }
+    // Otherwise, add and evaluate the new watch expression immediately.
+    else {
+      this.toggleContents(false);
+      this._onBlur({ target: expressionItem.attachment.view.inputNode });
+    }
   },
 
   /**
@@ -1617,7 +2180,7 @@ WatchExpressionsView.prototype = Heritage.extend(WidgetMethods, {
 
     // Save the watch expression code string.
     expressionItem.attachment.currentExpression = aExpression;
-    expressionItem.attachment.inputNode.value = aExpression;
+    expressionItem.attachment.view.inputNode.value = aExpression;
 
     // Synchronize with the controller's watch expressions store.
     DebuggerController.StackFrames.syncWatchExpressions();
@@ -1667,18 +2230,20 @@ WatchExpressionsView.prototype = Heritage.extend(WidgetMethods, {
   /**
    * Customization function for creating an item's UI.
    *
-   * @param nsIDOMNode aElementNode
-   *        The element associated with the displayed item.
-   * @param any aAttachment
-   *        Some attached primitive/object.
+   * @param string aExpression
+   *        The watch expression string.
    */
-  _createItemView: function(aElementNode, aAttachment) {
-    let arrowNode = document.createElement("box");
+  _createItemView: function(aExpression) {
+    let container = document.createElement("hbox");
+    container.className = "list-widget-item dbg-expression";
+    container.setAttribute("align", "center");
+
+    let arrowNode = document.createElement("hbox");
     arrowNode.className = "dbg-expression-arrow";
 
     let inputNode = document.createElement("textbox");
     inputNode.className = "plain dbg-expression-input devtools-monospace";
-    inputNode.setAttribute("value", aAttachment.initialExpression);
+    inputNode.setAttribute("value", aExpression);
     inputNode.setAttribute("flex", "1");
 
     let closeNode = document.createElement("toolbarbutton");
@@ -1688,14 +2253,16 @@ WatchExpressionsView.prototype = Heritage.extend(WidgetMethods, {
     inputNode.addEventListener("blur", this._onBlur, false);
     inputNode.addEventListener("keypress", this._onKeyPress, false);
 
-    aElementNode.className = "dbg-expression";
-    aElementNode.appendChild(arrowNode);
-    aElementNode.appendChild(inputNode);
-    aElementNode.appendChild(closeNode);
+    container.appendChild(arrowNode);
+    container.appendChild(inputNode);
+    container.appendChild(closeNode);
 
-    aAttachment.arrowNode = arrowNode;
-    aAttachment.inputNode = inputNode;
-    aAttachment.closeNode = closeNode;
+    return {
+      container: container,
+      arrowNode: arrowNode,
+      inputNode: inputNode,
+      closeNode: closeNode
+    };
   },
 
   /**
@@ -1778,13 +2345,11 @@ WatchExpressionsView.prototype = Heritage.extend(WidgetMethods, {
    * The keypress listener for a watch expression's textbox.
    */
   _onKeyPress: function(e) {
-    switch(e.keyCode) {
+    switch (e.keyCode) {
       case e.DOM_VK_RETURN:
-      case e.DOM_VK_ENTER:
       case e.DOM_VK_ESCAPE:
         e.stopPropagation();
         DebuggerView.editor.focus();
-        return;
     }
   }
 });
@@ -1807,7 +2372,6 @@ EventListenersView.prototype = Heritage.extend(WidgetMethods, {
     dumpn("Initializing the EventListenersView");
 
     this.widget = new SideMenuWidget(document.getElementById("event-listeners"), {
-      theme: "light",
       showItemCheckboxes: true,
       showGroupCheckboxes: true
     });
@@ -1820,9 +2384,6 @@ EventListenersView.prototype = Heritage.extend(WidgetMethods, {
 
     this.widget.addEventListener("check", this._onCheck, false);
     this.widget.addEventListener("click", this._onClick, false);
-
-    // Show an empty label by default.
-    this.empty();
   },
 
   /**
@@ -1859,6 +2420,7 @@ EventListenersView.prototype = Heritage.extend(WidgetMethods, {
     let eventItem = this.getItemForPredicate(aItem =>
       aItem.attachment.url == url &&
       aItem.attachment.type == type);
+
     if (eventItem) {
       let { selectors, view: { targets } } = eventItem.attachment;
       if (selectors.indexOf(selector) == -1) {
@@ -1937,13 +2499,14 @@ EventListenersView.prototype = Heritage.extend(WidgetMethods, {
       DebuggerController.Breakpoints.DOM.activeEventNames.indexOf(type) != -1;
 
     // Append an event listener item to this container.
-    this.push([itemView.container, url, group], {
+    this.push([itemView.container], {
       staged: aOptions.staged, /* stage the item to be appended later? */
       attachment: {
         url: url,
         type: type,
         view: itemView,
         selectors: [selector],
+        group: group,
         checkboxState: checkboxState,
         checkboxTooltip: this._eventCheckboxTooltip
       }
@@ -2033,7 +2596,7 @@ EventListenersView.prototype = Heritage.extend(WidgetMethods, {
 
     // Check all the event items in this group.
     this.items
-      .filter(e => e.description == description)
+      .filter(e => e.attachment.group == description)
       .forEach(e => this.callMethod("checkItem", e.target, checked));
   },
 
@@ -2063,7 +2626,6 @@ EventListenersView.prototype = Heritage.extend(WidgetMethods, {
 function GlobalSearchView() {
   dumpn("GlobalSearchView was instantiated");
 
-  this._createItemView = this._createItemView.bind(this);
   this._onHeaderClick = this._onHeaderClick.bind(this);
   this._onLineClick = this._onLineClick.bind(this);
   this._onMatchClick = this._onMatchClick.bind(this);
@@ -2076,11 +2638,10 @@ GlobalSearchView.prototype = Heritage.extend(WidgetMethods, {
   initialize: function() {
     dumpn("Initializing the GlobalSearchView");
 
-    this.widget = new ListWidget(document.getElementById("globalsearch"));
+    this.widget = new SimpleListWidget(document.getElementById("globalsearch"));
     this._splitter = document.querySelector("#globalsearch + .devtools-horizontal-splitter");
 
-    this.widget.emptyText = L10N.getStr("noMatchingStringsText");
-    this.widget.itemFactory = this._createItemView;
+    this.emptyText = L10N.getStr("noMatchingStringsText");
   },
 
   /**
@@ -2287,29 +2848,20 @@ GlobalSearchView.prototype = Heritage.extend(WidgetMethods, {
    *        An object containing all the matched lines for a specific source.
    */
   _createSourceResultsUI: function(aSourceResults) {
-    // Append a source results item to this container.
-    this.push([], {
-      index: -1, /* specifies on which position should the item be appended */
-      relaxed: true, /* this container should allow dupes & degenerates */
-      attachment: {
-        sourceResults: aSourceResults
-      }
-    });
-  },
-
-  /**
-   * Customization function for creating an item's UI.
-   *
-   * @param nsIDOMNode aElementNode
-   *        The element associated with the displayed item.
-   * @param any aAttachment
-   *        Some attached primitive/object.
-   */
-  _createItemView: function(aElementNode, aAttachment) {
-    aAttachment.sourceResults.createView(aElementNode, {
+    // Create the element node for the source results item.
+    let container = document.createElement("hbox");
+    aSourceResults.createView(container, {
       onHeaderClick: this._onHeaderClick,
       onLineClick: this._onLineClick,
       onMatchClick: this._onMatchClick
+    });
+
+    // Append a source results item to this container.
+    let item = this.push([container], {
+      index: -1, /* specifies on which position should the item be appended */
+      attachment: {
+        sourceResults: aSourceResults
+      }
     });
   },
 
@@ -2351,7 +2903,15 @@ GlobalSearchView.prototype = Heritage.extend(WidgetMethods, {
     let line = lineResultsItem.instance.line;
 
     DebuggerView.setEditorLocation(url, line + 1, { noDebug: true });
-    DebuggerView.editor.extendSelection(lineResultsItem.lineData.range);
+
+    let range = lineResultsItem.lineData.range;
+    let cursor = DebuggerView.editor.getOffset({ line: line, ch: 0 });
+    let [ anchor, head ] = DebuggerView.editor.getPosition(
+      cursor + range.start,
+      cursor + range.start + range.length
+    );
+
+    DebuggerView.editor.setSelection(anchor, head);
   },
 
   /**
@@ -2361,10 +2921,7 @@ GlobalSearchView.prototype = Heritage.extend(WidgetMethods, {
    *        The match to scroll into view.
    */
   _scrollMatchIntoViewIfNeeded: function(aMatch) {
-    // TODO: Accessing private widget properties. Figure out what's the best
-    // way to expose such things. Bug 876271.
-    let boxObject = this.widget._parent.boxObject.QueryInterface(Ci.nsIScrollBoxObject);
-    boxObject.ensureElementIsVisible(aMatch);
+    this.widget.ensureElementIsVisible(aMatch);
   },
 
   /**
@@ -2619,7 +3176,7 @@ LineResults.prototype = {
     lineNumberNode.setAttribute("value", this.line + 1);
 
     let lineContentsNode = document.createElement("hbox");
-    lineContentsNode.className = "light list-widget-item dbg-results-line-contents";
+    lineContentsNode.className = "dbg-results-line-contents";
     lineContentsNode.classList.add("devtools-monospace");
     lineContentsNode.setAttribute("flex", "1");
 
@@ -2785,6 +3342,7 @@ LineResults.size = function() {
  */
 DebuggerView.Sources = new SourcesView();
 DebuggerView.VariableBubble = new VariableBubbleView();
+DebuggerView.Tracer = new TracerView();
 DebuggerView.WatchExpressions = new WatchExpressionsView();
 DebuggerView.EventListeners = new EventListenersView();
 DebuggerView.GlobalSearch = new GlobalSearchView();

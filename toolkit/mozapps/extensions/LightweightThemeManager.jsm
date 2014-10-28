@@ -40,7 +40,7 @@ const PERSIST_FILES = {
 };
 
 XPCOMUtils.defineLazyModuleGetter(this, "LightweightThemeImageOptimizer",
-  "resource://gre/modules/LightweightThemeImageOptimizer.jsm");
+  "resource://gre/modules/addons/LightweightThemeImageOptimizer.jsm");
 
 this.__defineGetter__("_prefs", function prefsGetter() {
   delete this._prefs;
@@ -70,6 +70,8 @@ var _themeIDBeingEnabled = null;
 var _themeIDBeingDisabled = null;
 
 this.LightweightThemeManager = {
+  get name() "LightweightThemeManager",
+
   get usedThemes () {
     try {
       return JSON.parse(_prefs.getComplexValue("usedThemes",
@@ -508,12 +510,7 @@ function AddonWrapper(aTheme) {
   };
 
   this.findUpdates = function AddonWrapper_findUpdates(listener, reason, appVersion, platformVersion) {
-    if ("onNoCompatibilityUpdateAvailable" in listener)
-      listener.onNoCompatibilityUpdateAvailable(this);
-    if ("onNoUpdateAvailable" in listener)
-      listener.onNoUpdateAvailable(this);
-    if ("onUpdateFinished" in listener)
-      listener.onUpdateFinished(this);
+    AddonManagerPrivate.callNoUpdateListeners(this, listener, reason, appVersion, platformVersion);
   };
 }
 
@@ -628,7 +625,7 @@ function _sanitizeTheme(aData, aBaseURI, aLocal) {
   if (!aData || typeof aData != "object")
     return null;
 
-  var resourceProtocols = ["http", "https"];
+  var resourceProtocols = ["http", "https", "resource"];
   if (aLocal)
     resourceProtocols.push("file");
   var resourceProtocolExp = new RegExp("^(" + resourceProtocols.join("|") + "):");
@@ -759,7 +756,7 @@ function _getLocalImageURI(localFileName) {
 }
 
 function _persistImage(sourceURL, localFileName, successCallback) {
-  if (/^file:/.test(sourceURL))
+  if (/^(file|resource):/.test(sourceURL))
     return;
 
   var targetURI = _getLocalImageURI(localFileName);

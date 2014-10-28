@@ -9,7 +9,6 @@
 
 class imgDecoderObserver;
 class imgIContainer;
-class imgRequestProxy;
 class imgStatusNotifyRunnable;
 class imgRequestNotifyRunnable;
 class imgStatusTrackerObserver;
@@ -21,6 +20,7 @@ class nsIRunnable;
 #include "nsTObserverArray.h"
 #include "nsThreadUtils.h"
 #include "nsRect.h"
+#include "imgRequestProxy.h"
 
 namespace mozilla {
 namespace image {
@@ -108,14 +108,16 @@ enum {
 
 class imgStatusTracker : public mozilla::SupportsWeakPtr<imgStatusTracker>
 {
+  virtual ~imgStatusTracker();
+
 public:
+  MOZ_DECLARE_REFCOUNTED_TYPENAME(imgStatusTracker)
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(imgStatusTracker)
 
   // aImage is the image that this status tracker will pass to the
   // imgRequestProxys in SyncNotify() and EmulateRequestFinished(), and must be
   // alive as long as this instance is, because we hold a weak reference to it.
-  imgStatusTracker(mozilla::image::Image* aImage);
-  virtual ~imgStatusTracker();
+  explicit imgStatusTracker(mozilla::image::Image* aImage);
 
   // Image-setter, for imgStatusTrackers created by imgRequest::Init, which
   // are created before their Image is created.  This method should only
@@ -173,10 +175,7 @@ public:
   // This is intentionally non-general because its sole purpose is to support an
   // some obscure network priority logic in imgRequest. That stuff could probably
   // be improved, but it's too scary to mess with at the moment.
-  bool FirstConsumerIs(imgRequestProxy* aConsumer) {
-    MOZ_ASSERT(NS_IsMainThread(), "Use mConsumers on main thread only");
-    return mConsumers.SafeElementAt(0, nullptr) == aConsumer;
-  }
+  bool FirstConsumerIs(imgRequestProxy* aConsumer);
 
   void AdoptConsumers(imgStatusTracker* aTracker) {
     MOZ_ASSERT(NS_IsMainThread(), "Use mConsumers on main thread only");
@@ -295,6 +294,7 @@ public:
   nsIntRect GetInvalidRect() const { return mInvalidRect; }
 
 private:
+  typedef nsTObserverArray<mozilla::WeakPtr<imgRequestProxy>> ProxyArray;
   friend class imgStatusNotifyRunnable;
   friend class imgRequestNotifyRunnable;
   friend class imgStatusTrackerObserver;
@@ -306,7 +306,7 @@ private:
 
   // Main thread only, since imgRequestProxy calls are expected on the main
   // thread, and mConsumers is not threadsafe.
-  static void SyncNotifyState(nsTObserverArray<imgRequestProxy*>& proxies,
+  static void SyncNotifyState(ProxyArray& proxies,
                               bool hasImage, uint32_t state,
                               nsIntRect& dirtyRect, bool hadLastPart);
 
@@ -322,7 +322,7 @@ private:
   // List of proxies attached to the image. Each proxy represents a consumer
   // using the image. Array and/or individual elements should only be accessed
   // on the main thread.
-  nsTObserverArray<imgRequestProxy*> mConsumers;
+  ProxyArray mConsumers;
 
   mozilla::RefPtr<imgDecoderObserver> mTrackerObserver;
 

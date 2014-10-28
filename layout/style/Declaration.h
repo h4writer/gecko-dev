@@ -63,6 +63,7 @@ public:
   bool HasProperty(nsCSSProperty aProperty) const;
 
   void GetValue(nsCSSProperty aProperty, nsAString& aValue) const;
+  void GetAuthoredValue(nsCSSProperty aProperty, nsAString& aValue) const;
 
   bool HasImportantData() const {
     return mImportantData || mImportantVariables;
@@ -73,7 +74,7 @@ public:
   /**
    * Adds a custom property declaration to this object.
    *
-   * @param aName The variable name (i.e., without the "var-" prefix).
+   * @param aName The variable name (i.e., without the "--" prefix).
    * @param aType The type of value the variable has.
    * @param aValue The value of the variable, if aType is
    *   CSSVariableDeclarations::eTokenStream.
@@ -90,7 +91,7 @@ public:
   /**
    * Removes a custom property declaration from this object.
    *
-   * @param aName The variable name (i.e., without the "var-" prefix).
+   * @param aName The variable name (i.e., without the "--" prefix).
    */
   void RemoveVariableDeclaration(const nsAString& aName);
 
@@ -98,7 +99,7 @@ public:
    * Returns whether a custom property declaration for a variable with
    * a given name exists on this object.
    *
-   * @param aName The variable name (i.e., without the "var-" prefix).
+   * @param aName The variable name (i.e., without the "--" prefix).
    */
   bool HasVariableDeclaration(const nsAString& aName) const;
 
@@ -106,7 +107,7 @@ public:
    * Gets the string value for a custom property declaration of a variable
    * with a given name.
    *
-   * @param aName The variable name (i.e., without the "var-" prefix).
+   * @param aName The variable name (i.e., without the "--" prefix).
    * @param aValue Out parameter into which the variable's value will be
    *   stored.  If the value is 'initial' or 'inherit', that exact string
    *   will be stored in aValue.
@@ -278,9 +279,14 @@ private:
   Declaration& operator=(const Declaration& aCopy) MOZ_DELETE;
   bool operator==(const Declaration& aCopy) const MOZ_DELETE;
 
+  void GetValue(nsCSSProperty aProperty, nsAString& aValue,
+                nsCSSValue::Serialization aValueSerialization) const;
+
   static void AppendImportanceToString(bool aIsImportant, nsAString& aString);
   // return whether there was a value in |aValue| (i.e., it had a non-null unit)
   bool AppendValueToString(nsCSSProperty aProperty, nsAString& aResult) const;
+  bool AppendValueToString(nsCSSProperty aProperty, nsAString& aResult,
+                           nsCSSValue::Serialization aValueSerialization) const;
   // Helper for ToString with strange semantics regarding aValue.
   void AppendPropertyAndValueToString(nsCSSProperty aProperty,
                                       nsAutoString& aValue,
@@ -310,16 +316,17 @@ public:
    */
   void GetCustomPropertyNameAt(uint32_t aIndex, nsAString& aResult) const {
     MOZ_ASSERT(mOrder[aIndex] >= eCSSProperty_COUNT);
+    uint32_t variableIndex = mOrder[aIndex] - eCSSProperty_COUNT;
     aResult.Truncate();
-    aResult.AppendLiteral("var-");
-    aResult.Append(mVariableOrder[aIndex]);
+    aResult.AppendLiteral("--");
+    aResult.Append(mVariableOrder[variableIndex]);
   }
 
   size_t SizeOfIncludingThis(mozilla::MallocSizeOf aMallocSizeOf) const;
 
 private:
   // The order of properties in this declaration.  Longhand properties are
-  // represented by their nsCSSProperty value, and each custom property (var-*)
+  // represented by their nsCSSProperty value, and each custom property (--*)
   // is represented by a value that begins at eCSSProperty_COUNT.
   //
   // Subtracting eCSSProperty_COUNT from those values that represent custom

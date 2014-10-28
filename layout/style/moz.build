@@ -5,20 +5,23 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 DIRS += ['xbl-marquee']
-TEST_TOOL_DIRS += ['test']
+TEST_DIRS += ['test']
 
 EXPORTS += [
     'AnimationCommon.h',
+    'CounterStyleManager.h',
     'nsAnimationManager.h',
     'nsComputedDOMStylePropertyList.h',
     'nsCSSAnonBoxes.h',
     'nsCSSAnonBoxList.h',
+    'nsCSSCounterDescList.h',
     'nsCSSFontDescList.h',
     'nsCSSKeywordList.h',
     'nsCSSKeywords.h',
     'nsCSSParser.h',
     'nsCSSPropAliasList.h',
     'nsCSSProperty.h',
+    'nsCSSPropertySet.h',
     'nsCSSPropList.h',
     'nsCSSProps.h',
     'nsCSSPseudoClasses.h',
@@ -27,16 +30,13 @@ EXPORTS += [
     'nsCSSPseudoElements.h',
     'nsCSSRuleProcessor.h',
     'nsCSSScanner.h',
-    'nsCSSStyleSheet.h',
     'nsCSSValue.h',
     'nsDOMCSSAttrDeclaration.h',
     'nsDOMCSSDeclaration.h',
     'nsDOMCSSRGBColor.h',
-    'nsDOMMediaQueryList.h',
     'nsICSSDeclaration.h',
     'nsICSSLoaderObserver.h',
     'nsICSSPseudoComparator.h',
-    'nsICSSRuleList.h',
     'nsICSSStyleRuleDOMWrapper.h',
     'nsIStyleRule.h',
     'nsIStyleRuleProcessor.h',
@@ -46,7 +46,6 @@ EXPORTS += [
     'nsRuleNode.h',
     'nsRuleProcessorData.h',
     'nsRuleWalker.h',
-    'nsStyleAnimation.h',
     'nsStyleConsts.h',
     'nsStyleContext.h',
     'nsStyleCoord.h',
@@ -59,14 +58,20 @@ EXPORTS += [
 ]
 
 EXPORTS.mozilla += [
+    'CSSStyleSheet.h',
     'CSSVariableDeclarations.h',
     'CSSVariableResolver.h',
     'CSSVariableValues.h',
+    'StyleAnimationValue.h',
 ]
 
 EXPORTS.mozilla.dom += [
     'CSS.h',
+    'CSSRuleList.h',
     'CSSValue.h',
+    'FontFace.h',
+    'FontFaceSet.h',
+    'MediaQueryList.h',
 ]
 
 EXPORTS.mozilla.css += [
@@ -83,14 +88,19 @@ EXPORTS.mozilla.css += [
 
 UNIFIED_SOURCES += [
     'AnimationCommon.cpp',
+    'CounterStyleManager.cpp',
     'CSS.cpp',
+    'CSSRuleList.cpp',
+    'CSSStyleSheet.cpp',
     'CSSVariableDeclarations.cpp',
     'CSSVariableResolver.cpp',
     'CSSVariableValues.cpp',
     'Declaration.cpp',
     'ErrorReporter.cpp',
+    'FontFace.cpp',
     'ImageLoader.cpp',
     'Loader.cpp',
+    'MediaQueryList.cpp',
     'nsAnimationManager.cpp',
     'nsComputedDOMStyle.cpp',
     'nsCSSAnonBoxes.cpp',
@@ -102,14 +112,13 @@ UNIFIED_SOURCES += [
     'nsCSSPseudoElements.cpp',
     'nsCSSRules.cpp',
     'nsCSSScanner.cpp',
-    'nsCSSStyleSheet.cpp',
     'nsCSSValue.cpp',
     'nsDOMCSSAttrDeclaration.cpp',
     'nsDOMCSSDeclaration.cpp',
     'nsDOMCSSRect.cpp',
     'nsDOMCSSRGBColor.cpp',
     'nsDOMCSSValueList.cpp',
-    'nsDOMMediaQueryList.cpp',
+    'nsFontFaceLoader.cpp',
     'nsHTMLCSSStyleSheet.cpp',
     'nsHTMLStyleSheet.cpp',
     'nsLayoutStylesheetCache.cpp',
@@ -118,7 +127,6 @@ UNIFIED_SOURCES += [
     'nsROCSSPrimitiveValue.cpp',
     'nsRuleData.cpp',
     'nsRuleNode.cpp',
-    'nsStyleAnimation.cpp',
     'nsStyleContext.cpp',
     'nsStyleCoord.cpp',
     'nsStyleSet.cpp',
@@ -126,14 +134,16 @@ UNIFIED_SOURCES += [
     'nsStyleTransformMatrix.cpp',
     'nsStyleUtil.cpp',
     'nsTransitionManager.cpp',
+    'StyleAnimationValue.cpp',
     'StyleRule.cpp',
+    'SVGAttrAnimationRuleProcessor.cpp',
 ]
 
+# FontFaceSet.cpp needs to be built separately because it redefines LOG.
 # nsCSSRuleProcessor.cpp needs to be built separately because it uses plarena.h.
-# nsFontFaceLoader.cpp needs to be built separately because it forces NSPR logging.
 SOURCES += [
+    'FontFaceSet.cpp',
     'nsCSSRuleProcessor.cpp',
-    'nsFontFaceLoader.cpp',
 ]
 
 FAIL_ON_WARNINGS = True
@@ -142,15 +152,28 @@ MSVC_ENABLE_PGO = True
 
 include('/ipc/chromium/chromium-config.mozbuild')
 
-FINAL_LIBRARY = 'gklayout'
+FINAL_LIBRARY = 'xul'
 
 LOCAL_INCLUDES += [
-    '../../content/base/src',
-    '../../content/html/content/src',
-    '../../content/xbl/src',
-    '../../content/xul/document/src',
     '../base',
     '../generic',
     '../xul',
     '/dom/base',
+    '/dom/html',
+    '/dom/xbl',
+    '/dom/xul',
 ]
+
+JAR_MANIFESTS += ['jar.mn']
+
+RESOURCE_FILES += [
+    'contenteditable.css',
+    'designmode.css',
+    'ImageDocument.css',
+    'TopLevelImageDocument.css',
+    'TopLevelVideoDocument.css',
+]
+
+if CONFIG['GNU_CC']:
+    CFLAGS += ['-Wshadow']
+    CXXFLAGS += ['-Wshadow']

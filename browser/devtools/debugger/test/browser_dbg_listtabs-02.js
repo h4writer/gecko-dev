@@ -5,6 +5,9 @@
  * Make sure the root actor's live tab list implementation works as specified.
  */
 
+let devtools = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools;
+let { BrowserTabList } = devtools.require("devtools/server/actors/webbrowser");
+
 let gTestPage = "data:text/html;charset=utf-8," + encodeURIComponent(
   "<title>JS Debugger BrowserTabList test page</title><body>Yo.</body>");
 
@@ -26,7 +29,7 @@ function test() {
     DebuggerServer.addBrowserActors();
   }
 
-  gTabList = new DebuggerServer.BrowserTabList("fake DebuggerServerConnection");
+  gTabList = new BrowserTabList("fake DebuggerServerConnection");
   gTabList._testing = true;
   gTabList.onListChanged = onListChangedHandler;
 
@@ -45,7 +48,7 @@ function test() {
     .then(testWindowClosed)
     .then(removeTabB)
     .then(checkSingleTab)
-    .then(finish);
+    .then(finishUp);
 }
 
 function checkSingleTab() {
@@ -207,4 +210,9 @@ function removeTabB() {
 
   removeTab(gTabB);
   return deferred.promise;
+}
+
+function finishUp() {
+  gTabList = gFirstActor = gActorA = gTabA = gTabB = gTabC = gNewWindow = null;
+  finish();
 }

@@ -11,9 +11,19 @@
  * and create derivative works of this document.
  */
 
-interface HitRegionOptions;
-
 enum CanvasWindingRule { "nonzero", "evenodd" };
+
+dictionary ContextAttributes2D {
+  // whether or not we're planning to do a lot of readback operations
+  boolean willReadFrequently = false;
+  // signal if the canvas contains an alpha channel
+  boolean alpha = true;
+};
+
+dictionary HitRegionOptions {
+  DOMString id = "";
+  Element? control = null;
+};
 
 interface CanvasRenderingContext2D {
 
@@ -63,6 +73,9 @@ interface CanvasRenderingContext2D {
            attribute double shadowBlur; // (default 0)
            attribute DOMString shadowColor; // (default transparent black)
 
+  [Pref="canvas.filters.enabled", SetterThrows]
+  attribute DOMString filter; // (default empty string = no filter)
+
   // rects
   [LenientFloat]
   void clearRect(double x, double y, double w, double h);
@@ -74,21 +87,22 @@ interface CanvasRenderingContext2D {
   // path API (see also CanvasPathMethods)
   void beginPath();
   void fill(optional CanvasWindingRule winding = "nonzero");
-// NOT IMPLEMENTED  void fill(Path path);
+  void fill(Path2D path, optional CanvasWindingRule winding = "nonzero");
   void stroke();
-// NOT IMPLEMENTED  void stroke(Path path);
-  [Pref="canvas.focusring.enabled"] void drawSystemFocusRing(Element element);
+  void stroke(Path2D path);
+  [Pref="canvas.focusring.enabled"] void drawFocusIfNeeded(Element element);
 // NOT IMPLEMENTED  void drawSystemFocusRing(Path path, HTMLElement element);
-  [Pref="canvas.focusring.enabled"] boolean drawCustomFocusRing(Element element);
+  [Pref="canvas.customfocusring.enabled"] boolean drawCustomFocusRing(Element element);
 // NOT IMPLEMENTED  boolean drawCustomFocusRing(Path path, HTMLElement element);
 // NOT IMPLEMENTED  void scrollPathIntoView();
 // NOT IMPLEMENTED  void scrollPathIntoView(Path path);
   void clip(optional CanvasWindingRule winding = "nonzero");
-// NOT IMPLEMENTED  void clip(Path path);
+  void clip(Path2D path, optional CanvasWindingRule winding = "nonzero");
 // NOT IMPLEMENTED  void resetClip();
   boolean isPointInPath(unrestricted double x, unrestricted double y, optional CanvasWindingRule winding = "nonzero");
-// NOT IMPLEMENTED  boolean isPointInPath(Path path, unrestricted double x, unrestricted double y);
+  boolean isPointInPath(Path2D path, unrestricted double x, unrestricted double y, optional CanvasWindingRule winding = "nonzero");
   boolean isPointInStroke(double x, double y);
+  boolean isPointInStroke(Path2D path, unrestricted double x, unrestricted double y);
 
   // text (see also the CanvasDrawingStyles interface)
   [Throws, LenientFloat]
@@ -108,7 +122,8 @@ interface CanvasRenderingContext2D {
   void drawImage((HTMLImageElement or HTMLCanvasElement or HTMLVideoElement) image, double sx, double sy, double sw, double sh, double dx, double dy, double dw, double dh);
 
   // hit regions
-// NOT IMPLEMENTED  void addHitRegion(HitRegionOptions options);
+  [Pref="canvas.hitregions.enabled", Throws] void addHitRegion(optional HitRegionOptions options);
+  [Pref="canvas.hitregions.enabled"] void removeHitRegion(DOMString id);
 
   // pixel manipulation
   [NewObject, Throws]
@@ -274,7 +289,11 @@ interface CanvasGradient {
 
 interface CanvasPattern {
   // opaque object
-  // void setTransform(SVGMatrix transform);
+  // [Throws, LenientFloat] - could not do this overload because of bug 1020975
+  // void setTransform(double a, double b, double c, double d, double e, double f);
+
+  // No throw necessary here - SVGMatrix is always good.
+  void setTransform(SVGMatrix matrix);
 };
 
 interface TextMetrics {
@@ -302,3 +321,12 @@ interface TextMetrics {
 
 };
 
+[Pref="canvas.path.enabled",
+ Constructor,
+ Constructor(Path2D other),
+ Constructor(DOMString pathString)]
+interface Path2D
+{
+  void addPath(Path2D path, optional SVGMatrix transformation);
+};
+Path2D implements CanvasPathMethods;

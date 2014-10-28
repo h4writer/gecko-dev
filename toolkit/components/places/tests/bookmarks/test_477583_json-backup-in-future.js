@@ -1,4 +1,4 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim:set ts=2 sw=2 sts=2 et: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -22,11 +22,10 @@ function run_test() {
     dateObj.setYear(dateObj.getFullYear() + 1);
     let name = PlacesBackups.getFilenameForDate(dateObj);
     do_check_eq(name, "bookmarks-" + dateObj.toLocaleFormat("%Y-%m-%d") + ".json");
-    let rx = new RegExp("^" + name.replace(/\.json/, "") + "(_[0-9]+){0,1}\.json$");
-    let files = bookmarksBackupDir.directoryEntries;
+    files = bookmarksBackupDir.directoryEntries;
     while (files.hasMoreElements()) {
       let entry = files.getNext().QueryInterface(Ci.nsIFile);
-      if (entry.leafName.match(rx))
+      if (PlacesBackups.filenamesRegex.test(entry.leafName))
         entry.remove(false);
     }
 
@@ -43,8 +42,7 @@ function run_test() {
     let mostRecentBackupFile = yield PlacesBackups.getMostRecentBackup();
     do_check_neq(mostRecentBackupFile, null);
     let todayFilename = PlacesBackups.getFilenameForDate();
-    rx = new RegExp("^" + todayFilename.replace(/\.json/, "") + "(_[0-9]+){0,1}\.json$");
-    do_check_true(OS.Path.basename(mostRecentBackupFile).match(rx).length > 0);
+    do_check_true(PlacesBackups.filenamesRegex.test(OS.Path.basename(mostRecentBackupFile)));
 
     // Check that future backup has been removed.
     do_check_false(futureBackupFile.exists());

@@ -4,12 +4,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#ifndef nsMemoryReporterManager_h__
+#define nsMemoryReporterManager_h__
+
 #include "nsIMemoryReporter.h"
+#include "nsITimer.h"
+#include "nsServiceManagerUtils.h"
 #include "mozilla/Mutex.h"
 #include "nsTHashtable.h"
 #include "nsHashKeys.h"
-
-using mozilla::Mutex;
 
 class nsITimer;
 
@@ -19,14 +22,15 @@ class MemoryReport;
 }
 }
 
-class nsMemoryReporterManager : public nsIMemoryReporterManager
+class nsMemoryReporterManager MOZ_FINAL : public nsIMemoryReporterManager
 {
+  virtual ~nsMemoryReporterManager();
+
 public:
   NS_DECL_THREADSAFE_ISUPPORTS
   NS_DECL_NSIMEMORYREPORTERMANAGER
 
   nsMemoryReporterManager();
-  virtual ~nsMemoryReporterManager();
 
   // Gets the memory reporter manager service.
   static nsMemoryReporterManager* GetOrCreate()
@@ -36,8 +40,8 @@ public:
     return static_cast<nsMemoryReporterManager*>(imgr.get());
   }
 
-  typedef nsTHashtable<nsISupportsHashKey>         StrongReportersTable;
-  typedef nsTHashtable<nsPtrHashKey<nsISupports> > WeakReportersTable;
+  typedef nsTHashtable<nsRefPtrHashKey<nsIMemoryReporter>> StrongReportersTable;
+  typedef nsTHashtable<nsPtrHashKey<nsIMemoryReporter>> WeakReportersTable;
 
   void IncrementNumChildProcesses();
   void DecrementNumChildProcesses();
@@ -114,13 +118,14 @@ public:
   // more.
   //
   void HandleChildReports(
-    const uint32_t& generation,
+    const uint32_t& aGeneration,
     const InfallibleTArray<mozilla::dom::MemoryReport>& aChildReports);
-  void FinishReporting();
+  nsresult FinishReporting();
 
   // Functions that (a) implement distinguished amounts, and (b) are outside of
   // this module.
-  struct AmountFns {
+  struct AmountFns
+  {
     mozilla::InfallibleAmountFn mJSMainRuntimeGCHeap;
     mozilla::InfallibleAmountFn mJSMainRuntimeTemporaryPeak;
     mozilla::InfallibleAmountFn mJSMainRuntimeCompartmentsSystem;
@@ -135,27 +140,45 @@ public:
 
     mozilla::InfallibleAmountFn mGhostWindows;
 
-    AmountFns() { mozilla::PodZero(this); }
+    AmountFns()
+    {
+      mozilla::PodZero(this);
+    }
   };
   AmountFns mAmountFns;
 
+  // Convenience function to get RSS easily from other code.  This is useful
+  // when debugging transient memory spikes with printf instrumentation.
+  static int64_t ResidentFast();
+
+  // Convenience function to get USS easily from other code.  This is useful
+  // when debugging unshared memory pages for forked processes.
+  static int64_t ResidentUnique();
+
   // Functions that measure per-tab memory consumption.
-  struct SizeOfTabFns {
+  struct SizeOfTabFns
+  {
     mozilla::JSSizeOfTabFn    mJS;
     mozilla::NonJSSizeOfTabFn mNonJS;
 
-    SizeOfTabFns() { mozilla::PodZero(this); }
+    SizeOfTabFns()
+    {
+      mozilla::PodZero(this);
+    }
   };
   SizeOfTabFns mSizeOfTabFns;
 
 private:
   nsresult RegisterReporterHelper(nsIMemoryReporter* aReporter,
                                   bool aForce, bool aStrongRef);
+  nsresult StartGettingReports();
 
   static void TimeoutCallback(nsITimer* aTimer, void* aData);
-  static const uint32_t kTimeoutLengthMS = 5000;
+  // Note: this timeout needs to be long enough to allow for the
+  // possibility of DMD reports and/or running on a low-end phone.
+  static const uint32_t kTimeoutLengthMS = 50000;
 
-  Mutex mMutex;
+  mozilla::Mutex mMutex;
   bool mIsRegistrationBlocked;
 
   StrongReportersTable* mStrongReporters;
@@ -168,31 +191,40 @@ private:
   uint32_t mNumChildProcesses;
   uint32_t mNextGeneration;
 
-  struct GetReportsState {
+  struct GetReportsState
+  {
     uint32_t                             mGeneration;
+    bool                                 mAnonymize;
     nsCOMPtr<nsITimer>                   mTimer;
     uint32_t                             mNumChildProcesses;
     uint32_t                             mNumChildProcessesCompleted;
+    bool                                 mParentDone;
     nsCOMPtr<nsIHandleReportCallback>    mHandleReport;
     nsCOMPtr<nsISupports>                mHandleReportData;
     nsCOMPtr<nsIFinishReportingCallback> mFinishReporting;
     nsCOMPtr<nsISupports>                mFinishReportingData;
+    nsString                             mDMDDumpIdent;
 
-    GetReportsState(uint32_t aGeneration, nsITimer* aTimer,
+    GetReportsState(uint32_t aGeneration, bool aAnonymize, nsITimer* aTimer,
                     uint32_t aNumChildProcesses,
                     nsIHandleReportCallback* aHandleReport,
                     nsISupports* aHandleReportData,
                     nsIFinishReportingCallback* aFinishReporting,
-                    nsISupports* aFinishReportingData)
-      : mGeneration(aGeneration),
-        mTimer(aTimer),
-        mNumChildProcesses(aNumChildProcesses),
-        mNumChildProcessesCompleted(0),
-        mHandleReport(aHandleReport),
-        mHandleReportData(aHandleReportData),
-        mFinishReporting(aFinishReporting),
-        mFinishReportingData(aFinishReportingData)
-    {}
+                    nsISupports* aFinishReportingData,
+                    const nsAString& aDMDDumpIdent)
+      : mGeneration(aGeneration)
+      , mAnonymize(aAnonymize)
+      , mTimer(aTimer)
+      , mNumChildProcesses(aNumChildProcesses)
+      , mNumChildProcessesCompleted(0)
+      , mParentDone(false)
+      , mHandleReport(aHandleReport)
+      , mHandleReportData(aHandleReportData)
+      , mFinishReporting(aFinishReporting)
+      , mFinishReportingData(aFinishReportingData)
+      , mDMDDumpIdent(aDMDDumpIdent)
+    {
+    }
   };
 
   // When this is non-null, a request is in flight.  Note: We use manual
@@ -204,3 +236,5 @@ private:
 #define NS_MEMORY_REPORTER_MANAGER_CID \
 { 0xfb97e4f5, 0x32dd, 0x497a, \
 { 0xba, 0xa2, 0x7d, 0x1e, 0x55, 0x7, 0x99, 0x10 } }
+
+#endif // nsMemoryReporterManager_h__

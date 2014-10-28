@@ -6,13 +6,16 @@
 
 const MAX_ORDINAL = 99;
 const ZOOM_PREF = "devtools.toolbox.zoomValue";
+const SPLITCONSOLE_ENABLED_PREF = "devtools.toolbox.splitconsoleEnabled";
+const SPLITCONSOLE_HEIGHT_PREF = "devtools.toolbox.splitconsoleHeight";
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
 
 let {Cc, Ci, Cu} = require("chrome");
-let promise = require("sdk/core/promise");
-let EventEmitter = require("devtools/shared/event-emitter");
+let {Promise: promise} = require("resource://gre/modules/Promise.jsm");
+let EventEmitter = require("devtools/toolkit/event-emitter");
 let Telemetry = require("devtools/shared/telemetry");
+let {getHighlighterUtils} = require("devtools/framework/toolbox-highlighter-utils");
 let HUDService = require("devtools/webconsole/hudservice");
 
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
@@ -20,6 +23,7 @@ Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource:///modules/devtools/gDevTools.jsm");
 Cu.import("resource:///modules/devtools/scratchpad-manager.jsm");
 Cu.import("resource:///modules/devtools/DOMHelpers.jsm");
+Cu.import("resource://gre/modules/Task.jsm");
 
 loader.lazyGetter(this, "Hosts", () => require("devtools/framework/toolbox-hosts").Hosts);
 
@@ -35,15 +39,34 @@ loader.lazyGetter(this, "toolboxStrings", () => {
       return bundle.formatStringFromName(name, args, args.length);
     } catch (ex) {
       Services.console.logStringMessage("Error reading '" + name + "'");
+      return null;
     }
   };
 });
 
-loader.lazyGetter(this, "Requisition", () => {
-  let {require} = Cu.import("resource://gre/modules/devtools/Require.jsm", {});
-  Cu.import("resource://gre/modules/devtools/gcli.jsm", {});
-  return require("gcli/cli").Requisition;
-});
+loader.lazyGetter(this, "Selection", () => require("devtools/framework/selection").Selection);
+loader.lazyGetter(this, "InspectorFront", () => require("devtools/server/actors/inspector").InspectorFront);
+
+// White-list buttons that can be toggled to prevent adding prefs for
+// addons that have manually inserted toolbarbuttons into DOM.
+// (By default, supported target is only local tab)
+const ToolboxButtons = [
+  { id: "command-button-pick",
+    isTargetSupported: target => !target.isAddon },
+  { id: "command-button-frames",
+    isTargetSupported: target => (
+      !target.isAddon && target.activeTab && target.activeTab.traits.frames
+    )
+  },
+  { id: "command-button-splitconsole",
+    isTargetSupported: target => !target.isAddon },
+  { id: "command-button-responsive" },
+  { id: "command-button-paintflashing" },
+  { id: "command-button-tilt" },
+  { id: "command-button-scratchpad" },
+  { id: "command-button-eyedropper" },
+  { id: "command-button-screenshot" }
+];
 
 /**
  * A "Toolbox" is the component that holds all the tools for one specific
@@ -67,8 +90,16 @@ function Toolbox(target, selectedTool, hostType, hostOptions) {
   this._toolRegistered = this._toolRegistered.bind(this);
   this._toolUnregistered = this._toolUnregistered.bind(this);
   this._refreshHostTitle = this._refreshHostTitle.bind(this);
-  this._splitConsoleOnKeypress = this._splitConsoleOnKeypress.bind(this)
+  this.selectFrame = this.selectFrame.bind(this);
+  this._updateFrames = this._updateFrames.bind(this);
+  this._splitConsoleOnKeypress = this._splitConsoleOnKeypress.bind(this);
   this.destroy = this.destroy.bind(this);
+  this.highlighterUtils = getHighlighterUtils(this);
+  this._highlighterReady = this._highlighterReady.bind(this);
+  this._highlighterHidden = this._highlighterHidden.bind(this);
+  this._prefChanged = this._prefChanged.bind(this);
+  this._saveSplitConsoleHeight = this._saveSplitConsoleHeight.bind(this);
+  this._onFocus = this._onFocus.bind(this);
 
   this._target.on("close", this.destroy);
 
@@ -88,6 +119,8 @@ function Toolbox(target, selectedTool, hostType, hostOptions) {
   EventEmitter.decorate(this);
 
   this._target.on("navigate", this._refreshHostTitle);
+  this._target.on("frame-update", this._updateFrames);
+
   this.on("host-changed", this._refreshHostTitle);
   this.on("select", this._refreshHostTitle);
 
@@ -183,6 +216,40 @@ Toolbox.prototype = {
   },
 
   /**
+   * Get the toolbox highlighter front. Note that it may not always have been
+   * initialized first. Use `initInspector()` if needed.
+   * Consider using highlighterUtils instead, it exposes the highlighter API in
+   * a useful way for the toolbox panels
+   */
+  get highlighter() {
+    return this._highlighter;
+  },
+
+  /**
+   * Get the toolbox's inspector front. Note that it may not always have been
+   * initialized first. Use `initInspector()` if needed.
+   */
+  get inspector() {
+    return this._inspector;
+  },
+
+  /**
+   * Get the toolbox's walker front. Note that it may not always have been
+   * initialized first. Use `initInspector()` if needed.
+   */
+  get walker() {
+    return this._walker;
+  },
+
+  /**
+   * Get the toolbox's node selection. Note that it may not always have been
+   * initialized first. Use `initInspector()` if needed.
+   */
+  get selection() {
+    return this._selection;
+  },
+
+  /**
    * Get the toggled state of the split console
    */
   get splitConsole() {
@@ -201,33 +268,83 @@ Toolbox.prototype = {
       let domReady = () => {
         this.isReady = true;
 
-        let closeButton = this.doc.getElementById("toolbox-close");
-        closeButton.addEventListener("command", this.destroy, true);
+        this._listFrames();
+
+        this.closeButton = this.doc.getElementById("toolbox-close");
+        this.closeButton.addEventListener("command", this.destroy, true);
+
+        gDevTools.on("pref-changed", this._prefChanged);
+
+        let framesMenu = this.doc.getElementById("command-button-frames");
+        framesMenu.addEventListener("command", this.selectFrame, true);
 
         this._buildDockButtons();
         this._buildOptions();
         this._buildTabs();
-        this._buildButtons();
+        this._applyCacheSettings();
         this._addKeysToWindow();
-        this._addToolSwitchingKeys();
+        this._addReloadKeys();
+        this._addHostListeners();
         this._addZoomKeys();
         this._loadInitialZoom();
+
+        this.webconsolePanel = this.doc.querySelector("#toolbox-panel-webconsole");
+        this.webconsolePanel.height =
+          Services.prefs.getIntPref(SPLITCONSOLE_HEIGHT_PREF);
+        this.webconsolePanel.addEventListener("resize",
+          this._saveSplitConsoleHeight);
+
+        let buttonsPromise = this._buildButtons();
 
         this._telemetry.toolOpened("toolbox");
 
         this.selectTool(this._defaultToolId).then(panel => {
-          this.emit("ready");
-          deferred.resolve();
+
+          // Wait until the original tool is selected so that the split
+          // console input will receive focus.
+          let splitConsolePromise = promise.resolve();
+          if (Services.prefs.getBoolPref(SPLITCONSOLE_ENABLED_PREF)) {
+            splitConsolePromise = this.openSplitConsole();
+          }
+
+          promise.all([
+            splitConsolePromise,
+            buttonsPromise
+          ]).then(() => {
+            this.emit("ready");
+            deferred.resolve();
+          }, deferred.reject);
         });
       };
 
-      iframe.setAttribute("src", this._URL);
-
-      let domHelper = new DOMHelpers(iframe.contentWindow);
-      domHelper.onceDOMReady(domReady);
+      // Load the toolbox-level actor fronts and utilities now
+      this._target.makeRemote().then(() => {
+        iframe.setAttribute("src", this._URL);
+        iframe.setAttribute("aria-label", toolboxStrings("toolbox.label"))
+        let domHelper = new DOMHelpers(iframe.contentWindow);
+        domHelper.onceDOMReady(domReady);
+      });
 
       return deferred.promise;
-    });
+    }).then(null, console.error.bind(console));
+  },
+
+  /**
+   * Because our panels are lazy loaded this is a good place to watch for
+   * "pref-changed" events.
+   * @param  {String} event
+   *         The event type, "pref-changed".
+   * @param  {Object} data
+   *         {
+   *           newValue: The new value
+   *           oldValue:  The old value
+   *           pref: The name of the preference that has changed
+   *         }
+   */
+  _prefChanged: function(event, data) {
+    if (data.pref === "devtools.cache.disabled") {
+      this._applyCacheSettings();
+    }
   },
 
   _buildOptions: function() {
@@ -237,25 +354,32 @@ Toolbox.prototype = {
     }, true);
   },
 
-  _isResponsiveModeActive: function() {
-    let responsiveModeActive = false;
-    if (this.target.isLocalTab) {
-      let tab = this.target.tab;
-      let browserWindow = tab.ownerDocument.defaultView;
-      let responsiveUIManager = browserWindow.ResponsiveUI.ResponsiveUIManager;
-      responsiveModeActive = responsiveUIManager.isActiveForTab(tab);
-    }
-    return responsiveModeActive;
-  },
-
   _splitConsoleOnKeypress: function(e) {
-    let responsiveModeActive = this._isResponsiveModeActive();
-    if (e.keyCode === e.DOM_VK_ESCAPE && !responsiveModeActive) {
+    if (e.keyCode === e.DOM_VK_ESCAPE) {
       this.toggleSplitConsole();
+      // If the debugger is paused, don't let the ESC key stop any pending
+      // navigation.
+      let jsdebugger = this.getPanel("jsdebugger");
+      if (jsdebugger && jsdebugger.panelWin.gThreadClient.state == "paused") {
+        e.preventDefault();
+      }
     }
   },
 
-  _addToolSwitchingKeys: function() {
+  _addReloadKeys: function() {
+    [
+      ["toolbox-reload-key", false],
+      ["toolbox-reload-key2", false],
+      ["toolbox-force-reload-key", true],
+      ["toolbox-force-reload-key2", true]
+    ].forEach(([id, force]) => {
+      this.doc.getElementById(id).addEventListener("command", (event) => {
+        this.reloadTarget(force);
+      }, true);
+    });
+  },
+
+  _addHostListeners: function() {
     let nextKey = this.doc.getElementById("toolbox-next-tool-key");
     nextKey.addEventListener("command", this.selectNextTool.bind(this), true);
     let prevKey = this.doc.getElementById("toolbox-previous-tool-key");
@@ -264,6 +388,13 @@ Toolbox.prototype = {
     // Split console uses keypress instead of command so the event can be
     // cancelled with stopPropagation on the keypress, and not preventDefault.
     this.doc.addEventListener("keypress", this._splitConsoleOnKeypress, false);
+
+    this.doc.addEventListener("focus", this._onFocus, true);
+  },
+
+  _saveSplitConsoleHeight: function() {
+    Services.prefs.setIntPref(SPLITCONSOLE_HEIGHT_PREF,
+      this.webconsolePanel.height);
   },
 
   /**
@@ -280,7 +411,7 @@ Toolbox.prototype = {
    */
   _refreshConsoleDisplay: function() {
     let deck = this.doc.getElementById("toolbox-deck");
-    let webconsolePanel = this.doc.getElementById("toolbox-panel-webconsole");
+    let webconsolePanel = this.webconsolePanel;
     let splitter = this.doc.getElementById("toolbox-console-splitter");
     let openedConsolePanel = this.currentToolId === "webconsole";
 
@@ -290,7 +421,7 @@ Toolbox.prototype = {
       webconsolePanel.removeAttribute("collapsed");
     } else {
       deck.removeAttribute("collapsed");
-      if (this._splitConsole) {
+      if (this.splitConsole) {
         webconsolePanel.removeAttribute("collapsed");
         splitter.removeAttribute("hidden");
       } else {
@@ -357,9 +488,8 @@ Toolbox.prototype = {
     zoomValue = Math.min(zoomValue, MAX_ZOOM);
 
     let contViewer = this.frame.docShell.contentViewer;
-    let docViewer = contViewer.QueryInterface(Ci.nsIMarkupDocumentViewer);
 
-    docViewer.fullZoom = zoomValue;
+    contViewer.fullZoom = zoomValue;
 
     Services.prefs.setCharPref(ZOOM_PREF, zoomValue);
   },
@@ -414,7 +544,6 @@ Toolbox.prototype = {
     }
   },
 
-
   /**
    * Handle any custom key events.  Returns true if there was a custom key binding run
    * @param {string} toolId
@@ -423,8 +552,10 @@ Toolbox.prototype = {
   fireCustomKey: function(toolId) {
     let toolDefinition = gDevTools.getToolDefinition(toolId);
 
-    if (toolDefinition.onkey && this.currentToolId === toolId) {
-      toolDefinition.onkey(this.getCurrentPanel());
+    if (toolDefinition.onkey &&
+        ((this.currentToolId === toolId) ||
+          (toolId == "webconsole" && this.splitConsole))) {
+      toolDefinition.onkey(this.getCurrentPanel(), this);
     }
   },
 
@@ -443,11 +574,10 @@ Toolbox.prototype = {
       return;
     }
 
-    let closeButton = this.doc.getElementById("toolbox-close");
     if (this.hostType == Toolbox.HostType.WINDOW) {
-      closeButton.setAttribute("hidden", "true");
+      this.closeButton.setAttribute("hidden", "true");
     } else {
-      closeButton.removeAttribute("hidden");
+      this.closeButton.removeAttribute("hidden");
     }
 
     let sideEnabled = Services.prefs.getBoolPref(this._prefs.SIDE_ENABLED);
@@ -483,20 +613,117 @@ Toolbox.prototype = {
   },
 
   /**
-   * Add buttons to the UI as specified in the devtools.window.toolbarSpec pref
+   * Add buttons to the UI as specified in the devtools.toolbox.toolbarSpec pref
    */
   _buildButtons: function() {
-    if (!this.target.isLocalTab) {
-      return;
+    if (!this.target.isAddon) {
+      this._buildPickerButton();
     }
 
     let spec = CommandUtils.getCommandbarSpec("devtools.toolbox.toolbarSpec");
-    let env = CommandUtils.createEnvironment(this.target.tab.ownerDocument,
-                                             this.target.window.document);
-    let req = new Requisition(env);
-    let buttons = CommandUtils.createButtons(spec, this._target, this.doc, req);
-    let container = this.doc.getElementById("toolbox-buttons");
-    buttons.forEach(container.appendChild.bind(container));
+    let environment = CommandUtils.createEnvironment(this, '_target');
+    return CommandUtils.createRequisition(environment).then(requisition => {
+      this._requisition = requisition;
+      return CommandUtils.createButtons(spec, this.target, this.doc,
+                                        requisition).then(buttons => {
+        let container = this.doc.getElementById("toolbox-buttons");
+        buttons.forEach(button=> {
+          if (button) {
+            container.appendChild(button);
+          }
+        });
+        this.setToolboxButtonsVisibility();
+      });
+    });
+  },
+
+  /**
+   * Adding the element picker button is done here unlike the other buttons
+   * since we want it to work for remote targets too
+   */
+  _buildPickerButton: function() {
+    this._pickerButton = this.doc.createElement("toolbarbutton");
+    this._pickerButton.id = "command-button-pick";
+    this._pickerButton.className = "command-button command-button-invertable";
+    this._pickerButton.setAttribute("tooltiptext", toolboxStrings("pickButton.tooltip"));
+    this._pickerButton.setAttribute("hidden", "true");
+
+    let container = this.doc.querySelector("#toolbox-picker-container");
+    container.appendChild(this._pickerButton);
+
+    this._togglePicker = this.highlighterUtils.togglePicker.bind(this.highlighterUtils);
+    this._pickerButton.addEventListener("command", this._togglePicker, false);
+  },
+
+  /**
+   * Apply the current cache setting from devtools.cache.disabled to this
+   * toolbox's tab.
+   */
+  _applyCacheSettings: function() {
+    let pref = "devtools.cache.disabled";
+    let cacheDisabled = Services.prefs.getBoolPref(pref);
+
+    if (this.target.activeTab) {
+      this.target.activeTab.reconfigure({"cacheDisabled": cacheDisabled});
+    }
+  },
+
+  /**
+   * Setter for the checked state of the picker button in the toolbar
+   * @param {Boolean} isChecked
+   */
+  set pickerButtonChecked(isChecked) {
+    if (isChecked) {
+      this._pickerButton.setAttribute("checked", "true");
+    } else {
+      this._pickerButton.removeAttribute("checked");
+    }
+  },
+
+  /**
+   * Return all toolbox buttons (command buttons, plus any others that were
+   * added manually).
+   */
+  get toolboxButtons() {
+    return ToolboxButtons.map(options => {
+      let button = this.doc.getElementById(options.id);
+      // Some buttons may not exist inside of Browser Toolbox
+      if (!button) {
+        return false;
+      }
+      return {
+        id: options.id,
+        button: button,
+        label: button.getAttribute("tooltiptext"),
+        visibilityswitch: "devtools." + options.id + ".enabled",
+        isTargetSupported: options.isTargetSupported ? options.isTargetSupported
+                                                     : target => target.isLocalTab
+      }
+    }).filter(button=>button);
+  },
+
+  /**
+   * Ensure the visibility of each toolbox button matches the
+   * preference value.  Simply hide buttons that are preffed off.
+   */
+  setToolboxButtonsVisibility: function() {
+    this.toolboxButtons.forEach(buttonSpec => {
+      let { visibilityswitch, id, button, isTargetSupported } = buttonSpec;
+      let on = true;
+      try {
+        on = Services.prefs.getBoolPref(visibilityswitch);
+      } catch (ex) { }
+
+      on = on && isTargetSupported(this.target);
+
+      if (button) {
+        if (on) {
+          button.removeAttribute("hidden");
+        } else {
+          button.setAttribute("hidden", "true");
+        }
+      }
+    });
   },
 
   /**
@@ -523,11 +750,14 @@ Toolbox.prototype = {
     // The radio element is not being used in the conventional way, thus
     // the devtools-tab class replaces the radio XBL binding with its base
     // binding (the control-item binding).
-    radio.className = "toolbox-tab devtools-tab";
+    radio.className = "devtools-tab";
     radio.id = "toolbox-tab-" + id;
     radio.setAttribute("toolid", id);
     radio.setAttribute("ordinal", toolDefinition.ordinal);
     radio.setAttribute("tooltiptext", toolDefinition.tooltip);
+    if (toolDefinition.invertIconForLightTheme) {
+      radio.setAttribute("icon-invertable", "true");
+    }
 
     radio.addEventListener("command", () => {
       this.selectTool(id);
@@ -552,7 +782,7 @@ Toolbox.prototype = {
       radio.appendChild(image);
     }
 
-    if (toolDefinition.label) {
+    if (toolDefinition.label && !toolDefinition.iconOnly) {
       let label = this.doc.createElement("label");
       label.setAttribute("value", toolDefinition.label)
       label.setAttribute("crop", "end");
@@ -572,20 +802,32 @@ Toolbox.prototype = {
       vbox.id = "toolbox-panel-" + id;
     }
 
-    // If there is no tab yet, or the ordinal to be added is the largest one.
-    if (tabs.childNodes.length == 0 ||
-        +tabs.lastChild.getAttribute("ordinal") <= toolDefinition.ordinal) {
-      tabs.appendChild(radio);
+    if (id === "options") {
+      // Options panel is special.  It doesn't belong in the same container as
+      // the other tabs.
+      radio.setAttribute("role", "button");
+      let optionTabContainer = this.doc.getElementById("toolbox-option-container");
+      optionTabContainer.appendChild(radio);
       deck.appendChild(vbox);
     } else {
-      // else, iterate over all the tabs to get the correct location.
-      Array.some(tabs.childNodes, (node, i) => {
-        if (+node.getAttribute("ordinal") > toolDefinition.ordinal) {
-          tabs.insertBefore(radio, node);
-          deck.insertBefore(vbox, deck.childNodes[i]);
-          return true;
-        }
-      });
+      radio.setAttribute("role", "tab");
+
+      // If there is no tab yet, or the ordinal to be added is the largest one.
+      if (tabs.childNodes.length == 0 ||
+          tabs.lastChild.getAttribute("ordinal") <= toolDefinition.ordinal) {
+        tabs.appendChild(radio);
+        deck.appendChild(vbox);
+      } else {
+        // else, iterate over all the tabs to get the correct location.
+        Array.some(tabs.childNodes, (node, i) => {
+          if (+node.getAttribute("ordinal") > toolDefinition.ordinal) {
+            tabs.insertBefore(radio, node);
+            deck.insertBefore(vbox, deck.childNodes[i]);
+            return true;
+          }
+          return false;
+        });
+      }
     }
 
     this._addKeysToWindow();
@@ -598,6 +840,12 @@ Toolbox.prototype = {
    *        The id of the tool to load.
    */
   loadTool: function(id) {
+    if (id === "inspector" && !this._inspector) {
+      return this.initInspector().then(() => {
+        return this.loadTool(id);
+      });
+    }
+
     let deferred = promise.defer();
     let iframe = this.doc.getElementById("toolbox-panel-iframe-" + id);
 
@@ -627,23 +875,74 @@ Toolbox.prototype = {
     iframe.tooltip = "aHTMLTooltip";
     iframe.style.visibility = "hidden";
 
-    let vbox = this.doc.getElementById("toolbox-panel-" + id);
-    vbox.appendChild(iframe);
+    gDevTools.emit(id + "-init", this, iframe);
+    this.emit(id + "-init", iframe);
+
+    // If no parent yet, append the frame into default location.
+    if (!iframe.parentNode) {
+      let vbox = this.doc.getElementById("toolbox-panel-" + id);
+      vbox.appendChild(iframe);
+    }
 
     let onLoad = () => {
       // Prevent flicker while loading by waiting to make visible until now.
       iframe.style.visibility = "visible";
 
+      // The build method should return a panel instance, so events can
+      // be fired with the panel as an argument. However, in order to keep
+      // backward compatibility with existing extensions do a check
+      // for a promise return value.
       let built = definition.build(iframe.contentWindow, this);
+      if (!(built instanceof Promise)) {
+        let panel = built;
+        iframe.panel = panel;
+
+        // The panel instance is expected to fire (and listen to) various
+        // framework events, so make sure it's properly decorated with
+        // appropriate API (on, off, once, emit).
+        // In this case we decorate panel instances directly returned by
+        // the tool definition 'build' method.
+        if (typeof panel.emit == "undefined") {
+          EventEmitter.decorate(panel);
+        }
+
+        gDevTools.emit(id + "-build", this, panel);
+        this.emit(id + "-build", panel);
+
+        // The panel can implement an 'open' method for asynchronous
+        // initialization sequence.
+        if (typeof panel.open == "function") {
+          built = panel.open();
+        } else {
+          let deferred = promise.defer();
+          deferred.resolve(panel);
+          built = deferred.promise;
+        }
+      }
+
+      // Wait till the panel is fully ready and fire 'ready' events.
       promise.resolve(built).then((panel) => {
         this._toolPanels.set(id, panel);
-        this.emit(id + "-ready", panel);
+
+        // Make sure to decorate panel object with event API also in case
+        // where the tool definition 'build' method returns only a promise
+        // and the actual panel instance is available as soon as the
+        // promise is resolved.
+        if (typeof panel.emit == "undefined") {
+          EventEmitter.decorate(panel);
+        }
+
         gDevTools.emit(id + "-ready", this, panel);
+        this.emit(id + "-ready", panel);
+
         deferred.resolve(panel);
-      });
+      }, console.error);
     };
 
     iframe.setAttribute("src", definition.url);
+    if (definition.panelLabel) {
+      iframe.setAttribute("aria-label", definition.panelLabel);
+    }
 
     // Depending on the host, iframe.contentWindow is not always
     // defined at this moment. If it is not defined, we use an
@@ -675,10 +974,21 @@ Toolbox.prototype = {
     let selected = this.doc.querySelector(".devtools-tab[selected]");
     if (selected) {
       selected.removeAttribute("selected");
+      selected.setAttribute("aria-selected", "false");
     }
 
     let tab = this.doc.getElementById("toolbox-tab-" + id);
     tab.setAttribute("selected", "true");
+    tab.setAttribute("aria-selected", "true");
+
+    // If options is selected, the separator between it and the
+    // command buttons should be hidden.
+    let sep = this.doc.getElementById("toolbox-controls-separator");
+    if (id === "options") {
+      sep.setAttribute("invisible", "true");
+    } else {
+      sep.removeAttribute("invisible");
+    }
 
     if (this.currentToolId == id) {
       // re-focus tool to get key events again
@@ -706,20 +1016,13 @@ Toolbox.prototype = {
     let tabstrip = this.doc.getElementById("toolbox-tabs");
 
     // select the right tab, making 0th index the default tab if right tab not
-    // found
-    let index = 0;
-    let tabs = tabstrip.childNodes;
-    for (let i = 0; i < tabs.length; i++) {
-      if (tabs[i] === tab) {
-        index = i;
-        break;
-      }
-    }
-    tabstrip.selectedItem = tab;
+    // found.
+    tabstrip.selectedItem = tab || tabstrip.childNodes[0];
 
     // and select the right iframe
     let deck = this.doc.getElementById("toolbox-deck");
-    deck.selectedIndex = index;
+    let panel = this.doc.getElementById("toolbox-panel-" + id);
+    deck.selectedPanel = panel;
 
     this.currentToolId = id;
     this._refreshConsoleDisplay();
@@ -748,32 +1051,99 @@ Toolbox.prototype = {
   },
 
   /**
+   * Focus split console's input line
+   */
+  focusConsoleInput: function() {
+    let consolePanel = this.getPanel("webconsole");
+    if (consolePanel) {
+      consolePanel.focusInput();
+    }
+  },
+
+  /**
+   * If the console is split and we are focusing an element outside
+   * of the console, then store the newly focused element, so that
+   * it can be restored once the split console closes.
+   */
+  _onFocus: function({originalTarget}) {
+    // Ignore any non element nodes, or any elements contained
+    // within the webconsole frame.
+    let webconsoleURL = gDevTools.getToolDefinition("webconsole").url;
+    if (originalTarget.nodeType !== 1 ||
+        originalTarget.baseURI === webconsoleURL) {
+      return;
+    }
+
+    this._lastFocusedElement = originalTarget;
+  },
+
+  /**
+   * Opens the split console.
+   *
+   * @returns {Promise} a promise that resolves once the tool has been
+   *          loaded and focused.
+   */
+  openSplitConsole: function() {
+    this._splitConsole = true;
+    Services.prefs.setBoolPref(SPLITCONSOLE_ENABLED_PREF, true);
+    this._refreshConsoleDisplay();
+    this.emit("split-console");
+
+    return this.loadTool("webconsole").then(() => {
+      this.focusConsoleInput();
+    });
+  },
+
+  /**
+   * Closes the split console.
+   *
+   * @returns {Promise} a promise that resolves once the tool has been
+   *          closed.
+   */
+  closeSplitConsole: function() {
+    this._splitConsole = false;
+    Services.prefs.setBoolPref(SPLITCONSOLE_ENABLED_PREF, false);
+    this._refreshConsoleDisplay();
+    this.emit("split-console");
+
+    if (this._lastFocusedElement) {
+      this._lastFocusedElement.focus();
+    }
+    return promise.resolve();
+  },
+
+  /**
    * Toggles the split state of the webconsole.  If the webconsole panel
-   * is already selected, then this command is ignored.
+   * is already selected then this command is ignored.
+   *
+   * @returns {Promise} a promise that resolves once the tool has been
+   *          opened or closed.
    */
   toggleSplitConsole: function() {
-    let openedConsolePanel = this.currentToolId === "webconsole";
-
-    // Don't allow changes when console is open, since it could be confusing
-    if (!openedConsolePanel) {
-      this._splitConsole = !this._splitConsole;
-      this._refreshConsoleDisplay();
-      this.emit("split-console");
-
-      if (this._splitConsole) {
-        this.loadTool("webconsole").then(() => {
-          this.focusTool("webconsole");
-        });
-      }
+    if (this.currentToolId !== "webconsole") {
+      return this.splitConsole ?
+             this.closeSplitConsole() :
+             this.openSplitConsole();
     }
+
+    return promise.resolve();
+  },
+
+  /**
+   * Tells the target tab to reload.
+   */
+  reloadTarget: function(force) {
+    this.target.activeTab.reload({ force: force });
   },
 
   /**
    * Loads the tool next to the currently selected tool.
    */
   selectNextTool: function() {
+    let tools = this.doc.querySelectorAll(".devtools-tab");
     let selected = this.doc.querySelector(".devtools-tab[selected]");
-    let next = selected.nextSibling || selected.parentNode.firstChild;
+    let nextIndex = [...tools].indexOf(selected) + 1;
+    let next = tools[nextIndex] || tools[0];
     let tool = next.getAttribute("toolid");
     return this.selectTool(tool);
   },
@@ -782,9 +1152,11 @@ Toolbox.prototype = {
    * Loads the tool just left to the currently selected tool.
    */
   selectPreviousTool: function() {
+    let tools = this.doc.querySelectorAll(".devtools-tab");
     let selected = this.doc.querySelector(".devtools-tab[selected]");
-    let previous = selected.previousSibling || selected.parentNode.lastChild;
-    let tool = previous.getAttribute("toolid");
+    let prevIndex = [...tools].indexOf(selected) - 1;
+    let prev = tools[prevIndex] || tools[tools.length - 1];
+    let tool = prev.getAttribute("toolid");
     return this.selectTool(tool);
   },
 
@@ -796,7 +1168,7 @@ Toolbox.prototype = {
    */
   highlightTool: function(id) {
     let tab = this.doc.getElementById("toolbox-tab-" + id);
-    tab && tab.classList.add("highlighted");
+    tab && tab.setAttribute("highlighted", "true");
   },
 
   /**
@@ -807,7 +1179,7 @@ Toolbox.prototype = {
    */
   unhighlightTool: function(id) {
     let tab = this.doc.getElementById("toolbox-tab-" + id);
-    tab && tab.classList.remove("highlighted");
+    tab && tab.removeAttribute("highlighted");
   },
 
   /**
@@ -830,8 +1202,98 @@ Toolbox.prototype = {
       toolName = toolboxStrings("toolbox.defaultTitle");
     }
     let title = toolboxStrings("toolbox.titleTemplate",
-                               toolName, this.target.url);
+                               toolName, this.target.url || this.target.name);
     this._host.setTitle(title);
+  },
+
+  _listFrames: function (event) {
+    if (!this._target.form || !this._target.form.actor) {
+      // We are not targetting a regular TabActor
+      // it can be either an addon or browser toolbox actor
+      return;
+    }
+    let packet = {
+      to: this._target.form.actor,
+      type: "listFrames"
+    };
+    this._target.client.request(packet, resp => {
+      this._updateFrames(null, { frames: resp.frames });
+    });
+  },
+
+  selectFrame: function (event) {
+    let windowId = event.target.getAttribute("data-window-id");
+    let packet = {
+      to: this._target.form.actor,
+      type: "switchToFrame",
+      windowId: windowId
+    };
+    this._target.client.request(packet);
+    // Wait for frameUpdate event to update the UI
+  },
+
+  _updateFrames: function (event, data) {
+    if (!Services.prefs.getBoolPref("devtools.command-button-frames.enabled")) {
+      return;
+    }
+
+    // We may receive this event before the toolbox is ready.
+    if (!this.isReady) {
+      return;
+    }
+
+    let menu = this.doc.getElementById("command-button-frames");
+
+    if (data.destroyAll) {
+      let menupopup = menu.firstChild;
+      while (menupopup.firstChild) {
+        menupopup.firstChild.remove();
+      }
+      return;
+    } else if (data.selected) {
+      let item = menu.querySelector("menuitem[data-window-id=\"" + data.selected + "\"]");
+      if (!item) {
+        return;
+      }
+      // Toggle the toolbarbutton if we selected a non top-level frame
+      if (item.hasAttribute("data-parent-id")) {
+        menu.setAttribute("checked", "true");
+      } else {
+        menu.removeAttribute("checked");
+      }
+      // Uncheck the previously selected frame
+      let selected = menu.querySelector("menuitem[checked=true]")
+      if (selected) {
+        selected.removeAttribute("checked");
+      }
+      // Check the new one
+      item.setAttribute("checked", "true");
+    } else if (data.frames) {
+      data.frames.forEach(win => {
+        let item = menu.querySelector("menuitem[data-window-id=\"" + win.id + "\"]");
+        if (win.destroy) {
+          if (item) {
+            item.remove();
+          }
+          return;
+        }
+        if (!item) {
+          item = this.doc.createElement("menuitem");
+          item.setAttribute("data-window-id", win.id);
+          if (win.parentID) {
+            item.setAttribute("data-parent-id", win.parentID);
+          }
+          // If we register a root docshell and we don't have any selected,
+          // consider it as the currently targeted one.
+          if (!win.parentID && !menu.querySelector("menuitem[checked=true]")) {
+            item.setAttribute("checked", "true");
+            menu.removeAttribute("checked");
+          }
+          menu.firstChild.appendChild(item);
+        }
+        item.setAttribute("label", win.url);
+      });
+    }
   },
 
   /**
@@ -867,7 +1329,7 @@ Toolbox.prototype = {
    */
   switchHost: function(hostType) {
     if (hostType == this._host.type || !this._target.isLocalTab) {
-      return;
+      return null;
     }
 
     let newHost = this._createHost(hostType);
@@ -956,6 +1418,74 @@ Toolbox.prototype = {
   },
 
   /**
+   * Initialize the inspector/walker/selection/highlighter fronts.
+   * Returns a promise that resolves when the fronts are initialized
+   */
+  initInspector: function() {
+    if (!this._initInspector) {
+      this._initInspector = Task.spawn(function*() {
+        this._inspector = InspectorFront(this._target.client, this._target.form);
+        this._walker = yield this._inspector.getWalker();
+        this._selection = new Selection(this._walker);
+
+        if (this.highlighterUtils.isRemoteHighlightable()) {
+          this.walker.on("highlighter-ready", this._highlighterReady);
+          this.walker.on("highlighter-hide", this._highlighterHidden);
+
+          let autohide = !gDevTools.testing;
+          this._highlighter = yield this._inspector.getHighlighter(autohide);
+        }
+      }.bind(this));
+    }
+    return this._initInspector;
+  },
+
+  /**
+   * Destroy the inspector/walker/selection fronts
+   * Returns a promise that resolves when the fronts are destroyed
+   */
+  destroyInspector: function() {
+    if (this._destroying) {
+      return this._destroying;
+    }
+
+    if (!this._inspector) {
+      return promise.resolve();
+    }
+
+    let outstanding = () => {
+      return Task.spawn(function*() {
+        yield this.highlighterUtils.stopPicker();
+        yield this._inspector.destroy();
+        if (this._highlighter) {
+          yield this._highlighter.destroy();
+        }
+        if (this._selection) {
+          this._selection.destroy();
+        }
+
+        if (this.walker) {
+          this.walker.off("highlighter-ready", this._highlighterReady);
+          this.walker.off("highlighter-hide", this._highlighterHidden);
+        }
+
+        this._inspector = null;
+        this._highlighter = null;
+        this._selection = null;
+        this._walker = null;
+      }.bind(this));
+    };
+
+    // Releasing the walker (if it has been created)
+    // This can fail, but in any case, we want to continue destroying the
+    // inspector/highlighter/selection
+    let walker = (this._destroying = this._walker) ?
+                 this._walker.release() :
+                 promise.resolve();
+    return walker.then(outstanding, outstanding);
+  },
+
+  /**
    * Get the toolbox's notification box
    *
    * @return The notification box element.
@@ -972,6 +1502,7 @@ Toolbox.prototype = {
   destroyHost: function() {
     this.doc.removeEventListener("keypress",
       this._splitConsoleOnKeypress, false);
+    this.doc.removeEventListener("focus", this._onFocus, true);
     return this._host.destroy();
   },
 
@@ -985,58 +1516,118 @@ Toolbox.prototype = {
       return this._destroyer;
     }
 
+    this.emit("destroy");
+
     this._target.off("navigate", this._refreshHostTitle);
+    this._target.off("frame-update", this._updateFrames);
     this.off("select", this._refreshHostTitle);
     this.off("host-changed", this._refreshHostTitle);
 
     gDevTools.off("tool-registered", this._toolRegistered);
     gDevTools.off("tool-unregistered", this._toolUnregistered);
 
-    // Revert docShell.allowJavascript back to its original value if it was
-    // changed via the Disable JS option.
-    if (typeof this._origAllowJavascript != "undefined") {
-      let docShell = this._host.hostTab.linkedBrowser.docShell;
-      docShell.allowJavascript = this._origAllowJavascript;
-      this._origAllowJavascript = undefined;
+    gDevTools.off("pref-changed", this._prefChanged);
+
+    this._lastFocusedElement = null;
+    if (this.webconsolePanel) {
+      this._saveSplitConsoleHeight();
+      this.webconsolePanel.removeEventListener("resize",
+        this._saveSplitConsoleHeight);
     }
+    this.closeButton.removeEventListener("command", this.destroy, true);
 
     let outstanding = [];
-
     for (let [id, panel] of this._toolPanels) {
       try {
+        gDevTools.emit(id + "-destroy", this, panel);
+        this.emit(id + "-destroy", panel);
+
         outstanding.push(panel.destroy());
       } catch (e) {
         // We don't want to stop here if any panel fail to close.
-        console.error(e);
+        console.error("Panel " + id + ":", e);
       }
     }
 
-    let container = this.doc.getElementById("toolbox-buttons");
-    while (container.firstChild) {
-      container.removeChild(container.firstChild);
+    // Now that we are closing the toolbox we can re-enable JavaScript for the
+    // current tab.
+    if (this.target.activeTab) {
+      this.target.activeTab.reconfigure({"cacheDisabled": false});
     }
 
+    // Destroying the walker and inspector fronts
+    outstanding.push(this.destroyInspector().then(() => {
+      // Removing buttons
+      if (this._pickerButton) {
+        this._pickerButton.removeEventListener("command", this._togglePicker, false);
+        this._pickerButton = null;
+      }
+    }));
+
+    // We need to grab a reference to win before this._host is destroyed.
+    let win = this.frame.ownerGlobal;
+
+    // Remove the host UI
     outstanding.push(this.destroyHost());
 
+    if (this._requisition) {
+      this._requisition.destroy();
+    }
+    this._telemetry.toolClosed("toolbox");
     this._telemetry.destroy();
 
-    return this._destroyer = promise.all(outstanding).then(() => {
+    // Finish all outstanding tasks (successfully or not) before destroying the
+    // target.
+    this._destroyer = promise.all(outstanding).then(null, console.error).then(() => {
       // Targets need to be notified that the toolbox is being torn down.
       // This is done after other destruction tasks since it may tear down
       // fronts and the debugger transport which earlier destroy methods may
       // require to complete.
-      if (this._target) {
-        let target = this._target;
-        this._target = null;
-        target.off("close", this.destroy);
-        return target.destroy();
+      if (!this._target) {
+        return null;
       }
-    }).then(() => {
+      let target = this._target;
+      this._target = null;
+      this.highlighterUtils.release();
+      target.off("close", this.destroy);
+      return target.destroy();
+    }, console.error).then(() => {
       this.emit("destroyed");
+
       // Free _host after the call to destroyed in order to let a chance
       // to destroyed listeners to still query toolbox attributes
       this._host = null;
       this._toolPanels.clear();
+
+      // Force GC to prevent long GC pauses when running tests and to free up
+      // memory in general when the toolbox is closed.
+      if (gDevTools.testing) {
+        win.QueryInterface(Ci.nsIInterfaceRequestor)
+           .getInterface(Ci.nsIDOMWindowUtils)
+           .garbageCollect();
+      }
     }).then(null, console.error);
+
+    let leakCheckObserver = ({wrappedJSObject: barrier}) => {
+      // Make the leak detector wait until this toolbox is properly destroyed.
+      barrier.client.addBlocker("DevTools: Wait until toolbox is destroyed",
+                                this._destroyer);
+    };
+
+    let topic = "shutdown-leaks-before-check";
+    Services.obs.addObserver(leakCheckObserver, topic, false);
+    this._destroyer.then(() => {
+      Services.obs.removeObserver(leakCheckObserver, topic);
+    });
+
+    return this._destroyer;
+  },
+
+  _highlighterReady: function() {
+    this.emit("highlighter-ready");
+  },
+
+  _highlighterHidden: function() {
+    this.emit("highlighter-hide");
   }
 };

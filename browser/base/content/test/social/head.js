@@ -5,7 +5,7 @@
 Components.utils.import("resource://gre/modules/XPCOMUtils.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "Promise",
-  "resource://gre/modules/commonjs/sdk/core/promise.js");
+  "resource://gre/modules/Promise.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "Task",
   "resource://gre/modules/Task.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "PlacesUtils",
@@ -31,6 +31,16 @@ function waitForCondition(condition, nextTest, errorMsg) {
     tries++;
   }, 100);
   var moveOn = function() { clearInterval(interval); nextTest(); };
+}
+
+
+function promiseObserverNotified(aTopic) {
+  let deferred = Promise.defer();
+  Services.obs.addObserver(function onNotification(aSubject, aTopic, aData) {
+    Services.obs.removeObserver(onNotification, aTopic);
+      deferred.resolve({subject: aSubject, data: aData});
+    }, aTopic, false);
+  return deferred.promise;
 }
 
 // Check that a specified (string) URL hasn't been "remembered" (ie, is not
@@ -63,20 +73,25 @@ function checkProviderPrefsEmpty(isError) {
 }
 
 function defaultFinishChecks() {
+  PopupNotifications.transitionsEnabled = true;
   checkProviderPrefsEmpty(true);
   finish();
 }
 
 function runSocialTestWithProvider(manifest, callback, finishcallback) {
+  PopupNotifications.transitionsEnabled = false;
+
   let SocialService = Cu.import("resource://gre/modules/SocialService.jsm", {}).SocialService;
 
   let manifests = Array.isArray(manifest) ? manifest : [manifest];
 
   // Check that none of the provider's content ends up in history.
   function finishCleanUp() {
+    ok(!SocialSidebar.provider, "no provider in sidebar");
+    SessionStore.setWindowValue(window, "socialSidebar", "");
     for (let i = 0; i < manifests.length; i++) {
       let m = manifests[i];
-      for (let what of ['sidebarURL', 'workerURL', 'iconURL']) {
+      for (let what of ['sidebarURL', 'workerURL', 'iconURL', 'shareURL', 'markURL']) {
         if (m[what]) {
           yield promiseSocialUrlNotRemembered(m[what]);
         }
@@ -101,14 +116,14 @@ function runSocialTestWithProvider(manifest, callback, finishcallback) {
       // If we're "cleaning up", don't call finish when done.
       let callback = cleanup ? function () {} : finishIfDone;
       // Similarly, if we're cleaning up, catch exceptions from removeProvider
-      let removeProvider = SocialService.removeProvider.bind(SocialService);
+      let removeProvider = SocialService.disableProvider.bind(SocialService);
       if (cleanup) {
         removeProvider = function (origin, cb) {
           try {
-            SocialService.removeProvider(origin, cb);
+            SocialService.disableProvider(origin, cb);
           } catch (ex) {
             // Ignore "provider doesn't exist" errors.
-            if (ex.message.indexOf("SocialService.removeProvider: no provider with origin") == 0)
+            if (ex.message.indexOf("SocialService.disableProvider: no provider with origin") == 0)
               return;
             info("Failed to clean up provider " + origin + ": " + ex);
           }
@@ -118,9 +133,6 @@ function runSocialTestWithProvider(manifest, callback, finishcallback) {
     });
   }
   function finishSocialTest(cleanup) {
-    // disable social before removing the providers to avoid providers
-    // being activated immediately before we get around to removing it.
-    Services.prefs.clearUserPref("social.enabled");
     removeAddedProviders(cleanup);
   }
 
@@ -141,13 +153,14 @@ function runSocialTestWithProvider(manifest, callback, finishcallback) {
       // If we've added all the providers we need, call the callback to start
       // the tests (and give it a callback it can call to finish them)
       if (providersAdded == manifests.length) {
-        // Set the UI's provider (which enables the feature)
-        Social.provider = firstProvider;
-
         registerCleanupFunction(function () {
           finishSocialTest(true);
         });
-        callback(finishSocialTest);
+        waitForCondition(function() provider.enabled,
+                         function() {
+          info("provider has been enabled");
+          callback(finishSocialTest);
+        }, "providers added and enabled");
       }
     });
   });
@@ -157,6 +170,8 @@ function runSocialTests(tests, cbPreTest, cbPostTest, cbFinish) {
   let testIter = Iterator(tests);
   let providersAtStart = Social.providers.length;
   info("runSocialTests: start test run with " + providersAtStart + " providers");
+
+  PopupNotifications.transitionsEnabled = false;
 
   if (cbPreTest === undefined) {
     cbPreTest = function(cb) {cb()};
@@ -204,10 +219,10 @@ function checkSocialUI(win) {
   let SocialService = Cu.import("resource://gre/modules/SocialService.jsm", {}).SocialService;
   win = win || window;
   let doc = win.document;
-  let provider = Social.provider;
   let enabled = win.SocialUI.enabled;
   let active = Social.providers.length > 0 && !win.SocialUI._chromeless &&
                !PrivateBrowsingUtils.isWindowPrivate(win);
+  let sidebarEnabled = win.SocialSidebar.provider ? enabled : false;
 
   // if we have enabled providers, we should also have instances of those
   // providers
@@ -236,71 +251,48 @@ function checkSocialUI(win) {
   function isbool(a, b, msg) {
     _is(!!a, !!b, msg);
   }
-  isbool(win.SocialSidebar.canShow, enabled, "social sidebar active?");
-  if (enabled)
-    isbool(win.SocialSidebar.opened, enabled, "social sidebar open?");
-  isbool(win.SocialChatBar.isAvailable, enabled, "chatbar available?");
-  isbool(!win.SocialChatBar.chatbar.hidden, enabled, "chatbar visible?");
+  isbool(win.SocialSidebar.canShow, sidebarEnabled, "social sidebar active?");
 
-  isbool(!doc.getElementById("social-toolbar-item").hidden, active, "toolbar items visible?");
-  if (active) {
-    if (!enabled || (Social.defaultProvider.statusURL && Social.allowMultipleWorkers)) {
-      _ok(!win.SocialToolbar.button.style.listStyleImage, "toolbar button is default icon");
+  let contextMenus = [
+    {
+      type: "link",
+      id: "context-marklinkMenu",
+      label: "social.marklinkMenu.label"
+    },
+    {
+      type: "page",
+      id: "context-markpageMenu",
+      label: "social.markpageMenu.label"
+    }
+  ];
+
+  for (let c of contextMenus) {
+    let leMenu = document.getElementById(c.id);
+    let parent, menus;
+    let markProviders = SocialMarks.getProviders();
+    if (markProviders.length > SocialMarks.MENU_LIMIT) {
+      // menus should be in a submenu, not in the top level of the context menu
+      parent = leMenu.firstChild;
+      menus = document.getElementsByClassName("context-mark" + c.type);
+      _is(menus.length, 0, "menu's are not in main context menu\n");
+      menus = parent.childNodes;
+      _is(menus.length, markProviders.length, c.id + " menu exists for each mark provider");
     } else {
-      _is(win.SocialToolbar.button.style.listStyleImage, 'url("' + Social.defaultProvider.iconURL + '")', "toolbar button has provider icon");
+      // menus should be in the top level of the context menu, not in a submenu
+      parent = leMenu.parentNode;
+      menus = document.getElementsByClassName("context-mark" + c.type);
+      _is(menus.length, markProviders.length, c.id + " menu exists for each mark provider");
+      menus = leMenu.firstChild.childNodes;
+      _is(menus.length, 0, "menu's are not in context submenu\n");
     }
-  }
-  // the menus should always have the provider name
-  if (provider) {
-    for (let id of ["menu_socialSidebar", "menu_socialAmbientMenu"])
-      _is(document.getElementById(id).getAttribute("label"), Social.provider.name, "element has the provider name");
-
-    let contextMenus = [
-      {
-        type: "link",
-        id: "context-marklinkMenu",
-        label: "social.marklinkMenu.label"
-      },
-      {
-        type: "page",
-        id: "context-markpageMenu",
-        label: "social.markpageMenu.label"
-      }
-    ];
-
-    for (let c of contextMenus) {
-      let leMenu = document.getElementById(c.id);
-      let parent, menus;
-      let markProviders = SocialMarks.getProviders();
-      if (markProviders.length > SocialMarks.MENU_LIMIT) {
-        // menus should be in a submenu, not in the top level of the context menu
-        parent = leMenu.firstChild;
-        menus = document.getElementsByClassName("context-mark" + c.type);
-        _is(menus.length, 0, "menu's are not in main context menu\n");
-        menus = parent.childNodes;
-        _is(menus.length, markProviders.length, c.id + " menu exists for each mark provider");
-      } else {
-        // menus should be in the top level of the context menu, not in a submenu
-        parent = leMenu.parentNode;
-        menus = document.getElementsByClassName("context-mark" + c.type);
-        _is(menus.length, markProviders.length, c.id + " menu exists for each mark provider");
-        menus = leMenu.firstChild.childNodes;
-        _is(menus.length, 0, "menu's are not in context submenu\n");
-      }
-      for (let m of menus)
-        _is(m.parentNode, parent, "menu has correct parent");
-    }
+    for (let m of menus)
+      _is(m.parentNode, parent, "menu has correct parent");
   }
 
   // and for good measure, check all the social commands.
-  isbool(!doc.getElementById("Social:Toggle").hidden, active, "Social:Toggle visible?");
-  isbool(!doc.getElementById("Social:ToggleSidebar").hidden, enabled, "Social:ToggleSidebar visible?");
+  isbool(!doc.getElementById("Social:ToggleSidebar").hidden, sidebarEnabled, "Social:ToggleSidebar visible?");
   isbool(!doc.getElementById("Social:ToggleNotifications").hidden, enabled, "Social:ToggleNotifications visible?");
-  isbool(!doc.getElementById("Social:FocusChat").hidden, enabled, "Social:FocusChat visible?");
-  isbool(doc.getElementById("Social:FocusChat").getAttribute("disabled"), enabled ? "false" : "true", "Social:FocusChat disabled?");
 
-  // broadcasters.
-  isbool(!doc.getElementById("socialActiveBroadcaster").hidden, active, "socialActiveBroadcaster hidden?");
   // and report on overall success of failure of the various checks here.
   is(numGoodTests, numTests, "The Social UI tests succeeded.")
 }
@@ -326,14 +318,24 @@ function updateBlocklist(aCallback) {
   blocklistNotifier.notify(null);
 }
 
+var _originalTestBlocklistURL = null;
 function setAndUpdateBlocklist(aURL, aCallback) {
+  if (!_originalTestBlocklistURL)
+    _originalTestBlocklistURL = Services.prefs.getCharPref("extensions.blocklist.url");
   Services.prefs.setCharPref("extensions.blocklist.url", aURL);
   updateBlocklist(aCallback);
 }
 
 function resetBlocklist(aCallback) {
-  Services.prefs.clearUserPref("extensions.blocklist.url");
-  updateBlocklist(aCallback);
+  // XXX - this has "forked" from the head.js helpers in our parent directory :(
+  // But let's reuse their blockNoPlugins.xml.  Later, we should arrange to
+  // use their head.js helpers directly
+  let noBlockedURL = "http://example.com/browser/browser/base/content/test/plugins/blockNoPlugins.xml";
+  setAndUpdateBlocklist(noBlockedURL, function() {
+    Services.prefs.setCharPref("extensions.blocklist.url", _originalTestBlocklistURL);
+    if (aCallback)
+      aCallback();
+  });
 }
 
 function setManifestPref(name, manifest) {
@@ -412,7 +414,7 @@ function get3ChatsForCollapsing(mode, cb) {
   // To make our life easier we don't go via the worker and ports so we get
   // more control over creation *and* to make the code much simpler.  We
   // assume the worker/port stuff is individually tested above.
-  let chatbar = window.SocialChatBar.chatbar;
+  let chatbar = getChatBar();
   let chatWidth = undefined;
   let num = 0;
   is(chatbar.childNodes.length, 0, "chatbar starting empty");
@@ -454,25 +456,23 @@ function get3ChatsForCollapsing(mode, cb) {
 
 function makeChat(mode, uniqueid, cb) {
   info("making a chat window '" + uniqueid +"'");
-  let provider = Social.provider;
+  let provider = SocialSidebar.provider;
   const chatUrl = provider.origin + "/browser/browser/base/content/test/social/social_chat.html";
-  let isOpened = window.SocialChatBar.openChat(provider, chatUrl + "?id=" + uniqueid, function(chat) {
+  // Note that we use promiseChatLoaded instead of the callback to ensure the
+  // content has started loading.
+  let chatbox = getChatBar().openChat(provider.origin, provider.name,
+                                      chatUrl + "?id=" + uniqueid, mode);
+  chatbox.promiseChatLoaded.then(
+    () => {
     info("chat window has opened");
-    // we can't callback immediately or we might close the chat during
-    // this event which upsets the implementation - it is only 1/2 way through
-    // handling the load event.
-    chat.document.title = uniqueid;
-    executeSoon(cb);
-  }, mode);
-  if (!isOpened) {
-    ok(false, "unable to open chat window, no provider? more failures to come");
-    executeSoon(cb);
-  }
+    chatbox.contentDocument.title = uniqueid;
+    cb();
+  });
 }
 
 function checkPopup() {
   // popup only showing if any collapsed popup children.
-  let chatbar = window.SocialChatBar.chatbar;
+  let chatbar = getChatBar();
   let numCollapsed = 0;
   for (let chat of chatbar.childNodes) {
     if (chat.collapsed) {
@@ -491,7 +491,7 @@ function checkPopup() {
 // Does a callback passing |true| if the window is now big enough or false
 // if we couldn't resize large enough to satisfy the test requirement.
 function resizeWindowToChatAreaWidth(desired, cb, count = 0) {
-  let current = window.SocialChatBar.chatbar.getBoundingClientRect().width;
+  let current = getChatBar().getBoundingClientRect().width;
   let delta = desired - current;
   info(count + ": resizing window so chat area is " + desired + " wide, currently it is "
        + current + ".  Screen avail is " + window.screen.availWidth
@@ -523,23 +523,19 @@ function resizeWindowToChatAreaWidth(desired, cb, count = 0) {
     return;
   }
   function resize_handler(event) {
-    // for whatever reason, sometimes we get called twice for different event
-    // phases, only handle one of them.
-    if (event.eventPhase != event.AT_TARGET)
-      return;
     // we did resize - but did we get far enough to be able to continue?
-    let newSize = window.SocialChatBar.chatbar.getBoundingClientRect().width;
+    let newSize = getChatBar().getBoundingClientRect().width;
     let sizedOk = widthDeltaCloseEnough(newSize - desired);
     if (!sizedOk)
       return;
-    window.removeEventListener("resize", resize_handler);
+    window.removeEventListener("resize", resize_handler, true);
     info(count + ": resized window width is " + newSize);
     executeSoon(function() {
       cb(sizedOk);
     });
   }
   // Otherwise we request resize and expect a resize event
-  window.addEventListener("resize", resize_handler);
+  window.addEventListener("resize", resize_handler, true);
   window.resizeBy(delta, 0);
 }
 
@@ -562,22 +558,28 @@ function resizeAndCheckWidths(first, second, third, checks, cb) {
         }
         ok(true, count + ": " + "correct number of chats visible");
         info(">> Check " + count);
-        resizeAndCheckWidths(first, second, third, checks, cb);
-        return true;
+        executeSoon(function() {
+          resizeAndCheckWidths(first, second, third, checks, cb);
+        });
       }
-      return false;
     }
-    if (!collapsedObserver()) {
-      let m = new MutationObserver(collapsedObserver);
-      m.observe(first, {attributes: true });
-      m.observe(second, {attributes: true });
-      m.observe(third, {attributes: true });
-    }
+    let m = new MutationObserver(collapsedObserver);
+    m.observe(first, {attributes: true });
+    m.observe(second, {attributes: true });
+    m.observe(third, {attributes: true });
+    // and just in case we are already at the right size, explicitly call the
+    // observer.
+    collapsedObserver(undefined, m);
   }, count);
 }
 
+function getChatBar() {
+  return document.getElementById("pinnedchats");
+}
+
 function getPopupWidth() {
-  let popup = window.SocialChatBar.chatbar.menupopup;
+  let chatbar = getChatBar();
+  let popup = chatbar.menupopup;
   ok(!popup.parentNode.collapsed, "asking for popup width when it is visible");
   let cs = document.defaultView.getComputedStyle(popup.parentNode);
   let margins = parseInt(cs.marginLeft) + parseInt(cs.marginRight);
@@ -585,6 +587,8 @@ function getPopupWidth() {
 }
 
 function closeAllChats() {
-  let chatbar = window.SocialChatBar.chatbar;
-  chatbar.removeAll();
+  let chatbar = getChatBar();
+  while (chatbar.selectedChat) {
+    chatbar.selectedChat.close();
+  }
 }

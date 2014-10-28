@@ -22,8 +22,8 @@ from ..preprocessor import Preprocessor
 from ..pythonutil import iter_modules_in_path
 from ..util import FileAvoidWrite
 from ..frontend.data import (
+    ContextDerived,
     ReaderSummary,
-    SandboxDerived,
 )
 from .configenvironment import ConfigEnvironment
 import mozpack.path as mozpath
@@ -153,11 +153,6 @@ class BuildBackend(LoggingMixin):
             l = open(self._backend_output_list_file).read().split('\n')
             self._backend_output_list.update(mozpath.normsep(p) for p in l)
 
-        # Pull in all loaded Python as dependencies so any Python changes that
-        # could influence our output result in a rescan.
-        self.backend_input_files |= set(iter_modules_in_path(environment.topsrcdir))
-        self.backend_input_files |= set(iter_modules_in_path(environment.topobjdir))
-
         self._environments = {}
         self._environments[environment.topobjdir] = environment
 
@@ -168,24 +163,6 @@ class BuildBackend(LoggingMixin):
 
         This exists so child classes don't need to implement __init__.
         """
-
-    def get_environment(self, obj):
-        """Obtain the ConfigEnvironment for a specific object.
-
-        This is used to support external source directories which operate in
-        their own topobjdir and have their own ConfigEnvironment.
-
-        This is somewhat hacky and should be considered for rewrite if external
-        project integration is rewritten.
-        """
-        environment = self._environments.get(obj.topobjdir, None)
-        if not environment:
-            config_status = mozpath.join(obj.topobjdir, 'config.status')
-
-            environment = ConfigEnvironment.from_config_status(config_status)
-            self._environments[obj.topobjdir] = environment
-
-        return environment
 
     def consume(self, objs):
         """Consume a stream of TreeMetadata instances.
@@ -207,13 +184,18 @@ class BuildBackend(LoggingMixin):
             self.consume_object(obj)
             backend_time += time.time() - obj_start
 
-            if isinstance(obj, SandboxDerived):
-                self.backend_input_files |= obj.sandbox_all_paths
+            if isinstance(obj, ContextDerived):
+                self.backend_input_files |= obj.context_all_paths
 
             if isinstance(obj, ReaderSummary):
                 self.summary.mozbuild_count = obj.total_file_count
                 self.summary.mozbuild_execution_time = obj.total_sandbox_execution_time
                 self.summary.emitter_execution_time = obj.total_emitter_execution_time
+
+        # Pull in all loaded Python as dependencies so any Python changes that
+        # could influence our output result in a rescan.
+        self.backend_input_files |= set(iter_modules_in_path(
+            self.environment.topsrcdir, self.environment.topobjdir))
 
         finished_start = time.time()
         self.consume_finished()
@@ -310,7 +292,7 @@ class BuildBackend(LoggingMixin):
         in the current environment.'''
         pp = Preprocessor()
         srcdir = mozpath.dirname(obj.input_path)
-        pp.context.update(self.environment.substs)
+        pp.context.update(obj.config.substs)
         pp.context.update(
             top_srcdir=obj.topsrcdir,
             srcdir=srcdir,

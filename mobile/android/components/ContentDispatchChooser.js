@@ -8,10 +8,7 @@ const Cc = Components.classes;
 
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
-
-function sendMessageToJava(aMessage) {
-  return Services.androidBridge.handleGeckoMessage(JSON.stringify(aMessage));
-}
+Cu.import("resource://gre/modules/Messaging.jsm");
 
 function ContentDispatchChooser() {}
 
@@ -22,8 +19,10 @@ ContentDispatchChooser.prototype =
   QueryInterface: XPCOMUtils.generateQI([Ci.nsIContentDispatchChooser]),
 
   get protoSvc() {
-    delete this.protoSvc;
-    return this.protoSvc = Cc["@mozilla.org/uriloader/external-protocol-service;1"].getService(Ci.nsIExternalProtocolService);
+    if (!this._protoSvc) {
+      this._protoSvc = Cc["@mozilla.org/uriloader/external-protocol-service;1"].getService(Ci.nsIExternalProtocolService);
+    }
+    return this._protoSvc;
   },
 
   _getChromeWin: function getChromeWin() {
@@ -65,7 +64,7 @@ ContentDispatchChooser.prototype =
                 url: "market://search?q=" + aURI.scheme,
               };
 
-              sendMessageToJava(message);
+              Messaging.sendRequest(message);
             }
           }
         });

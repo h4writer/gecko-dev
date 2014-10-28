@@ -18,7 +18,7 @@
 namespace mozilla {
 namespace net {
 
-NS_IMPL_ISUPPORTS1(Tickler, nsISupportsWeakReference)
+NS_IMPL_ISUPPORTS(Tickler, nsISupportsWeakReference, Tickler)
 
 Tickler::Tickler()
     : mLock("Tickler::mLock")
@@ -80,7 +80,9 @@ Tickler::Init()
   MOZ_ASSERT(!mThread);
   MOZ_ASSERT(!mFD);
 
-  GeckoAppShell::EnableNetworkNotifications();
+  if (AndroidBridge::HasEnv()) {
+      mozilla::widget::android::GeckoAppShell::EnableNetworkNotifications();
+  }
 
   mFD = PR_OpenUDPSocket(PR_AF_INET);
   if (!mFD)
@@ -143,8 +145,7 @@ void Tickler::MaybeStartTickler()
   mLock.AssertCurrentThreadOwns();
   if (!NS_IsMainThread()) {
     NS_DispatchToMainThread(
-      NS_NewRunnableMethod(this, &Tickler::MaybeStartTicklerUnlocked),
-      NS_DISPATCH_NORMAL);
+      NS_NewRunnableMethod(this, &Tickler::MaybeStartTicklerUnlocked));
     return;
   }
 
@@ -224,9 +225,9 @@ class TicklerTimer MOZ_FINAL : public nsITimerCallback
     mTickler = do_GetWeakReference(aTickler);
   }
 
-  ~TicklerTimer() {};
-
 private:
+  ~TicklerTimer() {}
+
   nsWeakPtr mTickler;
 };
 
@@ -255,7 +256,7 @@ void Tickler::SetIPV4Port(uint16_t port)
   mAddr.inet.port = port;
 }
 
-NS_IMPL_ISUPPORTS1(TicklerTimer, nsITimerCallback)
+NS_IMPL_ISUPPORTS(TicklerTimer, nsITimerCallback)
 
 NS_IMETHODIMP TicklerTimer::Notify(nsITimer *timer)
 {

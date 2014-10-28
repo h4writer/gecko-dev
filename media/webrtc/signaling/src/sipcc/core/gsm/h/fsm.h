@@ -201,17 +201,21 @@ typedef struct fsmdef_media_t_ {
     /* ICE Candidates */
     char **candidatesp;
     int candidate_ct;
-
     /*
      * rtcp-mux indicates media stream is muxed for RTP and RTCP
      */
     boolean        rtcp_mux;
+    /*
+     * Flag to indicate if RTP Header extension for audio level is used
+     * and the id to be used for it
+     */
+    boolean         audio_level;
+    uint8_t         audio_level_id;
 
     /*
      * The value of the a=setup line
      */
     sdp_setup_type_e setup;
-
     /*
      * port number used in m= data channel line
      */
@@ -352,15 +356,6 @@ typedef struct {
     /* TRUE if GSM has applied ringout due to CCMs request to show ringout UI */
     boolean spoof_ringout_applied;
 
-    /* Timer to go on hook after any call error */
-    cprTimer_t err_onhook_tmr;
-
-    /* Request pending timer */
-    cprTimer_t req_pending_tmr;
-
-    /* Ringback delay timer */
-    cprTimer_t ringback_delay_tmr;
-
     /*
      * save of orientation from callInfo to update UI at any time
      * other than during call info. update such as after Tx start in
@@ -380,11 +375,6 @@ typedef struct {
 
     cc_security_e security;
     cc_policy_e policy;
-
-    /* auto answer timer */
-    cprTimer_t autoAnswerTimer;
-    int32_t    reversionInterval;
-    cprTimer_t revertTimer;
 
     boolean dsp_out_of_resources;
 
@@ -424,12 +414,11 @@ typedef struct {
 
     char *ice_ufrag;
     char *ice_pwd;
+    boolean peer_ice_lite;
     char ice_default_candidate_addr[MAX_IPADDR_STR_LEN];
 
     char digest_alg[FSMDEF_MAX_DIGEST_ALG_LEN];
     char digest[FSMDEF_MAX_DIGEST_LEN];
-
-    sll_lite_list_t candidate_list;
 } fsmdef_dcb_t;
 
 typedef enum fsm_types_t_ {
@@ -759,4 +748,38 @@ void fsmdef_update_media_cap_feature_event(cc_feature_t *msg);
 boolean fsmcnd_conf_call_id_valid(fsmcnf_ccb_t   *ccb);
 
 boolean fsmdef_check_retain_fwd_info_state(void);
+
+
+pc_error fsmdef_setpeerconnection(fsm_fcb_t *fcb, cc_feature_t *msg);
+pc_error fsmdef_createoffer(fsm_fcb_t *fcb,
+                            cc_feature_t *msg,
+                            string_t *sdp_outparam,
+                            string_t *error_outparam);
+pc_error fsmdef_createanswer(fsm_fcb_t *fcb,
+                             cc_feature_t *msg,
+                             string_t *sdp_outparam,
+                             string_t *error_outparam);
+pc_error fsmdef_setlocaldesc(fsm_fcb_t *fcb,
+                             cc_feature_t *msg,
+                             string_t *sdp_outparam,
+                             string_t *error_outparam);
+pc_error fsmdef_setremotedesc(fsm_fcb_t *fcb,
+                              cc_feature_t *msg,
+                              string_t *sdp_outparam,
+                              string_t *error_outparam);
+pc_error fsmdef_addcandidate(fsm_fcb_t *fcb,
+                             cc_feature_t *msg,
+                             string_t *sdp_outparam,
+                             string_t *error_outparam);
+pc_error fsmdef_foundcandidate(fsm_fcb_t *fcb,
+                               cc_feature_t *msg,
+                               string_t *sdp_outparam,
+                               string_t *error_outparam);
+pc_error fsmdef_removestream(fsm_fcb_t *fcb,
+                             cc_feature_t *msg,
+                             string_t *error_outparam);
+pc_error fsmdef_addstream(fsm_fcb_t *fcb,
+                          cc_feature_t *msg,
+                          string_t *error_outparam);
+
 #endif

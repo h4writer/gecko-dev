@@ -4,14 +4,13 @@
 
 // Tests AddonRepository.jsm
 
-Components.utils.import("resource://gre/modules/AddonRepository.jsm");
+Components.utils.import("resource://gre/modules/addons/AddonRepository.jsm");
 
 Components.utils.import("resource://testing-common/httpd.js");
 var gServer = new HttpServer();
 gServer.start(-1);
 
 const PREF_GETADDONS_BROWSEADDONS        = "extensions.getAddons.browseAddons";
-const PREF_GETADDONS_BYIDS               = "extensions.getAddons.get.url";
 const PREF_GETADDONS_BROWSERECOMMENDED   = "extensions.getAddons.recommended.browseURL";
 const PREF_GETADDONS_GETRECOMMENDED      = "extensions.getAddons.recommended.url";
 const PREF_GETADDONS_BROWSESEARCHRESULTS = "extensions.getAddons.search.browseURL";
@@ -416,7 +415,20 @@ function run_test() {
 }
 
 function end_test() {
-  gServer.stop(do_test_finished);
+  let testDir = gProfD.clone();
+  testDir.append("extensions");
+  testDir.append("staged");
+  gServer.stop(function() {
+    function loop() {
+      if (!testDir.exists()) {
+        do_print("Staged directory has been cleaned up");
+        do_test_finished();
+      }
+      do_print("Waiting 1 second until cleanup is complete");
+      do_timeout(1000, loop);
+    }
+    loop();
+  });
 }
 
 // Tests homepageURL, getRecommendedURL() and getSearchURL()

@@ -7,12 +7,10 @@ dist_dest   = $(DIST)/$(MOZ_MACBUNDLE_NAME)
 PREF_JS_EXPORTS = $(srcdir)/profile/firefox.js \
 		  $(NULL)
 
-
 # hardcode en-US for the moment
 AB_CD = en-US
 
 DEFINES += \
-  -DAB_CD=$(AB_CD) \
   -DFIREFOX_ICO='"$(DIST)/branding/firefox.ico"' \
   -DDOCUMENT_ICO='"$(DIST)/branding/document.ico"' \
   -DNEWWINDOW_ICO='"$(DIST)/branding/newwindow.ico"' \
@@ -26,29 +24,8 @@ endif #} LIBXUL_SDK
 
 # Build a binary bootstrapping with XRE_main
 
-LOCAL_INCLUDES += \
-  -I$(topsrcdir)/toolkit/xre \
-  -I$(topsrcdir)/xpcom/base \
-  -I$(topsrcdir)/xpcom/build \
-  -I$(DEPTH)/build \
-  $(NULL)
-
-STL_FLAGS=
-
-LIBS += \
-	$(XPCOM_STANDALONE_GLUE_LDOPTS) \
-	$(NULL)
-
-ifdef MOZ_LINKER
-LIBS += $(MOZ_ZLIB_LIBS)
-endif
-
-ifdef HAVE_CLOCK_MONOTONIC
-LIBS += $(REALTIME_LIBS)
-endif
-
 ifndef MOZ_WINCONSOLE
-ifdef MOZ_DEBUG
+ifneq (,$(MOZ_DEBUG)$(MOZ_ASAN))
 MOZ_WINCONSOLE = 1
 else
 MOZ_WINCONSOLE = 0
@@ -61,53 +38,19 @@ NSDISTMODE = copy
 
 include $(topsrcdir)/config/config.mk
 
-ifdef _MSC_VER
-# Always enter a Windows program through wmain, whether or not we're
-# a console application.
-WIN32_EXE_LDFLAGS += -ENTRY:wmainCRTStartup
-endif
-
 ifeq ($(OS_ARCH),WINNT)
-RCINCLUDE = splash.rc
 # Rebuild firefox.exe if the manifest changes - it's included by splash.rc.
 # (this dependency should really be just for firefox.exe, not other targets)
 # Note the manifest file exists in the tree, so we use the explicit filename
 # here.
 EXTRA_DEPS += firefox.exe.manifest
-ifndef GNU_CC
-RCFLAGS += -DMOZ_PHOENIX -I$(srcdir)
-else
-RCFLAGS += -DMOZ_PHOENIX --include-dir $(srcdir)
-endif
-endif
-
-ifeq ($(OS_ARCH),OS2)
-RESFILE=splashos2.res
-RCFLAGS += -DMOZ_PHOENIX
-RCFLAGS += -DFIREFOX_ICO='"$(DIST)/branding/firefox-os2.ico"' -DDOCUMENT_ICO='"$(DIST)/branding/document-os2.ico"'
 endif
 
 PROGRAMS_DEST = $(DIST)/bin
 
 include $(topsrcdir)/config/rules.mk
 
-ifeq ($(OS_ARCH),WINNT) #{
-#
-# Control the default heap size.
-# This is the heap returned by GetProcessHeap().
-# As we use the CRT heap, the default size is too large and wastes VM.
-#
-# The default heap size is 1MB on Win32.
-# The heap will grow if need be.
-#
-# Set it to 256k.  See bug 127069.
-#
-ifndef GNU_CC #{
-LDFLAGS += /HEAP:0x40000
-endif #}
-endif #}
-
-ifneq (,$(filter-out OS2 WINNT,$(OS_ARCH)))
+ifneq (,$(filter-out WINNT,$(OS_ARCH)))
 
 ifdef COMPILE_ENVIRONMENT
 libs:: 
@@ -133,7 +76,7 @@ ifndef LIBXUL_SDK
 # channel-prefs.js is handled separate from other prefs due to bug 756325
 libs:: $(srcdir)/profile/channel-prefs.js
 	$(NSINSTALL) -D $(DIST)/bin/defaults/pref
-	$(call py_action,preprocessor,$(PREF_PPFLAGS) $(ACDEFINES) $^ -o $(DIST)/bin/defaults/pref/channel-prefs.js)
+	$(call py_action,preprocessor,-Fsubstitution $(PREF_PPFLAGS) $(ACDEFINES) $^ -o $(DIST)/bin/defaults/pref/channel-prefs.js)
 endif
 
 libs:: $(srcdir)/blocklist.xml
@@ -154,12 +97,6 @@ AB := $(firstword $(subst -, ,$(AB_CD)))
 clean clobber repackage::
 	$(RM) -r $(dist_dest)
 
-ifdef LIBXUL_SDK
-APPFILES = Resources
-else
-APPFILES = MacOS
-endif
-
 MAC_BUNDLE_VERSION = $(shell $(PYTHON) $(srcdir)/macversion.py --version=$(MOZ_APP_VERSION) --buildid=$(DEPTH)/config/buildid)
 
 .PHONY: repackage
@@ -170,7 +107,8 @@ tools repackage:: $(PROGRAM)
 	rsync -a --exclude '*.in' $(srcdir)/macbuild/Contents/Resources/English.lproj/ $(dist_dest)/Contents/Resources/$(AB).lproj
 	sed -e 's/%APP_VERSION%/$(MOZ_APP_VERSION)/' -e 's/%MAC_APP_NAME%/$(MAC_APP_NAME)/' -e 's/%MOZ_MACBUNDLE_ID%/$(MOZ_MACBUNDLE_ID)/' -e 's/%MAC_BUNDLE_VERSION%/$(MAC_BUNDLE_VERSION)/' $(srcdir)/macbuild/Contents/Info.plist.in > $(dist_dest)/Contents/Info.plist
 	sed -e 's/%MAC_APP_NAME%/$(MAC_APP_NAME)/' $(srcdir)/macbuild/Contents/Resources/English.lproj/InfoPlist.strings.in | iconv -f UTF-8 -t UTF-16 > $(dist_dest)/Contents/Resources/$(AB).lproj/InfoPlist.strings
-	rsync -a $(DIST)/bin/ $(dist_dest)/Contents/$(APPFILES)
+	rsync -a --exclude-from='$(srcdir)/macbuild/Contents/MacOS-files.in' $(DIST)/bin/ $(dist_dest)/Contents/Resources
+	rsync -a --include-from='$(srcdir)/macbuild/Contents/MacOS-files.in' --exclude '*' $(DIST)/bin/ $(dist_dest)/Contents/MacOS
 	$(RM) $(dist_dest)/Contents/MacOS/$(PROGRAM)
 	rsync -aL $(PROGRAM) $(dist_dest)/Contents/MacOS
 	cp -RL $(DIST)/branding/firefox.icns $(dist_dest)/Contents/Resources/firefox.icns
@@ -179,7 +117,6 @@ tools repackage:: $(PROGRAM)
 endif
 
 ifdef LIBXUL_SDK #{
-ifndef SKIP_COPY_XULRUNNER #{
 libs::
 ifeq (cocoa,$(MOZ_WIDGET_TOOLKIT)) #{
 	rsync -a --copy-unsafe-links $(LIBXUL_DIST)/XUL.framework $(dist_dest)/Contents/Frameworks
@@ -187,5 +124,4 @@ else
 	$(NSINSTALL) -D $(DIST)/bin/xulrunner
 	(cd $(LIBXUL_SDK)/bin && tar $(TAR_CREATE_FLAGS) - .) | (cd $(DIST)/bin/xulrunner && tar -xf -)
 endif #} cocoa
-endif #} SKIP_COPY_XULRUNNER
 endif #} LIBXUL_SDK

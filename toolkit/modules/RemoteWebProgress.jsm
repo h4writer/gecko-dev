@@ -1,4 +1,4 @@
-// -*- Mode: javascript; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+// -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -17,15 +17,17 @@ function newURI(spec)
                                                     .newURI(spec, null, null);
 }
 
-function RemoteWebProgressRequest(spec)
+function RemoteWebProgressRequest(spec, originalSpec)
 {
-  this.uri = newURI(spec);
+  this._uri = newURI(spec);
+  this._originalURI = newURI(originalSpec);
 }
 
 RemoteWebProgressRequest.prototype = {
   QueryInterface : XPCOMUtils.generateQI([Ci.nsIChannel]),
 
-  get URI() { return this.uri.clone(); }
+  get URI() { return this._uri.clone(); },
+  get originalURI() { return this._originalURI.clone(); }
 };
 
 function RemoteWebProgress(aManager, aIsTopLevel) {
@@ -144,16 +146,21 @@ RemoteWebProgressManager.prototype = {
                                       : new RemoteWebProgress(this, false);
 
     // The WebProgressRequest object however is always dynamic.
-    let request = json.requestURI ? new RemoteWebProgressRequest(json.requestURI)
-                                  : null;
+    let request = null;
+    if (json.requestURI) {
+      request = new RemoteWebProgressRequest(json.requestURI,
+                                             json.originalRequestURI);
+    }
 
     // Update the actual WebProgress fields.
     webProgress._isLoadingDocument = json.isLoadingDocument;
     webProgress._DOMWindow = objects.DOMWindow;
     webProgress._loadType = json.loadType;
 
-    if (json.isTopLevel)
+    if (json.isTopLevel) {
       this._browser._contentWindow = objects.contentWindow;
+      this._browser._documentContentType = json.documentContentType;
+    }
 
     switch (aMessage.name) {
     case "Content:StateChange":
@@ -164,13 +171,17 @@ RemoteWebProgressManager.prototype = {
       let location = newURI(json.location);
       let flags = json.flags;
 
+      // These properties can change even for a sub-frame navigation.
+      this._browser.webNavigation.canGoBack = json.canGoBack;
+      this._browser.webNavigation.canGoForward = json.canGoForward;
+
       if (json.isTopLevel) {
         this._browser.webNavigation._currentURI = location;
-        this._browser.webNavigation.canGoBack = json.canGoBack;
-        this._browser.webNavigation.canGoForward = json.canGoForward;
         this._browser._characterSet = json.charset;
         this._browser._documentURI = newURI(json.documentURI);
         this._browser._imageDocument = null;
+        this._browser._mayEnableCharacterEncodingMenu = json.mayEnableCharacterEncodingMenu;
+        this._browser._contentPrincipal = json.principal;
       }
 
       this._callProgressListeners("onLocationChange", webProgress, request, location, flags);

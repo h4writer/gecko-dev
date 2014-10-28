@@ -1,9 +1,10 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 Components.utils.import("resource://gre/modules/XPCOMUtils.jsm");
+Components.utils.import("resource://gre/modules/TelemetryStopwatch.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "MigrationUtils",
                                   "resource:///modules/MigrationUtils.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "Task",
@@ -14,6 +15,9 @@ XPCOMUtils.defineLazyModuleGetter(this, "PlacesBackups",
                                   "resource://gre/modules/PlacesBackups.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "DownloadUtils",
                                   "resource://gre/modules/DownloadUtils.jsm");
+
+const RESTORE_FILEPICKER_FILTER_EXT = "*.json;*.jsonlz4";
+const HISTORY_LIBRARY_SEARCH_TELEMETRY = "PLACES_HISTORY_LIBRARY_SEARCH_TIME_MS";
 
 var PlacesOrganizer = {
   _places: null,
@@ -62,7 +66,7 @@ var PlacesOrganizer = {
       for (let container of hierarchy) {
         switch (typeof container) {
           case "number":
-            this._places.selectItems([container]);
+            this._places.selectItems([container], false);
             break;
           case "string":
             if (container.substr(0, 6) == "place:")
@@ -326,10 +330,13 @@ var PlacesOrganizer = {
   },
 
   openFlatContainer: function PO_openFlatContainerFlatContainer(aContainer) {
-    if (aContainer.itemId != -1)
-      this._places.selectItems([aContainer.itemId]);
-    else if (PlacesUtils.nodeIsQuery(aContainer))
+    if (aContainer.itemId != -1) {
+      PlacesUtils.asContainer(this._places.selectedNode).containerOpen = true;
+      this._places.selectItems([aContainer.itemId], false);
+    }
+    else if (PlacesUtils.nodeIsQuery(aContainer)) {
       this._places.selectPlaceURI(aContainer.uri);
+    }
   },
 
   /**
@@ -383,7 +390,7 @@ var PlacesOrganizer = {
     let fpCallback = function fpCallback_done(aResult) {
       if (aResult != Ci.nsIFilePicker.returnCancel) {
         Components.utils.import("resource://gre/modules/BookmarkHTMLUtils.jsm");
-        BookmarkHTMLUtils.exportToFile(fp.file)
+        BookmarkHTMLUtils.exportToFile(fp.file.path)
                          .then(null, Components.utils.reportError);
       }
     };
@@ -461,7 +468,7 @@ var PlacesOrganizer = {
       let backupFilePaths = yield PlacesBackups.getBackupFiles();
       for (let backupFilePath of backupFilePaths) {
         if (OS.Path.basename(backupFilePath) == backupName) {
-          PlacesOrganizer.restoreBookmarksFromFile(new FileUtils.File(backupFilePath));
+          PlacesOrganizer.restoreBookmarksFromFile(backupFilePath);
           break;
         }
       }
@@ -479,14 +486,14 @@ var PlacesOrganizer = {
     let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
     let fpCallback = function fpCallback_done(aResult) {
       if (aResult != Ci.nsIFilePicker.returnCancel) {
-        this.restoreBookmarksFromFile(fp.file);
+        this.restoreBookmarksFromFile(fp.file.path);
       }
     }.bind(this);
 
     fp.init(window, PlacesUIUtils.getString("bookmarksRestoreTitle"),
             Ci.nsIFilePicker.modeOpen);
     fp.appendFilter(PlacesUIUtils.getString("bookmarksRestoreFilterName"),
-                    PlacesUIUtils.getString("bookmarksRestoreFilterExtension"));
+                    RESTORE_FILEPICKER_FILTER_EXT);
     fp.appendFilters(Ci.nsIFilePicker.filterAll);
     fp.displayDirectory = backupsDir;
     fp.open(fpCallback);
@@ -495,9 +502,9 @@ var PlacesOrganizer = {
   /**
    * Restores bookmarks from a JSON file.
    */
-  restoreBookmarksFromFile: function PO_restoreBookmarksFromFile(aFile) {
+  restoreBookmarksFromFile: function PO_restoreBookmarksFromFile(aFilePath) {
     // check file extension
-    if (!aFile.leafName.match(/\.json$/)) {
+    if (!aFilePath.endsWith("json") && !aFilePath.endsWith("jsonlz4"))  {
       this._showErrorAlert(PlacesUIUtils.getString("bookmarksRestoreFormatError"));
       return;
     }
@@ -512,7 +519,7 @@ var PlacesOrganizer = {
 
     Task.spawn(function() {
       try {
-        yield BookmarkJSONUtils.importFromFile(aFile, true);
+        yield BookmarkJSONUtils.importFromFile(aFilePath, true);
       } catch(ex) {
         PlacesOrganizer._showErrorAlert(PlacesUIUtils.getString("bookmarksRestoreParseError"));
       }
@@ -540,30 +547,18 @@ var PlacesOrganizer = {
     let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
     let fpCallback = function fpCallback_done(aResult) {
       if (aResult != Ci.nsIFilePicker.returnCancel) {
-        PlacesBackups.saveBookmarksToJSONFile(fp.file);
+        // There is no OS.File version of the filepicker yet (Bug 937812).
+        PlacesBackups.saveBookmarksToJSONFile(fp.file.path);
       }
     };
 
     fp.init(window, PlacesUIUtils.getString("bookmarksBackupTitle"),
             Ci.nsIFilePicker.modeSave);
     fp.appendFilter(PlacesUIUtils.getString("bookmarksRestoreFilterName"),
-                    PlacesUIUtils.getString("bookmarksRestoreFilterExtension"));
+                    RESTORE_FILEPICKER_FILTER_EXT);
     fp.defaultString = PlacesBackups.getFilenameForDate();
     fp.displayDirectory = backupsDir;
     fp.open(fpCallback);
-  },
-
-  _paneDisabled: false,
-  _setDetailsFieldsDisabledState:
-  function PO__setDetailsFieldsDisabledState(aDisabled) {
-    if (aDisabled) {
-      document.getElementById("paneElementsBroadcaster")
-              .setAttribute("disabled", "true");
-    }
-    else {
-      document.getElementById("paneElementsBroadcaster")
-              .removeAttribute("disabled");
-    }
   },
 
   _detectAndSetDetailsPaneMinimalState:
@@ -849,7 +844,9 @@ var PlacesSearchBox = {
           currentView.load([query], options);
         }
         else {
+          TelemetryStopwatch.start(HISTORY_LIBRARY_SEARCH_TELEMETRY);
           currentView.applyFilter(filterString, null, true);
+          TelemetryStopwatch.finish(HISTORY_LIBRARY_SEARCH_TELEMETRY);
         }
         break;
       case "downloads":

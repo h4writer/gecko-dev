@@ -3,13 +3,21 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+///////////////////
+//
+// Whitelisting this test.
+// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+//
+thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Protocol error (unknownError): TypeError: this.conn.getActor(...) is null");
+
 // Tests that the $0 console helper works as intended.
 
-function createDocument()
-{
+let inspector, h1;
+
+function createDocument() {
   let doc = content.document;
   let div = doc.createElement("div");
-  let h1 = doc.createElement("h1");
+  h1 = doc.createElement("h1");
   let p1 = doc.createElement("p");
   let p2 = doc.createElement("p");
   let div2 = doc.createElement("div");
@@ -40,45 +48,29 @@ function createDocument()
   setupHighlighterTests();
 }
 
-function setupHighlighterTests()
-{
-  let h1 = content.document.querySelector("h1");
+function setupHighlighterTests() {
   ok(h1, "we have the header node");
-
   openInspector(runSelectionTests);
 }
 
-function runSelectionTests(aInspector)
-{
-  aInspector.highlighter.unlockAndFocus();
-  aInspector.highlighter.outline.setAttribute("disable-transitions", "true");
+function runSelectionTests(aInspector) {
+  inspector = aInspector;
 
-  executeSoon(function() {
-    aInspector.selection.once("new-node", performTestComparisons);
-    let h1 = content.document.querySelector("h1");
-    EventUtils.synthesizeMouse(h1, 2, 2, {type: "mousemove"}, content);
+  inspector.toolbox.highlighterUtils.startPicker();
+  inspector.toolbox.once("picker-started", () => {
+    info("Picker mode started, now clicking on H1 to select that node");
+    executeSoon(() => {
+      h1.scrollIntoView();
+      EventUtils.synthesizeMouseAtCenter(h1, {}, content);
+      inspector.toolbox.once("picker-stopped", () => {
+        info("Picker mode stopped, H1 selected, now switching to the console");
+        openConsole(gBrowser.selectedTab).then(performWebConsoleTests);
+      });
+    });
   });
 }
 
-function performTestComparisons()
-{
-  let target = TargetFactory.forTab(gBrowser.selectedTab);
-  let inspector = gDevTools.getToolbox(target).getPanel("inspector");
-  inspector.highlighter.lock();
-
-  let isHighlighting =
-    !(inspector.highlighter.outline.getAttribute("hidden") == "true");
-
-  ok(isHighlighting, "inspector is highlighting");
-
-  let h1 = content.document.querySelector("h1");
-  is(inspector.selection.node, h1, "selection matches node");
-
-  openConsole(gBrowser.selectedTab, performWebConsoleTests);
-}
-
-function performWebConsoleTests(hud)
-{
+function performWebConsoleTests(hud) {
   let target = TargetFactory.forTab(gBrowser.selectedTab);
   let jsterm = hud.jsterm;
   outputNode = hud.outputNode;
@@ -86,31 +78,28 @@ function performWebConsoleTests(hud)
   jsterm.clearOutput();
   jsterm.execute("$0", onNodeOutput);
 
-  function onNodeOutput(node)
-  {
-    isnot(node.textContent.indexOf("[object HTMLHeadingElement"), -1,
-          "correct output for $0");
+  function onNodeOutput(node) {
+    isnot(node.textContent.indexOf("<h1>"), -1, "correct output for $0");
 
     jsterm.clearOutput();
     jsterm.execute("$0.textContent = 'bug653531'", onNodeUpdate);
   }
 
-  function onNodeUpdate(node)
-  {
+  function onNodeUpdate(node) {
     isnot(node.textContent.indexOf("bug653531"), -1,
           "correct output for $0.textContent");
-    let inspector = gDevTools.getToolbox(target).getPanel("inspector");
     is(inspector.selection.node.textContent, "bug653531",
        "node successfully updated");
 
+    inspector = h1 = null;
     gBrowser.removeCurrentTab();
     finishTest();
   }
 }
 
-function test()
-{
+function test() {
   waitForExplicitFinish();
+
   gBrowser.selectedTab = gBrowser.addTab();
   gBrowser.selectedBrowser.addEventListener("load", function onLoad() {
     gBrowser.selectedBrowser.removeEventListener("load", onLoad, true);
@@ -119,4 +108,3 @@ function test()
 
   content.location = "data:text/html;charset=utf-8,test for highlighter helper in web console";
 }
-

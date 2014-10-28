@@ -1,8 +1,9 @@
 ac_add_options --enable-debug
-ac_add_options --enable-trace-malloc
+ac_add_options --enable-dmd
 ac_add_options --enable-signmar
+ac_add_options --with-google-oauth-api-keyfile=/builds/google-oauth-api.key
 
-ac_add_options --disable-unified-compilation
+MOZ_AUTOMATION_L10N_CHECK=0
 
 . $topsrcdir/build/unix/mozconfig.linux
 
@@ -10,7 +11,7 @@ ac_add_options --disable-unified-compilation
 export MOZILLA_OFFICIAL=1
 
 # Use ccache
-ac_add_options --with-ccache=/usr/bin/ccache
+. "$topsrcdir/build/mozconfig.cache"
 
 # Treat warnings as errors in directories with FAIL_ON_WARNINGS.
 ac_add_options --enable-warnings-as-errors

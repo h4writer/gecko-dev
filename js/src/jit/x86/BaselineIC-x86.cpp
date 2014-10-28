@@ -87,14 +87,20 @@ ICBinaryArith_Int32::Compiler::generateStubCode(MacroAssembler &masm)
         masm.movl(scratchReg, R0.payloadReg());
         break;
       case JSOP_DIV:
+      {
         // Prevent division by 0.
         masm.branchTest32(Assembler::Zero, R1.payloadReg(), R1.payloadReg(), &failure);
 
         // Prevent negative 0 and -2147483648 / -1.
-        masm.branchTest32(Assembler::Zero, R0.payloadReg(), Imm32(0x7fffffff), &failure);
+        masm.branch32(Assembler::Equal, R0.payloadReg(), Imm32(INT32_MIN), &failure);
+
+        Label notZero;
+        masm.branch32(Assembler::NotEqual, R0.payloadReg(), Imm32(0), &notZero);
+        masm.branchTest32(Assembler::Signed, R1.payloadReg(), R1.payloadReg(), &failure);
+        masm.bind(&notZero);
 
         // For idiv we need eax.
-        JS_ASSERT(R1.typeReg() == eax);
+        MOZ_ASSERT(R1.typeReg() == eax);
         masm.movl(R0.payloadReg(), eax);
         // Preserve R0.payloadReg()/edx, eax is JSVAL_TYPE_INT32.
         masm.movl(R0.payloadReg(), scratchReg);
@@ -107,6 +113,7 @@ ICBinaryArith_Int32::Compiler::generateStubCode(MacroAssembler &masm)
 
         masm.movl(eax, R0.payloadReg());
         break;
+      }
       case JSOP_MOD:
       {
         // x % 0 always results in NaN.
@@ -116,7 +123,7 @@ ICBinaryArith_Int32::Compiler::generateStubCode(MacroAssembler &masm)
         masm.branchTest32(Assembler::Zero, R0.payloadReg(), Imm32(0x7fffffff), &failure);
 
         // For idiv we need eax.
-        JS_ASSERT(R1.typeReg() == eax);
+        MOZ_ASSERT(R1.typeReg() == eax);
         masm.movl(R0.payloadReg(), eax);
         // Preserve R0.payloadReg()/edx, eax is JSVAL_TYPE_INT32.
         masm.movl(R0.payloadReg(), scratchReg);
@@ -132,8 +139,8 @@ ICBinaryArith_Int32::Compiler::generateStubCode(MacroAssembler &masm)
 
         masm.bind(&done);
         // Result is in edx, tag in ecx remains untouched.
-        JS_ASSERT(R0.payloadReg() == edx);
-        JS_ASSERT(R0.typeReg() == ecx);
+        MOZ_ASSERT(R0.payloadReg() == edx);
+        MOZ_ASSERT(R0.typeReg() == ecx);
         break;
       }
       case JSOP_BITOR:
@@ -149,7 +156,7 @@ ICBinaryArith_Int32::Compiler::generateStubCode(MacroAssembler &masm)
         break;
       case JSOP_LSH:
         // RHS needs to be in ecx for shift operations.
-        JS_ASSERT(R0.typeReg() == ecx);
+        MOZ_ASSERT(R0.typeReg() == ecx);
         masm.movl(R1.payloadReg(), ecx);
         masm.shll_cl(R0.payloadReg());
         // We need to tag again, because we overwrote it.
@@ -176,15 +183,15 @@ ICBinaryArith_Int32::Compiler::generateStubCode(MacroAssembler &masm)
             EmitReturnFromIC(masm);
 
             masm.bind(&toUint);
-            masm.convertUInt32ToDouble(R0.payloadReg(), ScratchFloatReg);
-            masm.boxDouble(ScratchFloatReg, R0);
+            masm.convertUInt32ToDouble(R0.payloadReg(), ScratchDoubleReg);
+            masm.boxDouble(ScratchDoubleReg, R0);
         } else {
             masm.j(Assembler::Signed, &revertRegister);
             masm.tagValue(JSVAL_TYPE_INT32, R0.payloadReg(), R0);
         }
         break;
       default:
-       MOZ_ASSUME_UNREACHABLE("Unhandled op for BinaryArith_Int32.  ");
+       MOZ_CRASH("Unhandled op for BinaryArith_Int32.");
     }
 
     // Return.
@@ -245,7 +252,7 @@ ICUnaryArith_Int32::Compiler::generateStubCode(MacroAssembler &masm)
         masm.negl(R0.payloadReg());
         break;
       default:
-        MOZ_ASSUME_UNREACHABLE("Unexpected op");
+        MOZ_CRASH("Unexpected op");
     }
 
     EmitReturnFromIC(masm);

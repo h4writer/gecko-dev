@@ -1,15 +1,17 @@
 package org.mozilla.gecko.tests;
 
-import org.mozilla.gecko.*;
-import com.jayway.android.robotium.solo.Condition;
-import com.jayway.android.robotium.solo.Solo;
-import android.graphics.Rect;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.mozilla.gecko.Actions;
+import org.mozilla.gecko.home.HomePager;
+import org.mozilla.gecko.R;
+
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ListView;
-import java.util.ArrayList;
-import org.json.JSONException;
-import org.json.JSONObject;
+
+import com.jayway.android.robotium.solo.Condition;
+import com.jayway.android.robotium.solo.Solo;
 
 /**
  * This patch tests the Reader Mode feature by adding and removing items in reading list
@@ -21,13 +23,6 @@ public class testReaderMode extends AboutHomeTest {
     static final int EVENT_CLEAR_DELAY_MS = 3000;
     static final int READER_ICON_MAX_WAIT_MS = 15000;
 
-    // IDs for UI views.
-    private static final String PAGE_ACTION_LAYOUT_ID = "page_action_layout";
-
-    @Override
-    protected int getTestType() {
-        return TEST_MOCHITEST;
-    }
     public void testReaderMode() {
         blockForGeckoReady();
 
@@ -78,7 +73,7 @@ public class testReaderMode extends AboutHomeTest {
         contentPageShowExpecter.unregisterListener();
         paintExpecter.blockUntilClear(EVENT_CLEAR_DELAY_MS);
         paintExpecter.unregisterListener();
-        verifyPageTitle("Robocop Text Page");
+        verifyPageTitle(StringHelper.ROBOCOP_TEXT_PAGE_TITLE, StringHelper.ROBOCOP_TEXT_PAGE_URL);
 
         // Open the share menu for the reader toolbar
         height = mDriver.getGeckoTop() + mDriver.getGeckoHeight() - 10;
@@ -109,17 +104,19 @@ public class testReaderMode extends AboutHomeTest {
         contentEventExpecter.unregisterListener();
 
         // Check if the page is present in the Reading List
-        mAsserter.ok(mSolo.waitForText("Robocop Text Page"), "Verify if the page is added to your Reading List", "The page is present in your Reading List");
+        mAsserter.ok(mSolo.waitForText(StringHelper.ROBOCOP_TEXT_PAGE_TITLE),
+                "Verify if the page is added to your Reading List",
+                StringHelper.ROBOCOP_TEXT_PAGE_TITLE);
 
         // Check if the page is added in History tab like a Reading List item
-        openAboutHomeTab(AboutHomeTabs.MOST_RECENT);
-        list = findListViewWithTag("most_recent");
+        openAboutHomeTab(AboutHomeTabs.HISTORY);
+        list = findListViewWithTag(HomePager.LIST_TAG_HISTORY);
         child = list.getChildAt(1);
         mAsserter.ok(child != null, "item can be retrieved", child != null ? child.toString() : "null!");
         mSolo.clickLongOnView(child);
         mAsserter.ok(mSolo.waitForText("Open in Reader"), "Verify if the page is present in history as a Reading List item", "The page is present in history as a Reading List item");
         mActions.sendSpecialKey(Actions.SpecialKey.BACK); // Dismiss the context menu
-        mSolo.waitForText("Robocop Text Page");
+        mSolo.waitForText(StringHelper.ROBOCOP_TEXT_PAGE_TITLE);
 
         // Verify separately the Reading List entries for tablets and phone because for tablets there is an extra child in UI design
         if (devType.equals("phone")) {
@@ -130,14 +127,14 @@ public class testReaderMode extends AboutHomeTest {
         }
         // Verify if the page is present to your Reading List
         openAboutHomeTab(AboutHomeTabs.READING_LIST);
-        list = findListViewWithTag("reading_list");
+        list = findListViewWithTag(HomePager.LIST_TAG_READING_LIST);
         child = list.getChildAt(childNo-1);
         mAsserter.ok(child != null, "Verify if the page is present to your Reading List", "The page is present in your Reading List");
         contentEventExpecter = mActions.expectGeckoEvent("DOMContentLoaded");
         mSolo.clickOnView(child);
         contentEventExpecter.blockForEvent();
         contentEventExpecter.unregisterListener();
-        verifyPageTitle("Robocop Text Page");
+        verifyPageTitle(StringHelper.ROBOCOP_TEXT_PAGE_TITLE, StringHelper.ROBOCOP_TEXT_PAGE_URL);
 
         // Verify that we are in reader mode and remove the page from Reading List
         height = mDriver.getGeckoTop() + mDriver.getGeckoHeight() - 10;
@@ -145,18 +142,18 @@ public class testReaderMode extends AboutHomeTest {
         mAsserter.dumpLog("Long Clicking at width = " + String.valueOf(width) + " and height = " + String.valueOf(height));
         mSolo.clickOnScreen(width,height);
         mAsserter.ok(mSolo.waitForText("Page removed from your Reading List"), "Waiting for the page to removed from your Reading List", "The page is removed from your Reading List");
-        verifyPageTitle("Robocop Text Page");
+        verifyPageTitle(StringHelper.ROBOCOP_TEXT_PAGE_TITLE, StringHelper.ROBOCOP_TEXT_PAGE_URL);
 
         //Check if the Reading List is empty
         openAboutHomeTab(AboutHomeTabs.READING_LIST);
-        list = findListViewWithTag("reading_list");
+        list = findListViewWithTag(HomePager.LIST_TAG_READING_LIST);
         child = list.getChildAt(childNo-1);
         mAsserter.ok(child == null, "Verify if the Reading List is empty", "The Reading List is empty");
     }
 
     // Get the reader icon method
     protected View getReaderIcon() {
-        View pageActionLayout = mSolo.getView(PAGE_ACTION_LAYOUT_ID);
+        View pageActionLayout = mSolo.getView(R.id.page_action_layout);
         final ViewGroup actionLayoutEntry = (ViewGroup)pageActionLayout;
         View icon = actionLayoutEntry.getChildAt(1);
         if (icon == null || icon.getVisibility() != View.VISIBLE) {
@@ -167,7 +164,7 @@ public class testReaderMode extends AboutHomeTest {
                 @Override
                 public boolean isSatisfied() {
                     View conditionIcon = actionLayoutEntry.getChildAt(1);
-                    if (conditionIcon == null || 
+                    if (conditionIcon == null ||
                         conditionIcon.getVisibility() != View.VISIBLE)
                         return false;
                     return true;

@@ -13,8 +13,6 @@
 #include "nsNetUtil.h"
 #include "nsIObserverService.h"
 #include "mozIApplicationClearPrivateDataParams.h"
-#include "nsICacheService.h"
-#include "nsICacheSession.h"
 
 #include "mozilla/net/NeckoChild.h"
 
@@ -38,29 +36,8 @@ nsWyciwygProtocolHandler::~nsWyciwygProtocolHandler()
   LOG(("Deleting nsWyciwygProtocolHandler [this=%p]\n", this));
 }
 
-void
-nsWyciwygProtocolHandler::GetCacheSessionName(uint32_t aAppId,
-                                              bool aInBrowser,
-                                              bool aPrivateBrowsing,
-                                              nsACString& aSessionName)
-{
-  if (aPrivateBrowsing) {
-    aSessionName.AssignLiteral("wyciwyg-private");
-  } else {
-    aSessionName.AssignLiteral("wyciwyg");
-  }
-  if (aAppId == NECKO_NO_APP_ID && !aInBrowser) {
-    return;
-  }
-
-  aSessionName.Append('~');
-  aSessionName.AppendInt(aAppId);
-  aSessionName.Append('~');
-  aSessionName.AppendInt(aInBrowser);
-}
-
-NS_IMPL_ISUPPORTS1(nsWyciwygProtocolHandler,
-                   nsIProtocolHandler)
+NS_IMPL_ISUPPORTS(nsWyciwygProtocolHandler,
+                  nsIProtocolHandler)
 
 ////////////////////////////////////////////////////////////////////////////////
 // nsIProtocolHandler methods:
@@ -108,7 +85,9 @@ nsWyciwygProtocolHandler::NewURI(const nsACString &aSpec,
 }
 
 NS_IMETHODIMP
-nsWyciwygProtocolHandler::NewChannel(nsIURI* url, nsIChannel* *result)
+nsWyciwygProtocolHandler::NewChannel2(nsIURI* url,
+                                      nsILoadInfo* aLoadInfo,
+                                      nsIChannel** result)
 {
   if (mozilla::net::IsNeckoChild())
     mozilla::net::NeckoChild::InitNeckoChild();
@@ -152,8 +131,14 @@ nsWyciwygProtocolHandler::NewChannel(nsIURI* url, nsIChannel* *result)
   if (NS_FAILED(rv))
     return rv;
 
-  *result = channel.forget().get();
+  channel.forget(result);
   return NS_OK;
+}
+
+NS_IMETHODIMP
+nsWyciwygProtocolHandler::NewChannel(nsIURI* url, nsIChannel* *result)
+{
+  return NewChannel2(url, nullptr, result);
 }
 
 NS_IMETHODIMP

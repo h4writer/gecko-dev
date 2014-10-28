@@ -13,7 +13,6 @@
 #include "nsThreadUtils.h"
 #include "nsCRT.h"
 #include "nsServiceManagerUtils.h"
-#include "nsRecentBadCerts.h"
 #include "PSMRunnable.h"
 #include "PublicSSL.h"
 #include "ssl.h"
@@ -27,8 +26,7 @@ using mozilla::unused;
 
 namespace {
 
-static Atomic<int32_t> sCertOverrideSvcExists(0);
-static Atomic<int32_t> sCertDBExists(0);
+static Atomic<bool> sCertOverrideSvcExists(false);
 
 class MainThreadClearer : public SyncRunnableBase
 {
@@ -40,27 +38,14 @@ public:
     // is in progress. We want to avoid this, since they do not handle the situation well,
     // hence the flags to avoid instantiating the services if they don't already exist.
 
-    bool certOverrideSvcExists = (bool)sCertOverrideSvcExists.exchange(0);
+    bool certOverrideSvcExists = sCertOverrideSvcExists.exchange(false);
     if (certOverrideSvcExists) {
-      sCertOverrideSvcExists = 1;
+      sCertOverrideSvcExists = true;
       nsCOMPtr<nsICertOverrideService> icos = do_GetService(NS_CERTOVERRIDE_CONTRACTID);
       if (icos) {
         icos->ClearValidityOverride(
           NS_LITERAL_CSTRING("all:temporary-certificates"),
           0);
-      }
-    }
-
-    bool certDBExists = (bool)sCertDBExists.exchange(0);
-    if (certDBExists) {
-      sCertDBExists = 1;
-      nsCOMPtr<nsIX509CertDB> certdb = do_GetService(NS_X509CERTDB_CONTRACTID);
-      if (certdb) {
-        nsCOMPtr<nsIRecentBadCerts> badCerts;
-        certdb->GetRecentBadCerts(true, getter_AddRefs(badCerts));
-        if (badCerts) {
-          badCerts->ResetStoredCerts();
-        }
       }
     }
 
@@ -108,7 +93,8 @@ class PrivateBrowsingObserver : public nsIObserver {
 public:
   NS_DECL_ISUPPORTS
   NS_DECL_NSIOBSERVER
-  PrivateBrowsingObserver(SharedSSLState* aOwner) : mOwner(aOwner) {}
+  explicit PrivateBrowsingObserver(SharedSSLState* aOwner) : mOwner(aOwner) {}
+protected:
   virtual ~PrivateBrowsingObserver() {}
 private:
   SharedSSLState* mOwner;
@@ -118,12 +104,12 @@ SharedSSLState* gPublicState;
 SharedSSLState* gPrivateState;
 } // anonymous namespace
 
-NS_IMPL_ISUPPORTS1(PrivateBrowsingObserver, nsIObserver)
+NS_IMPL_ISUPPORTS(PrivateBrowsingObserver, nsIObserver)
 
 NS_IMETHODIMP
 PrivateBrowsingObserver::Observe(nsISupports     *aSubject,
                                  const char      *aTopic,
-                                 const PRUnichar *aData)
+                                 const char16_t *aData)
 {
   if (!nsCRT::strcmp(aTopic, "last-pb-context-exited")) {
     mOwner->ResetStoredData();
@@ -206,13 +192,7 @@ SharedSSLState::GlobalCleanup()
 /*static*/ void
 SharedSSLState::NoteCertOverrideServiceInstantiated()
 {
-  sCertOverrideSvcExists = 1;
-}
-
-/*static*/ void
-SharedSSLState::NoteCertDBServiceInstantiated()
-{
-  sCertDBExists = 1;
+  sCertOverrideSvcExists = true;
 }
 
 void

@@ -11,7 +11,16 @@ Cu.import('resource://gre/modules/XPCOMUtils.jsm');
 Cu.import("resource://gre/modules/RemoteAddonsChild.jsm");
 Cu.import("resource://gre/modules/Timer.jsm");
 
-let SyncHandler = {
+XPCOMUtils.defineLazyModuleGetter(this, "PageThumbUtils",
+  "resource://gre/modules/PageThumbUtils.jsm");
+
+#ifdef MOZ_CRASHREPORTER
+XPCOMUtils.defineLazyServiceGetter(this, "CrashReporter",
+                                   "@mozilla.org/xre/app-info;1",
+                                   "nsICrashReporter");
+#endif
+
+let FocusSyncHandler = {
   init: function() {
     sendAsyncMessage("SetSyncHandler", {}, {handler: this});
   },
@@ -25,7 +34,7 @@ let SyncHandler = {
   },
 };
 
-SyncHandler.init();
+FocusSyncHandler.init();
 
 let WebProgressListener = {
   init: function() {
@@ -34,18 +43,20 @@ let WebProgressListener = {
     webProgress.addProgressListener(this, Ci.nsIWebProgress.NOTIFY_ALL);
   },
 
-  _requestSpec: function (aRequest) {
+  _requestSpec: function (aRequest, aPropertyName) {
     if (!aRequest || !(aRequest instanceof Ci.nsIChannel))
       return null;
-    return aRequest.QueryInterface(Ci.nsIChannel).URI.spec;
+    return aRequest.QueryInterface(Ci.nsIChannel)[aPropertyName].spec;
   },
 
   _setupJSON: function setupJSON(aWebProgress, aRequest) {
     return {
       isTopLevel: aWebProgress.isTopLevel,
       isLoadingDocument: aWebProgress.isLoadingDocument,
-      requestURI: this._requestSpec(aRequest),
-      loadType: aWebProgress.loadType
+      requestURI: this._requestSpec(aRequest, "URI"),
+      originalRequestURI: this._requestSpec(aRequest, "originalURI"),
+      loadType: aWebProgress.loadType,
+      documentContentType: content.document && content.document.contentType
     };
   },
 
@@ -77,11 +88,15 @@ let WebProgressListener = {
     json.location = aLocationURI ? aLocationURI.spec : "";
     json.flags = aFlags;
 
+    // These properties can change even for a sub-frame navigation.
+    json.canGoBack = docShell.canGoBack;
+    json.canGoForward = docShell.canGoForward;
+
     if (json.isTopLevel) {
-      json.canGoBack = docShell.canGoBack;
-      json.canGoForward = docShell.canGoForward;
       json.documentURI = content.document.documentURIObject.spec;
       json.charset = content.document.characterSet;
+      json.mayEnableCharacterEncodingMenu = docShell.mayEnableCharacterEncodingMenu;
+      json.principal = content.document.nodePrincipal;
     }
 
     sendAsyncMessage("Content:LocationChange", json, objects);
@@ -121,8 +136,6 @@ let WebProgressListener = {
 WebProgressListener.init();
 
 let WebNavigation =  {
-  _webNavigation: docShell.QueryInterface(Ci.nsIWebNavigation),
-
   init: function() {
     addMessageListener("WebNavigation:GoBack", this);
     addMessageListener("WebNavigation:GoForward", this);
@@ -131,8 +144,13 @@ let WebNavigation =  {
     addMessageListener("WebNavigation:Reload", this);
     addMessageListener("WebNavigation:Stop", this);
 
-    // Send a CPOW for the sessionHistory object.
-    let history = this._webNavigation.sessionHistory;
+    this._webNavigation = docShell.QueryInterface(Ci.nsIWebNavigation);
+    this._sessionHistory = this._webNavigation.sessionHistory;
+
+    // Send a CPOW for the sessionHistory object. We need to make sure
+    // it stays alive as long as the content script since CPOWs are
+    // weakly held.
+    let history = this._sessionHistory;
     sendAsyncMessage("WebNavigation:setHistory", {}, {history: history});
   },
 
@@ -160,8 +178,9 @@ let WebNavigation =  {
   },
 
   goBack: function() {
-    if (this._webNavigation.canGoBack)
+    if (this._webNavigation.canGoBack) {
       this._webNavigation.goBack();
+    }
   },
 
   goForward: function() {
@@ -174,6 +193,10 @@ let WebNavigation =  {
   },
 
   loadURI: function(uri, flags) {
+#ifdef MOZ_CRASHREPORTER
+    if (CrashReporter.enabled)
+      CrashReporter.annotateCrashReport("URL", uri);
+#endif
     this._webNavigation.loadURI(uri, flags, null, null, null);
   },
 
@@ -233,6 +256,13 @@ addEventListener("DOMTitleChanged", function (aEvent) {
   }
 }, false);
 
+addEventListener("DOMWindowClose", function (aEvent) {
+  if (!aEvent.isTrusted)
+    return;
+  sendAsyncMessage("DOMWindowClose");
+  aEvent.preventDefault();
+}, false);
+
 addEventListener("ImageContentLoaded", function (aEvent) {
   if (content.document instanceof Ci.nsIImageDocument) {
     let req = content.document.imageRequest;
@@ -243,11 +273,196 @@ addEventListener("ImageContentLoaded", function (aEvent) {
   }
 }, false);
 
-RemoteAddonsChild.init(this);
+let DocumentObserver = {
+  init: function() {
+    Services.obs.addObserver(this, "document-element-inserted", false);
+    addEventListener("unload", () => {
+      Services.obs.removeObserver(this, "document-element-inserted");
+    });
+  },
 
-addMessageListener("History:UseGlobalHistory", function (aMessage) {
-  docShell.useGlobalHistory = aMessage.data.enabled;
+  observe: function(aSubject, aTopic, aData) {
+    if (aSubject == content.document) {
+      sendAsyncMessage("DocumentInserted", {synthetic: aSubject.mozSyntheticDocument});
+    }
+  },
+};
+DocumentObserver.init();
+
+const ZoomManager = {
+  get fullZoom() {
+    return this._cache.fullZoom;
+  },
+
+  get textZoom() {
+    return this._cache.textZoom;
+  },
+
+  set fullZoom(value) {
+    this._cache.fullZoom = value;
+    this._markupViewer.fullZoom = value;
+  },
+
+  set textZoom(value) {
+    this._cache.textZoom = value;
+    this._markupViewer.textZoom = value;
+  },
+
+  refreshFullZoom: function() {
+    return this._refreshZoomValue('fullZoom');
+  },
+
+  refreshTextZoom: function() {
+    return this._refreshZoomValue('textZoom');
+  },
+
+  /**
+   * Retrieves specified zoom property value from markupViewer and refreshes
+   * cache if needed.
+   * @param valueName Either 'fullZoom' or 'textZoom'.
+   * @returns Returns true if cached value was actually refreshed.
+   * @private
+   */
+  _refreshZoomValue: function(valueName) {
+    let actualZoomValue = this._markupViewer[valueName];
+    if (actualZoomValue != this._cache[valueName]) {
+      this._cache[valueName] = actualZoomValue;
+      return true;
+    }
+    return false;
+  },
+
+  get _markupViewer() {
+    return docShell.contentViewer;
+  },
+
+  _cache: {
+    fullZoom: NaN,
+    textZoom: NaN
+  }
+};
+
+addMessageListener("FullZoom", function (aMessage) {
+  ZoomManager.fullZoom = aMessage.data.value;
 });
+
+addMessageListener("TextZoom", function (aMessage) {
+  ZoomManager.textZoom = aMessage.data.value;
+});
+
+addEventListener("FullZoomChange", function () {
+  if (ZoomManager.refreshFullZoom()) {
+    sendAsyncMessage("FullZoomChange", { value:  ZoomManager.fullZoom});
+  }
+}, false);
+
+addEventListener("TextZoomChange", function (aEvent) {
+  if (ZoomManager.refreshTextZoom()) {
+    sendAsyncMessage("TextZoomChange", { value:  ZoomManager.textZoom});
+  }
+}, false);
+
+addEventListener("ZoomChangeUsingMouseWheel", function () {
+  sendAsyncMessage("ZoomChangeUsingMouseWheel", {});
+}, false);
+
+addMessageListener("UpdateCharacterSet", function (aMessage) {
+  docShell.charset = aMessage.data.value;
+  docShell.gatherCharsetMenuTelemetry();
+});
+
+/**
+ * Remote thumbnail request handler for PageThumbs thumbnails.
+ */
+addMessageListener("Browser:Thumbnail:Request", function (aMessage) {
+  let thumbnail = content.document.createElementNS(PageThumbUtils.HTML_NAMESPACE,
+                                                   "canvas");
+  thumbnail.mozOpaque = true;
+  thumbnail.mozImageSmoothingEnabled = true;
+
+  thumbnail.width = aMessage.data.canvasWidth;
+  thumbnail.height = aMessage.data.canvasHeight;
+
+  let [width, height, scale] =
+    PageThumbUtils.determineCropSize(content, thumbnail);
+
+  let ctx = thumbnail.getContext("2d");
+  ctx.save();
+  ctx.scale(scale, scale);
+  ctx.drawWindow(content, 0, 0, width, height,
+                 aMessage.data.background,
+                 ctx.DRAWWINDOW_DO_NOT_FLUSH);
+  ctx.restore();
+
+  thumbnail.toBlob(function (aBlob) {
+    sendAsyncMessage("Browser:Thumbnail:Response", {
+      thumbnail: aBlob,
+      id: aMessage.data.id
+    });
+  });
+});
+
+// The AddonsChild needs to be rooted so that it stays alive as long as
+// the tab.
+let AddonsChild;
+if (Services.appinfo.browserTabsRemoteAutostart) {
+  // Currently, the addon shims are only supported when autostarting
+  // with remote tabs.
+  AddonsChild = RemoteAddonsChild.init(this);
+
+  addEventListener("unload", () => {
+    RemoteAddonsChild.uninit(AddonsChild);
+  });
+}
+
+addMessageListener("NetworkPrioritizer:AdjustPriority", (msg) => {
+  let webNav = docShell.QueryInterface(Ci.nsIWebNavigation);
+  let loadGroup = webNav.QueryInterface(Ci.nsIDocumentLoader)
+                        .loadGroup.QueryInterface(Ci.nsISupportsPriority);
+  loadGroup.adjustPriority(msg.data.adjustment);
+});
+
+let DOMFullscreenManager = {
+  QueryInterface: XPCOMUtils.generateQI([Ci.nsIObserver,
+                                         Ci.nsISupportsWeakReference]),
+
+  init: function() {
+    Services.obs.addObserver(this, "ask-parent-to-exit-fullscreen", false);
+    Services.obs.addObserver(this, "ask-parent-to-rollback-fullscreen", false);
+    addMessageListener("DOMFullscreen:ChildrenMustExit", () => {
+      let utils = content.QueryInterface(Ci.nsIInterfaceRequestor)
+                         .getInterface(Ci.nsIDOMWindowUtils);
+      utils.exitFullscreen();
+    });
+    addEventListener("unload", () => {
+      Services.obs.removeObserver(this, "ask-parent-to-exit-fullscreen");
+      Services.obs.removeObserver(this, "ask-parent-to-rollback-fullscreen");
+    });
+  },
+
+  observe: function(aSubject, aTopic, aData) {
+    // Observer notifications are global, which means that these notifications
+    // might be coming from elements that are not actually children within this
+    // windows' content. We should ignore those. This will not be necessary once
+    // we fix bug 1053413 and stop using observer notifications for this stuff.
+    if (aSubject.defaultView.top !== content) {
+      return;
+    }
+
+    switch (aTopic) {
+      case "ask-parent-to-exit-fullscreen": {
+        sendAsyncMessage("DOMFullscreen:RequestExit");
+        break;
+      }
+      case "ask-parent-to-rollback-fullscreen": {
+        sendAsyncMessage("DOMFullscreen:RequestRollback");
+        break;
+      }
+    }
+  },
+};
+
+DOMFullscreenManager.init();
 
 let AutoCompletePopup = {
   QueryInterface: XPCOMUtils.generateQI([Ci.nsIAutoCompletePopup]),
@@ -308,6 +523,12 @@ let AutoCompletePopup = {
   }
 }
 
-addMessageListener("FormAutoComplete:InitPopup", function (aMessage) {
-  setTimeout(function() AutoCompletePopup.init(), 0);
-});
+// We may not get any responses to Browser:Init if the browser element
+// is torn down too quickly.
+let initData = sendSyncMessage("Browser:Init");
+if (initData.length) {
+  docShell.useGlobalHistory = initData[0].useGlobalHistory;
+  if (initData[0].initPopup) {
+    setTimeout(() => AutoCompletePopup.init(), 0);
+  }
+}

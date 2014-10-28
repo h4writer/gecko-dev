@@ -32,6 +32,28 @@ extern PRLogModuleInfo *gUrlClassifierDbServiceLog;
 namespace mozilla {
 namespace safebrowsing {
 
+void
+Classifier::SplitTables(const nsACString& str, nsTArray<nsCString>& tables)
+{
+  tables.Clear();
+
+  nsACString::const_iterator begin, iter, end;
+  str.BeginReading(begin);
+  str.EndReading(end);
+  while (begin != end) {
+    iter = begin;
+    FindCharInReadable(',', iter, end);
+    nsDependentCSubstring table = Substring(begin,iter);
+    if (!table.IsEmpty()) {
+      tables.AppendElement(Substring(begin, iter));
+    }
+    begin = iter;
+    if (begin != end) {
+      begin++;
+    }
+  }
+}
+
 Classifier::Classifier()
   : mFreshTime(45 * 60)
 {
@@ -169,13 +191,13 @@ Classifier::TableRequest(nsACString& aResult)
       continue;
 
     aResult.Append(store->TableName());
-    aResult.Append(";");
+    aResult.Append(';');
 
     ChunkSet &adds = store->AddChunks();
     ChunkSet &subs = store->SubChunks();
 
     if (adds.Length() > 0) {
-      aResult.Append("a:");
+      aResult.AppendLiteral("a:");
       nsAutoCString addList;
       adds.Serialize(addList);
       aResult.Append(addList);
@@ -184,7 +206,7 @@ Classifier::TableRequest(nsACString& aResult)
     if (subs.Length() > 0) {
       if (adds.Length() > 0)
         aResult.Append(':');
-      aResult.Append("s:");
+      aResult.AppendLiteral("s:");
       nsAutoCString subList;
       subs.Serialize(subList);
       aResult.Append(subList);
@@ -195,7 +217,9 @@ Classifier::TableRequest(nsACString& aResult)
 }
 
 nsresult
-Classifier::Check(const nsACString& aSpec, LookupResultArray& aResults)
+Classifier::Check(const nsACString& aSpec,
+                  const nsACString& aTables,
+                  LookupResultArray& aResults)
 {
   Telemetry::AutoTimer<Telemetry::URLCLASSIFIER_CL_CHECK_TIME> timer;
 
@@ -207,10 +231,11 @@ Classifier::Check(const nsACString& aSpec, LookupResultArray& aResults)
   NS_ENSURE_SUCCESS(rv, rv);
 
   nsTArray<nsCString> activeTables;
-  ActiveTables(activeTables);
+  SplitTables(aTables, activeTables);
 
   nsTArray<LookupCache*> cacheArray;
   for (uint32_t i = 0; i < activeTables.Length(); i++) {
+    LOG(("Checking table %s", activeTables[i].get()));
     LookupCache *cache = GetLookupCache(activeTables[i]);
     if (cache) {
       cacheArray.AppendElement(cache);
@@ -293,7 +318,7 @@ Classifier::ApplyUpdates(nsTArray<TableUpdate*>* aUpdates)
   nsresult rv = BackupTables();
   NS_ENSURE_SUCCESS(rv, rv);
 
-  LOG(("Applying table updates."));
+  LOG(("Applying %d table updates.", aUpdates->Length()));
 
   for (uint32_t i = 0; i < aUpdates->Length(); i++) {
     // Previous ApplyTableUpdates() may have consumed this update..
@@ -414,9 +439,11 @@ Classifier::ScanStoreDir(nsTArray<nsCString>& aTables)
 
   bool hasMore;
   while (NS_SUCCEEDED(rv = entries->HasMoreElements(&hasMore)) && hasMore) {
-    nsCOMPtr<nsIFile> file;
-    rv = entries->GetNext(getter_AddRefs(file));
+    nsCOMPtr<nsISupports> supports;
+    rv = entries->GetNext(getter_AddRefs(supports));
     NS_ENSURE_SUCCESS(rv, rv);
+
+    nsCOMPtr<nsIFile> file = do_QueryInterface(supports);
 
     nsCString leafName;
     rv = file->GetNativeLeafName(leafName);
@@ -549,8 +576,9 @@ Classifier::ApplyTableUpdates(nsTArray<TableUpdate*>* aUpdates,
 
   nsAutoPtr<HashStore> store(new HashStore(aTable, mStoreDirectory));
 
-  if (!store)
+  if (!store) {
     return NS_ERROR_FAILURE;
+  }
 
   // take the quick exit if there is no valid update for us
   // (common case)
@@ -710,7 +738,7 @@ Classifier::ReadNoiseEntries(const Prefix& aPrefix,
   nsresult rv = cache->GetPrefixes(&prefixes);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  uint32_t idx = prefixes.BinaryIndexOf(aPrefix.ToUint32());
+  size_t idx = prefixes.BinaryIndexOf(aPrefix.ToUint32());
 
   if (idx == nsTArray<uint32_t>::NoIndex) {
     NS_WARNING("Could not find prefix in PrefixSet during noise lookup");
@@ -719,7 +747,7 @@ Classifier::ReadNoiseEntries(const Prefix& aPrefix,
 
   idx -= idx % aCount;
 
-  for (uint32_t i = 0; (i < aCount) && ((idx+i) < prefixes.Length()); i++) {
+  for (size_t i = 0; (i < aCount) && ((idx+i) < prefixes.Length()); i++) {
     Prefix newPref;
     newPref.FromUint32(prefixes[idx+i]);
     if (newPref != aPrefix) {

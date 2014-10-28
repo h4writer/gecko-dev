@@ -11,6 +11,8 @@ Cu.import("resource://gre/modules/PluralForm.jsm");
 Cu.import("resource://gre/modules/PrivateBrowsingUtils.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "OS", "resource://gre/modules/osfile.jsm");
+XPCOMUtils.defineLazyModuleGetter(this, "Messaging",
+                                  "resource://gre/modules/Messaging.jsm");
 
 let gStrings = Services.strings.createBundle("chrome://browser/locale/aboutDownloads.properties");
 
@@ -44,6 +46,13 @@ var ContextMenus = {
 
   init: function() {
     document.addEventListener("contextmenu", this, false);
+    document.getElementById("contextmenu-open").addEventListener("click", this.open.bind(this), false);
+    document.getElementById("contextmenu-retry").addEventListener("click", this.retry.bind(this), false);
+    document.getElementById("contextmenu-remove").addEventListener("click", this.remove.bind(this), false);
+    document.getElementById("contextmenu-pause").addEventListener("click", this.pause.bind(this), false);
+    document.getElementById("contextmenu-resume").addEventListener("click", this.resume.bind(this), false);
+    document.getElementById("contextmenu-cancel").addEventListener("click", this.cancel.bind(this), false);
+    document.getElementById("contextmenu-removeall").addEventListener("click", this.removeAll.bind(this), false);
     this.items = [
       { name: "open", states: [Downloads._dlmgr.DOWNLOAD_FINISHED] },
       { name: "retry", states: [Downloads._dlmgr.DOWNLOAD_FAILED, Downloads._dlmgr.DOWNLOAD_CANCELED] },
@@ -411,11 +420,11 @@ let Downloads = {
     let stmt = this._initStatement(aParams.isPrivate);
 
     stmt.reset();
-    stmt.bindInt32Parameter(0, Ci.nsIDownloadManager.DOWNLOAD_NOTSTARTED);
-    stmt.bindInt32Parameter(1, Ci.nsIDownloadManager.DOWNLOAD_DOWNLOADING);
-    stmt.bindInt32Parameter(2, Ci.nsIDownloadManager.DOWNLOAD_PAUSED);
-    stmt.bindInt32Parameter(3, Ci.nsIDownloadManager.DOWNLOAD_QUEUED);
-    stmt.bindInt32Parameter(4, Ci.nsIDownloadManager.DOWNLOAD_SCANNING);
+    stmt.bindByIndex(0, Ci.nsIDownloadManager.DOWNLOAD_NOTSTARTED);
+    stmt.bindByIndex(1, Ci.nsIDownloadManager.DOWNLOAD_DOWNLOADING);
+    stmt.bindByIndex(2, Ci.nsIDownloadManager.DOWNLOAD_PAUSED);
+    stmt.bindByIndex(3, Ci.nsIDownloadManager.DOWNLOAD_QUEUED);
+    stmt.bindByIndex(4, Ci.nsIDownloadManager.DOWNLOAD_SCANNING);
 
     let entries = [];
     while (entry = this._getEntry(stmt)) {
@@ -451,6 +460,10 @@ let Downloads = {
 
   openDownload: function dl_openDownload(aItem) {
     this._getDownloadForElement(aItem, function(aDownload) {
+      if (aDownload.state !== Ci.nsIDownloadManager.DOWNLOAD_FINISHED) {
+        // Do not open unfinished downloads.
+        return;
+      }
       try {
         let f = aDownload.targetFile;
         if (f) f.launch();
@@ -471,6 +484,11 @@ let Downloads = {
       }
 
       aDownload.remove();
+      Messaging.sendRequest({
+        type: "Download:Remove",
+        path: aDownload.targetFile.path,
+      });
+
     }.bind(this));
   },
 
@@ -599,3 +617,8 @@ let Downloads = {
     return this;
   }
 }
+
+document.addEventListener("DOMContentLoaded", Downloads.init.bind(Downloads), true);
+window.addEventListener("unload", Downloads.uninit.bind(Downloads), false);
+
+

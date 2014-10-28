@@ -5,7 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "nsNSSCallbacks.h"
-
+#include "pkix/pkixtypes.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/TimeStamp.h"
 #include "nsNSSComponent.h"
@@ -17,7 +17,6 @@
 #include "nsIPrompt.h"
 #include "nsProxyRelease.h"
 #include "PSMRunnable.h"
-#include "ScopedNSSTypes.h"
 #include "nsContentUtils.h"
 #include "nsIHttpChannelInternal.h"
 #include "nsISupportsPriority.h"
@@ -60,7 +59,7 @@ public:
 
   nsNSSHttpRequestSession *mRequestSession;
   
-  nsCOMPtr<nsHTTPListener> mListener;
+  nsRefPtr<nsHTTPListener> mListener;
   bool mResponsibleForDoneSignal;
   TimeStamp mStartTime;
 };
@@ -137,6 +136,9 @@ nsHTTPDownloadEvent::Run()
   nsCOMPtr<nsIHttpChannel> hchan = do_QueryInterface(chan);
   NS_ENSURE_STATE(hchan);
 
+  rv = hchan->SetAllowSTS(false);
+  NS_ENSURE_SUCCESS(rv, rv);
+
   rv = hchan->SetRequestMethod(mRequestSession->mRequestMethod);
   NS_ENSURE_SUCCESS(rv, rv);
 
@@ -168,7 +170,7 @@ nsHTTPDownloadEvent::Run()
 }
 
 struct nsCancelHTTPDownloadEvent : nsRunnable {
-  nsCOMPtr<nsHTTPListener> mListener;
+  nsRefPtr<nsHTTPListener> mListener;
 
   NS_IMETHOD Run() {
     mListener->FreeLoadGroup(true);
@@ -226,7 +228,7 @@ SECStatus nsNSSHttpRequestSession::createFcn(SEC_HTTP_SERVER_SESSION session,
   rs->mURL.Assign(http_protocol_variant);
   rs->mURL.AppendLiteral("://");
   rs->mURL.Append(hss->mHost);
-  rs->mURL.AppendLiteral(":");
+  rs->mURL.Append(':');
   rs->mURL.AppendInt(hss->mPort);
   rs->mURL.Append(path_and_query_string);
 
@@ -584,16 +586,6 @@ void nsNSSHttpInterface::initTable()
   v1.freeFcn = freeFcn;
 }
 
-void nsNSSHttpInterface::registerHttpClient()
-{
-  SEC_RegisterDefaultHttpClient(&sNSSInterfaceTable);
-}
-
-void nsNSSHttpInterface::unregisterHttpClient()
-{
-  SEC_RegisterDefaultHttpClient(nullptr);
-}
-
 nsHTTPListener::nsHTTPListener()
 : mResultData(nullptr),
   mResultLen(0),
@@ -611,13 +603,17 @@ nsHTTPListener::~nsHTTPListener()
   if (mResponsibleForDoneSignal)
     send_done_signal();
 
+  if (mResultData) {
+    moz_free(const_cast<uint8_t *>(mResultData));
+  }
+
   if (mLoader) {
     nsCOMPtr<nsIThread> mainThread(do_GetMainThread());
     NS_ProxyRelease(mainThread, mLoader);
   }
 }
 
-NS_IMPL_ISUPPORTS1(nsHTTPListener, nsIStreamLoaderObserver)
+NS_IMPL_ISUPPORTS(nsHTTPListener, nsIStreamLoaderObserver)
 
 void
 nsHTTPListener::FreeLoadGroup(bool aCancelLoad)
@@ -679,7 +675,8 @@ nsHTTPListener::OnStreamComplete(nsIStreamLoader* aLoader,
       mHttpRequestSucceeded = false;
 
     mResultLen = stringLen;
-    mResultData = string; // reference. Make sure loader lives as long as this
+    mResultData = string; // take ownership of allocation
+    aStatus = NS_SUCCESS_ADOPTED_DATA;
 
     unsigned int rcode;
     rv = hchan->GetResponseStatus(&rcode);
@@ -793,7 +790,7 @@ void PK11PasswordPromptRunnable::RunOnTargetThread()
 
   nsNSSShutDownPreventionLock locker;
   nsresult rv = NS_OK;
-  PRUnichar *password = nullptr;
+  char16_t *password = nullptr;
   bool value = false;
   nsCOMPtr<nsIPrompt> prompt;
 
@@ -827,13 +824,13 @@ void PK11PasswordPromptRunnable::RunOnTargetThread()
   if (NS_FAILED(rv))
     return; 
 
-  const PRUnichar* formatStrings[1] = { 
+  const char16_t* formatStrings[1] = { 
     ToNewUnicode(NS_ConvertUTF8toUTF16(PK11_GetTokenName(mSlot)))
   };
   rv = nssComponent->PIPBundleFormatStringFromName("CertPassPrompt",
                                       formatStrings, 1,
                                       promptString);
-  nsMemory::Free(const_cast<PRUnichar*>(formatStrings[0]));
+  nsMemory::Free(const_cast<char16_t*>(formatStrings[0]));
 
   if (NS_FAILED(rv))
     return;
@@ -881,13 +878,37 @@ PreliminaryHandshakeDone(PRFileDesc* fd)
 
   infoObject->SetPreliminaryHandshakeDone();
 
+  SSLChannelInfo channelInfo;
+  if (SSL_GetChannelInfo(fd, &channelInfo, sizeof(channelInfo)) == SECSuccess) {
+    infoObject->SetSSLVersionUsed(channelInfo.protocolVersion);
+
+    SSLCipherSuiteInfo cipherInfo;
+    if (SSL_GetCipherSuiteInfo(channelInfo.cipherSuite, &cipherInfo,
+                               sizeof cipherInfo) == SECSuccess) {
+      /* Set the SSL Status information */
+      RefPtr<nsSSLStatus> status(infoObject->SSLStatus());
+      if (!status) {
+        status = new nsSSLStatus();
+        infoObject->SetSSLStatus(status);
+      }
+
+      status->mHaveCipherSuiteAndProtocol = true;
+      status->mCipherSuite = channelInfo.cipherSuite;
+      status->mProtocolVersion = channelInfo.protocolVersion & 0xFF;
+      infoObject->SetKEAUsed(cipherInfo.keaType);
+      infoObject->SetKEAKeyBits(channelInfo.keaKeyBits);
+      infoObject->SetMACAlgorithmUsed(cipherInfo.macAlgorithm);
+    }
+  }
+
   // Get the NPN value.
   SSLNextProtoState state;
   unsigned char npnbuf[256];
   unsigned int npnlen;
 
   if (SSL_GetNextProto(fd, &state, npnbuf, &npnlen, 256) == SECSuccess) {
-    if (state == SSL_NEXT_PROTO_NEGOTIATED) {
+    if (state == SSL_NEXT_PROTO_NEGOTIATED ||
+        state == SSL_NEXT_PROTO_SELECTED) {
       infoObject->SetNegotiatedNPN(reinterpret_cast<char *>(npnbuf), npnlen);
     }
     else {
@@ -1043,7 +1064,7 @@ AccumulateNonECCKeySize(Telemetry::ID probe, uint32_t bits)
   unsigned int value = bits <   512 ?  1 : bits ==   512 ?  2
                      : bits <   768 ?  3 : bits ==   768 ?  4
                      : bits <  1024 ?  5 : bits ==  1024 ?  6
-                     : bits <  1024 ?  7 : bits ==  1024 ?  8
+                     : bits <  1280 ?  7 : bits ==  1280 ?  8
                      : bits <  1536 ?  9 : bits ==  1536 ? 10
                      : bits <  2048 ? 11 : bits ==  2048 ? 12
                      : bits <  3072 ? 13 : bits ==  3072 ? 14
@@ -1061,7 +1082,7 @@ AccumulateNonECCKeySize(Telemetry::ID probe, uint32_t bits)
 // named curves for a given size (e.g. secp256k1 vs. secp256r1). We punt on
 // that for now. See also NSS bug 323674.
 static void
-AccummulateECCCurve(Telemetry::ID probe, uint32_t bits)
+AccumulateECCCurve(Telemetry::ID probe, uint32_t bits)
 {
   unsigned int value = bits == 256 ? 23 // P-256
                      : bits == 384 ? 24 // P-384
@@ -1085,16 +1106,18 @@ AccumulateCipherSuite(Telemetry::ID probe, const SSLChannelInfo& channelInfo)
     case TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA: value = 7; break;
     case TLS_ECDHE_RSA_WITH_RC4_128_SHA: value = 8; break;
     case TLS_ECDHE_ECDSA_WITH_RC4_128_SHA: value = 9; break;
+    case TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA: value = 10; break;
     // DHE key exchange
     case TLS_DHE_RSA_WITH_AES_128_CBC_SHA: value = 21; break;
     case TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA: value = 22; break;
     case TLS_DHE_RSA_WITH_AES_256_CBC_SHA: value = 23; break;
     case TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA: value = 24; break;
-    case SSL_DHE_RSA_WITH_3DES_EDE_CBC_SHA: value = 25; break;
+    case TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA: value = 25; break;
     case TLS_DHE_DSS_WITH_AES_128_CBC_SHA: value = 26; break;
     case TLS_DHE_DSS_WITH_CAMELLIA_128_CBC_SHA: value = 27; break;
     case TLS_DHE_DSS_WITH_AES_256_CBC_SHA: value = 28; break;
     case TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA: value = 29; break;
+    case TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA: value = 30; break;
     // ECDH key exchange
     case TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA: value = 41; break;
     case TLS_ECDH_RSA_WITH_AES_128_CBC_SHA: value = 42; break;
@@ -1110,16 +1133,16 @@ AccumulateCipherSuite(Telemetry::ID probe, const SSLChannelInfo& channelInfo)
     case TLS_RSA_WITH_AES_256_CBC_SHA: value = 63; break;
     case TLS_RSA_WITH_CAMELLIA_256_CBC_SHA: value = 64; break;
     case SSL_RSA_FIPS_WITH_3DES_EDE_CBC_SHA: value = 65; break;
-    case SSL_RSA_WITH_3DES_EDE_CBC_SHA: value = 66; break;
+    case TLS_RSA_WITH_3DES_EDE_CBC_SHA: value = 66; break;
     case TLS_RSA_WITH_SEED_CBC_SHA: value = 67; break;
-    case SSL_RSA_WITH_RC4_128_SHA: value = 68; break;
-    case SSL_RSA_WITH_RC4_128_MD5: value = 69; break;
+    case TLS_RSA_WITH_RC4_128_SHA: value = 68; break;
+    case TLS_RSA_WITH_RC4_128_MD5: value = 69; break;
     // unknown
     default:
-      MOZ_CRASH("impossible cipher suite");
       value = 0;
       break;
   }
+  MOZ_ASSERT(value != 0);
   Telemetry::Accumulate(probe, value);
 }
 
@@ -1177,7 +1200,7 @@ void HandshakeCallback(PRFileDesc* fd, void* client_data) {
 
     nsAutoString msg;
     msg.Append(NS_ConvertASCIItoUTF16(hostName));
-    msg.Append(NS_LITERAL_STRING(" : server does not support RFC 5746, see CVE-2009-3555"));
+    msg.AppendLiteral(" : server does not support RFC 5746, see CVE-2009-3555");
 
     nsContentUtils::LogSimpleConsoleError(msg, "SSL");
   }
@@ -1194,7 +1217,7 @@ void HandshakeCallback(PRFileDesc* fd, void* client_data) {
   RememberCertErrorsTable::GetInstance().LookupCertErrorBits(infoObject,
                                                              status);
 
-  RefPtr<nsNSSCertificate> nssc(nsNSSCertificate::Create(serverCert));
+  RefPtr<nsNSSCertificate> nssc(nsNSSCertificate::Create(serverCert.get()));
   nsCOMPtr<nsIX509Cert> prevcert;
   infoObject->GetPreviousCert(getter_AddRefs(prevcert));
 
@@ -1241,18 +1264,16 @@ void HandshakeCallback(PRFileDesc* fd, void* client_data) {
                                 sizeof cipherInfo);
     MOZ_ASSERT(rv == SECSuccess);
     if (rv == SECSuccess) {
-      status->mHaveKeyLengthAndCipher = true;
-      status->mKeyLength = cipherInfo.symKeyBits;
-      status->mSecretKeyLength = cipherInfo.effectiveKeyBits;
-      status->mCipherName.Assign(cipherInfo.cipherSuiteName);
-
       // keyExchange null=0, rsa=1, dh=2, fortezza=3, ecdh=4
       Telemetry::Accumulate(
         infoObject->IsFullHandshake()
           ? Telemetry::SSL_KEY_EXCHANGE_ALGORITHM_FULL
           : Telemetry::SSL_KEY_EXCHANGE_ALGORITHM_RESUMED,
         cipherInfo.keaType);
-      infoObject->SetKEAUsed(cipherInfo.keaType);
+
+      DebugOnly<int16_t> KEAUsed;
+      MOZ_ASSERT(NS_SUCCEEDED(infoObject->GetKEAUsed(&KEAUsed)) &&
+                 (KEAUsed == cipherInfo.keaType));
 
       if (infoObject->IsFullHandshake()) {
         switch (cipherInfo.keaType) {
@@ -1265,8 +1286,8 @@ void HandshakeCallback(PRFileDesc* fd, void* client_data) {
                                     channelInfo.keaKeyBits);
             break;
           case ssl_kea_ecdh:
-            AccummulateECCCurve(Telemetry::SSL_KEA_ECDHE_CURVE_FULL,
-                                channelInfo.keaKeyBits);
+            AccumulateECCCurve(Telemetry::SSL_KEA_ECDHE_CURVE_FULL,
+                               channelInfo.keaKeyBits);
             break;
           default:
             MOZ_CRASH("impossible KEA");
@@ -1288,8 +1309,8 @@ void HandshakeCallback(PRFileDesc* fd, void* client_data) {
                                       channelInfo.authKeyBits);
               break;
             case ssl_auth_ecdsa:
-              AccummulateECCCurve(Telemetry::SSL_AUTH_ECDSA_CURVE_FULL,
-                                  channelInfo.authKeyBits);
+              AccumulateECCCurve(Telemetry::SSL_AUTH_ECDSA_CURVE_FULL,
+                                 channelInfo.authKeyBits);
               break;
             default:
               MOZ_CRASH("impossible auth algorithm");

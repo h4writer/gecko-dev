@@ -16,21 +16,22 @@
  */
 
 interface ApplicationCache;
-interface MediaQueryList;
+interface IID;
 interface MozFrameRequestCallback;
+interface nsIBrowserDOMWindow;
+interface nsIMessageBroadcaster;
 interface nsIDOMCrypto;
-interface Pkcs11;
 typedef any Transferable;
 
 // http://www.whatwg.org/specs/web-apps/current-work/
-[Global]
+[PrimaryGlobal, NeedNewResolve]
 /*sealed*/ interface Window : EventTarget {
   // the current browsing context
   [Unforgeable, Throws,
    CrossOriginReadable] readonly attribute WindowProxy window;
   [Replaceable, Throws,
    CrossOriginReadable] readonly attribute WindowProxy self;
-  //[Unforgeable] readonly attribute Document? document;
+  [Unforgeable, StoreInSlot, Pure] readonly attribute Document? document;
   [Throws] attribute DOMString name; 
   [PutForwards=href, Unforgeable, Throws,
    CrossOriginReadable, CrossOriginWritable] readonly attribute Location? location;
@@ -51,30 +52,35 @@ typedef any Transferable;
   // other browsing contexts
   [Replaceable, Throws, CrossOriginReadable] readonly attribute WindowProxy frames;
   [Replaceable, CrossOriginReadable] readonly attribute unsigned long length;
-  [Unforgeable, Throws, CrossOriginReadable] readonly attribute WindowProxy top;
-  [Throws, CrossOriginReadable] attribute WindowProxy? opener;
+  //[Unforgeable, Throws, CrossOriginReadable] readonly attribute WindowProxy top;
+  [Unforgeable, Throws, CrossOriginReadable] readonly attribute WindowProxy? top;
+  [Throws, CrossOriginReadable] attribute any opener;
   //[Throws] readonly attribute WindowProxy parent;
   [Replaceable, Throws, CrossOriginReadable] readonly attribute WindowProxy? parent;
   [Throws] readonly attribute Element? frameElement;
-  //[Throws] WindowProxy open(optional DOMString url = "about:blank", optional DOMString target = "_blank", optional DOMString features = "", optional boolean replace = false);
-  [Throws] WindowProxy? open(optional DOMString url = "", optional DOMString target = "", optional DOMString features = "");
+  //[Throws] WindowProxy open(optional DOMString url = "about:blank", optional DOMString target = "_blank", [TreatNullAs=EmptyString] optional DOMString features = "", optional boolean replace = false);
+  [Throws] WindowProxy? open(optional DOMString url = "", optional DOMString target = "", [TreatNullAs=EmptyString] optional DOMString features = "");
   // We think the indexed getter is a bug in the spec, it actually needs to live
   // on the WindowProxy
   //getter WindowProxy (unsigned long index);
-  //getter object (DOMString name);
+  getter object (DOMString name);
 
   // the user agent
   [Throws] readonly attribute Navigator navigator; 
-  //(Not implemented)readonly attribute External external;
+#ifdef HAVE_SIDEBAR
+  [Replaceable, Throws] readonly attribute External external;
+#endif
   [Throws] readonly attribute ApplicationCache applicationCache;
 
   // user prompts
-  [Throws] void alert(optional DOMString message = "");
+  [Throws] void alert();
+  [Throws] void alert(DOMString message);
   [Throws] boolean confirm(optional DOMString message = "");
   [Throws] DOMString? prompt(optional DOMString message = "", optional DOMString default = "");
   [Throws] void print();
   //[Throws] any showModalDialog(DOMString url, optional any argument);
-  [Throws] any showModalDialog(DOMString url, optional any argument, optional DOMString options = "");
+  [Throws, Func="nsGlobalWindow::IsShowModalDialogEnabled"]
+  any showModalDialog(DOMString url, optional any argument, optional DOMString options = "");
 
   [Throws, CrossOriginCallable] void postMessage(any message, DOMString targetOrigin, optional sequence<Transferable> transfer);
 
@@ -84,19 +90,19 @@ Window implements GlobalEventHandlers;
 Window implements WindowEventHandlers;
 
 // http://www.whatwg.org/specs/web-apps/current-work/
-[NoInterfaceObject]
+[NoInterfaceObject, Exposed=(Window,Worker)]
 interface WindowTimers {
   [Throws] long setTimeout(Function handler, optional long timeout = 0, any... arguments);
-  [Throws] long setTimeout(DOMString handler, optional long timeout = 0);
-  [Throws] void clearTimeout(long handle);
+  [Throws] long setTimeout(DOMString handler, optional long timeout = 0, any... unused);
+  [Throws] void clearTimeout(optional long handle = 0);
   [Throws] long setInterval(Function handler, optional long timeout, any... arguments);
-  [Throws] long setInterval(DOMString handler, optional long timeout);
-  [Throws] void clearInterval(long handle);
+  [Throws] long setInterval(DOMString handler, optional long timeout, any... unused);
+  [Throws] void clearInterval(optional long handle = 0);
 };
 Window implements WindowTimers;
 
 // http://www.whatwg.org/specs/web-apps/current-work/
-[NoInterfaceObject]
+[NoInterfaceObject, Exposed=(Window,Worker)]
 interface WindowBase64 {
   [Throws] DOMString btoa(DOMString btoa);
   [Throws] DOMString atob(DOMString atob);
@@ -120,8 +126,8 @@ Window implements WindowLocalStorage;
 
 // http://www.whatwg.org/specs/web-apps/current-work/
 partial interface Window {
-  void captureEvents(long dummy);
-  void releaseEvents(long dummy);
+  void captureEvents();
+  void releaseEvents();
 };
 
 // https://dvcs.w3.org/hg/editing/raw-file/tip/editing.html
@@ -146,9 +152,14 @@ dictionary ScrollOptions {
   ScrollBehavior behavior = "auto";
 };
 
+dictionary ScrollToOptions : ScrollOptions {
+  unrestricted double left;
+  unrestricted double top;
+};
+
 partial interface Window {
-  //[Throws] MediaQueryList matchMedia(DOMString query);
-  [Throws] MediaQueryList? matchMedia(DOMString query);
+  //[Throws,NewObject] MediaQueryList matchMedia(DOMString query);
+  [Throws,NewObject] MediaQueryList? matchMedia(DOMString query);
   //[SameObject]
   [Throws] readonly attribute Screen screen;
 
@@ -173,16 +184,16 @@ partial interface Window {
   //[Throws] readonly attribute double pageXOffset;
   //[Throws] readonly attribute double scrollY;
   //[Throws] readonly attribute double pageYOffset;
-  //void scroll(double x, double y, optional ScrollOptions options);
-  //void scrollTo(double x, double y, optional ScrollOptions options);
-  //void scrollBy(double x, double y, optional ScrollOptions options);
+  void scroll(unrestricted double x, unrestricted double y);
+  void scroll(optional ScrollToOptions options);
+  void scrollTo(unrestricted double x, unrestricted double y);
+  void scrollTo(optional ScrollToOptions options);
+  void scrollBy(unrestricted double x, unrestricted double y);
+  void scrollBy(optional ScrollToOptions options);
   [Replaceable, Throws] readonly attribute long scrollX;
   [Throws] readonly attribute long pageXOffset;
   [Replaceable, Throws] readonly attribute long scrollY;
   [Throws] readonly attribute long pageYOffset;
-  void scroll(long x, long y);
-  void scrollTo(long x, long y);
-  void scrollBy(long x, long y);
 
   // client
   //[Throws] readonly attribute double screenX;
@@ -195,6 +206,17 @@ partial interface Window {
   [Throws] attribute long outerHeight;
 };
 
+/**
+ * Special function that gets the fill ratio from the compositor used for testing
+ * and is an indicator that we're layerizing correctly.
+ * This function will call the given callback current fill ratio for a
+ * composited frame. We don't guarantee which frame fill ratios will be returned.
+ */
+partial interface Window {
+  [ChromeOnly, Throws] void mozRequestOverfill(OverfillCallback callback);
+};
+callback OverfillCallback = void (unsigned long overfill);
+
 // https://dvcs.w3.org/hg/webperf/raw-file/tip/specs/RequestAnimationFrame/Overview.html
 partial interface Window {
   [Throws] long requestAnimationFrame(FrameRequestCallback callback);
@@ -204,7 +226,7 @@ callback FrameRequestCallback = void (DOMHighResTimeStamp time);
 
 // https://dvcs.w3.org/hg/webperf/raw-file/tip/specs/NavigationTiming/Overview.html
 partial interface Window {
-  [Replaceable, Throws] readonly attribute Performance? performance;
+  [Replaceable, Pure, StoreInSlot] readonly attribute Performance? performance;
 };
 
 // https://dvcs.w3.org/hg/webcrypto-api/raw-file/tip/spec/Overview.html
@@ -222,6 +244,14 @@ interface SpeechSynthesisGetter {
 
 Window implements SpeechSynthesisGetter;
 #endif
+
+// http://www.whatwg.org/specs/web-apps/current-work/
+[NoInterfaceObject]
+interface WindowModal {
+  [Throws, Func="nsGlobalWindow::IsModalContentWindow"] readonly attribute any dialogArguments;
+  [Throws, Func="nsGlobalWindow::IsModalContentWindow"] attribute any returnValue;
+};
+Window implements WindowModal;
 
 // Mozilla-specific stuff
 partial interface Window {
@@ -246,22 +276,22 @@ partial interface Window {
   /**
    * Method for scrolling this window by a number of lines.
    */
-  void                      scrollByLines(long numLines);
+  void                      scrollByLines(long numLines, optional ScrollOptions options);
 
   /**
    * Method for scrolling this window by a number of pages.
    */
-  void                      scrollByPages(long numPages);
+  void                      scrollByPages(long numPages, optional ScrollOptions options);
 
   /**
    * Method for sizing this window to the content in the window.
    */
   [Throws] void             sizeToContent();
 
-  readonly attribute Pkcs11?                      pkcs11;
-
   // XXX Shouldn't this be in nsIDOMChromeWindow?
-  [Replaceable, Throws] readonly attribute MozControllers controllers;
+  [ChromeOnly, Replaceable, Throws] readonly attribute MozControllers controllers;
+
+  [ChromeOnly, Throws] readonly attribute Element? realFrameElement;
 
   [Throws] readonly attribute float               mozInnerScreenX;
   [Throws] readonly attribute float               mozInnerScreenY;
@@ -274,12 +304,14 @@ partial interface Window {
 
   [Throws] attribute boolean                            fullScreen;
 
-  [Throws] void             back();
-  [Throws] void             forward();
-  [Throws] void             home();
+  [Throws, ChromeOnly] void             back();
+  [Throws, ChromeOnly] void             forward();
+  [Throws, ChromeOnly] void             home();
 
   // XXX Should this be in nsIDOMChromeWindow?
-  void                      updateCommands(DOMString action);
+  void                      updateCommands(DOMString action,
+                                           optional Selection? sel = null,
+                                           optional short reason = 0);
 
   /* Find in page.
    * @param str: the search pattern
@@ -303,6 +335,17 @@ partial interface Window {
    * been painted to the screen.
    */
   [Throws] readonly attribute unsigned long long mozPaintCount;
+
+  /**
+   * This property exists because static attributes don't yet work for
+   * JS-implemented WebIDL (see bugs 1058606 and 863952). With this hack, we
+   * can use `MozSelfSupport.something(...)`, which will continue to work
+   * after we ditch this property and switch to static attributes. See 
+   */
+  [ChromeOnly, Throws] readonly attribute MozSelfSupport MozSelfSupport;
+
+  [Pure]
+           attribute EventHandler onwheel;
 
            attribute EventHandler ondevicemotion;
            attribute EventHandler ondeviceorientation;
@@ -338,8 +381,96 @@ partial interface Window {
   [Replaceable, Throws] readonly attribute object? content;
 
   [ChromeOnly, Throws] readonly attribute object? __content;
+
+  [Throws, ChromeOnly] any getInterface(IID iid);
 };
 
 Window implements TouchEventHandlers;
 
 Window implements OnErrorEventHandlerForWindow;
+
+// ConsoleAPI
+partial interface Window {
+  [Replaceable, GetterThrows]
+  readonly attribute Console console;
+};
+
+#ifdef HAVE_SIDEBAR
+// Mozilla extension
+partial interface Window {
+  [Replaceable, Throws]
+  readonly attribute (External or WindowProxy) sidebar;
+};
+#endif
+
+[Func="IsChromeOrXBL"]
+interface ChromeWindow {
+  [Func="nsGlobalWindow::IsChromeWindow"]
+  const unsigned short STATE_MAXIMIZED = 1;
+  [Func="nsGlobalWindow::IsChromeWindow"]
+  const unsigned short STATE_MINIMIZED = 2;
+  [Func="nsGlobalWindow::IsChromeWindow"]
+  const unsigned short STATE_NORMAL = 3;
+  [Func="nsGlobalWindow::IsChromeWindow"]
+  const unsigned short STATE_FULLSCREEN = 4;
+
+  [Func="nsGlobalWindow::IsChromeWindow"]
+  readonly attribute unsigned short windowState;
+
+  /**
+   * browserDOMWindow provides access to yet another layer of
+   * utility functions implemented by chrome script. It will be null
+   * for DOMWindows not corresponding to browsers.
+   */
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+           attribute nsIBrowserDOMWindow? browserDOMWindow;
+
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+  void                      getAttention();
+
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+  void                      getAttentionWithCycleCount(long aCycleCount);
+
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+  void                      setCursor(DOMString cursor);
+
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+  void                      maximize();
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+  void                      minimize();
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+  void                      restore();
+
+  /**
+   * Notify a default button is loaded on a dialog or a wizard.
+   * defaultButton is the default button.
+   */
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+  void notifyDefaultButtonLoaded(Element defaultButton);
+
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+  readonly attribute nsIMessageBroadcaster messageManager;
+
+  /**
+   * Returns the message manager identified by the given group name that
+   * manages all frame loaders belonging to that group.
+   */
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+  nsIMessageBroadcaster getGroupMessageManager(DOMString aGroup);
+
+  /**
+   * On some operating systems, we must allow the window manager to
+   * handle window dragging. This function tells the window manager to
+   * start dragging the window. This function will fail unless called
+   * while the left mouse button is held down, callers must check this.
+   *
+   * The optional panel argument should be set when moving a panel.
+   *
+   * Throws NS_ERROR_NOT_IMPLEMENTED if the OS doesn't support this.
+   */
+  [Throws, Func="nsGlobalWindow::IsChromeWindow"]
+  void beginWindowMove(Event mouseDownEvent, optional Element? panel = null);
+};
+
+Window implements ChromeWindow;
+Window implements GlobalFetch;

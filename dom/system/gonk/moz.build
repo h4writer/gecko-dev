@@ -19,6 +19,7 @@ XPIDL_SOURCES += [
     'nsINetworkInterfaceListService.idl',
     'nsINetworkManager.idl',
     'nsINetworkService.idl',
+    'nsINetworkWorker.idl',
     'nsISystemWorkerManager.idl',
     'nsIVolume.idl',
     'nsIVolumeMountLock.idl',
@@ -34,12 +35,17 @@ EXPORTS += [
     'nsVolume.h',
     'nsVolumeService.h',
 ]
-SOURCES += [
+UNIFIED_SOURCES += [
     'AudioChannelManager.cpp',
     'AudioManager.cpp',
     'AutoMounter.cpp',
     'AutoMounterSetting.cpp',
     'GonkGPSGeolocationProvider.cpp',
+    'MozMtpDatabase.cpp',
+    'MozMtpServer.cpp',
+    'MozMtpStorage.cpp',
+    'NetworkUtils.cpp',
+    'NetworkWorker.cpp',
     'nsVolume.cpp',
     'nsVolumeMountLock.cpp',
     'nsVolumeService.cpp',
@@ -54,6 +60,11 @@ SOURCES += [
     'VolumeServiceTest.cpp',
 ]
 
+if CONFIG['ANDROID_VERSION'] >= '17':
+    CXXFLAGS += ['-I%s/frameworks/av/media/mtp' % CONFIG['ANDROID_SOURCE']]
+else:
+    CXXFLAGS += ['-I%s/frameworks/base/media/mtp' % CONFIG['ANDROID_SOURCE']]
+
 if CONFIG['ENABLE_TESTS']:
     XPCSHELL_TESTS_MANIFESTS += ['tests/xpcshell.ini']
 
@@ -61,14 +72,13 @@ EXTRA_COMPONENTS += [
     'NetworkInterfaceListService.js',
     'NetworkInterfaceListService.manifest',
     'NetworkManager.manifest',
+    'NetworkService.js',
     'NetworkService.manifest',
 ]
 EXTRA_PP_COMPONENTS += [
     'NetworkManager.js',
-    'NetworkService.js',
 ]
 EXTRA_JS_MODULES += [
-    'net_worker.js',
     'systemlibs.js',
 ]
 
@@ -86,41 +96,15 @@ if CONFIG['MOZ_B2G_RIL']:
         'ril_worker.js',
     ]
 
-if CONFIG['MOZ_NFC']:
-    XPIDL_SOURCES += [
-        'nsINfcContentHelper.idl',
-    ]
-    EXTRA_COMPONENTS += [
-        'Nfc.js',
-        'Nfc.manifest',
-        'NfcContentHelper.js',
-    ]
-    EXTRA_JS_MODULES += [
-    'nfc_consts.js',
-    'nfc_worker.js',
-    ]
-
-# include different BluetoothHfpManager.h under dom/bluetooth/
-if CONFIG['MOZ_B2G_BT_BLUEZ']:
-    LOCAL_INCLUDES += [
-        '/dom/bluetooth/bluez',
-    ]
-elif CONFIG['MOZ_B2G_BT_BLUEDROID']:
-    LOCAL_INCLUDES += [
-        '/dom/bluetooth/bluedroid',
-    ]
-
 FAIL_ON_WARNINGS = True
 
 include('/ipc/chromium/chromium-config.mozbuild')
 
 LOCAL_INCLUDES += [
-    '/content/events/src',
     '/dom/base',
     '/dom/bluetooth',
-    '/dom/nfc',
-    '/dom/src/geolocation',
+    '/dom/geolocation',
     '/dom/wifi',
 ]
 
-FINAL_LIBRARY = 'gklayout'
+FINAL_LIBRARY = 'xul'

@@ -7,6 +7,7 @@ from __future__ import unicode_literals
 import os
 import unittest
 
+from collections import defaultdict
 from shutil import rmtree
 from tempfile import mkdtemp
 
@@ -27,7 +28,20 @@ test_data_path = mozpath.abspath(mozpath.dirname(__file__))
 test_data_path = mozpath.join(test_data_path, 'data')
 
 
-CONFIGS = {
+CONFIGS = defaultdict(lambda: {
+    'defines': [],
+    'non_global_defines': [],
+    'substs': [],
+}, {
+    'android_eclipse': {
+        'defines': [
+            ('MOZ_ANDROID_MIN_SDK_VERSION', '9'),
+        ],
+        'non_global_defines': [],
+        'substs': [
+            ('ANDROID_TARGET_SDK', '16'),
+        ],
+    },
     'stub0': {
         'defines': [
             ('MOZ_TRUE_1', '1'),
@@ -50,51 +64,6 @@ CONFIGS = {
             ('MOZ_BAR', 'bar'),
         ],
     },
-    'variable_passthru': {
-        'defines': [],
-        'non_global_defines': [],
-        'substs': [],
-    },
-    'defines': {
-        'defines': [],
-        'non_global_defines': [],
-        'substs': [],
-    },
-    'exports': {
-        'defines': [],
-        'non_global_defines': [],
-        'substs': [],
-    },
-    'test-manifests-written': {
-        'defines': [],
-        'non_global_defines': [],
-        'substs': [],
-    },
-    'ipdl_sources': {
-        'defines': [],
-        'non_global_defines': [],
-        'substs': [],
-    },
-    'xpidl': {
-        'defines': [],
-        'non_global_defines': [],
-        'substs': [],
-    },
-    'local_includes': {
-        'defines': [],
-        'non_global_defines': [],
-        'substs': [],
-    },
-    'generated_includes': {
-        'defines': [],
-        'non_global_defines': [],
-        'substs': [],
-    },
-    'final_target': {
-        'defines': [],
-        'non_global_defines': [],
-        'substs': [],
-    },
     'test_config': {
         'defines': [
             ('foo', 'baz qux'),
@@ -105,10 +74,25 @@ CONFIGS = {
             ('foo', 'bar baz'),
         ],
     },
-}
+    'visual-studio': {
+        'defines': [],
+        'non_global_defines': [],
+        'substs': [
+            ('MOZ_APP_NAME', 'my_app'),
+        ],
+    },
+})
 
 
 class BackendTester(unittest.TestCase):
+    def setUp(self):
+        self._old_env = dict(os.environ)
+        os.environ.pop('MOZ_OBJDIR', None)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._old_env)
+
     def _get_environment(self, name):
         """Obtain a new instance of a ConfigEnvironment for a known profile.
 

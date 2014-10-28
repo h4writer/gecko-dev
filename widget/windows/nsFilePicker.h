@@ -30,6 +30,7 @@
 #include "nsdefs.h"
 #include <commdlg.h>
 #include <shobjidl.h>
+#undef LogSeverity // SetupAPI.h #defines this as DWORD
 
 class nsILoadContext;
 
@@ -56,9 +57,9 @@ class nsFilePicker :
   public IFileDialogEvents,
   public nsBaseWinFilePicker
 {
+  virtual ~nsFilePicker();
 public:
   nsFilePicker(); 
-  virtual ~nsFilePicker();
 
   NS_IMETHOD Init(nsIDOMWindow *aParent, const nsAString& aTitle, int16_t aMode);
                   
@@ -122,7 +123,7 @@ protected:
   nsCOMArray<nsIFile>    mFiles;
   static char            mLastUsedDirectory[];
   nsString               mUnicodeFile;
-  static PRUnichar      *mLastUsedUnicodeDirectory;
+  static char16_t      *mLastUsedUnicodeDirectory;
   HWND                   mDlgWnd;
 
   class ComDlgFilterSpec

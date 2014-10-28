@@ -7,7 +7,7 @@
 const {Cu} = require("chrome");
 const Editor = require("devtools/sourceeditor/editor");
 Cu.import("resource://gre/modules/Services.jsm");
-Cu.import("resource:///modules/devtools/shared/event-emitter.js");
+Cu.import("resource://gre/modules/devtools/event-emitter.js");
 
 exports.HTMLEditor = HTMLEditor;
 
@@ -181,6 +181,7 @@ HTMLEditor.prototype = {
     this.editorInner.removeEventListener("click", stopPropagation, false);
 
     this.hide(false);
-    this.container.parentNode.removeChild(this.container);
+    this.container.remove();
+    this.editor.destroy();
   }
 };

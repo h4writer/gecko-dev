@@ -7,9 +7,7 @@
 #ifndef vm_Monitor_h
 #define vm_Monitor_h
 
-#ifdef JS_THREADSAFE
 #include "mozilla/DebugOnly.h"
-#endif
 
 #include <stddef.h>
 
@@ -40,12 +38,10 @@ class Monitor
     { }
 
     ~Monitor() {
-#ifdef JS_THREADSAFE
         if (lock_)
             PR_DestroyLock(lock_);
         if (condVar_)
             PR_DestroyCondVar(condVar_);
-#endif
     }
 
     bool init();
@@ -54,70 +50,70 @@ class Monitor
 class AutoLockMonitor
 {
   private:
-#ifdef JS_THREADSAFE
     Monitor &monitor;
-#endif
 
   public:
-    AutoLockMonitor(Monitor &monitor)
-#ifdef JS_THREADSAFE
+    explicit AutoLockMonitor(Monitor &monitor)
       : monitor(monitor)
     {
         PR_Lock(monitor.lock_);
     }
-#else
-    {}
-#endif
 
     ~AutoLockMonitor() {
-#ifdef JS_THREADSAFE
         PR_Unlock(monitor.lock_);
-#endif
+    }
+
+    bool isFor(Monitor &other) const {
+        return monitor.lock_ == other.lock_;
+    }
+
+    void wait(PRCondVar *condVar) {
+        mozilla::DebugOnly<PRStatus> status =
+          PR_WaitCondVar(condVar, PR_INTERVAL_NO_TIMEOUT);
+        MOZ_ASSERT(status == PR_SUCCESS);
     }
 
     void wait() {
-#ifdef JS_THREADSAFE
-        mozilla::DebugOnly<PRStatus> status =
-          PR_WaitCondVar(monitor.condVar_, PR_INTERVAL_NO_TIMEOUT);
-        JS_ASSERT(status == PR_SUCCESS);
-#endif
+        wait(monitor.condVar_);
+    }
+
+    void notify(PRCondVar *condVar) {
+        mozilla::DebugOnly<PRStatus> status = PR_NotifyCondVar(condVar);
+        MOZ_ASSERT(status == PR_SUCCESS);
     }
 
     void notify() {
-#ifdef JS_THREADSAFE
-        PR_NotifyCondVar(monitor.condVar_);
-#endif
+        notify(monitor.condVar_);
+    }
+
+    void notifyAll(PRCondVar *condVar) {
+        mozilla::DebugOnly<PRStatus> status = PR_NotifyAllCondVar(monitor.condVar_);
+        MOZ_ASSERT(status == PR_SUCCESS);
     }
 
     void notifyAll() {
-#ifdef JS_THREADSAFE
-        PR_NotifyAllCondVar(monitor.condVar_);
-#endif
+        notifyAll(monitor.condVar_);
     }
 };
 
 class AutoUnlockMonitor
 {
   private:
-#ifdef JS_THREADSAFE
     Monitor &monitor;
-#endif
 
   public:
-    AutoUnlockMonitor(Monitor &monitor)
-#ifdef JS_THREADSAFE
+    explicit AutoUnlockMonitor(Monitor &monitor)
       : monitor(monitor)
     {
         PR_Unlock(monitor.lock_);
     }
-#else
-    {}
-#endif
 
     ~AutoUnlockMonitor() {
-#ifdef JS_THREADSAFE
         PR_Lock(monitor.lock_);
-#endif
+    }
+
+    bool isFor(Monitor &other) const {
+        return monitor.lock_ == other.lock_;
     }
 };
 

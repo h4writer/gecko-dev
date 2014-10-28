@@ -9,20 +9,22 @@
 #include "nsContainerFrame.h"
 #include "nsLeafFrame.h"
 
+class nsFontMetrics;
 class nsSharedPageData;
 
 // Page frame class used by the simple page sequence frame
-class nsPageFrame : public nsContainerFrame {
+class nsPageFrame MOZ_FINAL : public nsContainerFrame {
 
 public:
   NS_DECL_FRAMEARENA_HELPERS
 
-  friend nsIFrame* NS_NewPageFrame(nsIPresShell* aPresShell, nsStyleContext* aContext);
+  friend nsPageFrame* NS_NewPageFrame(nsIPresShell* aPresShell,
+                                      nsStyleContext* aContext);
 
-  NS_IMETHOD  Reflow(nsPresContext*      aPresContext,
-                     nsHTMLReflowMetrics& aDesiredSize,
-                     const nsHTMLReflowState& aMaxSize,
-                     nsReflowStatus&      aStatus) MOZ_OVERRIDE;
+  virtual void Reflow(nsPresContext*      aPresContext,
+                      nsHTMLReflowMetrics& aDesiredSize,
+                      const nsHTMLReflowState& aMaxSize,
+                      nsReflowStatus&      aStatus) MOZ_OVERRIDE;
 
   virtual void BuildDisplayList(nsDisplayListBuilder*   aBuilder,
                                 const nsRect&           aDirtyRect,
@@ -35,8 +37,8 @@ public:
    */
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
   
-#ifdef DEBUG
-  NS_IMETHOD  GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult  GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
 #endif
 
   //////////////////
@@ -56,7 +58,7 @@ public:
                          nsPoint aPt);
 
 protected:
-  nsPageFrame(nsStyleContext* aContext);
+  explicit nsPageFrame(nsStyleContext* aContext);
   virtual ~nsPageFrame();
 
   typedef enum {
@@ -64,12 +66,14 @@ protected:
     eFooter
   } nsHeaderFooterEnum;
 
-  nscoord GetXPosition(nsRenderingContext& aRenderingContext, 
+  nscoord GetXPosition(nsRenderingContext& aRenderingContext,
+                       nsFontMetrics&       aFontMetrics,
                        const nsRect&        aRect, 
                        int32_t              aJust,
                        const nsString&      aStr);
 
   void DrawHeaderFooter(nsRenderingContext& aRenderingContext,
+                        nsFontMetrics&       aFontMetrics,
                         nsHeaderFooterEnum   aHeaderFooter,
                         int32_t              aJust,
                         const nsString&      sStr,
@@ -79,6 +83,7 @@ protected:
                         nscoord              aWidth);
 
   void DrawHeaderFooter(nsRenderingContext& aRenderingContext,
+                        nsFontMetrics&       aFontMetrics,
                         nsHeaderFooterEnum   aHeaderFooter,
                         const nsString&      aStrLeft,
                         const nsString&      aStrRight,
@@ -100,24 +105,24 @@ class nsPageBreakFrame : public nsLeafFrame
 {
   NS_DECL_FRAMEARENA_HELPERS
 
-  nsPageBreakFrame(nsStyleContext* aContext);
+  explicit nsPageBreakFrame(nsStyleContext* aContext);
   ~nsPageBreakFrame();
 
-  NS_IMETHOD Reflow(nsPresContext*          aPresContext,
-                    nsHTMLReflowMetrics&     aDesiredSize,
-                    const nsHTMLReflowState& aReflowState,
-                    nsReflowStatus&          aStatus) MOZ_OVERRIDE;
+  virtual void Reflow(nsPresContext*          aPresContext,
+                          nsHTMLReflowMetrics&     aDesiredSize,
+                          const nsHTMLReflowState& aReflowState,
+                          nsReflowStatus&          aStatus) MOZ_OVERRIDE;
 
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
 
-#ifdef DEBUG
-  NS_IMETHOD  GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult  GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
 #endif
 
 protected:
 
-  virtual nscoord GetIntrinsicWidth() MOZ_OVERRIDE;
-  virtual nscoord GetIntrinsicHeight() MOZ_OVERRIDE;
+  virtual nscoord GetIntrinsicISize() MOZ_OVERRIDE;
+  virtual nscoord GetIntrinsicBSize() MOZ_OVERRIDE;
 
     bool mHaveReflowed;
 

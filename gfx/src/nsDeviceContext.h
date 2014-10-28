@@ -9,6 +9,7 @@
 #include <stdint.h>                     // for uint32_t
 #include <sys/types.h>                  // for int32_t
 #include "gfxTypes.h"                   // for gfxFloat
+#include "gfxFont.h"                    // for gfxFont::Orientation
 #include "mozilla/Assertions.h"         // for MOZ_ASSERT_HELPER2
 #include "nsAutoPtr.h"                  // for nsRefPtr
 #include "nsCOMPtr.h"                   // for nsCOMPtr
@@ -16,13 +17,13 @@
 #include "nsError.h"                    // for nsresult
 #include "nsISupports.h"                // for NS_INLINE_DECL_REFCOUNTING
 #include "nsMathUtils.h"                // for NS_round
-#include "nscore.h"                     // for PRUnichar, nsAString
+#include "nscore.h"                     // for char16_t, nsAString
 #include "mozilla/AppUnits.h"           // for AppUnits
 
 class gfxASurface;
 class gfxTextPerfMetrics;
 class gfxUserFontSet;
-class nsFont;
+struct nsFont;
 class nsFontCache;
 class nsFontMetrics;
 class nsIAtom;
@@ -30,14 +31,13 @@ class nsIDeviceContextSpec;
 class nsIScreen;
 class nsIScreenManager;
 class nsIWidget;
-class nsRect;
+struct nsRect;
 class nsRenderingContext;
 
-class nsDeviceContext
+class nsDeviceContext MOZ_FINAL
 {
 public:
     nsDeviceContext();
-    ~nsDeviceContext();
 
     NS_INLINE_DECL_REFCOUNTING(nsDeviceContext)
 
@@ -58,10 +58,10 @@ public:
     /**
      * Create a rendering context and initialize it.  Only call this
      * method on device contexts that were initialized for printing.
-     * @param aContext out parameter for new rendering context
-     * @return error status
+     *
+     * @return the new rendering context (guaranteed to be non-null)
      */
-    nsresult CreateRenderingContext(nsRenderingContext *&aContext);
+    already_AddRefed<nsRenderingContext> CreateRenderingContext();
 
     /**
      * Gets the number of app units in one CSS pixel; this number is global,
@@ -119,6 +119,7 @@ public:
      * @return error status
      */
     nsresult GetMetricsFor(const nsFont& aFont, nsIAtom* aLanguage,
+                           gfxFont::Orientation aOrientation,
                            gfxUserFontSet* aUserFontSet,
                            gfxTextPerfMetrics* aTextPerf,
                            nsFontMetrics*& aMetrics);
@@ -189,7 +190,7 @@ public:
      * @return error status
      */
     nsresult BeginDocument(const nsAString& aTitle,
-                           PRUnichar*       aPrintToFileName,
+                           char16_t*       aPrintToFileName,
                            int32_t          aStartPage,
                            int32_t          aEndPage);
 
@@ -249,7 +250,10 @@ public:
      */
     bool IsPrinterSurface();
 
-protected:
+private:
+    // Private destructor, to discourage deletion outside of Release():
+    ~nsDeviceContext();
+
     void SetDPI();
     void ComputeClientRectUsingScreen(nsRect *outRect);
     void ComputeFullAreaUsingScreen(nsRect *outRect);

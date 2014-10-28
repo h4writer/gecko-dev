@@ -53,14 +53,19 @@ namespace net {
 
 #ifdef MOZ_USE_WIFI_TICKLER
 
+// 8f769ed6-207c-4af9-9f7e-9e832da3754e
+#define NS_TICKLER_IID \
+{ 0x8f769ed6, 0x207c, 0x4af9, \
+  { 0x9f, 0x7e, 0x9e, 0x83, 0x2d, 0xa3, 0x75, 0x4e } }
+
 class Tickler MOZ_FINAL : public nsSupportsWeakReference
 {
 public:
   NS_DECL_THREADSAFE_ISUPPORTS
+  NS_DECLARE_STATIC_IID_ACCESSOR(NS_TICKLER_IID)
 
   // These methods are main thread only
   Tickler();
-  ~Tickler();
   void Cancel();
   nsresult Init();
   void SetIPV4Address(uint32_t address);
@@ -71,6 +76,8 @@ public:
   void Tickle();
 
 private:
+  ~Tickler();
+
   friend class TicklerTimer;
   Mutex mLock;
   nsCOMPtr<nsIThread> mThread;
@@ -98,15 +105,17 @@ private:
   void StopTickler();
 };
 
+NS_DEFINE_STATIC_IID_ACCESSOR(Tickler, NS_TICKLER_IID)
+
 #else // not defined MOZ_USE_WIFI_TICKLER
 
 class Tickler MOZ_FINAL : public nsISupports
 {
+  ~Tickler() { }
 public:
   NS_DECL_THREADSAFE_ISUPPORTS
 
   Tickler() { }
-  ~Tickler() { }
   nsresult Init() { return NS_ERROR_NOT_IMPLEMENTED; }
   void Cancel() { }
   void SetIPV4Address(uint32_t) { };

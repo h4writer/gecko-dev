@@ -7,37 +7,46 @@
 #ifndef nsIOfflineStorage_h__
 #define nsIOfflineStorage_h__
 
-#include "nsIFileStorage.h"
-
 #include "mozilla/dom/quota/PersistenceType.h"
 
 #define NS_OFFLINESTORAGE_IID \
-  {0xec7e878d, 0xc8c1, 0x402e, \
-  { 0xa2, 0xc4, 0xf6, 0x82, 0x29, 0x4e, 0x3c, 0xb1 } }
+  {0x91c57bf2, 0x0eda, 0x4db6, {0x9f, 0xf6, 0xcb, 0x38, 0x26, 0x8d, 0xb3, 0x01}}
 
 class nsPIDOMWindow;
 
 namespace mozilla {
 namespace dom {
+
+class ContentParent;
+
 namespace quota {
+
 class Client;
+
 }
 }
 }
 
-class nsIOfflineStorage : public nsIFileStorage
+class nsIOfflineStorage : public nsISupports
 {
 public:
+  typedef mozilla::dom::ContentParent ContentParent;
   typedef mozilla::dom::quota::Client Client;
   typedef mozilla::dom::quota::PersistenceType PersistenceType;
 
   NS_DECLARE_STATIC_IID_ACCESSOR(NS_OFFLINESTORAGE_IID)
 
+  NS_IMETHOD_(const nsACString&)
+  Id() = 0;
+
   NS_IMETHOD_(Client*)
   GetClient() = 0;
 
   NS_IMETHOD_(bool)
-  IsOwned(nsPIDOMWindow* aOwner) = 0;
+  IsOwnedByWindow(nsPIDOMWindow* aOwner) = 0;
+
+  NS_IMETHOD_(bool)
+  IsOwnedByProcess(ContentParent* aOwner) = 0;
 
   NS_IMETHOD_(PersistenceType)
   Type()
@@ -83,11 +92,17 @@ protected:
 NS_DEFINE_STATIC_IID_ACCESSOR(nsIOfflineStorage, NS_OFFLINESTORAGE_IID)
 
 #define NS_DECL_NSIOFFLINESTORAGE                                              \
+  NS_IMETHOD_(const nsACString&)                                               \
+  Id() MOZ_OVERRIDE;                                                           \
+                                                                               \
   NS_IMETHOD_(Client*)                                                         \
   GetClient() MOZ_OVERRIDE;                                                    \
                                                                                \
   NS_IMETHOD_(bool)                                                            \
-  IsOwned(nsPIDOMWindow* aOwner) MOZ_OVERRIDE;                                 \
+  IsOwnedByWindow(nsPIDOMWindow* aOwner) MOZ_OVERRIDE;                         \
+                                                                               \
+  NS_IMETHOD_(bool)                                                            \
+  IsOwnedByProcess(ContentParent* aOwner) MOZ_OVERRIDE;                        \
                                                                                \
   NS_IMETHOD_(const nsACString&)                                               \
   Origin() MOZ_OVERRIDE;                                                       \

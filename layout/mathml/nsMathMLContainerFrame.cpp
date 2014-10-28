@@ -4,10 +4,14 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "nsMathMLContainerFrame.h"
+
+#include "gfxUtils.h"
+#include "mozilla/gfx/2D.h"
+#include "nsLayoutUtils.h"
 #include "nsPresContext.h"
 #include "nsIPresShell.h"
 #include "nsStyleContext.h"
-#include "nsINameSpaceManager.h"
+#include "nsNameSpaceManager.h"
 #include "nsRenderingContext.h"
 #include "nsIDOMMutationEvent.h"
 #include "nsGkAtoms.h"
@@ -20,6 +24,7 @@
 #include "nsMathMLElement.h"
 
 using namespace mozilla;
+using namespace mozilla::gfx;
 
 //
 // nsMathMLContainerFrame implementation
@@ -48,18 +53,19 @@ nsMathMLContainerFrame::ReflowError(nsRenderingContext& aRenderingContext,
   // Set font
   nsRefPtr<nsFontMetrics> fm;
   nsLayoutUtils::GetFontMetricsForFrame(this, getter_AddRefs(fm));
-  aRenderingContext.SetFont(fm);
 
   // bounding metrics
   nsAutoString errorMsg; errorMsg.AssignLiteral("invalid-markup");
   mBoundingMetrics =
-    aRenderingContext.GetBoundingMetrics(errorMsg.get(), errorMsg.Length());
+    nsLayoutUtils::AppUnitBoundsOfString(errorMsg.get(), errorMsg.Length(),
+                                         *fm, aRenderingContext);
 
   // reflow metrics
-  aDesiredSize.ascent = fm->MaxAscent();
+  WritingMode wm = aDesiredSize.GetWritingMode();
+  aDesiredSize.SetBlockStartAscent(fm->MaxAscent());
   nscoord descent = fm->MaxDescent();
-  aDesiredSize.height = aDesiredSize.ascent + descent;
-  aDesiredSize.width = mBoundingMetrics.width;
+  aDesiredSize.BSize(wm) = aDesiredSize.BlockStartAscent() + descent;
+  aDesiredSize.ISize(wm) = mBoundingMetrics.width;
 
   // Also return our bounding metrics
   aDesiredSize.mBoundingMetrics = mBoundingMetrics;
@@ -80,7 +86,7 @@ public:
 #endif
 
   virtual void Paint(nsDisplayListBuilder* aBuilder,
-                     nsRenderingContext* aCtx);
+                     nsRenderingContext* aCtx) MOZ_OVERRIDE;
   NS_DISPLAY_DECL_NAME("MathMLError", TYPE_MATHML_ERROR)
 };
 
@@ -90,18 +96,21 @@ void nsDisplayMathMLError::Paint(nsDisplayListBuilder* aBuilder,
   // Set color and font ...
   nsRefPtr<nsFontMetrics> fm;
   nsLayoutUtils::GetFontMetricsForFrame(mFrame, getter_AddRefs(fm));
-  aCtx->SetFont(fm);
 
   nsPoint pt = ToReferenceFrame();
-  aCtx->SetColor(NS_RGB(255,0,0));
-  aCtx->FillRect(nsRect(pt, mFrame->GetSize()));
-  aCtx->SetColor(NS_RGB(255,255,255));
+  int32_t appUnitsPerDevPixel = mFrame->PresContext()->AppUnitsPerDevPixel();
+  DrawTarget* drawTarget = aCtx->GetDrawTarget();
+  Rect rect = NSRectToSnappedRect(nsRect(pt, mFrame->GetSize()),
+                                  appUnitsPerDevPixel,
+                                  *drawTarget);
+  ColorPattern red(ToDeviceColor(Color(1.f, 0.f, 0.f, 1.f)));
+  drawTarget->FillRect(rect, red);
 
-  nscoord ascent = aCtx->FontMetrics()->MaxAscent();
-
+  aCtx->ThebesContext()->SetColor(NS_RGB(255,255,255));
+  nscoord ascent = fm->MaxAscent();
   NS_NAMED_LITERAL_STRING(errorMsg, "invalid-markup");
-  aCtx->DrawString(errorMsg.get(), uint32_t(errorMsg.Length()),
-                   pt.x, pt.y+ascent);
+  nsLayoutUtils::DrawUniDirString(errorMsg.get(), uint32_t(errorMsg.Length()),
+                                  nsPoint(pt.x, pt.y + ascent), *fm, *aCtx);
 }
 
 /* /////////////
@@ -195,15 +204,19 @@ nsMathMLContainerFrame::GetPreferredStretchSize(nsRenderingContext& aRenderingCo
   }
   else if (aOptions & STRETCH_CONSIDER_EMBELLISHMENTS) {
     // compute our up-to-date size using Place()
-    nsHTMLReflowMetrics metrics;
+    nsHTMLReflowMetrics metrics(GetWritingMode()); // ???
     Place(aRenderingContext, false, metrics);
     aPreferredStretchSize = metrics.mBoundingMetrics;
   }
   else {
-    // compute a size that doesn't include embellishements
-    bool stretchAll =
-      NS_MATHML_WILL_STRETCH_ALL_CHILDREN_VERTICALLY(mPresentationData.flags) ||
-      NS_MATHML_WILL_STRETCH_ALL_CHILDREN_HORIZONTALLY(mPresentationData.flags);
+    // compute a size that includes embellishments iff the container stretches
+    // in the same direction as the embellished operator.
+    bool stretchAll = aStretchDirection == NS_STRETCH_DIRECTION_VERTICAL ?
+                      NS_MATHML_WILL_STRETCH_ALL_CHILDREN_VERTICALLY(mPresentationData.flags) :
+                      NS_MATHML_WILL_STRETCH_ALL_CHILDREN_HORIZONTALLY(mPresentationData.flags);
+    NS_ASSERTION(aStretchDirection == NS_STRETCH_DIRECTION_HORIZONTAL ||
+                 aStretchDirection == NS_STRETCH_DIRECTION_VERTICAL,
+                 "You must specify a direction in which to stretch");
     NS_ASSERTION(NS_MATHML_IS_EMBELLISH_OPERATOR(mEmbellishData.flags) ||
                  stretchAll,
                  "invalid call to GetPreferredStretchSize");
@@ -233,7 +246,7 @@ nsMathMLContainerFrame::GetPreferredStretchSize(nsRenderingContext& aRenderingCo
         mathMLFrame->GetBoundingMetrics(bmChild);
       }
       else {
-        nsHTMLReflowMetrics unused;
+        nsHTMLReflowMetrics unused(GetWritingMode());
         GetReflowAndBoundingMetricsFor(childFrame, unused, bmChild);
       }
 
@@ -247,7 +260,7 @@ nsMathMLContainerFrame::GetPreferredStretchSize(nsRenderingContext& aRenderingCo
         }
       }
       else {
-        if (NS_MATHML_WILL_STRETCH_ALL_CHILDREN_HORIZONTALLY(mPresentationData.flags)) {
+        if (aStretchDirection == NS_STRETCH_DIRECTION_HORIZONTAL) {
           // if we get here, it means this is container that will stack its children
           // vertically and fire an horizontal stretch on each them. This is the case
           // for \munder, \mover, \munderover. We just sum-up the size vertically.
@@ -265,7 +278,7 @@ nsMathMLContainerFrame::GetPreferredStretchSize(nsRenderingContext& aRenderingCo
           if (bm.rightBearing < bmChild.rightBearing)
             bm.rightBearing = bmChild.rightBearing;
         }
-        else if (NS_MATHML_WILL_STRETCH_ALL_CHILDREN_VERTICALLY(mPresentationData.flags)) {
+        else if (aStretchDirection == NS_STRETCH_DIRECTION_VERTICAL) {
           // just sum-up the sizes horizontally.
           bm += bmChild;
         }
@@ -306,9 +319,6 @@ nsMathMLContainerFrame::Stretch(nsRenderingContext& aRenderingContext,
       nsIMathMLFrame* mathMLFrame = do_QueryFrame(baseFrame);
       NS_ASSERTION(mathMLFrame, "Something is wrong somewhere");
       if (mathMLFrame) {
-        bool stretchAll =
-          NS_MATHML_WILL_STRETCH_ALL_CHILDREN_VERTICALLY(mPresentationData.flags) ||
-          NS_MATHML_WILL_STRETCH_ALL_CHILDREN_HORIZONTALLY(mPresentationData.flags);
 
         // And the trick is that the child's rect.x is still holding the descent,
         // and rect.y is still holding the ascent ...
@@ -327,21 +337,26 @@ nsMathMLContainerFrame::Stretch(nsRenderingContext& aRenderingContext,
         //   </mstyle>
         // </math>
         nsBoundingMetrics containerSize = aContainerSize;
-        if (aStretchDirection != NS_STRETCH_DIRECTION_DEFAULT &&
-            aStretchDirection != mEmbellishData.direction) {
-          if (mEmbellishData.direction == NS_STRETCH_DIRECTION_UNSUPPORTED) {
-            containerSize = childSize.mBoundingMetrics;
-          }
-          else {
-            GetPreferredStretchSize(aRenderingContext, 
-                                    stretchAll ? STRETCH_CONSIDER_EMBELLISHMENTS : 0,
+        if (aStretchDirection != mEmbellishData.direction &&
+            mEmbellishData.direction != NS_STRETCH_DIRECTION_UNSUPPORTED) {
+          NS_ASSERTION(mEmbellishData.direction != NS_STRETCH_DIRECTION_DEFAULT,
+                       "Stretches may have a default direction, operators can not.");
+          if (mEmbellishData.direction == NS_STRETCH_DIRECTION_VERTICAL ?
+              NS_MATHML_WILL_STRETCH_ALL_CHILDREN_VERTICALLY(mPresentationData.flags) :
+              NS_MATHML_WILL_STRETCH_ALL_CHILDREN_HORIZONTALLY(mPresentationData.flags)) {
+            GetPreferredStretchSize(aRenderingContext, 0,
                                     mEmbellishData.direction, containerSize);
+            // Stop further recalculations
+            aStretchDirection = mEmbellishData.direction;
+          } else {
+            // We aren't going to stretch the child, so just use the child metrics.
+            containerSize = childSize.mBoundingMetrics;
           }
         }
 
         // do the stretching...
         mathMLFrame->Stretch(aRenderingContext,
-                             mEmbellishData.direction, containerSize, childSize);
+                             aStretchDirection, containerSize, childSize);
         // store the updated metrics
         SaveReflowAndBoundingMetricsFor(baseFrame, childSize,
                                         childSize.mBoundingMetrics);
@@ -350,7 +365,8 @@ nsMathMLContainerFrame::Stretch(nsRenderingContext& aRenderingContext,
         // Now that this embellished child may have changed, we need to
         // fire the stretch on its siblings using our updated size
 
-        if (stretchAll) {
+        if (NS_MATHML_WILL_STRETCH_ALL_CHILDREN_VERTICALLY(mPresentationData.flags) ||
+            NS_MATHML_WILL_STRETCH_ALL_CHILDREN_HORIZONTALLY(mPresentationData.flags)) {
 
           nsStretchDirection stretchDir =
             NS_MATHML_WILL_STRETCH_ALL_CHILDREN_VERTICALLY(mPresentationData.flags) ?
@@ -391,7 +407,7 @@ nsMathMLContainerFrame::Stretch(nsRenderingContext& aRenderingContext,
         // the outermost embellished container will take care of it.
 
         nsEmbellishData parentData;
-        GetEmbellishDataFrom(mParent, parentData);
+        GetEmbellishDataFrom(GetParent(), parentData);
         // ensure that we are the embellished child, not just a sibling
         // (need to test coreFrame since <mfrac> resets other things)
         if (parentData.coreFrame != mEmbellishData.coreFrame) {
@@ -403,7 +419,7 @@ nsMathMLContainerFrame::Stretch(nsRenderingContext& aRenderingContext,
 
           mBoundingMetrics.width +=
             coreData.leadingSpace + coreData.trailingSpace;
-          aDesiredStretchSize.width = mBoundingMetrics.width;
+          aDesiredStretchSize.Width() = mBoundingMetrics.width;
           aDesiredStretchSize.mBoundingMetrics.width = mBoundingMetrics.width;
 
           nscoord dx = (StyleVisibility()->mDirection ?
@@ -470,6 +486,7 @@ nsMathMLContainerFrame::FinalizeReflow(nsRenderingContext& aRenderingContext,
   // If placeOrigin is false we should reach Place() with aPlaceOrigin == true
   // through Stretch() eventually.
   if (NS_MATHML_HAS_ERROR(mPresentationData.flags) || NS_FAILED(rv)) {
+    GatherAndStoreOverflow(&aDesiredSize);
     DidReflowChildren(GetFirstPrincipalChild());
     return rv;
   }
@@ -479,7 +496,7 @@ nsMathMLContainerFrame::FinalizeReflow(nsRenderingContext& aRenderingContext,
     // This means the rect.x and rect.y of our children were not set!!
     // Don't go without checking to see if our parent will later fire a Stretch() command
     // targeted at us. The Stretch() will cause the rect.x and rect.y to clear...
-    nsIMathMLFrame* mathMLFrame = do_QueryFrame(mParent);
+    nsIMathMLFrame* mathMLFrame = do_QueryFrame(GetParent());
     if (mathMLFrame) {
       nsEmbellishData embellishData;
       nsPresentationData presentationData;
@@ -500,18 +517,21 @@ nsMathMLContainerFrame::FinalizeReflow(nsRenderingContext& aRenderingContext,
         /* NS_MATHML_WILL_STRETCH_ALL_CHILDREN_VERTICALLY(mPresentationData.flags) || */
         NS_MATHML_WILL_STRETCH_ALL_CHILDREN_HORIZONTALLY(mPresentationData.flags);
 
-      nsBoundingMetrics defaultSize;
-      if (mEmbellishData.coreFrame == this /* case of a bare <mo>...</mo> itself */
-          || stretchAll) { /* or <mover><mo>...</mo>...</mover>, or friends */
-        // use our current size as computed earlier by Place()
-        defaultSize = aDesiredSize.mBoundingMetrics;
+      nsStretchDirection stretchDir;
+      if (mEmbellishData.coreFrame == this || /* case of a bare <mo>...</mo> itself */
+          (mEmbellishData.direction == NS_STRETCH_DIRECTION_HORIZONTAL &&
+           stretchAll) || /* or <mover><mo>...</mo>...</mover>, or friends */
+          mEmbellishData.direction == NS_STRETCH_DIRECTION_UNSUPPORTED) { /* Doesn't stretch */
+        stretchDir = mEmbellishData.direction;
+      } else {
+        // Let the Stretch() call decide the direction.
+        stretchDir = NS_STRETCH_DIRECTION_DEFAULT;
       }
-      else { /* case of <msup><mo>...</mo>...</msup> or friends */
-        // compute a size that doesn't include embellishments
-        GetPreferredStretchSize(aRenderingContext, 0, mEmbellishData.direction,
-                                defaultSize);
-      }
-      Stretch(aRenderingContext, NS_STRETCH_DIRECTION_DEFAULT, defaultSize,
+      // Use our current size as computed earlier by Place()
+      // The stretch call will detect if this is incorrect and recalculate the size.
+      nsBoundingMetrics defaultSize = aDesiredSize.mBoundingMetrics;
+
+      Stretch(aRenderingContext, stretchDir, defaultSize,
               aDesiredSize);
 #ifdef DEBUG
       {
@@ -527,11 +547,11 @@ nsMathMLContainerFrame::FinalizeReflow(nsRenderingContext& aRenderingContext,
     }
   }
 
-  // see if we should fix the spacing
-  FixInterFrameSpacing(aDesiredSize);
-
   // Also return our bounding metrics
   aDesiredSize.mBoundingMetrics = mBoundingMetrics;
+
+  // see if we should fix the spacing
+  FixInterFrameSpacing(aDesiredSize);
 
   if (!parentWillFireStretch) {
     // Not expecting a stretch.
@@ -694,13 +714,6 @@ nsMathMLContainerFrame::ReLayoutChildren(nsIFrame* aParentFrame)
         content->Tag() == nsGkAtoms::math)
       break;
 
-    // mark the frame dirty, and continue to climb up.  It's important that
-    // we're NOT doing this to the frame we plan to pass to FrameNeedsReflow()
-    // XXXldb Why do we need to bother with this?  Marking ancestor
-    // dirty (which we do below) should do a superset of the work this
-    // does.
-    frame->AddStateBits(NS_FRAME_IS_DIRTY | NS_FRAME_HAS_DIRTY_CHILDREN);
-
     frame = parent;
   }
 
@@ -731,61 +744,46 @@ nsMathMLContainerFrame::ChildListChanged(int32_t aModType)
   // outermost embellished container.
   nsIFrame* frame = this;
   if (mEmbellishData.coreFrame) {
-    nsIFrame* parent = mParent;
+    nsIFrame* parent = GetParent();
     nsEmbellishData embellishData;
     for ( ; parent; frame = parent, parent = parent->GetParent()) {
       GetEmbellishDataFrom(parent, embellishData);
       if (embellishData.coreFrame != mEmbellishData.coreFrame)
         break;
-
-      // Important: do not do this to the frame we plan to pass to
-      // ReLayoutChildren
-      // XXXldb Why do we need to bother with this?  Marking ancestor
-      // dirty (which we do below) should do a superset of the work this
-      // does.
-      frame->AddStateBits(NS_FRAME_IS_DIRTY | NS_FRAME_HAS_DIRTY_CHILDREN);
     }
   }
   return ReLayoutChildren(frame);
 }
 
-NS_IMETHODIMP
+void
 nsMathMLContainerFrame::AppendFrames(ChildListID     aListID,
                                      nsFrameList&    aFrameList)
 {
-  if (aListID != kPrincipalList) {
-    return NS_ERROR_INVALID_ARG;
-  }
+  MOZ_ASSERT(aListID == kPrincipalList);
   mFrames.AppendFrames(this, aFrameList);
-  return ChildListChanged(nsIDOMMutationEvent::ADDITION);
+  ChildListChanged(nsIDOMMutationEvent::ADDITION);
 }
 
-NS_IMETHODIMP
+void
 nsMathMLContainerFrame::InsertFrames(ChildListID     aListID,
                                      nsIFrame*       aPrevFrame,
                                      nsFrameList&    aFrameList)
 {
-  if (aListID != kPrincipalList) {
-    return NS_ERROR_INVALID_ARG;
-  }
-  // Insert frames after aPrevFrame
+  MOZ_ASSERT(aListID == kPrincipalList);
   mFrames.InsertFrames(this, aPrevFrame, aFrameList);
-  return ChildListChanged(nsIDOMMutationEvent::ADDITION);
+  ChildListChanged(nsIDOMMutationEvent::ADDITION);
 }
 
-NS_IMETHODIMP
+void
 nsMathMLContainerFrame::RemoveFrame(ChildListID     aListID,
                                     nsIFrame*       aOldFrame)
 {
-  if (aListID != kPrincipalList) {
-    return NS_ERROR_INVALID_ARG;
-  }
-  // remove the child frame
+  MOZ_ASSERT(aListID == kPrincipalList);
   mFrames.DestroyFrame(aOldFrame);
-  return ChildListChanged(nsIDOMMutationEvent::REMOVAL);
+  ChildListChanged(nsIDOMMutationEvent::REMOVAL);
 }
 
-NS_IMETHODIMP
+nsresult
 nsMathMLContainerFrame::AttributeChanged(int32_t         aNameSpaceID,
                                          nsIAtom*        aAttribute,
                                          int32_t         aModType)
@@ -809,7 +807,7 @@ nsMathMLContainerFrame::GatherAndStoreOverflow(nsHTMLReflowMetrics* aMetrics)
   // All non-child-frame content such as nsMathMLChars (and most child-frame
   // content) is included in mBoundingMetrics.
   nsRect boundingBox(mBoundingMetrics.leftBearing,
-                     aMetrics->ascent - mBoundingMetrics.ascent,
+                     aMetrics->BlockStartAscent() - mBoundingMetrics.ascent,
                      mBoundingMetrics.rightBearing - mBoundingMetrics.leftBearing,
                      mBoundingMetrics.ascent + mBoundingMetrics.descent);
 
@@ -841,7 +839,7 @@ nsMathMLContainerFrame::UpdateOverflow()
   return false;
 }
 
-nsresult 
+void
 nsMathMLContainerFrame::ReflowChild(nsIFrame*                aChildFrame,
                                     nsPresContext*           aPresContext,
                                     nsHTMLReflowMetrics&     aDesiredSize,
@@ -863,21 +861,21 @@ nsMathMLContainerFrame::ReflowChild(nsIFrame*                aChildFrame,
   NS_ASSERTION(!inlineFrame, "Inline frames should be wrapped in blocks");
 #endif
   
-  nsresult rv = nsContainerFrame::
+  nsContainerFrame::
          ReflowChild(aChildFrame, aPresContext, aDesiredSize, aReflowState,
                      0, 0, NS_FRAME_NO_MOVE_FRAME, aStatus);
 
-  if (NS_FAILED(rv))
-    return rv;
-
-  if (aDesiredSize.ascent == nsHTMLReflowMetrics::ASK_FOR_BASELINE) {
+  if (aDesiredSize.BlockStartAscent() == nsHTMLReflowMetrics::ASK_FOR_BASELINE) {
     // This will be suitable for inline frames, which are wrapped in a block.
-    if(!nsLayoutUtils::GetLastLineBaseline(aChildFrame,
-                                           &aDesiredSize.ascent)) {
+    nscoord ascent;
+    WritingMode wm = aDesiredSize.GetWritingMode();
+    if (!nsLayoutUtils::GetLastLineBaseline(wm, aChildFrame, &ascent)) {
       // We don't expect any other block children so just place the frame on
       // the baseline instead of going through DidReflow() and
       // GetBaseline().  This is what nsFrame::GetBaseline() will do anyway.
-      aDesiredSize.ascent = aDesiredSize.height;
+      aDesiredSize.SetBlockStartAscent(aDesiredSize.BSize(wm));
+    } else {
+      aDesiredSize.SetBlockStartAscent(ascent);
     }
   }
   if (IsForeignChild(aChildFrame)) {
@@ -885,21 +883,20 @@ nsMathMLContainerFrame::ReflowChild(nsIFrame*                aChildFrame,
     nsRect r = aChildFrame->ComputeTightBounds(aReflowState.rendContext->ThebesContext());
     aDesiredSize.mBoundingMetrics.leftBearing = r.x;
     aDesiredSize.mBoundingMetrics.rightBearing = r.XMost();
-    aDesiredSize.mBoundingMetrics.ascent = aDesiredSize.ascent - r.y;
-    aDesiredSize.mBoundingMetrics.descent = r.YMost() - aDesiredSize.ascent;
-    aDesiredSize.mBoundingMetrics.width = aDesiredSize.width;
+    aDesiredSize.mBoundingMetrics.ascent = aDesiredSize.BlockStartAscent() - r.y;
+    aDesiredSize.mBoundingMetrics.descent = r.YMost() - aDesiredSize.BlockStartAscent();
+    aDesiredSize.mBoundingMetrics.width = aDesiredSize.Width();
   }
-  return rv;
 }
 
-NS_IMETHODIMP
+void
 nsMathMLContainerFrame::Reflow(nsPresContext*           aPresContext,
                                nsHTMLReflowMetrics&     aDesiredSize,
                                const nsHTMLReflowState& aReflowState,
                                nsReflowStatus&          aStatus)
 {
-  aDesiredSize.width = aDesiredSize.height = 0;
-  aDesiredSize.ascent = 0;
+  aDesiredSize.Width() = aDesiredSize.Height() = 0;
+  aDesiredSize.SetBlockStartAscent(0);
   aDesiredSize.mBoundingMetrics = nsBoundingMetrics();
 
   /////////////
@@ -907,21 +904,18 @@ nsMathMLContainerFrame::Reflow(nsPresContext*           aPresContext,
   // Asking each child to cache its bounding metrics
 
   nsReflowStatus childStatus;
-  nsSize availSize(aReflowState.ComputedWidth(), NS_UNCONSTRAINEDSIZE);
   nsIFrame* childFrame = mFrames.FirstChild();
   while (childFrame) {
-    nsHTMLReflowMetrics childDesiredSize(aDesiredSize.mFlags);
+    nsHTMLReflowMetrics childDesiredSize(aReflowState, // ???
+                                         aDesiredSize.mFlags);
+    WritingMode wm = childFrame->GetWritingMode();
+    LogicalSize availSize = aReflowState.ComputedSize(wm);
+    availSize.BSize(wm) = NS_UNCONSTRAINEDSIZE;
     nsHTMLReflowState childReflowState(aPresContext, aReflowState,
                                        childFrame, availSize);
-    nsresult rv = ReflowChild(childFrame, aPresContext, childDesiredSize,
-                              childReflowState, childStatus);
+    ReflowChild(childFrame, aPresContext, childDesiredSize,
+                childReflowState, childStatus);
     //NS_ASSERTION(NS_FRAME_IS_COMPLETE(childStatus), "bad status");
-    if (NS_FAILED(rv)) {
-      // Call DidReflow() for the child frames we successfully did reflow.
-      DidReflowChildren(mFrames.FirstChild(), childFrame);
-      return rv;
-    }
-
     SaveReflowAndBoundingMetricsFor(childFrame, childDesiredSize,
                                     childDesiredSize.mBoundingMetrics);
     childFrame = childFrame->GetNextSibling();
@@ -958,7 +952,7 @@ nsMathMLContainerFrame::Reflow(nsPresContext*           aPresContext,
       nsIMathMLFrame* mathMLFrame = do_QueryFrame(childFrame);
       if (mathMLFrame) {
         // retrieve the metrics that was stored at the previous pass
-        nsHTMLReflowMetrics childDesiredSize;
+        nsHTMLReflowMetrics childDesiredSize(aReflowState);
         GetReflowAndBoundingMetricsFor(childFrame,
           childDesiredSize, childDesiredSize.mBoundingMetrics);
 
@@ -978,46 +972,52 @@ nsMathMLContainerFrame::Reflow(nsPresContext*           aPresContext,
 
   aStatus = NS_FRAME_COMPLETE;
   NS_FRAME_SET_TRUNCATION(aStatus, aReflowState, aDesiredSize);
-  return NS_OK;
 }
 
+static nscoord AddInterFrameSpacingToSize(nsHTMLReflowMetrics&    aDesiredSize,
+                                          nsMathMLContainerFrame* aFrame);
+
 /* virtual */ nscoord
-nsMathMLContainerFrame::GetMinWidth(nsRenderingContext *aRenderingContext)
+nsMathMLContainerFrame::GetMinISize(nsRenderingContext *aRenderingContext)
 {
   nscoord result;
   DISPLAY_MIN_WIDTH(this, result);
-  nsHTMLReflowMetrics desiredSize;
-  GetIntrinsicWidthMetrics(aRenderingContext, desiredSize);
-  nsBoundingMetrics bm = desiredSize.mBoundingMetrics;
-  // We include the overflow to compensate for FixInterFrameSpacing.
-  result = std::max(bm.width, bm.rightBearing) - std::min(0, bm.leftBearing);
+  nsHTMLReflowMetrics desiredSize(GetWritingMode());
+  GetIntrinsicISizeMetrics(aRenderingContext, desiredSize);
+
+  // Include the additional width added by FixInterFrameSpacing to ensure
+  // consistent width calculations.
+  AddInterFrameSpacingToSize(desiredSize, this);
+  result = desiredSize.ISize(GetWritingMode());
   return result;
 }
 
 /* virtual */ nscoord
-nsMathMLContainerFrame::GetPrefWidth(nsRenderingContext *aRenderingContext)
+nsMathMLContainerFrame::GetPrefISize(nsRenderingContext *aRenderingContext)
 {
   nscoord result;
-  DISPLAY_MIN_WIDTH(this, result);
-  nsHTMLReflowMetrics desiredSize;
-  GetIntrinsicWidthMetrics(aRenderingContext, desiredSize);
-  nsBoundingMetrics bm = desiredSize.mBoundingMetrics;
-  // We include the overflow to compensate for FixInterFrameSpacing.
-  result = std::max(bm.width, bm.rightBearing) - std::min(0, bm.leftBearing);
+  DISPLAY_PREF_WIDTH(this, result);
+  nsHTMLReflowMetrics desiredSize(GetWritingMode());
+  GetIntrinsicISizeMetrics(aRenderingContext, desiredSize);
+
+  // Include the additional width added by FixInterFrameSpacing to ensure
+  // consistent width calculations.
+  AddInterFrameSpacingToSize(desiredSize, this);
+  result = desiredSize.ISize(GetWritingMode());
   return result;
 }
 
 /* virtual */ void
-nsMathMLContainerFrame::GetIntrinsicWidthMetrics(nsRenderingContext* aRenderingContext, nsHTMLReflowMetrics& aDesiredSize)
+nsMathMLContainerFrame::GetIntrinsicISizeMetrics(nsRenderingContext* aRenderingContext, nsHTMLReflowMetrics& aDesiredSize)
 {
   // Get child widths
   nsIFrame* childFrame = mFrames.FirstChild();
   while (childFrame) {
-    nsHTMLReflowMetrics childDesiredSize;
+    nsHTMLReflowMetrics childDesiredSize(GetWritingMode()); // ???
 
     nsMathMLContainerFrame* containerFrame = do_QueryFrame(childFrame);
     if (containerFrame) {
-      containerFrame->GetIntrinsicWidthMetrics(aRenderingContext,
+      containerFrame->GetIntrinsicISizeMetrics(aRenderingContext,
                                                childDesiredSize);
     } else {
       // XXX This includes margin while Reflow currently doesn't consider
@@ -1025,9 +1025,9 @@ nsMathMLContainerFrame::GetIntrinsicWidthMetrics(nsRenderingContext* aRenderingC
       // characters, this is an approximation anyway.
       nscoord width =
         nsLayoutUtils::IntrinsicForContainer(aRenderingContext, childFrame,
-                                             nsLayoutUtils::PREF_WIDTH);
+                                             nsLayoutUtils::PREF_ISIZE);
 
-      childDesiredSize.width = width;
+      childDesiredSize.Width() = width;
       childDesiredSize.mBoundingMetrics.width = width;
       childDesiredSize.mBoundingMetrics.leftBearing = 0;
       childDesiredSize.mBoundingMetrics.rightBearing = width;
@@ -1178,6 +1178,7 @@ class nsMathMLContainerFrame::RowChildFrameIterator {
 public:
   explicit RowChildFrameIterator(nsMathMLContainerFrame* aParentFrame) :
     mParentFrame(aParentFrame),
+    mSize(aParentFrame->GetWritingMode()), // ???
     mX(0),
     mCarrySpace(0),
     mFromFrameType(eMathMLFrameType_UNKNOWN),
@@ -1225,8 +1226,8 @@ public:
   nsIFrame* Frame() const { return mChildFrame; }
   nscoord X() const { return mX; }
   const nsHTMLReflowMetrics& ReflowMetrics() const { return mSize; }
-  nscoord Ascent() const { return mSize.ascent; }
-  nscoord Descent() const { return mSize.height - mSize.ascent; }
+  nscoord Ascent() const { return mSize.BlockStartAscent(); }
+  nscoord Descent() const { return mSize.Height() - mSize.BlockStartAscent(); }
   const nsBoundingMetrics& BoundingMetrics() const {
     return mSize.mBoundingMetrics;
   }
@@ -1294,19 +1295,19 @@ nsMathMLContainerFrame::Place(nsRenderingContext& aRenderingContext,
   // another math frame
   mBoundingMetrics.width = child.X();
 
-  aDesiredSize.width = std::max(0, mBoundingMetrics.width);
-  aDesiredSize.height = ascent + descent;
-  aDesiredSize.ascent = ascent;
+  aDesiredSize.Width() = std::max(0, mBoundingMetrics.width);
+  aDesiredSize.Height() = ascent + descent;
+  aDesiredSize.SetBlockStartAscent(ascent);
   aDesiredSize.mBoundingMetrics = mBoundingMetrics;
 
   mReference.x = 0;
-  mReference.y = aDesiredSize.ascent;
+  mReference.y = aDesiredSize.BlockStartAscent();
 
   //////////////////
   // Place Children
 
   if (aPlaceOrigin) {
-    PositionRowChildFrames(0, aDesiredSize.ascent);
+    PositionRowChildFrames(0, aDesiredSize.BlockStartAscent());
   }
 
   return NS_OK;
@@ -1320,18 +1321,18 @@ nsMathMLContainerFrame::PositionRowChildFrames(nscoord aOffsetX,
   while (child.Frame()) {
     nscoord dx = aOffsetX + child.X();
     nscoord dy = aBaseline - child.Ascent();
-    FinishReflowChild(child.Frame(), PresContext(), nullptr,
-                      child.ReflowMetrics(), dx, dy, 0);
+    FinishReflowChild(child.Frame(), PresContext(), child.ReflowMetrics(),
+                      nullptr, dx, dy, 0);
     ++child;
   }
 }
 
 class ForceReflow : public nsIReflowCallback {
 public:
-  virtual bool ReflowFinished() {
+  virtual bool ReflowFinished() MOZ_OVERRIDE {
     return true;
   }
-  virtual void ReflowCallbackCanceled() {}
+  virtual void ReflowCallbackCanceled() MOZ_OVERRIDE {}
 };
 
 // We only need one of these so we just make it a static global, no need
@@ -1394,36 +1395,50 @@ GetInterFrameSpacingFor(int32_t         aScriptLevel,
   return 0;
 }
 
-nscoord
-nsMathMLContainerFrame::FixInterFrameSpacing(nsHTMLReflowMetrics& aDesiredSize)
+static nscoord
+AddInterFrameSpacingToSize(nsHTMLReflowMetrics&    aDesiredSize,
+                           nsMathMLContainerFrame* aFrame)
 {
   nscoord gap = 0;
-  nsIContent* parentContent = mParent->GetContent();
+  nsIFrame* parent = aFrame->GetParent();
+  nsIContent* parentContent = parent->GetContent();
   if (MOZ_UNLIKELY(!parentContent)) {
     return 0;
   }
   nsIAtom *parentTag = parentContent->Tag();
   if (parentContent->GetNameSpaceID() == kNameSpaceID_MathML && 
       (parentTag == nsGkAtoms::math || parentTag == nsGkAtoms::mtd_)) {
-    gap = GetInterFrameSpacingFor(StyleFont()->mScriptLevel, mParent, this);
+    gap = GetInterFrameSpacingFor(aFrame->StyleFont()->mScriptLevel,
+                                  parent, aFrame);
     // add our own italic correction
     nscoord leftCorrection = 0, italicCorrection = 0;
-    GetItalicCorrection(mBoundingMetrics, leftCorrection, italicCorrection);
+    aFrame->GetItalicCorrection(aDesiredSize.mBoundingMetrics,
+                                leftCorrection, italicCorrection);
     gap += leftCorrection;
-    // see if we should shift our children to account for the correction
     if (gap) {
-      nsIFrame* childFrame = mFrames.FirstChild();
-      while (childFrame) {
-        childFrame->SetPosition(childFrame->GetPosition() + nsPoint(gap, 0));
-        childFrame = childFrame->GetNextSibling();
-      }
-      mBoundingMetrics.leftBearing += gap;
-      mBoundingMetrics.rightBearing += gap;
-      mBoundingMetrics.width += gap;
-      aDesiredSize.width += gap;
+      aDesiredSize.mBoundingMetrics.leftBearing += gap;
+      aDesiredSize.mBoundingMetrics.rightBearing += gap;
+      aDesiredSize.mBoundingMetrics.width += gap;
+      aDesiredSize.Width() += gap;
     }
-    mBoundingMetrics.width += italicCorrection;
-    aDesiredSize.width += italicCorrection;
+    aDesiredSize.mBoundingMetrics.width += italicCorrection;
+    aDesiredSize.Width() += italicCorrection;
+  }
+  return gap;
+}
+
+nscoord
+nsMathMLContainerFrame::FixInterFrameSpacing(nsHTMLReflowMetrics& aDesiredSize)
+{
+  nscoord gap = 0;
+  gap = AddInterFrameSpacingToSize(aDesiredSize, this);
+  if (gap) {
+    // Shift our children to account for the correction
+    nsIFrame* childFrame = mFrames.FirstChild();
+    while (childFrame) {
+      childFrame->SetPosition(childFrame->GetPosition() + nsPoint(gap, 0));
+      childFrame = childFrame->GetNextSibling();
+    }
   }
   return gap;
 }
@@ -1525,22 +1540,37 @@ nsMathMLContainerFrame::TransmitAutomaticDataForMrowLikeElement()
   return NS_OK;
 }
 
+/*static*/ void
+nsMathMLContainerFrame::PropagateFrameFlagFor(nsIFrame* aFrame,
+                                              nsFrameState  aFlags)
+{
+  if (!aFrame || !aFlags)
+    return;
+
+  aFrame->AddStateBits(aFlags);
+  nsIFrame* childFrame = aFrame->GetFirstPrincipalChild();
+  while (childFrame) {
+    PropagateFrameFlagFor(childFrame, aFlags);
+    childFrame = childFrame->GetNextSibling();
+  }
+}
+
 nsresult
 nsMathMLContainerFrame::ReportErrorToConsole(const char*       errorMsgId,
-                                             const PRUnichar** aParams,
+                                             const char16_t** aParams,
                                              uint32_t          aParamCount)
 {
   return nsContentUtils::ReportToConsole(nsIScriptError::errorFlag,
-                                         NS_LITERAL_CSTRING("MathML"), mContent->OwnerDoc(),
+                                         NS_LITERAL_CSTRING("Layout: MathML"), mContent->OwnerDoc(),
                                          nsContentUtils::eMATHML_PROPERTIES,
                                          errorMsgId, aParams, aParamCount);
 }
 
 nsresult
-nsMathMLContainerFrame::ReportParseError(const PRUnichar* aAttribute,
-                                         const PRUnichar* aValue)
+nsMathMLContainerFrame::ReportParseError(const char16_t* aAttribute,
+                                         const char16_t* aValue)
 {
-  const PRUnichar* argv[] = 
+  const char16_t* argv[] = 
     { aValue, aAttribute, mContent->Tag()->GetUTF16String() };
   return ReportErrorToConsole("AttributeParsingError", argv, 3);
 }
@@ -1548,23 +1578,23 @@ nsMathMLContainerFrame::ReportParseError(const PRUnichar* aAttribute,
 nsresult
 nsMathMLContainerFrame::ReportChildCountError()
 {
-  const PRUnichar* arg = mContent->Tag()->GetUTF16String();
+  const char16_t* arg = mContent->Tag()->GetUTF16String();
   return ReportErrorToConsole("ChildCountIncorrect", &arg, 1);
 }
 
 nsresult
 nsMathMLContainerFrame::ReportInvalidChildError(nsIAtom* aChildTag)
 {
-  const PRUnichar* argv[] =
+  const char16_t* argv[] =
     { aChildTag->GetUTF16String(), mContent->Tag()->GetUTF16String() };
   return ReportErrorToConsole("InvalidChild", argv, 2);
 }
 
 //==========================
 
-nsIFrame*
+nsContainerFrame*
 NS_NewMathMLmathBlockFrame(nsIPresShell* aPresShell, nsStyleContext* aContext,
-                           uint32_t aFlags)
+                           nsFrameState aFlags)
 {
   nsMathMLmathBlockFrame* it = new (aPresShell) nsMathMLmathBlockFrame(aContext);
   it->SetFlags(aFlags);
@@ -1573,10 +1603,18 @@ NS_NewMathMLmathBlockFrame(nsIPresShell* aPresShell, nsStyleContext* aContext,
 
 NS_IMPL_FRAMEARENA_HELPERS(nsMathMLmathBlockFrame)
 
-nsIFrame*
+NS_QUERYFRAME_HEAD(nsMathMLmathBlockFrame)
+  NS_QUERYFRAME_ENTRY(nsMathMLmathBlockFrame)
+NS_QUERYFRAME_TAIL_INHERITING(nsBlockFrame)
+
+nsContainerFrame*
 NS_NewMathMLmathInlineFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
 {
   return new (aPresShell) nsMathMLmathInlineFrame(aContext);
 }
 
 NS_IMPL_FRAMEARENA_HELPERS(nsMathMLmathInlineFrame)
+
+NS_QUERYFRAME_HEAD(nsMathMLmathInlineFrame)
+  NS_QUERYFRAME_ENTRY(nsIMathMLFrame)
+NS_QUERYFRAME_TAIL_INHERITING(nsInlineFrame)

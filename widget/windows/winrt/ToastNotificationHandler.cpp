@@ -18,23 +18,19 @@ using namespace ABI::Windows::UI::Notifications;
 typedef __FITypedEventHandler_2_Windows__CUI__CNotifications__CToastNotification_IInspectable_t ToastActivationHandler;
 typedef __FITypedEventHandler_2_Windows__CUI__CNotifications__CToastNotification_Windows__CUI__CNotifications__CToastDismissedEventArgs ToastDismissHandler;
 
-void
+bool
 ToastNotificationHandler::DisplayNotification(HSTRING title,
                                               HSTRING msg,
                                               HSTRING imagePath,
-                                              const nsAString& aCookie)
+                                              const nsAString& aCookie,
+                                              const nsAString& aAppId)
 {
   mCookie = aCookie;
 
-  ComPtr<IToastNotificationManagerStatics> toastNotificationManagerStatics;
-  AssertHRESULT(GetActivationFactory(HStringReference(RuntimeClass_Windows_UI_Notifications_ToastNotificationManager).Get(),
-                                    toastNotificationManagerStatics.GetAddressOf()));
-
-  ComPtr<IXmlDocument> toastXml;
-  toastNotificationManagerStatics->GetTemplateContent(ToastTemplateType::ToastTemplateType_ToastImageAndText03, &toastXml);
-
-  ComPtr<IXmlNodeList> toastTextElements, toastImageElements;
-  ComPtr<IXmlNode> titleTextNodeRoot, msgTextNodeRoot, imageNodeRoot, srcAttribute;
+  Microsoft::WRL::ComPtr<IXmlDocument> toastXml =
+    InitializeXmlForTemplate(ToastTemplateType::ToastTemplateType_ToastImageAndText03);
+  Microsoft::WRL::ComPtr<IXmlNodeList> toastTextElements, toastImageElements;
+  Microsoft::WRL::ComPtr<IXmlNode> titleTextNodeRoot, msgTextNodeRoot, imageNodeRoot, srcAttribute;
 
   HSTRING textNodeStr, imageNodeStr, srcNodeStr;
   HSTRING_HEADER textHeader, imageHeader, srcHeader;
@@ -44,41 +40,98 @@ ToastNotificationHandler::DisplayNotification(HSTRING title,
   toastXml->GetElementsByTagName(textNodeStr, &toastTextElements);
   toastXml->GetElementsByTagName(imageNodeStr, &toastImageElements);
 
-  AssertHRESULT(toastTextElements->Item(0, &titleTextNodeRoot));
-  AssertHRESULT(toastTextElements->Item(1, &msgTextNodeRoot));
-  AssertHRESULT(toastImageElements->Item(0, &imageNodeRoot));
+  AssertRetHRESULT(toastTextElements->Item(0, &titleTextNodeRoot), false);
+  AssertRetHRESULT(toastTextElements->Item(1, &msgTextNodeRoot), false);
+  AssertRetHRESULT(toastImageElements->Item(0, &imageNodeRoot), false);
 
-  ComPtr<IXmlNamedNodeMap> attributes;
-  AssertHRESULT(imageNodeRoot->get_Attributes(&attributes));
-  AssertHRESULT(attributes->GetNamedItem(srcNodeStr, &srcAttribute));
+  Microsoft::WRL::ComPtr<IXmlNamedNodeMap> attributes;
+  AssertRetHRESULT(imageNodeRoot->get_Attributes(&attributes), false);
+  AssertRetHRESULT(attributes->GetNamedItem(srcNodeStr, &srcAttribute), false);
 
   SetNodeValueString(title, titleTextNodeRoot.Get(), toastXml.Get());
   SetNodeValueString(msg, msgTextNodeRoot.Get(), toastXml.Get());
   SetNodeValueString(imagePath, srcAttribute.Get(), toastXml.Get());
 
-  ComPtr<IToastNotification> notification;
-  ComPtr<IToastNotificationFactory> factory;
-  AssertHRESULT(GetActivationFactory(HStringReference(RuntimeClass_Windows_UI_Notifications_ToastNotification).Get(),
-                factory.GetAddressOf()));
-  AssertHRESULT(factory->CreateToastNotification(toastXml.Get(), &notification));
-
-  EventRegistrationToken activatedToken;
-  AssertHRESULT(notification->add_Activated(Callback<ToastActivationHandler>(this,
-      &ToastNotificationHandler::OnActivate).Get(), &activatedToken));
-  EventRegistrationToken dismissedToken;
-  AssertHRESULT(notification->add_Dismissed(Callback<ToastDismissHandler>(this,
-      &ToastNotificationHandler::OnDismiss).Get(), &dismissedToken));
-
-  ComPtr<IToastNotifier> notifier;
-  toastNotificationManagerStatics->CreateToastNotifier(&notifier);
-  notifier->Show(notification.Get());
-
-  MetroUtils::FireObserver("metro_native_toast_shown", mCookie.get());
+  return CreateWindowsNotificationFromXml(toastXml.Get(), aAppId);
 }
 
-void ToastNotificationHandler::SetNodeValueString(HSTRING inputString, ComPtr<IXmlNode> node, ComPtr<IXmlDocument> xml) { 
-  ComPtr<IXmlText> inputText;
-  ComPtr<IXmlNode> inputTextNode, pAppendedChild;
+bool
+ToastNotificationHandler::DisplayTextNotification(HSTRING title,
+                                                  HSTRING msg,
+                                                  const nsAString& aCookie,
+                                                  const nsAString& aAppId)
+{
+  mCookie = aCookie;
+
+  Microsoft::WRL::ComPtr<IXmlDocument> toastXml =
+    InitializeXmlForTemplate(ToastTemplateType::ToastTemplateType_ToastText03);
+  Microsoft::WRL::ComPtr<IXmlNodeList> toastTextElements;
+  Microsoft::WRL::ComPtr<IXmlNode> titleTextNodeRoot, msgTextNodeRoot;
+
+  HSTRING textNodeStr;
+  HSTRING_HEADER textHeader;
+  WindowsCreateStringReference(L"text", 4, &textHeader, &textNodeStr);
+  toastXml->GetElementsByTagName(textNodeStr, &toastTextElements);
+
+  AssertRetHRESULT(toastTextElements->Item(0, &titleTextNodeRoot), false);
+  AssertRetHRESULT(toastTextElements->Item(1, &msgTextNodeRoot), false);
+
+  SetNodeValueString(title, titleTextNodeRoot.Get(), toastXml.Get());
+  SetNodeValueString(msg, msgTextNodeRoot.Get(), toastXml.Get());
+
+  return CreateWindowsNotificationFromXml(toastXml.Get(), aAppId);
+}
+
+Microsoft::WRL::ComPtr<IXmlDocument>
+ToastNotificationHandler::InitializeXmlForTemplate(ToastTemplateType templateType) {
+  Microsoft::WRL::ComPtr<IXmlDocument> toastXml;
+
+  AssertRetHRESULT(GetActivationFactory(HStringReference(RuntimeClass_Windows_UI_Notifications_ToastNotificationManager).Get(),
+    mToastNotificationManagerStatics.GetAddressOf()), nullptr);
+
+  mToastNotificationManagerStatics->GetTemplateContent(templateType, &toastXml);
+
+  return toastXml;
+}
+
+bool
+ToastNotificationHandler::CreateWindowsNotificationFromXml(IXmlDocument *toastXml,
+                                                           const nsAString& aAppId)
+{
+  Microsoft::WRL::ComPtr<IToastNotification> notification;
+  Microsoft::WRL::ComPtr<IToastNotificationFactory> factory;
+  AssertRetHRESULT(GetActivationFactory(HStringReference(RuntimeClass_Windows_UI_Notifications_ToastNotification).Get(),
+    factory.GetAddressOf()), false);
+  AssertRetHRESULT(factory->CreateToastNotification(toastXml, &notification),
+                   false);
+
+  EventRegistrationToken activatedToken;
+  AssertRetHRESULT(notification->add_Activated(Callback<ToastActivationHandler>(this,
+    &ToastNotificationHandler::OnActivate).Get(), &activatedToken), false);
+  EventRegistrationToken dismissedToken;
+  AssertRetHRESULT(notification->add_Dismissed(Callback<ToastDismissHandler>(this,
+    &ToastNotificationHandler::OnDismiss).Get(), &dismissedToken), false);
+
+  Microsoft::WRL::ComPtr<IToastNotifier> notifier;
+  if (aAppId.IsEmpty()) {
+    AssertRetHRESULT(mToastNotificationManagerStatics->CreateToastNotifier(
+                       &notifier), false);
+  } else {
+    AssertRetHRESULT(mToastNotificationManagerStatics->CreateToastNotifierWithId(
+                    HStringReference(PromiseFlatString(aAppId).get()).Get(),
+                    &notifier), false);
+  }
+  AssertRetHRESULT(notifier->Show(notification.Get()), false);
+
+  MetroUtils::FireObserver("metro_native_toast_shown", mCookie.get());
+
+  return true;
+}
+
+void ToastNotificationHandler::SetNodeValueString(HSTRING inputString,
+  Microsoft::WRL::ComPtr<IXmlNode> node, Microsoft::WRL::ComPtr<IXmlDocument> xml) {
+  Microsoft::WRL::ComPtr<IXmlText> inputText;
+  Microsoft::WRL::ComPtr<IXmlNode> inputTextNode, pAppendedChild;
 
   AssertHRESULT(xml->CreateTextNode(inputString, &inputText));
   AssertHRESULT(inputText.As(&inputTextNode));
@@ -95,5 +148,6 @@ ToastNotificationHandler::OnDismiss(IToastNotification *notification,
                                     IToastDismissedEventArgs* aArgs)
 {
   MetroUtils::FireObserver("metro_native_toast_dismissed", mCookie.get());
+  delete this;
   return S_OK;
 }

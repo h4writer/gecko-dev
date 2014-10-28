@@ -6,8 +6,8 @@
 
 #include "ImageContainer.h"
 #include <string.h>                     // for memcpy, memset
-#include "SharedTextureImage.h"         // for SharedTextureImage
-#include "gfxImageSurface.h"            // for gfxImageSurface
+#include "GLImages.h"                   // for SurfaceTextureImage
+#include "gfx2DGlue.h"
 #include "gfxPlatform.h"                // for gfxPlatform
 #include "gfxUtils.h"                   // for gfxUtils
 #include "mozilla/RefPtr.h"             // for TemporaryRef
@@ -16,9 +16,12 @@
 #include "mozilla/layers/ImageBridgeChild.h"  // for ImageBridgeChild
 #include "mozilla/layers/ImageClient.h"  // for ImageClient
 #include "nsISupportsUtils.h"           // for NS_IF_ADDREF
+#include "YCbCrUtils.h"                 // for YCbCr conversions
 #ifdef MOZ_WIDGET_GONK
 #include "GrallocImages.h"
 #endif
+#include "gfx2DGlue.h"
+#include "mozilla/gfx/2D.h"
 
 #ifdef XP_MACOSX
 #include "mozilla/gfx/QuartzSupport.h"
@@ -33,56 +36,57 @@
 #include "D3D9SurfaceImage.h"
 #endif
 
-using namespace mozilla::ipc;
-using namespace android;
-using mozilla::gfx::DataSourceSurface;
-using mozilla::gfx::SourceSurface;
-
-
 namespace mozilla {
 namespace layers {
 
-class DataSourceSurface;
-class SourceSurface;
+using namespace mozilla::ipc;
+using namespace android;
+using namespace mozilla::gfx;
 
 Atomic<int32_t> Image::sSerialCounter(0);
 
 already_AddRefed<Image>
-ImageFactory::CreateImage(const ImageFormat *aFormats,
-                          uint32_t aNumFormats,
-                          const gfxIntSize &,
+ImageFactory::CreateImage(ImageFormat aFormat,
+                          const gfx::IntSize &,
                           BufferRecycleBin *aRecycleBin)
 {
-  if (!aNumFormats) {
-    return nullptr;
-  }
   nsRefPtr<Image> img;
 #ifdef MOZ_WIDGET_GONK
-  if (FormatInList(aFormats, aNumFormats, GRALLOC_PLANAR_YCBCR)) {
+  if (aFormat == ImageFormat::GRALLOC_PLANAR_YCBCR) {
     img = new GrallocImage();
     return img.forget();
   }
+  if (aFormat == ImageFormat::OVERLAY_IMAGE) {
+    img = new OverlayImage();
+    return img.forget();
+  }
 #endif
-  if (FormatInList(aFormats, aNumFormats, PLANAR_YCBCR)) {
+  if (aFormat == ImageFormat::PLANAR_YCBCR) {
     img = new PlanarYCbCrImage(aRecycleBin);
     return img.forget();
   }
-  if (FormatInList(aFormats, aNumFormats, CAIRO_SURFACE)) {
+  if (aFormat == ImageFormat::CAIRO_SURFACE) {
     img = new CairoImage();
     return img.forget();
   }
-  if (FormatInList(aFormats, aNumFormats, SHARED_TEXTURE)) {
-    img = new SharedTextureImage();
+#ifdef MOZ_WIDGET_ANDROID
+  if (aFormat == ImageFormat::SURFACE_TEXTURE) {
+    img = new SurfaceTextureImage();
+    return img.forget();
+  }
+#endif
+  if (aFormat == ImageFormat::EGLIMAGE) {
+    img = new EGLImageImage();
     return img.forget();
   }
 #ifdef XP_MACOSX
-  if (FormatInList(aFormats, aNumFormats, MAC_IOSURFACE)) {
+  if (aFormat == ImageFormat::MAC_IOSURFACE) {
     img = new MacIOSurfaceImage();
     return img.forget();
   }
 #endif
 #ifdef XP_WIN
-  if (FormatInList(aFormats, aNumFormats, D3D9_RGB32_TEXTURE)) {
+  if (aFormat == ImageFormat::D3D9_RGB32_TEXTURE) {
     img = new D3D9SurfaceImage();
     return img.forget();
   }
@@ -127,19 +131,13 @@ ImageContainer::ImageContainer(int flag)
   mPreviousImagePainted(false),
   mImageFactory(new ImageFactory()),
   mRecycleBin(new BufferRecycleBin()),
-  mRemoteData(nullptr),
-  mRemoteDataMutex(nullptr),
   mCompositionNotifySink(nullptr),
   mImageClient(nullptr)
 {
   if (flag == ENABLE_ASYNC && ImageBridgeChild::IsCreated()) {
     // the refcount of this ImageClient is 1. we don't use a RefPtr here because the refcount
     // of this class must be done on the ImageBridge thread.
-    if (gfxPlatform::GetPlatform()->UseDeprecatedTextures()) {
-      mImageClient = ImageBridgeChild::GetSingleton()->CreateImageClient(BUFFER_IMAGE_BUFFERED).drop();
-    } else {
-      mImageClient = ImageBridgeChild::GetSingleton()->CreateImageClient(BUFFER_IMAGE_SINGLE).drop();
-    }
+    mImageClient = ImageBridgeChild::GetSingleton()->CreateImageClient(CompositableType::BUFFER_IMAGE_SINGLE).drop();
     MOZ_ASSERT(mImageClient);
   }
 }
@@ -152,19 +150,28 @@ ImageContainer::~ImageContainer()
 }
 
 already_AddRefed<Image>
-ImageContainer::CreateImage(const ImageFormat *aFormats,
-                            uint32_t aNumFormats)
+ImageContainer::CreateImage(ImageFormat aFormat)
 {
   ReentrantMonitorAutoEnter mon(mReentrantMonitor);
 
+#ifdef MOZ_WIDGET_GONK
+  if (aFormat == ImageFormat::OVERLAY_IMAGE) {
+    if (mImageClient && mImageClient->GetTextureInfo().mCompositableType != CompositableType::IMAGE_OVERLAY) {
+      // If this ImageContainer is async but the image type mismatch, fix it here
+      if (ImageBridgeChild::IsCreated()) {
+        ImageBridgeChild::DispatchReleaseImageClient(mImageClient);
+        mImageClient = ImageBridgeChild::GetSingleton()->CreateImageClient(CompositableType::IMAGE_OVERLAY).drop();
+      }
+    }
+  }
+#endif
   if (mImageClient) {
-    nsRefPtr<Image> img = mImageClient->CreateImage((uint32_t*)aFormats,
-                                                            aNumFormats);
+    nsRefPtr<Image> img = mImageClient->CreateImage(aFormat);
     if (img) {
       return img.forget();
     }
   }
-  return mImageFactory->CreateImage(aFormats, aNumFormats, mScaleHint, mRecycleBin);
+  return mImageFactory->CreateImage(aFormat, mScaleHint, mRecycleBin);
 }
 
 void
@@ -172,19 +179,8 @@ ImageContainer::SetCurrentImageInternal(Image *aImage)
 {
   ReentrantMonitorAutoEnter mon(mReentrantMonitor);
 
-  if (mRemoteData) {
-    NS_ASSERTION(mRemoteDataMutex, "Should have remote data mutex when having remote data!");
-    mRemoteDataMutex->Lock();
-    // This is important since it ensures we won't change the active image
-    // when we currently have a locked image that depends on mRemoteData.
-  }
-
   mActiveImage = aImage;
   CurrentImageChanged();
-
-  if (mRemoteData) {
-    mRemoteDataMutex->Unlock();
-  }
 }
 
 void
@@ -259,14 +255,6 @@ ImageContainer::HasCurrentImage()
 {
   ReentrantMonitorAutoEnter mon(mReentrantMonitor);
 
-  if (mRemoteData) {
-    CrossProcessMutexAutoLock autoLock(*mRemoteDataMutex);
-    
-    EnsureActiveImage();
-
-    return !!mActiveImage.get();
-  }
-
   return !!mActiveImage.get();
 }
 
@@ -274,53 +262,15 @@ already_AddRefed<Image>
 ImageContainer::LockCurrentImage()
 {
   ReentrantMonitorAutoEnter mon(mReentrantMonitor);
-  
-  if (mRemoteData) {
-    NS_ASSERTION(mRemoteDataMutex, "Should have remote data mutex when having remote data!");
-    mRemoteDataMutex->Lock();
-  }
-
-  EnsureActiveImage();
 
   nsRefPtr<Image> retval = mActiveImage;
   return retval.forget();
 }
 
-already_AddRefed<gfxASurface>
-ImageContainer::LockCurrentAsSurface(gfxIntSize *aSize, Image** aCurrentImage)
+TemporaryRef<gfx::SourceSurface>
+ImageContainer::LockCurrentAsSourceSurface(gfx::IntSize *aSize, Image** aCurrentImage)
 {
   ReentrantMonitorAutoEnter mon(mReentrantMonitor);
-
-  if (mRemoteData) {
-    NS_ASSERTION(mRemoteDataMutex, "Should have remote data mutex when having remote data!");
-    mRemoteDataMutex->Lock();
-
-    EnsureActiveImage();
-
-    if (aCurrentImage) {
-      NS_IF_ADDREF(mActiveImage);
-      *aCurrentImage = mActiveImage.get();
-    }
-
-    if (!mActiveImage) {
-      return nullptr;
-    } 
-
-    if (mActiveImage->GetFormat() == REMOTE_IMAGE_BITMAP) {
-      nsRefPtr<gfxImageSurface> newSurf =
-        new gfxImageSurface(mRemoteData->mBitmap.mData, mRemoteData->mSize, mRemoteData->mBitmap.mStride,
-                            mRemoteData->mFormat == RemoteImageData::BGRX32 ?
-                                                   gfxImageFormatARGB32 :
-                                                   gfxImageFormatRGB24);
-
-      *aSize = newSurf->GetSize();
-    
-      return newSurf.forget();
-    }
-
-    *aSize = mActiveImage->GetSize();
-    return mActiveImage->GetAsSurface();
-  }
 
   if (aCurrentImage) {
     NS_IF_ADDREF(mActiveImage);
@@ -332,117 +282,41 @@ ImageContainer::LockCurrentAsSurface(gfxIntSize *aSize, Image** aCurrentImage)
   }
 
   *aSize = mActiveImage->GetSize();
-  return mActiveImage->GetAsSurface();
+  return mActiveImage->GetAsSourceSurface();
 }
 
 void
 ImageContainer::UnlockCurrentImage()
 {
-  if (mRemoteData) {
-    NS_ASSERTION(mRemoteDataMutex, "Should have remote data mutex when having remote data!");
-    mRemoteDataMutex->Unlock();
-  }
 }
 
-already_AddRefed<gfxASurface>
-ImageContainer::GetCurrentAsSurface(gfxIntSize *aSize)
+TemporaryRef<gfx::SourceSurface>
+ImageContainer::GetCurrentAsSourceSurface(gfx::IntSize *aSize)
 {
   ReentrantMonitorAutoEnter mon(mReentrantMonitor);
 
-  if (mRemoteData) {
-    CrossProcessMutexAutoLock autoLock(*mRemoteDataMutex);
-    EnsureActiveImage();
-
-    if (!mActiveImage)
-      return nullptr;
-    *aSize = mRemoteData->mSize;
-  } else {
-    if (!mActiveImage)
-      return nullptr;
-    *aSize = mActiveImage->GetSize();
-  }
-  return mActiveImage->GetAsSurface();
+  if (!mActiveImage)
+    return nullptr;
+  *aSize = mActiveImage->GetSize();
+  return mActiveImage->GetAsSourceSurface();
 }
 
-gfxIntSize
+gfx::IntSize
 ImageContainer::GetCurrentSize()
 {
   ReentrantMonitorAutoEnter mon(mReentrantMonitor);
 
-  if (mRemoteData) {
-    CrossProcessMutexAutoLock autoLock(*mRemoteDataMutex);
-
-    // We don't need to ensure we have an active image here, as we need to
-    // be in the mutex anyway, and this is easiest to return from there.
-    return mRemoteData->mSize;
-  }
-
   if (!mActiveImage) {
-    return gfxIntSize(0,0);
+    return gfx::IntSize(0, 0);
   }
 
   return mActiveImage->GetSize();
 }
 
-void
-ImageContainer::SetRemoteImageData(RemoteImageData *aData, CrossProcessMutex *aMutex)
-{
-  ReentrantMonitorAutoEnter mon(mReentrantMonitor);
-
-  NS_ASSERTION(!mActiveImage || !aData, "No active image expected when SetRemoteImageData is called with non-NULL aData.");
-  NS_ASSERTION(!mRemoteData || !aData, "No remote data expected when SetRemoteImageData is called with non-NULL aData.");
-
-  mRemoteData = aData;
-
-  if (aData) {
-    memset(aData, 0, sizeof(RemoteImageData));
-  } else {
-    mActiveImage = nullptr;
-  }
-
-  mRemoteDataMutex = aMutex;
-}
-
-void
-ImageContainer::EnsureActiveImage()
-{
-  if (mRemoteData) {
-    if (mRemoteData->mWasUpdated) {
-      mActiveImage = nullptr;
-    }
-
-    if (mRemoteData->mType == RemoteImageData::RAW_BITMAP &&
-        mRemoteData->mBitmap.mData && !mActiveImage) {
-      nsRefPtr<RemoteBitmapImage> newImg = new RemoteBitmapImage();
-      
-      newImg->mFormat = mRemoteData->mFormat;
-      newImg->mData = mRemoteData->mBitmap.mData;
-      newImg->mSize = mRemoteData->mSize;
-      newImg->mStride = mRemoteData->mBitmap.mStride;
-      mRemoteData->mWasUpdated = false;
-              
-      mActiveImage = newImg;
-    }
-#ifdef XP_WIN
-    else if (mRemoteData->mType == RemoteImageData::DXGI_TEXTURE_HANDLE &&
-             mRemoteData->mTextureHandle && !mActiveImage) {
-      nsRefPtr<RemoteDXGITextureImage> newImg = new RemoteDXGITextureImage();
-      newImg->mSize = mRemoteData->mSize;
-      newImg->mHandle = mRemoteData->mTextureHandle;
-      newImg->mFormat = mRemoteData->mFormat;
-      mRemoteData->mWasUpdated = false;
-
-      mActiveImage = newImg;
-    }
-#endif
-  }
-}
-
-
 PlanarYCbCrImage::PlanarYCbCrImage(BufferRecycleBin *aRecycleBin)
-  : Image(nullptr, PLANAR_YCBCR)
+  : Image(nullptr, ImageFormat::PLANAR_YCBCR)
   , mBufferSize(0)
-  , mOffscreenFormat(gfxImageFormatUnknown)
+  , mOffscreenFormat(gfxImageFormat::Unknown)
   , mRecycleBin(aRecycleBin)
 {
 }
@@ -454,15 +328,34 @@ PlanarYCbCrImage::~PlanarYCbCrImage()
   }
 }
 
-uint8_t* 
+size_t
+PlanarYCbCrImage::SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const
+{
+  // Ignoring:
+  // - mData - just wraps mBuffer
+  // - Surfaces should be reported under gfx-surfaces-*:
+  //   - mSourceSurface
+  // - Base class:
+  //   - mImplData is not used
+  // Not owned:
+  // - mRecycleBin
+  size_t size = mBuffer.SizeOfExcludingThis(aMallocSizeOf);
+
+  // Could add in the future:
+  // - mBackendData (from base class)
+
+  return size;
+}
+
+uint8_t*
 PlanarYCbCrImage::AllocateBuffer(uint32_t aSize)
 {
-  return mRecycleBin->GetBuffer(aSize); 
+  return mRecycleBin->GetBuffer(aSize);
 }
 
 static void
 CopyPlane(uint8_t *aDst, const uint8_t *aSrc,
-          const gfxIntSize &aSize, int32_t aStride, int32_t aSkip)
+          const gfx::IntSize &aSize, int32_t aStride, int32_t aSkip)
 {
   if (!aSkip) {
     // Fast path: planar input.
@@ -524,7 +417,7 @@ PlanarYCbCrImage::SetData(const Data &aData)
 gfxImageFormat
 PlanarYCbCrImage::GetOffscreenFormat()
 {
-  return mOffscreenFormat == gfxImageFormatUnknown ?
+  return mOffscreenFormat == gfxImageFormat::Unknown ?
     gfxPlatform::GetPlatform()->GetOffscreenFormat() :
     mOffscreenFormat;
 }
@@ -548,49 +441,86 @@ PlanarYCbCrImage::AllocateAndGetNewBuffer(uint32_t aSize)
   return mBuffer;
 }
 
-already_AddRefed<gfxASurface>
-PlanarYCbCrImage::GetAsSurface()
+TemporaryRef<gfx::SourceSurface>
+PlanarYCbCrImage::GetAsSourceSurface()
 {
-  if (mSurface) {
-    nsRefPtr<gfxASurface> result = mSurface.get();
-    return result.forget();
+  if (mSourceSurface) {
+    return mSourceSurface.get();
   }
 
-  gfxImageFormat format = GetOffscreenFormat();
-  gfxIntSize size(mSize);
-  gfxUtils::GetYCbCrToRGBDestFormatAndSize(mData, format, size);
-  if (size.width > PlanarYCbCrImage::MAX_DIMENSION ||
-      size.height > PlanarYCbCrImage::MAX_DIMENSION) {
+  gfx::IntSize size(mSize);
+  gfx::SurfaceFormat format = gfx::ImageFormatToSurfaceFormat(GetOffscreenFormat());
+  gfx::GetYCbCrToRGBDestFormatAndSize(mData, format, size);
+  if (mSize.width > PlanarYCbCrImage::MAX_DIMENSION ||
+      mSize.height > PlanarYCbCrImage::MAX_DIMENSION) {
     NS_ERROR("Illegal image dest width or height");
     return nullptr;
   }
 
-  nsRefPtr<gfxImageSurface> imageSurface =
-    new gfxImageSurface(mSize, format);
-
-  gfxUtils::ConvertYCbCrToRGB(mData, format, mSize,
-                              imageSurface->Data(),
-                              imageSurface->Stride());
-
-  mSurface = imageSurface;
-
-  return imageSurface.forget();
-}
-
-already_AddRefed<gfxASurface>
-RemoteBitmapImage::GetAsSurface()
-{
-  nsRefPtr<gfxImageSurface> newSurf =
-    new gfxImageSurface(mSize,
-    mFormat == RemoteImageData::BGRX32 ? gfxImageFormatRGB24 : gfxImageFormatARGB32);
-
-  for (int y = 0; y < mSize.height; y++) {
-    memcpy(newSurf->Data() + newSurf->Stride() * y,
-           mData + mStride * y,
-           mSize.width * 4);
+  RefPtr<gfx::DataSourceSurface> surface = gfx::Factory::CreateDataSourceSurface(size, format);
+  if (NS_WARN_IF(!surface)) {
+    return nullptr;
   }
 
-  return newSurf.forget();
+  gfx::ConvertYCbCrToRGB(mData, format, size, surface->GetData(), surface->Stride());
+
+  mSourceSurface = surface;
+
+  return surface.forget();
+}
+
+CairoImage::CairoImage()
+  : Image(nullptr, ImageFormat::CAIRO_SURFACE)
+{}
+
+CairoImage::~CairoImage()
+{
+}
+
+TextureClient*
+CairoImage::GetTextureClient(CompositableClient *aClient)
+{
+  if (!aClient) {
+    return nullptr;
+  }
+
+  CompositableForwarder* forwarder = aClient->GetForwarder();
+  RefPtr<TextureClient> textureClient = mTextureClients.Get(forwarder->GetSerial());
+  if (textureClient) {
+    return textureClient;
+  }
+
+  RefPtr<SourceSurface> surface = GetAsSourceSurface();
+  MOZ_ASSERT(surface);
+  if (!surface) {
+    return nullptr;
+  }
+
+  // gfx::BackendType::NONE means default to content backend
+  textureClient = aClient->CreateTextureClientForDrawing(surface->GetFormat(),
+                                                         surface->GetSize(),
+                                                         gfx::BackendType::NONE,
+                                                         TextureFlags::DEFAULT);
+  if (!textureClient) {
+    return nullptr;
+  }
+  MOZ_ASSERT(textureClient->CanExposeDrawTarget());
+  if (!textureClient->Lock(OpenMode::OPEN_WRITE_ONLY)) {
+    return nullptr;
+  }
+
+  TextureClientAutoUnlock autoUnolck(textureClient);
+  {
+    // We must not keep a reference to the DrawTarget after it has been unlocked.
+    DrawTarget* dt = textureClient->BorrowDrawTarget();
+    if (!dt) {
+      return nullptr;
+    }
+    dt->CopySurface(surface, IntRect(IntPoint(), surface->GetSize()), IntPoint());
+  }
+
+  mTextureClients.Put(forwarder->GetSerial(), textureClient);
+  return textureClient;
 }
 
 } // namespace

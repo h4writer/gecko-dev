@@ -47,7 +47,7 @@ NS_QUERYFRAME_HEAD(nsLegendFrame)
   NS_QUERYFRAME_ENTRY(nsLegendFrame)
 NS_QUERYFRAME_TAIL_INHERITING(nsBlockFrame)
 
-NS_IMETHODIMP 
+void
 nsLegendFrame::Reflow(nsPresContext*          aPresContext,
                      nsHTMLReflowMetrics&     aDesiredSize,
                      const nsHTMLReflowState& aReflowState,
@@ -66,11 +66,10 @@ nsLegendFrame::Reflow(nsPresContext*          aPresContext,
 int32_t nsLegendFrame::GetAlign()
 {
   int32_t intValue = NS_STYLE_TEXT_ALIGN_LEFT;
-#ifdef IBMBIDI
-  if (mParent && NS_STYLE_DIRECTION_RTL == mParent->StyleVisibility()->mDirection) {
+  if (GetParent() &&
+      NS_STYLE_DIRECTION_RTL == GetParent()->StyleVisibility()->mDirection) {
     intValue = NS_STYLE_TEXT_ALIGN_RIGHT;
   }
-#endif // IBMBIDI
 
   nsGenericHTMLElement *content = nsGenericHTMLElement::FromContent(mContent);
 
@@ -83,8 +82,8 @@ int32_t nsLegendFrame::GetAlign()
   return intValue;
 }
 
-#ifdef DEBUG
-NS_IMETHODIMP
+#ifdef DEBUG_FRAME_DUMP
+nsresult
 nsLegendFrame::GetFrameName(nsAString& aResult) const
 {
   return MakeFrameName(NS_LITERAL_STRING("Legend"), aResult);

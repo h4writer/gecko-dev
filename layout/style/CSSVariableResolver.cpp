@@ -23,7 +23,7 @@ namespace mozilla {
 class EnumerateVariableReferencesData
 {
 public:
-  EnumerateVariableReferencesData(CSSVariableResolver& aResolver)
+  explicit EnumerateVariableReferencesData(CSSVariableResolver& aResolver)
     : mResolver(aResolver)
     , mReferences(new bool[aResolver.mVariables.Length()])
   {
@@ -193,6 +193,12 @@ CSSVariableResolver::Resolve(const CSSVariableValues* aInherited,
             mReferences[id].AppendElement(i);
           }
         }
+        // If a variable references itself, it is invalid.  (RemoveCycles
+        // does not check for cycles consisting of a single variable, so we
+        // check here.)
+        if (data.HasReferenceToVariable(id)) {
+          mVariables[id].mValue.Truncate();
+        }
         // Also record whether it referenced any variables that don't exist
         // in the resolver, so that we can ensure we still resolve its value
         // in ResolveVariable, even though its mReferences list is empty.
@@ -225,7 +231,9 @@ CSSVariableResolver::Resolve(const CSSVariableValues* aInherited,
     }
   }
 
+#ifdef DEBUG
   mResolved = true;
+#endif
 }
 
 void

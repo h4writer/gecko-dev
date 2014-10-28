@@ -40,7 +40,7 @@
     #include <sys/stat.h>
     #include <limits.h>
     #include <unistd.h>
-#elif defined(XP_WIN) || defined(XP_OS2)
+#elif defined(XP_WIN)
     #include <io.h>
 #endif
 
@@ -119,7 +119,7 @@ public:
       fd = file;
     }
     nsCString buf(zip);
-    buf.Append(" ");
+    buf.Append(' ');
     buf.Append(entry);
     buf.Append('\n');
     PR_Write(fd, buf.get(), buf.Length());
@@ -171,7 +171,8 @@ nsZipHandle::nsZipHandle()
 NS_IMPL_ADDREF(nsZipHandle)
 NS_IMPL_RELEASE(nsZipHandle)
 
-nsresult nsZipHandle::Init(nsIFile *file, nsZipHandle **ret, PRFileDesc **aFd)
+nsresult nsZipHandle::Init(nsIFile *file, bool aMustCacheFd, nsZipHandle **ret,
+                           PRFileDesc **aFd)
 {
   mozilla::AutoFDClose fd;
   int32_t flags = PR_RDONLY;
@@ -208,12 +209,16 @@ nsresult nsZipHandle::Init(nsIFile *file, nsZipHandle **ret, PRFileDesc **aFd)
   if (aFd) {
     *aFd = fd.forget();
   }
+#else
+  if (aMustCacheFd) {
+    handle->mNSPRFileDesc = fd.forget();
+  }
 #endif
   handle->mMap = map;
   handle->mFile.Init(file);
   handle->mLen = (uint32_t) size;
   handle->mFileData = buf;
-  *ret = handle.forget().get();
+  handle.forget(ret);
   return NS_OK;
 }
 
@@ -235,13 +240,23 @@ nsresult nsZipHandle::Init(nsZipArchive *zip, const char *entry,
   handle->mFile.Init(zip, entry);
   handle->mLen = handle->mBuf->Length();
   handle->mFileData = handle->mBuf->Buffer();
-  *ret = handle.forget().get();
+  handle.forget(ret);
   return NS_OK;
 }
 
 int64_t nsZipHandle::SizeOfMapping()
 {
     return mLen;
+}
+
+nsresult nsZipHandle::GetNSPRFileDesc(PRFileDesc** aNSPRFileDesc)
+{
+  if (!aNSPRFileDesc) {
+    return NS_ERROR_ILLEGAL_VALUE;
+  }
+
+  *aNSPRFileDesc = mNSPRFileDesc;
+  return NS_OK;
 }
 
 nsZipHandle::~nsZipHandle()
@@ -279,14 +294,15 @@ nsresult nsZipArchive::OpenArchive(nsZipHandle *aZipHandle, PRFileDesc *aFd)
   return rv;
 }
 
-nsresult nsZipArchive::OpenArchive(nsIFile *aFile)
+nsresult nsZipArchive::OpenArchive(nsIFile *aFile, bool aMustCacheFd)
 {
   nsRefPtr<nsZipHandle> handle;
 #if defined(XP_WIN)
   mozilla::AutoFDClose fd;
-  nsresult rv = nsZipHandle::Init(aFile, getter_AddRefs(handle), &fd.rwget());
+  nsresult rv = nsZipHandle::Init(aFile, aMustCacheFd, getter_AddRefs(handle),
+                                  &fd.rwget());
 #else
-  nsresult rv = nsZipHandle::Init(aFile, getter_AddRefs(handle));
+  nsresult rv = nsZipHandle::Init(aFile, aMustCacheFd, getter_AddRefs(handle));
 #endif
   if (NS_FAILED(rv))
     return rv;
@@ -763,9 +779,9 @@ nsZipHandle* nsZipArchive::GetFD()
 }
 
 //---------------------------------------------
-// nsZipArchive::GetData
+// nsZipArchive::GetDataOffset
 //---------------------------------------------
-const uint8_t* nsZipArchive::GetData(nsZipItem* aItem)
+uint32_t nsZipArchive::GetDataOffset(nsZipItem* aItem)
 {
   PR_ASSERT (aItem);
 MOZ_WIN_MEM_TRY_BEGIN
@@ -775,12 +791,12 @@ MOZ_WIN_MEM_TRY_BEGIN
   const uint8_t* data = mFd->mFileData;
   uint32_t offset = aItem->LocalOffset();
   if (offset + ZIPLOCAL_SIZE > len)
-    return nullptr;
+    return 0;
 
   // -- check signature before using the structure, in case the zip file is corrupt
   ZipLocal* Local = (ZipLocal*)(data + offset);
   if ((xtolong(Local->signature) != LOCALSIG))
-    return nullptr;
+    return 0;
 
   //-- NOTE: extralen is different in central header and local header
   //--       for archives created using the Unix "zip" utility. To set
@@ -789,11 +805,24 @@ MOZ_WIN_MEM_TRY_BEGIN
             xtoint(Local->filename_len) +
             xtoint(Local->extrafield_len);
 
+  return offset;
+MOZ_WIN_MEM_TRY_CATCH(return 0)
+}
+
+//---------------------------------------------
+// nsZipArchive::GetData
+//---------------------------------------------
+const uint8_t* nsZipArchive::GetData(nsZipItem* aItem)
+{
+  PR_ASSERT (aItem);
+MOZ_WIN_MEM_TRY_BEGIN
+  uint32_t offset = GetDataOffset(aItem);
+
   // -- check if there is enough source data in the file
-  if (offset + aItem->Size() > len)
+  if (!offset || offset + aItem->Size() > mFd->mLen)
     return nullptr;
 
-  return data + offset;
+  return mFd->mFileData + offset;
 MOZ_WIN_MEM_TRY_CATCH(return nullptr)
 }
 

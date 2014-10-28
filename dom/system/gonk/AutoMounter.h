@@ -14,8 +14,9 @@ namespace system {
 
 // AutoMounter modes
 #define AUTOMOUNTER_DISABLE                 0
-#define AUTOMOUNTER_ENABLE                  1
+#define AUTOMOUNTER_ENABLE_UMS              1
 #define AUTOMOUNTER_DISABLE_WHEN_UNPLUGGED  2
+#define AUTOMOUNTER_ENABLE_MTP              3
 
 // Automounter statuses
 #define AUTOMOUNTER_STATUS_DISABLED         0
@@ -67,6 +68,24 @@ SetAutoMounterSharingMode(const nsCString& aVolumeName, bool aAllowSharing);
  */
 void
 AutoMounterFormatVolume(const nsCString& aVolumeName);
+
+/**
+ * Mounts the volume with specified volume name.
+ *
+ * If the volume is already unmounted, automounter
+ * will mount it. Otherwise automounter will skip this.
+ */
+void
+AutoMounterMountVolume(const nsCString& aVolumeName);
+
+/**
+ * Unmounts the volume with specified volume name.
+ *
+ * If the volume is already mounted, automounter
+ * will unmount it. Otherwise automounter will skip this.
+ */
+void
+AutoMounterUnmountVolume(const nsCString& aVolumeName);
 
 /**
  * Shuts down the automounter.

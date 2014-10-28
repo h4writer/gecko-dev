@@ -9,10 +9,6 @@ Cu.import("resource://gre/modules/Services.jsm");
 var StartUI = {
   get startUI() { return document.getElementById("start-container"); },
 
-  get maxResultsPerSection() {
-    return Services.prefs.getIntPref("browser.display.startUI.maxresults");
-  },
-
   get chromeWin() {
     // XXX Not e10s friendly. We use this in a few places.
     return Services.wm.getMostRecentWindow('navigator:browser');
@@ -25,6 +21,12 @@ var StartUI = {
     // Update the input type on our local broadcaster
     document.getElementById("bcast_preciseInput").setAttribute("input",
       this.chromeWin.InputSourceHelper.isPrecise ? "precise" : "imprecise");
+
+    let firstRunCount = Services.prefs.getIntPref("browser.firstrun.count");
+    if (firstRunCount > 0) {
+      document.loadOverlay("chrome://browser/content/FirstRunOverlay.xul", null);
+      Services.prefs.setIntPref("browser.firstrun.count", firstRunCount - 1);
+    }
 
     this._adjustDOMforViewState(this.chromeWin.ContentAreaObserver.viewstate);
 

@@ -12,57 +12,82 @@
 
 #include "nsContainerFrame.h"
 
-nsIFrame* NS_NewFlexContainerFrame(nsIPresShell* aPresShell,
-                                   nsStyleContext* aContext);
+namespace mozilla {
+template <class T> class LinkedList;
+}
+
+nsContainerFrame* NS_NewFlexContainerFrame(nsIPresShell* aPresShell,
+                                           nsStyleContext* aContext);
 
 typedef nsContainerFrame nsFlexContainerFrameSuper;
 
-class FlexItem;
-class FlexLine;
-class FlexboxAxisTracker;
-class MainAxisPositionTracker;
-class SingleLineCrossAxisPositionTracker;
-template <class T> class nsTArray;
-
 class nsFlexContainerFrame : public nsFlexContainerFrameSuper {
+public:
   NS_DECL_FRAMEARENA_HELPERS
   NS_DECL_QUERYFRAME_TARGET(nsFlexContainerFrame)
   NS_DECL_QUERYFRAME
 
   // Factory method:
-  friend nsIFrame* NS_NewFlexContainerFrame(nsIPresShell* aPresShell,
-                                            nsStyleContext* aContext);
+  friend nsContainerFrame* NS_NewFlexContainerFrame(nsIPresShell* aPresShell,
+                                                    nsStyleContext* aContext);
 
-public:
+  // Forward-decls of helper classes
+  class FlexItem;
+  class FlexLine;
+  class FlexboxAxisTracker;
+  struct StrutInfo;
+
   // nsIFrame overrides
   virtual void BuildDisplayList(nsDisplayListBuilder*   aBuilder,
                                 const nsRect&           aDirtyRect,
                                 const nsDisplayListSet& aLists) MOZ_OVERRIDE;
 
-  NS_IMETHOD Reflow(nsPresContext*           aPresContext,
-                    nsHTMLReflowMetrics&     aDesiredSize,
-                    const nsHTMLReflowState& aReflowState,
-                    nsReflowStatus&          aStatus) MOZ_OVERRIDE;
+  virtual void Reflow(nsPresContext*           aPresContext,
+                      nsHTMLReflowMetrics&     aDesiredSize,
+                      const nsHTMLReflowState& aReflowState,
+                      nsReflowStatus&          aStatus) MOZ_OVERRIDE;
 
   virtual nscoord
-    GetMinWidth(nsRenderingContext* aRenderingContext) MOZ_OVERRIDE;
+    GetMinISize(nsRenderingContext* aRenderingContext) MOZ_OVERRIDE;
   virtual nscoord
-    GetPrefWidth(nsRenderingContext* aRenderingContext) MOZ_OVERRIDE;
+    GetPrefISize(nsRenderingContext* aRenderingContext) MOZ_OVERRIDE;
 
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
-#endif // DEBUG
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
+#endif
   // Flexbox-specific public methods
   bool IsHorizontal();
 
 protected:
   // Protected constructor & destructor
-  nsFlexContainerFrame(nsStyleContext* aContext) :
-    nsFlexContainerFrameSuper(aContext),
-    mChildrenHaveBeenReordered(false)
+  explicit nsFlexContainerFrame(nsStyleContext* aContext) :
+    nsFlexContainerFrameSuper(aContext)
   {}
   virtual ~nsFlexContainerFrame();
+
+  /*
+   * This method does the bulk of the flex layout, implementing the algorithm
+   * described at:
+   *   http://dev.w3.org/csswg/css-flexbox/#layout-algorithm
+   * (with a few initialization pieces happening in the caller, Reflow().
+   *
+   * Since this is a helper for Reflow(), this takes all the same parameters
+   * as Reflow(), plus a few more parameters that Reflow() sets up for us.
+   *
+   * (The logic behind the division of work between Reflow and DoFlexLayout is
+   * as follows: DoFlexLayout() begins at the step that we have to jump back
+   * to, if we find any visibility:collapse children, and Reflow() does
+   * everything before that point.)
+   */
+  void DoFlexLayout(nsPresContext*           aPresContext,
+                    nsHTMLReflowMetrics&     aDesiredSize,
+                    const nsHTMLReflowState& aReflowState,
+                    nsReflowStatus&          aStatus,
+                    nscoord aContentBoxMainSize,
+                    nscoord aAvailableHeightForContent,
+                    nsTArray<StrutInfo>& aStruts,
+                    const FlexboxAxisTracker& aAxisTracker);
 
   /**
    * Checks whether our child-frame list "mFrames" is sorted, using the given
@@ -81,40 +106,69 @@ protected:
   void SanityCheckAnonymousFlexItems() const;
 #endif // DEBUG
 
-  FlexItem GenerateFlexItemForChild(nsPresContext* aPresContext,
-                                    nsIFrame* aChildFrame,
-                                    const nsHTMLReflowState& aParentReflowState,
-                                    const FlexboxAxisTracker& aAxisTracker);
+  /*
+   * Returns a new FlexItem for the given child frame, allocated on the heap.
+   * Guaranteed to return non-null. Caller is responsible for managing the
+   * FlexItem's lifetime.
+   *
+   * Before returning, this method also processes the FlexItem to resolve its
+   * flex basis (including e.g. auto-height) as well as to resolve
+   * "min-height:auto", via ResolveAutoFlexBasisAndMinSize(). (Basically, the
+   * returned FlexItem will be ready to participate in the "Resolve the
+   * Flexible Lengths" step of the Flex Layout Algorithm.)
+   */
+  FlexItem* GenerateFlexItemForChild(nsPresContext* aPresContext,
+                                     nsIFrame* aChildFrame,
+                                     const nsHTMLReflowState& aParentReflowState,
+                                     const FlexboxAxisTracker& aAxisTracker);
 
-  // Returns nsresult because we might have to reflow aFlexItem.Frame() (to
-  // get its vertical intrinsic size in a vertical flexbox), and if that
-  // reflow fails (returns a failure nsresult), we want to bail out.
-  nsresult ResolveFlexItemMaxContentSizing(nsPresContext* aPresContext,
-                                           FlexItem& aFlexItem,
-                                           const nsHTMLReflowState& aParentReflowState,
-                                           const FlexboxAxisTracker& aAxisTracker);
+  /**
+   * This method performs a "measuring" reflow to get the content height of
+   * aFlexItem.Frame() (treating it as if it had auto-height), & returns the
+   * resulting height.
+   * (Helper for ResolveAutoFlexBasisAndMinSize().)
+   */
+  nscoord MeasureFlexItemContentHeight(nsPresContext* aPresContext,
+                                       FlexItem& aFlexItem,
+                                       bool aForceVerticalResizeForMeasuringReflow,
+                                       const nsHTMLReflowState& aParentReflowState);
 
-  nsresult GenerateFlexLines(nsPresContext* aPresContext,
-                             const nsHTMLReflowState& aReflowState,
-                             nscoord aContentBoxMainSize,
-                             nscoord aAvailableHeightForContent,
-                             const FlexboxAxisTracker& aAxisTracker,
-                             nsTArray<FlexLine>& aLines);
+  /**
+   * This method resolves an "auto" flex-basis and/or min-main-size value
+   * on aFlexItem, if needed.
+   * (Helper for GenerateFlexItemForChild().)
+   */
+  void ResolveAutoFlexBasisAndMinSize(nsPresContext* aPresContext,
+                                      FlexItem& aFlexItem,
+                                      const nsHTMLReflowState& aItemReflowState,
+                                      const FlexboxAxisTracker& aAxisTracker);
+
+  // Creates FlexItems for all of our child frames, arranged in a list of
+  // FlexLines.  These are returned by reference in |aLines|. Our actual
+  // return value has to be |nsresult|, in case we have to reflow a child
+  // to establish its flex base size and that reflow fails.
+  void GenerateFlexLines(nsPresContext* aPresContext,
+                         const nsHTMLReflowState& aReflowState,
+                         nscoord aContentBoxMainSize,
+                         nscoord aAvailableHeightForContent,
+                         const nsTArray<StrutInfo>& aStruts,
+                         const FlexboxAxisTracker& aAxisTracker,
+                         mozilla::LinkedList<FlexLine>& aLines);
 
   nscoord GetMainSizeFromReflowState(const nsHTMLReflowState& aReflowState,
                                      const FlexboxAxisTracker& aAxisTracker);
 
   nscoord ComputeCrossSize(const nsHTMLReflowState& aReflowState,
                            const FlexboxAxisTracker& aAxisTracker,
-                           const nsTArray<FlexLine>& aLines,
+                           nscoord aSumLineCrossSizes,
                            nscoord aAvailableHeightForContent,
                            bool* aIsDefinite,
                            nsReflowStatus& aStatus);
 
-  nsresult SizeItemInCrossAxis(nsPresContext* aPresContext,
-                               const FlexboxAxisTracker& aAxisTracker,
-                               nsHTMLReflowState& aChildReflowState,
-                               FlexItem& aItem);
+  void SizeItemInCrossAxis(nsPresContext* aPresContext,
+                           const FlexboxAxisTracker& aAxisTracker,
+                           nsHTMLReflowState& aChildReflowState,
+                           FlexItem& aItem);
 
   bool mChildrenHaveBeenReordered; // Have we ever had to reorder our kids
                                    // to satisfy their 'order' values?

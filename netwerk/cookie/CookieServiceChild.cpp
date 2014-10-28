@@ -40,10 +40,10 @@ CookieServiceChild::GetSingleton()
   return gCookieService;
 }
 
-NS_IMPL_ISUPPORTS3(CookieServiceChild,
-                   nsICookieService,
-                   nsIObserver,
-                   nsISupportsWeakReference)
+NS_IMPL_ISUPPORTS(CookieServiceChild,
+                  nsICookieService,
+                  nsIObserver,
+                  nsISupportsWeakReference)
 
 CookieServiceChild::CookieServiceChild()
   : mCookieBehavior(BEHAVIOR_ACCEPT)
@@ -159,7 +159,7 @@ CookieServiceChild::SetCookieStringInternal(nsIURI *aHostURI,
 NS_IMETHODIMP
 CookieServiceChild::Observe(nsISupports     *aSubject,
                             const char      *aTopic,
-                            const PRUnichar *aData)
+                            const char16_t *aData)
 {
   NS_ASSERTION(strcmp(aTopic, NS_PREFBRANCH_PREFCHANGE_TOPIC_ID) == 0,
                "not a pref change topic!");

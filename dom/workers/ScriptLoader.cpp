@@ -6,7 +6,6 @@
 #include "ScriptLoader.h"
 
 #include "nsIChannel.h"
-#include "nsIChannelPolicy.h"
 #include "nsIContentPolicy.h"
 #include "nsIContentSecurityPolicy.h"
 #include "nsIHttpChannel.h"
@@ -17,7 +16,6 @@
 #include "nsIURI.h"
 
 #include "jsapi.h"
-#include "nsChannelPolicy.h"
 #include "nsError.h"
 #include "nsContentPolicyUtils.h"
 #include "nsContentUtils.h"
@@ -35,6 +33,7 @@
 #include "Principal.h"
 #include "WorkerFeature.h"
 #include "WorkerPrivate.h"
+#include "WorkerRunnable.h"
 
 #define MAX_CONCURRENT_SCRIPTS 1000
 
@@ -103,42 +102,59 @@ ChannelFromScriptURL(nsIPrincipal* principal,
     NS_ENSURE_SUCCESS(rv, NS_ERROR_DOM_SECURITY_ERR);
   }
 
-  // Get Content Security Policy from parent document to pass into channel.
-  nsCOMPtr<nsIContentSecurityPolicy> csp;
-  rv = principal->GetCsp(getter_AddRefs(csp));
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  nsCOMPtr<nsIChannelPolicy> channelPolicy;
-  if (csp) {
-    channelPolicy = do_CreateInstance(NSCHANNELPOLICY_CONTRACTID, &rv);
-    NS_ENSURE_SUCCESS(rv, rv);
-
-    rv = channelPolicy->SetContentSecurityPolicy(csp);
-    NS_ENSURE_SUCCESS(rv, rv);
-
-    rv = channelPolicy->SetLoadType(nsIContentPolicy::TYPE_SCRIPT);
-    NS_ENSURE_SUCCESS(rv, rv);
-  }
-
   uint32_t flags = nsIRequest::LOAD_NORMAL | nsIChannel::LOAD_CLASSIFY_URI;
 
   nsCOMPtr<nsIChannel> channel;
-  rv = NS_NewChannel(getter_AddRefs(channel), uri, ios, loadGroup, nullptr,
-                     flags, channelPolicy);
+  // If we have the document, use it
+  if (parentDoc) {
+    rv = NS_NewChannel(getter_AddRefs(channel),
+                       uri,
+                       parentDoc,
+                       nsILoadInfo::SEC_NORMAL,
+                       nsIContentPolicy::TYPE_SCRIPT,
+                       loadGroup,
+                       nullptr, // aCallbacks
+                       flags,
+                       ios);
+  } else {
+    // we should use 'principal' here; needs to be fixed before
+    // we move security checks to AsyncOpen. We use nullPrincipal
+    // for now, because the loadGroup is null and hence causes
+    // GetChannelUriPrincipal to return the wrong principal.
+    nsCOMPtr<nsIPrincipal> nullPrincipal =
+      do_CreateInstance("@mozilla.org/nullprincipal;1", &rv);
+    rv = NS_NewChannel(getter_AddRefs(channel),
+                       uri,
+                       nullPrincipal,
+                       nsILoadInfo::SEC_NORMAL,
+                       nsIContentPolicy::TYPE_SCRIPT,
+                       loadGroup,
+                       nullptr, // aCallbacks
+                       flags,
+                       ios);
+  }
+
   NS_ENSURE_SUCCESS(rv, rv);
 
   channel.forget(aChannel);
   return rv;
 }
 
-class ScriptLoaderRunnable;
-
 struct ScriptLoadInfo
 {
   ScriptLoadInfo()
-  : mLoadResult(NS_ERROR_NOT_INITIALIZED), mExecutionScheduled(false),
-    mExecutionResult(false)
+  : mScriptTextBuf(nullptr)
+  , mScriptTextLength(0)
+  , mLoadResult(NS_ERROR_NOT_INITIALIZED), mExecutionScheduled(false)
+  , mExecutionResult(false)
   { }
+
+  ~ScriptLoadInfo()
+  {
+    if (mScriptTextBuf) {
+      js_free(mScriptTextBuf);
+    }
+  }
 
   bool
   ReadyToExecute()
@@ -148,14 +164,17 @@ struct ScriptLoadInfo
 
   nsString mURL;
   nsCOMPtr<nsIChannel> mChannel;
-  nsString mScriptText;
+  char16_t* mScriptTextBuf;
+  size_t mScriptTextLength;
 
   nsresult mLoadResult;
   bool mExecutionScheduled;
   bool mExecutionResult;
 };
 
-class ScriptExecutorRunnable : public WorkerSyncRunnable
+class ScriptLoaderRunnable;
+
+class ScriptExecutorRunnable MOZ_FINAL : public MainThreadWorkerSyncRunnable
 {
   ScriptLoaderRunnable& mScriptLoader;
   uint32_t mFirstIndex;
@@ -163,38 +182,36 @@ class ScriptExecutorRunnable : public WorkerSyncRunnable
 
 public:
   ScriptExecutorRunnable(ScriptLoaderRunnable& aScriptLoader,
-                         uint32_t aSyncQueueKey, uint32_t aFirstIndex,
+                         nsIEventTarget* aSyncLoopTarget, uint32_t aFirstIndex,
                          uint32_t aLastIndex);
 
-  bool
-  PreDispatch(JSContext* aCx, WorkerPrivate* aWorkerPrivate)
-  {
-    AssertIsOnMainThread();
-    return true;
-  }
+private:
+  ~ScriptExecutorRunnable()
+  { }
+
+  virtual bool
+  WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate) MOZ_OVERRIDE;
+
+  virtual void
+  PostRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate, bool aRunResult)
+          MOZ_OVERRIDE;
+
+  NS_DECL_NSICANCELABLERUNNABLE
 
   void
-  PostDispatch(JSContext* aCx, WorkerPrivate* aWorkerPrivate,
-               bool aDispatchResult)
-  {
-    AssertIsOnMainThread();
-  }
-
-  bool
-  WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate);
-
-  void
-  PostRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate, bool aRunResult);
+  ShutdownScriptLoader(JSContext* aCx,
+                       WorkerPrivate* aWorkerPrivate,
+                       bool aResult);
 };
 
-class ScriptLoaderRunnable : public WorkerFeature,
-                             public nsIRunnable,
-                             public nsIStreamLoaderObserver
+class ScriptLoaderRunnable MOZ_FINAL : public WorkerFeature,
+                                       public nsIRunnable,
+                                       public nsIStreamLoaderObserver
 {
   friend class ScriptExecutorRunnable;
 
   WorkerPrivate* mWorkerPrivate;
-  uint32_t mSyncQueueKey;
+  nsCOMPtr<nsIEventTarget> mSyncLoopTarget;
   nsTArray<ScriptLoadInfo> mLoadInfos;
   bool mIsWorkerScript;
   bool mCanceled;
@@ -204,21 +221,26 @@ public:
   NS_DECL_THREADSAFE_ISUPPORTS
 
   ScriptLoaderRunnable(WorkerPrivate* aWorkerPrivate,
-                       uint32_t aSyncQueueKey,
+                       nsIEventTarget* aSyncLoopTarget,
                        nsTArray<ScriptLoadInfo>& aLoadInfos,
                        bool aIsWorkerScript)
-  : mWorkerPrivate(aWorkerPrivate), mSyncQueueKey(aSyncQueueKey),
+  : mWorkerPrivate(aWorkerPrivate), mSyncLoopTarget(aSyncLoopTarget),
     mIsWorkerScript(aIsWorkerScript), mCanceled(false),
     mCanceledMainThread(false)
   {
     aWorkerPrivate->AssertIsOnWorkerThread();
-    NS_ASSERTION(!aIsWorkerScript || aLoadInfos.Length() == 1, "Bad args!");
+    MOZ_ASSERT(aSyncLoopTarget);
+    MOZ_ASSERT_IF(aIsWorkerScript, aLoadInfos.Length() == 1);
 
     mLoadInfos.SwapElements(aLoadInfos);
   }
 
+private:
+  ~ScriptLoaderRunnable()
+  { }
+
   NS_IMETHOD
-  Run()
+  Run() MOZ_OVERRIDE
   {
     AssertIsOnMainThread();
 
@@ -232,7 +254,7 @@ public:
   NS_IMETHOD
   OnStreamComplete(nsIStreamLoader* aLoader, nsISupports* aContext,
                    nsresult aStatus, uint32_t aStringLen,
-                   const uint8_t* aString)
+                   const uint8_t* aString) MOZ_OVERRIDE
   {
     AssertIsOnMainThread();
 
@@ -256,8 +278,8 @@ public:
     return NS_OK;
   }
 
-  bool
-  Notify(JSContext* aCx, Status aStatus)
+  virtual bool
+  Notify(JSContext* aCx, Status aStatus) MOZ_OVERRIDE
   {
     mWorkerPrivate->AssertIsOnWorkerThread();
 
@@ -268,7 +290,7 @@ public:
         NS_NewRunnableMethod(this, &ScriptLoaderRunnable::CancelMainThread);
       NS_ASSERTION(runnable, "This should never fail!");
 
-      if (NS_FAILED(NS_DispatchToMainThread(runnable, NS_DISPATCH_NORMAL))) {
+      if (NS_FAILED(NS_DispatchToMainThread(runnable))) {
         JS_ReportError(aCx, "Failed to cancel script loader!");
         return false;
       }
@@ -412,10 +434,6 @@ public:
       return aStatus;
     }
 
-    if (!aStringLen) {
-      return NS_OK;
-    }
-
     NS_ASSERTION(aString, "This should never be null!");
 
     // Make sure we're not seeing the result of a 404 or something by checking
@@ -444,12 +462,13 @@ public:
     // per spec. So we explicitly pass in the charset hint.
     rv = nsScriptLoader::ConvertToUTF16(aLoadInfo.mChannel, aString, aStringLen,
                                         NS_LITERAL_STRING("UTF-8"), parentDoc,
-                                        aLoadInfo.mScriptText);
+                                        aLoadInfo.mScriptTextBuf,
+                                        aLoadInfo.mScriptTextLength);
     if (NS_FAILED(rv)) {
       return rv;
     }
 
-    if (aLoadInfo.mScriptText.IsEmpty()) {
+    if (!aLoadInfo.mScriptTextBuf || !aLoadInfo.mScriptTextLength) {
       return NS_ERROR_FAILURE;
     }
 
@@ -491,7 +510,7 @@ public:
       NS_ASSERTION(ssm, "Should never be null!");
 
       nsCOMPtr<nsIPrincipal> channelPrincipal;
-      rv = ssm->GetChannelPrincipal(channel, getter_AddRefs(channelPrincipal));
+      rv = ssm->GetChannelResultPrincipal(channel, getter_AddRefs(channelPrincipal));
       NS_ENSURE_SUCCESS(rv, rv);
 
       // See if this is a resource URI. Since JSMs usually come from resource://
@@ -587,54 +606,36 @@ public:
 
     if (firstIndex != UINT32_MAX && lastIndex != UINT32_MAX) {
       nsRefPtr<ScriptExecutorRunnable> runnable =
-        new ScriptExecutorRunnable(*this, mSyncQueueKey, firstIndex, lastIndex);
+        new ScriptExecutorRunnable(*this, mSyncLoopTarget, firstIndex,
+                                   lastIndex);
       if (!runnable->Dispatch(nullptr)) {
-        NS_ERROR("This should never fail!");
+        MOZ_ASSERT(false, "This should never fail!");
       }
     }
   }
 };
 
-NS_IMPL_ISUPPORTS2(ScriptLoaderRunnable, nsIRunnable, nsIStreamLoaderObserver)
-
-class StopSyncLoopRunnable MOZ_FINAL : public MainThreadSyncRunnable
-{
-public:
-  StopSyncLoopRunnable(WorkerPrivate* aWorkerPrivate,
-                       uint32_t aSyncQueueKey)
-  : MainThreadSyncRunnable(aWorkerPrivate, SkipWhenClearing, aSyncQueueKey,
-                           false)
-  { }
-
-  bool
-  WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate) MOZ_OVERRIDE
-  {
-    aWorkerPrivate->AssertIsOnWorkerThread();
-    aWorkerPrivate->StopSyncLoop(mSyncQueueKey, true);
-    return true;
-  }
-};
+NS_IMPL_ISUPPORTS(ScriptLoaderRunnable, nsIRunnable, nsIStreamLoaderObserver)
 
 class ChannelGetterRunnable MOZ_FINAL : public nsRunnable
 {
   WorkerPrivate* mParentWorker;
-  uint32_t mSyncQueueKey;
+  nsCOMPtr<nsIEventTarget> mSyncLoopTarget;
   const nsAString& mScriptURL;
   nsIChannel** mChannel;
   nsresult mResult;
 
 public:
   ChannelGetterRunnable(WorkerPrivate* aParentWorker,
-                        uint32_t aSyncQueueKey,
+                        nsIEventTarget* aSyncLoopTarget,
                         const nsAString& aScriptURL,
                         nsIChannel** aChannel)
-  : mParentWorker(aParentWorker), mSyncQueueKey(aSyncQueueKey),
+  : mParentWorker(aParentWorker), mSyncLoopTarget(aSyncLoopTarget),
     mScriptURL(aScriptURL), mChannel(aChannel), mResult(NS_ERROR_FAILURE)
   {
     aParentWorker->AssertIsOnWorkerThread();
+    MOZ_ASSERT(aSyncLoopTarget);
   }
-
-  virtual ~ChannelGetterRunnable() { }
 
   NS_IMETHOD
   Run() MOZ_OVERRIDE
@@ -660,8 +661,9 @@ public:
       channel.forget(mChannel);
     }
 
-    nsRefPtr<StopSyncLoopRunnable> runnable =
-      new StopSyncLoopRunnable(mParentWorker, mSyncQueueKey);
+    nsRefPtr<MainThreadStopSyncLoopRunnable> runnable =
+      new MainThreadStopSyncLoopRunnable(mParentWorker,
+                                         mSyncLoopTarget.forget(), true);
     if (!runnable->Dispatch(nullptr)) {
       NS_ERROR("This should never fail!");
     }
@@ -675,19 +677,21 @@ public:
     return mResult;
   }
 
+private:
+  virtual ~ChannelGetterRunnable()
+  { }
 };
 
 ScriptExecutorRunnable::ScriptExecutorRunnable(
                                             ScriptLoaderRunnable& aScriptLoader,
-                                            uint32_t aSyncQueueKey,
+                                            nsIEventTarget* aSyncLoopTarget,
                                             uint32_t aFirstIndex,
                                             uint32_t aLastIndex)
-: WorkerSyncRunnable(aScriptLoader.mWorkerPrivate, aSyncQueueKey),
+: MainThreadWorkerSyncRunnable(aScriptLoader.mWorkerPrivate, aSyncLoopTarget),
   mScriptLoader(aScriptLoader), mFirstIndex(aFirstIndex), mLastIndex(aLastIndex)
 {
-  NS_ASSERTION(aFirstIndex <= aLastIndex, "Bad first index!");
-  NS_ASSERTION(aLastIndex < aScriptLoader.mLoadInfos.Length(),
-               "Bad last index!");
+  MOZ_ASSERT(aFirstIndex <= aLastIndex);
+  MOZ_ASSERT(aLastIndex < aScriptLoader.mLoadInfos.Length());
 }
 
 bool
@@ -710,8 +714,24 @@ ScriptExecutorRunnable::WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate)
   JS::Rooted<JSObject*> global(aCx, JS::CurrentGlobalOrNull(aCx));
   NS_ASSERTION(global, "Must have a global by now!");
 
-  JSPrincipals* principal = GetWorkerPrincipal();
-  NS_ASSERTION(principal, "This should never be null!");
+  // Determine whether we want to be discarding source on this global to save
+  // memory. It would make more sense to do this when we create the global, but
+  // the information behind UsesSystemPrincipal() et al isn't finalized until
+  // the call to SetPrincipal during the first script load. After that, however,
+  // it never changes. So we can just idempotently set the bits here.
+  //
+  // Note that we read a pref that is cached on the main thread. This is benignly
+  // racey.
+  if (xpc::ShouldDiscardSystemSource()) {
+    bool discard = aWorkerPrivate->UsesSystemPrincipal() ||
+                   aWorkerPrivate->IsInPrivilegedApp();
+    JS::CompartmentOptionsRef(global).setDiscardSource(discard);
+  }
+
+  // Similar to the above.
+  if (xpc::ExtraWarningsForSystemJS() && aWorkerPrivate->UsesSystemPrincipal()) {
+      JS::CompartmentOptionsRef(global).extraWarningsOverride().set(true);
+  }
 
   for (uint32_t index = mFirstIndex; index <= mLastIndex; index++) {
     ScriptLoadInfo& loadInfo = loadInfos.ElementAt(index);
@@ -729,10 +749,16 @@ ScriptExecutorRunnable::WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate)
     NS_ConvertUTF16toUTF8 filename(loadInfo.mURL);
 
     JS::CompileOptions options(aCx);
-    options.setPrincipals(principal)
-           .setFileAndLine(filename.get(), 1);
-    if (!JS::Evaluate(aCx, global, options, loadInfo.mScriptText.get(),
-                      loadInfo.mScriptText.Length(), nullptr)) {
+    options.setFileAndLine(filename.get(), 1)
+           .setNoScriptRval(true);
+
+    JS::SourceBufferHolder srcBuf(loadInfo.mScriptTextBuf,
+                                  loadInfo.mScriptTextLength,
+                                  JS::SourceBufferHolder::GiveOwnership);
+    loadInfo.mScriptTextBuf = nullptr;
+    loadInfo.mScriptTextLength = 0;
+
+    if (!JS::Evaluate(aCx, global, options, srcBuf)) {
       return true;
     }
 
@@ -758,9 +784,26 @@ ScriptExecutorRunnable::PostRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate,
       }
     }
 
-    aWorkerPrivate->RemoveFeature(aCx, &mScriptLoader);
-    aWorkerPrivate->StopSyncLoop(mSyncQueueKey, result);
+    ShutdownScriptLoader(aCx, aWorkerPrivate, result);
   }
+}
+
+NS_IMETHODIMP
+ScriptExecutorRunnable::Cancel()
+{
+  if (mLastIndex == mScriptLoader.mLoadInfos.Length() - 1) {
+    ShutdownScriptLoader(mWorkerPrivate->GetJSContext(), mWorkerPrivate, false);
+  }
+  return MainThreadWorkerSyncRunnable::Cancel();
+}
+
+void
+ScriptExecutorRunnable::ShutdownScriptLoader(JSContext* aCx,
+                                             WorkerPrivate* aWorkerPrivate,
+                                             bool aResult)
+{
+  aWorkerPrivate->RemoveFeature(aCx, &mScriptLoader);
+  aWorkerPrivate->StopSyncLoop(mSyncLoopTarget, aResult);
 }
 
 bool
@@ -773,7 +816,7 @@ LoadAllScripts(JSContext* aCx, WorkerPrivate* aWorkerPrivate,
   AutoSyncLoopHolder syncLoop(aWorkerPrivate);
 
   nsRefPtr<ScriptLoaderRunnable> loader =
-    new ScriptLoaderRunnable(aWorkerPrivate, syncLoop.SyncQueueKey(),
+    new ScriptLoaderRunnable(aWorkerPrivate, syncLoop.EventTarget(),
                              aLoadInfos, aIsWorkerScript);
 
   NS_ASSERTION(aLoadInfos.IsEmpty(), "Should have swapped!");
@@ -782,14 +825,14 @@ LoadAllScripts(JSContext* aCx, WorkerPrivate* aWorkerPrivate,
     return false;
   }
 
-  if (NS_FAILED(NS_DispatchToMainThread(loader, NS_DISPATCH_NORMAL))) {
+  if (NS_FAILED(NS_DispatchToMainThread(loader))) {
     NS_ERROR("Failed to dispatch!");
 
     aWorkerPrivate->RemoveFeature(aCx, loader);
     return false;
   }
 
-  return syncLoop.RunAndForget(aCx);
+  return syncLoop.Run();
 }
 
 } /* anonymous namespace */
@@ -832,15 +875,15 @@ ChannelFromScriptURLWorkerThread(JSContext* aCx,
   AutoSyncLoopHolder syncLoop(aParent);
 
   nsRefPtr<ChannelGetterRunnable> getter =
-    new ChannelGetterRunnable(aParent, syncLoop.SyncQueueKey(),
-                              aScriptURL, aChannel);
+    new ChannelGetterRunnable(aParent, syncLoop.EventTarget(), aScriptURL,
+                              aChannel);
 
-  if (NS_FAILED(NS_DispatchToMainThread(getter, NS_DISPATCH_NORMAL))) {
+  if (NS_FAILED(NS_DispatchToMainThread(getter))) {
     NS_ERROR("Failed to dispatch!");
     return NS_ERROR_FAILURE;
   }
 
-  if (!syncLoop.RunAndForget(aCx)) {
+  if (!syncLoop.Run()) {
     return NS_ERROR_FAILURE;
   }
 
@@ -872,8 +915,7 @@ void ReportLoadError(JSContext* aCx, const nsAString& aURL,
       break;
 
     default:
-      JS_ReportError(aCx, "Failed to load script: %s (nsresult = 0x%x)",
-                     url.get(), aLoadResult);
+      JS_ReportError(aCx, "Failed to load script (nsresult = 0x%x)", aLoadResult);
   }
 }
 

@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-const ContentWorker = Object.freeze({
+Object.freeze({
   // TODO: Bug 727854 Use same implementation than common JS modules,
   // i.e. EventEmitter module
 
@@ -41,20 +41,14 @@ const ContentWorker = Object.freeze({
         return [];
       let args = Array.slice(arguments, 1);
       let results = [];
-      for each (let callback in listeners[name]) {
+      for (let callback of listeners[name]) {
         results.push(callback.apply(null, args));
       }
       return results;
     }
-    function hasListenerFor(name) {
-      if (!(name in listeners))
-        return false;
-      return listeners[name].length > 0;
-    }
     return {
       eventEmitter: eventEmitter,
-      emit: onEvent,
-      hasListenerFor: hasListenerFor
+      emit: onEvent
     };
   },
 
@@ -70,19 +64,20 @@ const ContentWorker = Object.freeze({
    *              onChromeEvent --> callback registered through pipe.on
    */
   createPipe: function createPipe(emitToChrome) {
-    function onEvent() {
-      // Convert to real array
-      let args = Array.slice(arguments);
+    let ContentWorker = this;
+    function onEvent(type, ...args) {
       // JSON.stringify is buggy with cross-sandbox values,
       // it may return "{}" on functions. Use a replacer to match them correctly.
-      function replacer(k, v) {
-        return typeof v === "function" ? undefined : v;
-      }
-      let str = JSON.stringify(args, replacer);
+      let replacer = (k, v) =>
+        typeof(v) === "function"
+          ? (type === "console" ? Function.toString.call(v) : void(0))
+          : v;
+
+      let str = JSON.stringify([type, ...args], replacer);
       emitToChrome(str);
     }
 
-    let { eventEmitter, emit, hasListenerFor } =
+    let { eventEmitter, emit } =
       ContentWorker.createEventEmitter(onEvent);
 
     return {
@@ -94,8 +89,7 @@ const ContentWorker = Object.freeze({
         // and modules (only used for context-menu API)
         let args = typeof array == "string" ? JSON.parse(array) : array;
         return emit.apply(null, args);
-      },
-      hasListenerFor: hasListenerFor
+      }
     };
   },
 
@@ -107,7 +101,9 @@ const ContentWorker = Object.freeze({
       error: pipe.emit.bind(null, "console", "error"),
       debug: pipe.emit.bind(null, "console", "debug"),
       exception: pipe.emit.bind(null, "console", "exception"),
-      trace: pipe.emit.bind(null, "console", "trace")
+      trace: pipe.emit.bind(null, "console", "trace"),
+      time: pipe.emit.bind(null, "console", "time"),
+      timeEnd: pipe.emit.bind(null, "console", "timeEnd")
     });
   },
 
@@ -163,7 +159,7 @@ const ContentWorker = Object.freeze({
               fileName: e.fileName,
               lineNumber: e.lineNumber,
               stack: e.stack,
-              name: e.name, 
+              name: e.name,
             };
           }
           pipe.emit('error', wrapper);
@@ -269,6 +265,7 @@ const ContentWorker = Object.freeze({
 
   injectMessageAPI: function injectMessageAPI(exports, pipe, console) {
 
+    let ContentWorker = this;
     let { eventEmitter: port, emit : portEmit } =
       ContentWorker.createEventEmitter(pipe.emit.bind(null, "event"));
     pipe.on("event", portEmit);
@@ -284,24 +281,13 @@ const ContentWorker = Object.freeze({
       value: self
     });
 
-    // Deprecated use of on/postMessage from globals
-    exports.postMessage = function deprecatedPostMessage() {
-      console.error("DEPRECATED: The global `postMessage()` function in " +
-                    "content scripts is deprecated in favor of the " +
-                    "`self.postMessage()` function, which works the same. " +
-                    "Replace calls to `postMessage()` with calls to " +
-                    "`self.postMessage()`." +
-                    "For more info on `self.on`, see " +
-                    "<https://addons.mozilla.org/en-US/developers/docs/sdk/latest/dev-guide/addon-development/web-content.html>.");
-      return self.postMessage.apply(null, arguments);
-    };
     exports.on = function deprecatedOn() {
       console.error("DEPRECATED: The global `on()` function in content " +
                     "scripts is deprecated in favor of the `self.on()` " +
                     "function, which works the same. Replace calls to `on()` " +
                     "with calls to `self.on()`" +
                     "For more info on `self.on`, see " +
-                    "<https://addons.mozilla.org/en-US/developers/docs/sdk/latest/dev-guide/addon-development/web-content.html>.");
+                    "<https://developer.mozilla.org/en-US/Add-ons/SDK/Guides/Content_Scripts/using_postMessage>.");
       return self.on.apply(null, arguments);
     };
 
@@ -318,7 +304,7 @@ const ContentWorker = Object.freeze({
                       "definitions with calls to `self.on('message', " +
                       "function (data){})`. " +
                       "For more info on `self.on`, see " +
-                      "<https://addons.mozilla.org/en-US/developers/docs/sdk/latest/dev-guide/addon-development/web-content.html>.");
+                      "<https://developer.mozilla.org/en-US/Add-ons/SDK/Guides/Content_Scripts/using_postMessage>.");
         onMessage = v;
         if (typeof onMessage == "function")
           self.on("message", onMessage);
@@ -331,7 +317,8 @@ const ContentWorker = Object.freeze({
   },
 
   inject: function (exports, chromeAPI, emitToChrome, options) {
-    let { pipe, onChromeEvent, hasListenerFor } =
+    let ContentWorker = this;
+    let { pipe, onChromeEvent } =
       ContentWorker.createPipe(emitToChrome);
 
     ContentWorker.injectConsole(exports, pipe);
@@ -343,9 +330,6 @@ const ContentWorker = Object.freeze({
 
     Object.freeze( exports.self );
 
-    return {
-      emitToContent: onChromeEvent,
-      hasListenerFor: hasListenerFor
-    };
+    return onChromeEvent;
   }
 });

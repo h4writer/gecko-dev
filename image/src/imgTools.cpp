@@ -6,6 +6,9 @@
 
 #include "imgTools.h"
 
+#include "gfxUtils.h"
+#include "mozilla/gfx/2D.h"
+#include "mozilla/RefPtr.h"
 #include "nsCOMPtr.h"
 #include "nsIDocument.h"
 #include "nsIDOMDocument.h"
@@ -14,10 +17,7 @@
 #include "imgICache.h"
 #include "imgIContainer.h"
 #include "imgIEncoder.h"
-#include "gfxContext.h"
-#include "nsComponentManagerUtils.h"
 #include "nsStreamUtils.h"
-#include "nsNetUtil.h"
 #include "nsContentUtils.h"
 #include "ImageFactory.h"
 #include "Image.h"
@@ -33,7 +33,7 @@ using namespace mozilla::gfx;
 
 
 
-NS_IMPL_ISUPPORTS1(imgTools, imgITools)
+NS_IMPL_ISUPPORTS(imgTools, imgITools)
 
 imgTools::imgTools()
 {
@@ -60,7 +60,7 @@ NS_IMETHODIMP imgTools::DecodeImage(nsIInputStream* aInStr,
                                     imgIContainer **aContainer)
 {
   nsresult rv;
-  nsRefPtr<Image> image;
+  nsRefPtr<image::Image> image;
 
   NS_ENSURE_ARG_POINTER(aInStr);
 
@@ -98,20 +98,75 @@ NS_IMETHODIMP imgTools::DecodeImage(nsIInputStream* aInStr,
   return NS_OK;
 }
 
+/**
+ * This takes a DataSourceSurface rather than a SourceSurface because some
+ * of the callers have a DataSourceSurface and we don't want to call
+ * GetDataSurface on such surfaces since that may incure a conversion to
+ * SurfaceType::DATA which we don't need.
+ */
+static nsresult EncodeImageData(DataSourceSurface* aDataSurface,
+                                const nsACString& aMimeType,
+                                const nsAString& aOutputOptions,
+                                nsIInputStream **aStream)
+{
+  MOZ_ASSERT(aDataSurface->GetFormat() ==  SurfaceFormat::B8G8R8A8,
+             "We're assuming B8G8R8A8");
+
+  // Get an image encoder for the media type
+  nsAutoCString encoderCID(
+    NS_LITERAL_CSTRING("@mozilla.org/image/encoder;2?type=") + aMimeType);
+
+  nsCOMPtr<imgIEncoder> encoder = do_CreateInstance(encoderCID.get());
+  if (!encoder)
+    return NS_IMAGELIB_ERROR_NO_ENCODER;
+
+  DataSourceSurface::MappedSurface map;
+  if (!aDataSurface->Map(DataSourceSurface::MapType::READ, &map)) {
+    return NS_ERROR_FAILURE;
+  }
+
+  IntSize size = aDataSurface->GetSize();
+  uint32_t dataLength = map.mStride * size.height;
+
+  // Encode the bitmap
+  nsresult rv = encoder->InitFromData(map.mData,
+                                      dataLength,
+                                      size.width,
+                                      size.height,
+                                      map.mStride,
+                                      imgIEncoder::INPUT_FORMAT_HOSTARGB,
+                                      aOutputOptions);
+  aDataSurface->Unmap();
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  return CallQueryInterface(encoder, aStream);
+}
 
 NS_IMETHODIMP imgTools::EncodeImage(imgIContainer *aContainer,
                                     const nsACString& aMimeType,
                                     const nsAString& aOutputOptions,
                                     nsIInputStream **aStream)
 {
-  nsresult rv;
-
   // Use frame 0 from the image container.
-  nsRefPtr<gfxImageSurface> frame;
-  rv = GetFirstImageFrame(aContainer, getter_AddRefs(frame));
-  NS_ENSURE_SUCCESS(rv, rv);
+  RefPtr<SourceSurface> frame =
+    aContainer->GetFrame(imgIContainer::FRAME_FIRST,
+                         imgIContainer::FLAG_SYNC_DECODE);
+  NS_ENSURE_TRUE(frame, NS_ERROR_FAILURE);
 
-  return EncodeImageData(frame, aMimeType, aOutputOptions, aStream);
+  RefPtr<DataSourceSurface> dataSurface;
+
+  if (frame->GetFormat() == SurfaceFormat::B8G8R8A8) {
+    dataSurface = frame->GetDataSurface();
+  } else {
+    // Convert format to SurfaceFormat::B8G8R8A8
+    dataSurface = gfxUtils::
+      CopySurfaceToDataSourceSurfaceWithFormat(frame,
+                                               SurfaceFormat::B8G8R8A8);
+  }
+
+  NS_ENSURE_TRUE(dataSurface, NS_ERROR_FAILURE);
+
+  return EncodeImageData(dataSurface, aMimeType, aOutputOptions, aStream);
 }
 
 NS_IMETHODIMP imgTools::EncodeScaledImage(imgIContainer *aContainer,
@@ -130,11 +185,13 @@ NS_IMETHODIMP imgTools::EncodeScaledImage(imgIContainer *aContainer,
   }
 
   // Use frame 0 from the image container.
-  nsRefPtr<gfxImageSurface> frame;
-  nsresult rv = GetFirstImageFrame(aContainer, getter_AddRefs(frame));
-  NS_ENSURE_SUCCESS(rv, rv);
+  RefPtr<SourceSurface> frame =
+    aContainer->GetFrame(imgIContainer::FRAME_FIRST,
+                         imgIContainer::FLAG_SYNC_DECODE);
+  NS_ENSURE_TRUE(frame, NS_ERROR_FAILURE);
 
-  int32_t frameWidth = frame->Width(), frameHeight = frame->Height();
+  int32_t frameWidth = frame->GetSize().width;
+  int32_t frameHeight = frame->GetSize().height;
 
   // If the given width or height is zero we'll replace it with the image's
   // original dimensions.
@@ -144,38 +201,33 @@ NS_IMETHODIMP imgTools::EncodeScaledImage(imgIContainer *aContainer,
     aScaledHeight = frameHeight;
   }
 
-  // Create a temporary image surface
-  nsRefPtr<gfxImageSurface> dest = new gfxImageSurface(gfxIntSize(aScaledWidth, aScaledHeight),
-                                                       gfxImageFormatARGB32);
-  if (gfxPlatform::GetPlatform()->SupportsAzureContent()) {
-    RefPtr<DrawTarget> dt =
-      gfxPlatform::GetPlatform()->CreateDrawTargetForSurface(dest, IntSize(aScaledWidth, aScaledHeight));
-    RefPtr<SourceSurface> source = gfxPlatform::GetPlatform()->GetSourceSurfaceForSurface(dt, frame);
-
-    dt->DrawSurface(source,
-                    Rect(0, 0, aScaledWidth, aScaledHeight),
-                    Rect(0, 0, frameWidth, frameHeight),
-                    DrawSurfaceOptions(),
-                    DrawOptions(1.0f, OP_SOURCE));
-  } else {
-    gfxContext ctx(dest);
-
-    // Set scaling
-    gfxFloat sw = (double) aScaledWidth / frameWidth;
-    gfxFloat sh = (double) aScaledHeight / frameHeight;
-    ctx.Scale(sw, sh);
-
-    // Paint a scaled image
-    ctx.SetOperator(gfxContext::OPERATOR_SOURCE);
-
-    nsRefPtr<gfxPattern> pat = new gfxPattern(frame);
-    pat->SetExtend(gfxPattern::EXTEND_PAD);
-    ctx.SetPattern(pat);
-    ctx.Paint();
+  RefPtr<DataSourceSurface> dataSurface =
+    Factory::CreateDataSourceSurface(IntSize(aScaledWidth, aScaledHeight),
+                                     SurfaceFormat::B8G8R8A8);
+  if (NS_WARN_IF(!dataSurface)) {
+    return NS_ERROR_FAILURE;
   }
 
+  DataSourceSurface::MappedSurface map;
+  if (!dataSurface->Map(DataSourceSurface::MapType::WRITE, &map)) {
+    return NS_ERROR_FAILURE;
+  }
 
-  return EncodeImageData(dest, aMimeType, aOutputOptions, aStream);
+  RefPtr<DrawTarget> dt =
+    Factory::CreateDrawTargetForData(BackendType::CAIRO,
+                                     map.mData,
+                                     dataSurface->GetSize(),
+                                     map.mStride,
+                                     SurfaceFormat::B8G8R8A8);
+  dt->DrawSurface(frame,
+                  Rect(0, 0, aScaledWidth, aScaledHeight),
+                  Rect(0, 0, frameWidth, frameHeight),
+                  DrawSurfaceOptions(),
+                  DrawOptions(1.0f, CompositionOp::OP_SOURCE));
+
+  dataSurface->Unmap();
+
+  return EncodeImageData(dataSurface, aMimeType, aOutputOptions, aStream);
 }
 
 NS_IMETHODIMP imgTools::EncodeCroppedImage(imgIContainer *aContainer,
@@ -200,11 +252,13 @@ NS_IMETHODIMP imgTools::EncodeCroppedImage(imgIContainer *aContainer,
   }
 
   // Use frame 0 from the image container.
-  nsRefPtr<gfxImageSurface> frame;
-  nsresult rv = GetFirstImageFrame(aContainer, getter_AddRefs(frame));
-  NS_ENSURE_SUCCESS(rv, rv);
+  RefPtr<SourceSurface> frame =
+    aContainer->GetFrame(imgIContainer::FRAME_FIRST,
+                         imgIContainer::FLAG_SYNC_DECODE);
+  NS_ENSURE_TRUE(frame, NS_ERROR_FAILURE);
 
-  int32_t frameWidth = frame->Width(), frameHeight = frame->Height();
+  int32_t frameWidth = frame->GetSize().width;
+  int32_t frameHeight = frame->GetSize().height;
 
   // If the given width or height is zero we'll replace it with the image's
   // original dimensions.
@@ -218,76 +272,32 @@ NS_IMETHODIMP imgTools::EncodeCroppedImage(imgIContainer *aContainer,
   NS_ENSURE_ARG(frameWidth >= aOffsetX + aWidth &&
                 frameHeight >= aOffsetY + aHeight);
 
-  // Create a temporary image surface
-  nsRefPtr<gfxImageSurface> dest = new gfxImageSurface(gfxIntSize(aWidth, aHeight),
-                                                       gfxImageFormatARGB32);
-  gfxContext ctx(dest);
-
-  // Set translate
-  ctx.Translate(gfxPoint(-aOffsetX, -aOffsetY));
-
-  // Paint a scaled image
-  ctx.SetOperator(gfxContext::OPERATOR_SOURCE);
-  ctx.SetSource(frame);
-  ctx.Paint();
-
-  return EncodeImageData(dest, aMimeType, aOutputOptions, aStream);
-}
-
-NS_IMETHODIMP imgTools::EncodeImageData(gfxImageSurface *aSurface,
-                                        const nsACString& aMimeType,
-                                        const nsAString& aOutputOptions,
-                                        nsIInputStream **aStream)
-{
-  uint8_t *bitmapData;
-  uint32_t bitmapDataLength, strideSize;
-
-  // Get an image encoder for the media type
-  nsAutoCString encoderCID(
-    NS_LITERAL_CSTRING("@mozilla.org/image/encoder;2?type=") + aMimeType);
-
-  nsCOMPtr<imgIEncoder> encoder = do_CreateInstance(encoderCID.get());
-  if (!encoder)
-    return NS_IMAGELIB_ERROR_NO_ENCODER;
-
-  bitmapData = aSurface->Data();
-  if (!bitmapData)
+  RefPtr<DataSourceSurface> dataSurface =
+    Factory::CreateDataSourceSurface(IntSize(aWidth, aHeight),
+                                     SurfaceFormat::B8G8R8A8,
+                                     /* aZero = */ true);
+  if (NS_WARN_IF(!dataSurface)) {
     return NS_ERROR_FAILURE;
+  }
 
-  strideSize = aSurface->Stride();
+  DataSourceSurface::MappedSurface map;
+  if (!dataSurface->Map(DataSourceSurface::MapType::WRITE, &map)) {
+    return NS_ERROR_FAILURE;
+  }
 
-  int32_t width = aSurface->Width(), height = aSurface->Height();
-  bitmapDataLength = height * strideSize;
+  RefPtr<DrawTarget> dt =
+    Factory::CreateDrawTargetForData(BackendType::CAIRO,
+                                     map.mData,
+                                     dataSurface->GetSize(),
+                                     map.mStride,
+                                     SurfaceFormat::B8G8R8A8);
+  dt->CopySurface(frame,
+                  IntRect(aOffsetX, aOffsetY, aWidth, aHeight),
+                  IntPoint(0, 0));
 
-  // Encode the bitmap
-  nsresult rv = encoder->InitFromData(bitmapData,
-                                      bitmapDataLength,
-                                      width,
-                                      height,
-                                      strideSize,
-                                      imgIEncoder::INPUT_FORMAT_HOSTARGB,
-                                      aOutputOptions);
+  dataSurface->Unmap();
 
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  return CallQueryInterface(encoder, aStream);
-}
-
-NS_IMETHODIMP imgTools::GetFirstImageFrame(imgIContainer *aContainer,
-                                           gfxImageSurface **aSurface)
-{
-  nsRefPtr<gfxASurface> surface;
-  aContainer->GetFrame(imgIContainer::FRAME_FIRST,
-                       imgIContainer::FLAG_SYNC_DECODE,
-                       getter_AddRefs(surface));
-  NS_ENSURE_TRUE(surface, NS_ERROR_NOT_AVAILABLE);
-
-  nsRefPtr<gfxImageSurface> frame(surface->CopyToARGB32ImageSurface());
-  NS_ENSURE_TRUE(frame, NS_ERROR_FAILURE);
-  NS_ENSURE_TRUE(frame->Width() && frame->Height(), NS_ERROR_FAILURE);
-
-  frame.forget(aSurface);
-  return NS_OK;
+  return EncodeImageData(dataSurface, aMimeType, aOutputOptions, aStream);
 }
 
 NS_IMETHODIMP imgTools::CreateScriptedObserver(imgIScriptedNotificationObserver* aInner,

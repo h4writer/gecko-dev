@@ -35,6 +35,8 @@ class LIRGeneratorARM : public LIRGeneratorShared
         return LDefinition::BogusTemp();
     }
 
+    bool needTempForPostBarrier() { return false; }
+
     // x64 has a scratch register, so no need for another temp for dispatch
     // ICs.
     LDefinition tempForDispatchCache(MIRType outputType = MIRType_None) {
@@ -56,6 +58,18 @@ class LIRGeneratorARM : public LIRGeneratorShared
                      MDefinition *src);
     bool lowerForFPU(LInstructionHelper<1, 2, 0> *ins, MDefinition *mir,
                      MDefinition *lhs, MDefinition *rhs);
+
+    bool lowerForCompIx4(LSimdBinaryCompIx4 *ins, MSimdBinaryComp *mir,
+                         MDefinition *lhs, MDefinition *rhs)
+    {
+        return lowerForFPU(ins, mir, lhs, rhs);
+    }
+    bool lowerForCompFx4(LSimdBinaryCompFx4 *ins, MSimdBinaryComp *mir,
+                         MDefinition *lhs, MDefinition *rhs)
+    {
+        return lowerForFPU(ins, mir, lhs, rhs);
+    }
+
     bool lowerForBitAndAndBranch(LBitAndAndBranch *baab, MInstruction *mir,
                                  MDefinition *lhs, MDefinition *rhs);
     bool lowerConstantDouble(double d, MInstruction *ins);
@@ -88,10 +102,12 @@ class LIRGeneratorARM : public LIRGeneratorShared
     bool visitAsmJSStoreHeap(MAsmJSStoreHeap *ins);
     bool visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr *ins);
     bool visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic *ins);
-
-    static bool allowFloat32Optimizations() {
-        return true;
-    }
+    bool visitForkJoinGetSlice(MForkJoinGetSlice *ins);
+    bool visitSimdTernaryBitwise(MSimdTernaryBitwise *ins);
+    bool visitSimdSplatX4(MSimdSplatX4 *ins);
+    bool visitSimdValueX4(MSimdValueX4 *ins);
+    bool visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement *ins);
+    bool visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop *ins);
 };
 
 typedef LIRGeneratorARM LIRGeneratorSpecific;

@@ -13,6 +13,7 @@
 #include "nsContainerFrame.h"
 #include "nsIScrollPositionListener.h"
 #include "nsDisplayList.h"
+#include "nsIAnonymousContentCreator.h"
 
 class nsPresContext;
 class nsRenderingContext;
@@ -24,11 +25,12 @@ class nsRenderingContext;
  * It only supports having a single child frame which must be an area
  * frame
  */
-class nsCanvasFrame : public nsContainerFrame,
-                      public nsIScrollPositionListener
+class nsCanvasFrame MOZ_FINAL : public nsContainerFrame,
+                                public nsIScrollPositionListener,
+                                public nsIAnonymousContentCreator
 {
 public:
-  nsCanvasFrame(nsStyleContext* aContext)
+  explicit nsCanvasFrame(nsStyleContext* aContext)
   : nsContainerFrame(aContext),
     mDoPaintFocus(false),
     mAddedScrollPositionListener(false) {}
@@ -40,26 +42,49 @@ public:
 
   virtual void DestroyFrom(nsIFrame* aDestructRoot) MOZ_OVERRIDE;
 
-  NS_IMETHOD SetInitialChildList(ChildListID     aListID,
-                                 nsFrameList&    aChildList) MOZ_OVERRIDE;
-  NS_IMETHOD AppendFrames(ChildListID     aListID,
-                          nsFrameList&    aFrameList) MOZ_OVERRIDE;
-  NS_IMETHOD InsertFrames(ChildListID     aListID,
-                          nsIFrame*       aPrevFrame,
-                          nsFrameList&    aFrameList) MOZ_OVERRIDE;
-  NS_IMETHOD RemoveFrame(ChildListID     aListID,
-                         nsIFrame*       aOldFrame) MOZ_OVERRIDE;
+#ifdef DEBUG
+  virtual void SetInitialChildList(ChildListID     aListID,
+                                   nsFrameList&    aChildList) MOZ_OVERRIDE;
+  virtual void AppendFrames(ChildListID     aListID,
+                            nsFrameList&    aFrameList) MOZ_OVERRIDE;
+  virtual void InsertFrames(ChildListID     aListID,
+                            nsIFrame*       aPrevFrame,
+                            nsFrameList&    aFrameList) MOZ_OVERRIDE;
+  virtual void RemoveFrame(ChildListID     aListID,
+                           nsIFrame*       aOldFrame) MOZ_OVERRIDE;
+#endif
 
-  virtual nscoord GetMinWidth(nsRenderingContext *aRenderingContext) MOZ_OVERRIDE;
-  virtual nscoord GetPrefWidth(nsRenderingContext *aRenderingContext) MOZ_OVERRIDE;
-  NS_IMETHOD Reflow(nsPresContext*          aPresContext,
-                    nsHTMLReflowMetrics&     aDesiredSize,
-                    const nsHTMLReflowState& aReflowState,
-                    nsReflowStatus&          aStatus) MOZ_OVERRIDE;
+  virtual nscoord GetMinISize(nsRenderingContext *aRenderingContext) MOZ_OVERRIDE;
+  virtual nscoord GetPrefISize(nsRenderingContext *aRenderingContext) MOZ_OVERRIDE;
+  virtual void Reflow(nsPresContext*           aPresContext,
+                      nsHTMLReflowMetrics&     aDesiredSize,
+                      const nsHTMLReflowState& aReflowState,
+                      nsReflowStatus&          aStatus) MOZ_OVERRIDE;
   virtual bool IsFrameOfType(uint32_t aFlags) const MOZ_OVERRIDE
   {
     return nsContainerFrame::IsFrameOfType(aFlags &
              ~(nsIFrame::eCanContainOverflowContainers));
+  }
+
+  // nsIAnonymousContentCreator
+  virtual nsresult CreateAnonymousContent(nsTArray<ContentInfo>& aElements) MOZ_OVERRIDE;
+  virtual void AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements, uint32_t aFilter) MOZ_OVERRIDE;
+
+  // Touch caret handle function
+  mozilla::dom::Element* GetTouchCaretElement() const
+  {
+     return mTouchCaretElement;
+  }
+
+  // Selection Caret Handle function
+  mozilla::dom::Element* GetSelectionCaretsStartElement() const
+  {
+    return mSelectionCaretsStartElement;
+  }
+
+  mozilla::dom::Element* GetSelectionCaretsEndElement() const
+  {
+    return mSelectionCaretsEndElement;
   }
 
   /** SetHasFocus tells the CanvasFrame to draw with focus ring
@@ -84,26 +109,24 @@ public:
    */
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
 
-  virtual nsresult StealFrame(nsPresContext* aPresContext,
-                              nsIFrame*      aChild,
-                              bool           aForceNormal) MOZ_OVERRIDE
+  virtual nsresult StealFrame(nsIFrame* aChild, bool aForceNormal) MOZ_OVERRIDE
   {
     NS_ASSERTION(!aForceNormal, "No-one should be passing this in here");
 
     // nsCanvasFrame keeps overflow container continuations of its child
     // frame in main child list
-    nsresult rv = nsContainerFrame::StealFrame(aPresContext, aChild, true);
+    nsresult rv = nsContainerFrame::StealFrame(aChild, true);
     if (NS_FAILED(rv)) {
-      rv = nsContainerFrame::StealFrame(aPresContext, aChild);
+      rv = nsContainerFrame::StealFrame(aChild);
     }
     return rv;
   }
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
 #endif
-  NS_IMETHOD GetContentForEvent(mozilla::WidgetEvent* aEvent,
-                                nsIContent** aContent) MOZ_OVERRIDE;
+  virtual nsresult GetContentForEvent(mozilla::WidgetEvent* aEvent,
+                                      nsIContent** aContent) MOZ_OVERRIDE;
 
   nsRect CanvasArea() const;
 
@@ -111,6 +134,10 @@ protected:
   // Data members
   bool                      mDoPaintFocus;
   bool                      mAddedScrollPositionListener;
+
+  nsCOMPtr<mozilla::dom::Element> mTouchCaretElement;
+  nsCOMPtr<mozilla::dom::Element> mSelectionCaretsStartElement;
+  nsCOMPtr<mozilla::dom::Element> mSelectionCaretsEndElement;
 };
 
 /**
@@ -128,8 +155,7 @@ public:
   }
 
   virtual bool ComputeVisibility(nsDisplayListBuilder* aBuilder,
-                                 nsRegion* aVisibleRegion,
-                                 const nsRect& aAllowVisibleRegionExpansion) MOZ_OVERRIDE
+                                 nsRegion* aVisibleRegion) MOZ_OVERRIDE
   {
     return NS_GET_A(mColor) > 0;
   }
@@ -172,12 +198,6 @@ public:
     ComputeInvalidationRegionDifference(aBuilder, geometry, aInvalidRegion);
   }
 
-  virtual void NotifyRenderingChanged() MOZ_OVERRIDE
-  {
-    mFrame->Properties().Delete(nsIFrame::CachedBackgroundImage());
-    mFrame->Properties().Delete(nsIFrame::CachedBackgroundImageDT());
-  }
-
   virtual void Paint(nsDisplayListBuilder* aBuilder,
                      nsRenderingContext* aCtx) MOZ_OVERRIDE;
 
@@ -187,6 +207,9 @@ public:
   }
 
   NS_DISPLAY_DECL_NAME("CanvasBackgroundColor", TYPE_CANVAS_BACKGROUND_COLOR)
+#ifdef MOZ_DUMP_PAINTING
+  virtual void WriteDebugInfo(nsACString& aTo) MOZ_OVERRIDE;
+#endif
 
 private:
   nscolor mColor;
@@ -201,7 +224,13 @@ public:
 
   virtual void Paint(nsDisplayListBuilder* aBuilder, nsRenderingContext* aCtx) MOZ_OVERRIDE;
 
-  virtual bool ShouldFixToViewport(nsDisplayListBuilder* aBuilder) MOZ_OVERRIDE
+  virtual void NotifyRenderingChanged() MOZ_OVERRIDE
+  {
+    mFrame->Properties().Delete(nsIFrame::CachedBackgroundImage());
+    mFrame->Properties().Delete(nsIFrame::CachedBackgroundImageDT());
+  }
+
+  virtual bool ShouldFixToViewport(LayerManager* aManager) MOZ_OVERRIDE
   {
     // Put background-attachment:fixed canvas background images in their own
     // compositing layer. Since we know their background painting area can't

@@ -6,9 +6,8 @@
 #ifndef ROTATEDBUFFER_H_
 #define ROTATEDBUFFER_H_
 
+#include "gfxTypes.h"
 #include <stdint.h>                     // for uint32_t
-#include "gfxASurface.h"                // for gfxASurface, etc
-#include "gfxContext.h"                 // for gfxContext
 #include "mozilla/Assertions.h"         // for MOZ_ASSERT, etc
 #include "mozilla/RefPtr.h"             // for RefPtr, TemporaryRef
 #include "mozilla/gfx/2D.h"             // for DrawTarget, etc
@@ -16,13 +15,12 @@
 #include "nsAutoPtr.h"                  // for nsRefPtr
 #include "nsCOMPtr.h"                   // for already_AddRefed
 #include "nsDebug.h"                    // for NS_RUNTIMEABORT
+#include "nsISupportsImpl.h"            // for MOZ_COUNT_CTOR, etc
 #include "nsPoint.h"                    // for nsIntPoint
 #include "nsRect.h"                     // for nsIntRect
 #include "nsRegion.h"                   // for nsIntRegion
-#include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
 #include "LayersTypes.h"
 
-struct gfxMatrix;
 struct nsIntSize;
 
 namespace mozilla {
@@ -32,9 +30,8 @@ class Matrix;
 
 namespace layers {
 
-class DeprecatedTextureClient;
 class TextureClient;
-class ThebesLayer;
+class PaintedLayer;
 
 /**
  * This is a cairo/Thebes surface, but with a literal twist. Scrolling
@@ -55,12 +52,9 @@ class RotatedBuffer {
 public:
   typedef gfxContentType ContentType;
 
-  RotatedBuffer(gfx::DrawTarget* aDTBuffer, gfx::DrawTarget* aDTBufferOnWhite,
-                const nsIntRect& aBufferRect,
+  RotatedBuffer(const nsIntRect& aBufferRect,
                 const nsIntPoint& aBufferRotation)
-    : mDTBuffer(aDTBuffer)
-    , mDTBufferOnWhite(aDTBufferOnWhite)
-    , mBufferRect(aBufferRect)
+    : mBufferRect(aBufferRect)
     , mBufferRotation(aBufferRotation)
     , mDidSelfCopy(false)
   { }
@@ -76,9 +70,11 @@ public:
     BUFFER_WHITE, // The buffer with white background, only valid with component alpha.
     BUFFER_BOTH // The combined black/white buffers, only valid for writing operations, not reading.
   };
+  // It is the callers repsonsibility to ensure aTarget is flushed after calling
+  // this method.
   void DrawBufferWithRotation(gfx::DrawTarget* aTarget, ContextSource aSource,
                               float aOpacity = 1.0,
-                              gfx::CompositionOp aOperator = gfx::OP_OVER,
+                              gfx::CompositionOp aOperator = gfx::CompositionOp::OP_OVER,
                               gfx::SourceSurface* aMask = nullptr,
                               const gfx::Matrix* aMaskTransform = nullptr) const;
 
@@ -90,8 +86,10 @@ public:
   const nsIntRect& BufferRect() const { return mBufferRect; }
   const nsIntPoint& BufferRotation() const { return mBufferRotation; }
 
-  virtual bool HaveBuffer() const { return mDTBuffer; }
-  virtual bool HaveBufferOnWhite() const { return mDTBufferOnWhite; }
+  virtual bool HaveBuffer() const = 0;
+  virtual bool HaveBufferOnWhite() const = 0;
+
+  virtual TemporaryRef<gfx::SourceSurface> GetSourceSurface(ContextSource aSource) const = 0;
 
 protected:
 
@@ -117,9 +115,7 @@ protected:
                           gfx::SourceSurface* aMask,
                           const gfx::Matrix* aMaskTransform) const;
 
-  RefPtr<gfx::DrawTarget> mDTBuffer;
-  RefPtr<gfx::DrawTarget> mDTBufferOnWhite;
-  /** The area of the ThebesLayer that is covered by the buffer as a whole */
+  /** The area of the PaintedLayer that is covered by the buffer as a whole */
   nsIntRect             mBufferRect;
   /**
    * The x and y rotation of the buffer. Conceptually the buffer
@@ -137,18 +133,55 @@ protected:
   bool                  mDidSelfCopy;
 };
 
+class SourceRotatedBuffer : public RotatedBuffer
+{
+public:
+  SourceRotatedBuffer(gfx::SourceSurface* aSource, gfx::SourceSurface* aSourceOnWhite,
+                      const nsIntRect& aBufferRect,
+                      const nsIntPoint& aBufferRotation)
+    : RotatedBuffer(aBufferRect, aBufferRotation)
+    , mSource(aSource)
+    , mSourceOnWhite(aSourceOnWhite)
+  { }
+
+  virtual TemporaryRef<gfx::SourceSurface> GetSourceSurface(ContextSource aSource) const;
+
+  virtual bool HaveBuffer() const { return !!mSource; }
+  virtual bool HaveBufferOnWhite() const { return !!mSourceOnWhite; }
+
+private:
+  RefPtr<gfx::SourceSurface> mSource;
+  RefPtr<gfx::SourceSurface> mSourceOnWhite;
+};
+
+// Mixin class for classes which need logic for loaning out a draw target.
+// See comments on BorrowDrawTargetForQuadrantUpdate.
+class BorrowDrawTarget
+{
+protected:
+  void ReturnDrawTarget(gfx::DrawTarget*& aReturned);
+
+  // The draw target loaned by BorrowDrawTargetForQuadrantUpdate. It should not
+  // be used, we just keep a reference to ensure it is kept alive and so we can
+  // correctly restore state when it is returned.
+  RefPtr<gfx::DrawTarget> mLoanedDrawTarget;
+  gfx::Matrix mLoanedTransform;
+};
+
 /**
- * This class encapsulates the buffer used to retain ThebesLayer contents,
+ * This class encapsulates the buffer used to retain PaintedLayer contents,
  * i.e., the contents of the layer's GetVisibleRegion().
  */
-class RotatedContentBuffer : public RotatedBuffer {
+class RotatedContentBuffer : public RotatedBuffer
+                           , public BorrowDrawTarget
+{
 public:
   typedef gfxContentType ContentType;
 
   /**
    * Controls the size of the backing buffer of this.
    * - SizedToVisibleBounds: the backing buffer is exactly the same
-   *   size as the bounds of ThebesLayer's visible region
+   *   size as the bounds of PaintedLayer's visible region
    * - ContainsVisibleBounds: the backing buffer is large enough to
    *   fit visible bounds.  May be larger.
    */
@@ -157,10 +190,8 @@ public:
     ContainsVisibleBounds
   };
 
-  RotatedContentBuffer(BufferSizePolicy aBufferSizePolicy)
-    : mDeprecatedBufferProvider(nullptr)
-    , mDeprecatedBufferProviderOnWhite(nullptr)
-    , mBufferProvider(nullptr)
+  explicit RotatedContentBuffer(BufferSizePolicy aBufferSizePolicy)
+    : mBufferProvider(nullptr)
     , mBufferProviderOnWhite(nullptr)
     , mBufferSizePolicy(aBufferSizePolicy)
   {
@@ -179,15 +210,13 @@ public:
   {
     mDTBuffer = nullptr;
     mDTBufferOnWhite = nullptr;
-    mDeprecatedBufferProvider = nullptr;
-    mDeprecatedBufferProviderOnWhite = nullptr;
     mBufferProvider = nullptr;
     mBufferProviderOnWhite = nullptr;
     mBufferRect.SetEmpty();
   }
 
   /**
-   * This is returned by BeginPaint. The caller should draw into mContext.
+   * This is returned by BeginPaint. The caller should draw into mTarget.
    * mRegionToDraw must be drawn. mRegionToInvalidate has been invalidated
    * by RotatedContentBuffer and must be redrawn on the screen.
    * mRegionToInvalidate is set when the buffer has changed from
@@ -197,25 +226,32 @@ public:
    */
   struct PaintState {
     PaintState()
-      : mDidSelfCopy(false)
+      : mRegionToDraw()
+      , mRegionToInvalidate()
+      , mMode(SurfaceMode::SURFACE_NONE)
+      , mClip(DrawRegionClip::NONE)
+      , mContentType(gfxContentType::SENTINEL)
+      , mDidSelfCopy(false)
     {}
 
-    nsRefPtr<gfxContext> mContext;
     nsIntRegion mRegionToDraw;
     nsIntRegion mRegionToInvalidate;
-    bool mDidSelfCopy;
+    SurfaceMode mMode;
     DrawRegionClip mClip;
+    ContentType mContentType;
+    bool mDidSelfCopy;
   };
 
   enum {
     PAINT_WILL_RESAMPLE = 0x01,
-    PAINT_NO_ROTATION = 0x02
+    PAINT_NO_ROTATION = 0x02,
+    PAINT_CAN_DRAW_ROTATED = 0x04
   };
   /**
    * Start a drawing operation. This returns a PaintState describing what
    * needs to be drawn to bring the buffer up to date in the visible region.
    * This queries aLayer to get the currently valid and visible regions.
-   * The returned mContext may be null if mRegionToDraw is empty.
+   * The returned mTarget may be null if mRegionToDraw is empty.
    * Otherwise it must not be null.
    * mRegionToInvalidate will contain mRegionToDraw.
    * @param aFlags when PAINT_WILL_RESAMPLE is passed, this indicates that
@@ -226,9 +262,44 @@ public:
    * make the entire buffer contents valid (since we don't want to sample
    * invalid pixels outside the visible region, if the visible region doesn't
    * fill the buffer bounds).
+   * PAINT_CAN_DRAW_ROTATED can be passed if the caller supports drawing
+   * rotated content that crosses the physical buffer boundary. The caller
+   * will need to call BorrowDrawTargetForPainting multiple times to achieve
+   * this.
    */
-  PaintState BeginPaint(ThebesLayer* aLayer, ContentType aContentType,
+  PaintState BeginPaint(PaintedLayer* aLayer,
                         uint32_t aFlags);
+
+  struct DrawIterator {
+    friend class RotatedContentBuffer;
+    friend class ContentClientIncremental;
+    DrawIterator()
+      : mCount(0)
+    {}
+
+    nsIntRegion mDrawRegion;
+
+  private:
+    uint32_t mCount;
+  };
+
+  /**
+   * Fetch a DrawTarget for rendering. The DrawTarget remains owned by
+   * this. See notes on BorrowDrawTargetForQuadrantUpdate.
+   * May return null. If the return value is non-null, it must be
+   * 'un-borrowed' using ReturnDrawTarget.
+   *
+   * If PAINT_CAN_DRAW_ROTATED was specified for BeginPaint, then the caller
+   * must call this function repeatedly (with an iterator) until it returns
+   * nullptr. The caller should draw the mDrawRegion of the iterator instead
+   * of mRegionToDraw in the PaintState.
+   *
+   * @param aPaintState Paint state data returned by a call to BeginPaint
+   * @param aIter Paint state iterator. Only required if PAINT_CAN_DRAW_ROTATED
+   * was specified to BeginPaint.
+   */
+  gfx::DrawTarget* BorrowDrawTargetForPainting(PaintState& aPaintState,
+                                               DrawIterator* aIter = nullptr);
 
   enum {
     ALLOW_REPEAT = 0x01,
@@ -255,76 +326,27 @@ public:
   gfx::DrawTarget* GetDTBuffer() { return mDTBuffer; }
   gfx::DrawTarget* GetDTBufferOnWhite() { return mDTBufferOnWhite; }
 
+  virtual TemporaryRef<gfx::SourceSurface> GetSourceSurface(ContextSource aSource) const;
+
   /**
    * Complete the drawing operation. The region to draw must have been
    * drawn before this is called. The contents of the buffer are drawn
    * to aTarget.
    */
-  void DrawTo(ThebesLayer* aLayer, gfxContext* aTarget, float aOpacity,
-              gfxASurface* aMask, const gfxMatrix* aMaskTransform);
+  void DrawTo(PaintedLayer* aLayer,
+              gfx::DrawTarget* aTarget,
+              float aOpacity,
+              gfx::CompositionOp aOp,
+              gfx::SourceSurface* aMask,
+              const gfx::Matrix* aMaskTransform);
 
 protected:
-  TemporaryRef<gfx::DrawTarget>
-  SetDTBuffer(gfx::DrawTarget* aBuffer,
-              const nsIntRect& aBufferRect,
-              const nsIntPoint& aBufferRotation)
-  {
-    RefPtr<gfx::DrawTarget> tmp = mDTBuffer.forget();
-    mDTBuffer = aBuffer;
-    mBufferRect = aBufferRect;
-    mBufferRotation = aBufferRotation;
-    return tmp.forget();
-  }
-
-  TemporaryRef<gfx::DrawTarget>
-  SetDTBufferOnWhite(gfx::DrawTarget* aBuffer)
-  {
-    RefPtr<gfx::DrawTarget> tmp = mDTBufferOnWhite.forget();
-    mDTBufferOnWhite = aBuffer;
-    return tmp.forget();
-  }
-
-  /**
-   * Set the texture client only.  This is used with surfaces that
-   * require explicit lock/unlock, which |aClient| is used to do on
-   * demand in this code.
-   *
-   * It's the caller's responsibility to ensure |aClient| is valid
-   * for the duration of operations it requests of this
-   * RotatedContentBuffer.  It's also the caller's responsibility to
-   * unset the provider when inactive, by calling
-   * SetBufferProvider(nullptr).
-   */
-  void SetDeprecatedBufferProvider(DeprecatedTextureClient* aClient)
-  {
-    // Only this buffer provider can give us a buffer.  If we
-    // already have one, something has gone wrong.
-    MOZ_ASSERT((!aClient || !mDTBuffer) && !mBufferProvider);
-
-    mDeprecatedBufferProvider = aClient;
-    if (!mDeprecatedBufferProvider) {
-      mDTBuffer = nullptr;
-    } 
-  }
-  
-  void SetDeprecatedBufferProviderOnWhite(DeprecatedTextureClient* aClient)
-  {
-    // Only this buffer provider can give us a buffer.  If we
-    // already have one, something has gone wrong.
-    MOZ_ASSERT((!aClient || !mDTBufferOnWhite) && !mBufferProviderOnWhite);
-
-    mDeprecatedBufferProviderOnWhite = aClient;
-    if (!mDeprecatedBufferProviderOnWhite) {
-      mDTBufferOnWhite = nullptr;
-    }
-  }
-
   // new texture client versions
   void SetBufferProvider(TextureClient* aClient)
   {
     // Only this buffer provider can give us a buffer.  If we
     // already have one, something has gone wrong.
-    MOZ_ASSERT((!aClient || !mDTBuffer) && !mDeprecatedBufferProvider);
+    MOZ_ASSERT(!aClient || !mDTBuffer);
 
     mBufferProvider = aClient;
     if (!mBufferProvider) {
@@ -336,24 +358,33 @@ protected:
   {
     // Only this buffer provider can give us a buffer.  If we
     // already have one, something has gone wrong.
-    MOZ_ASSERT((!aClient || !mDTBufferOnWhite) && !mDeprecatedBufferProviderOnWhite);
+    MOZ_ASSERT(!aClient || !mDTBufferOnWhite);
 
     mBufferProviderOnWhite = aClient;
     if (!mBufferProviderOnWhite) {
       mDTBufferOnWhite = nullptr;
-    } 
+    }
   }
 
   /**
-   * Get a context at the specified resolution for updating |aBounds|,
+   * Get a draw target at the specified resolution for updating |aBounds|,
    * which must be contained within a single quadrant.
    *
-   * Optionally returns the TopLeft coordinate of the quadrant being drawn to.
+   * The result should only be held temporarily by the caller (it will be kept
+   * alive by this). Once used it should be returned using ReturnDrawTarget.
+   * BorrowDrawTargetForQuadrantUpdate may not be called more than once without
+   * first calling ReturnDrawTarget.
+   *
+   * ReturnDrawTarget will restore the transform on the draw target. But it is
+   * the callers responsibility to restore the clip. The caller should flush the
+   * draw target, if necessary.
    */
-  already_AddRefed<gfxContext>
-  GetContextForQuadrantUpdate(const nsIntRect& aBounds, ContextSource aSource, nsIntPoint* aTopLeft = nullptr);
+  gfx::DrawTarget*
+  BorrowDrawTargetForQuadrantUpdate(const nsIntRect& aBounds,
+                                    ContextSource aSource,
+                                    DrawIterator* aIter);
 
-  static bool IsClippingCheap(gfxContext* aTarget, const nsIntRegion& aRegion);
+  static bool IsClippingCheap(gfx::DrawTarget* aTarget, const nsIntRegion& aRegion);
 
 protected:
   /**
@@ -367,6 +398,10 @@ protected:
    */
   bool EnsureBuffer();
   bool EnsureBufferOnWhite();
+
+  // Flush our buffers if they are mapped.
+  void FlushBuffers();
+
   /**
    * True if we have a buffer where we can get it (but not necessarily
    * mapped currently).
@@ -375,12 +410,22 @@ protected:
   virtual bool HaveBufferOnWhite() const;
 
   /**
+   * Any actions that should be performed at the last moment before we begin
+   * rendering the next frame. I.e., after we calculate what we will draw,
+   * but before we rotate the buffer and possibly create new buffers.
+   * aRegionToDraw is the region which is guaranteed to be overwritten when
+   * drawing the next frame.
+   */
+  virtual void FinalizeFrame(const nsIntRegion& aRegionToDraw) {}
+
+  RefPtr<gfx::DrawTarget> mDTBuffer;
+  RefPtr<gfx::DrawTarget> mDTBufferOnWhite;
+
+  /**
    * These members are only set transiently.  They're used to map mDTBuffer
    * when we're using surfaces that require explicit map/unmap. Only one
    * may be used at a time.
    */
-  DeprecatedTextureClient* mDeprecatedBufferProvider;
-  DeprecatedTextureClient* mDeprecatedBufferProviderOnWhite;
   TextureClient* mBufferProvider;
   TextureClient* mBufferProviderOnWhite;
 

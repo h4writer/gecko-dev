@@ -12,15 +12,23 @@ const PREF_EM_CHECK_UPDATE_SECURITY   = "extensions.checkUpdateSecurity";
 const PREF_EM_STRICT_COMPATIBILITY    = "extensions.strictCompatibility";
 const PREF_EM_MIN_COMPAT_APP_VERSION      = "extensions.minCompatibleAppVersion";
 const PREF_EM_MIN_COMPAT_PLATFORM_VERSION = "extensions.minCompatiblePlatformVersion";
+const PREF_GETADDONS_BYIDS               = "extensions.getAddons.get.url";
+const PREF_GETADDONS_BYIDS_PERFORMANCE   = "extensions.getAddons.getWithPerformance.url";
 
 // Forcibly end the test if it runs longer than 15 minutes
 const TIMEOUT_MS = 900000;
 
-Components.utils.import("resource://gre/modules/AddonRepository.jsm");
+Components.utils.import("resource://gre/modules/addons/AddonRepository.jsm");
 Components.utils.import("resource://gre/modules/XPCOMUtils.jsm");
 Components.utils.import("resource://gre/modules/FileUtils.jsm");
 Components.utils.import("resource://gre/modules/Services.jsm");
 Components.utils.import("resource://gre/modules/NetUtil.jsm");
+Components.utils.import("resource://gre/modules/Promise.jsm");
+Components.utils.import("resource://gre/modules/Task.jsm");
+Components.utils.import("resource://gre/modules/osfile.jsm");
+Components.utils.import("resource://gre/modules/AsyncShutdown.jsm");
+
+Services.prefs.setBoolPref("toolkit.osfile.log", true);
 
 // We need some internal bits of AddonManager
 let AMscope = Components.utils.import("resource://gre/modules/AddonManager.jsm");
@@ -30,13 +38,18 @@ let AddonManagerInternal = AMscope.AddonManagerInternal;
 // down AddonManager from the test
 let MockAsyncShutdown = {
   hook: null,
+  status: null,
   profileBeforeChange: {
-    addBlocker: function(aName, aBlocker) {
+    addBlocker: function(aName, aBlocker, aOptions) {
       do_print("Mock profileBeforeChange blocker for '" + aName + "'");
       MockAsyncShutdown.hook = aBlocker;
+      MockAsyncShutdown.status = aOptions.fetchState;
     }
-  }
+  },
+  // We can use the real Barrier
+  Barrier: AsyncShutdown.Barrier
 };
+
 AMscope.AsyncShutdown = MockAsyncShutdown;
 
 var gInternalManager = null;
@@ -392,6 +405,25 @@ function startupManager(aAppChanged) {
 }
 
 /**
+ * Helper to spin the event loop until a promise resolves or rejects
+ */
+function loopUntilPromise(aPromise) {
+  let done = false;
+  aPromise.then(
+    () => done = true,
+    err => {
+      do_report_unexpected_exception(err);
+      done = true;
+    });
+
+  let thr = Services.tm.mainThread;
+
+  while (!done) {
+    thr.processNextEvent(true);
+  }
+}
+
+/**
  * Restarts the add-on manager as if the host application was restarted.
  *
  * @param  aNewVersion
@@ -400,50 +432,58 @@ function startupManager(aAppChanged) {
  *         the application version has changed.
  */
 function restartManager(aNewVersion) {
-  shutdownManager();
-  if (aNewVersion) {
-    gAppInfo.version = aNewVersion;
-    startupManager(true);
-  }
-  else {
-    startupManager(false);
-  }
+  loopUntilPromise(promiseRestartManager(aNewVersion));
+}
+
+function promiseRestartManager(aNewVersion) {
+  return promiseShutdownManager()
+    .then(null, err => do_report_unexpected_exception(err))
+    .then(() => {
+      if (aNewVersion) {
+        gAppInfo.version = aNewVersion;
+        startupManager(true);
+      }
+      else {
+        startupManager(false);
+      }
+    });
 }
 
 function shutdownManager() {
-  if (!gInternalManager)
-    return;
+  loopUntilPromise(promiseShutdownManager());
+}
 
-  let shutdownDone = false;
-
-  Services.obs.notifyObservers(null, "quit-application-granted", null);
-  MockAsyncShutdown.hook().then(
-    () => shutdownDone = true,
-    err => shutdownDone = true);
-
-  let thr = Services.tm.mainThread;
-
-  // Wait until we observe the shutdown notifications
-  while (!shutdownDone) {
-    thr.processNextEvent(true);
+function promiseShutdownManager() {
+  if (!gInternalManager) {
+    return Promise.resolve(false);
   }
 
-  gInternalManager = null;
+  let hookErr = null;
+  Services.obs.notifyObservers(null, "quit-application-granted", null);
+  return MockAsyncShutdown.hook()
+    .then(null, err => hookErr = err)
+    .then( () => {
+      gInternalManager = null;
 
-  // Load the add-ons list as it was after application shutdown
-  loadAddonsList();
+      // Load the add-ons list as it was after application shutdown
+      loadAddonsList();
 
-  // Clear any crash report annotations
-  gAppInfo.annotations = {};
+      // Clear any crash report annotations
+      gAppInfo.annotations = {};
 
-  // Force the XPIProvider provider to reload to better
-  // simulate real-world usage.
-  let XPIscope = Components.utils.import("resource://gre/modules/XPIProvider.jsm");
-  // This would be cleaner if I could get it as the rejection reason from
-  // the AddonManagerInternal.shutdown() promise
-  gXPISaveError = XPIscope.XPIProvider._shutdownError;
-  AddonManagerPrivate.unregisterProvider(XPIscope.XPIProvider);
-  Components.utils.unload("resource://gre/modules/XPIProvider.jsm");
+      // Force the XPIProvider provider to reload to better
+      // simulate real-world usage.
+      let XPIscope = Components.utils.import("resource://gre/modules/addons/XPIProvider.jsm");
+      // This would be cleaner if I could get it as the rejection reason from
+      // the AddonManagerInternal.shutdown() promise
+      gXPISaveError = XPIscope.XPIProvider._shutdownError;
+      do_print("gXPISaveError set to: " + gXPISaveError);
+      AddonManagerPrivate.unregisterProvider(XPIscope.XPIProvider);
+      Components.utils.unload("resource://gre/modules/addons/XPIProvider.jsm");
+      if (hookErr) {
+        throw hookErr;
+      }
+    });
 }
 
 function loadAddonsList() {
@@ -600,7 +640,7 @@ function createInstallRDF(aData) {
 /**
  * Writes an install.rdf manifest into a directory using the properties passed
  * in a JS object. The objects should contain a property for each property to
- * appear in the RDFThe object may contain an array of objects with id,
+ * appear in the RDF. The object may contain an array of objects with id,
  * minVersion and maxVersion in the targetApplications property to give target
  * application compatibility.
  *
@@ -608,14 +648,22 @@ function createInstallRDF(aData) {
  *          The object holding data about the add-on
  * @param   aDir
  *          The directory to add the install.rdf to
+ * @param   aId
+ *          An optional string to override the default installation aId
  * @param   aExtraFile
  *          An optional dummy file to create in the directory
+ * @return  An nsIFile for the directory in which the add-on is installed.
  */
-function writeInstallRDFToDir(aData, aDir, aExtraFile) {
+function writeInstallRDFToDir(aData, aDir, aId, aExtraFile) {
+  var id = aId ? aId : aData.id
+
+  var dir = aDir.clone();
+  dir.append(id);
+
   var rdf = createInstallRDF(aData);
-  if (!aDir.exists())
-    aDir.create(AM_Ci.nsIFile.DIRECTORY_TYPE, FileUtils.PERMS_DIRECTORY);
-  var file = aDir.clone();
+  if (!dir.exists())
+    dir.create(AM_Ci.nsIFile.DIRECTORY_TYPE, FileUtils.PERMS_DIRECTORY);
+  var file = dir.clone();
   file.append("install.rdf");
   if (file.exists())
     file.remove(true);
@@ -628,17 +676,18 @@ function writeInstallRDFToDir(aData, aDir, aExtraFile) {
   fos.close();
 
   if (!aExtraFile)
-    return;
+    return dir;
 
-  file = aDir.clone();
+  file = dir.clone();
   file.append(aExtraFile);
   file.create(AM_Ci.nsIFile.NORMAL_FILE_TYPE, FileUtils.PERMS_FILE);
+  return dir;
 }
 
 /**
  * Writes an install.rdf manifest into an extension using the properties passed
  * in a JS object. The objects should contain a property for each property to
- * appear in the RDFThe object may contain an array of objects with id,
+ * appear in the RDF. The object may contain an array of objects with id,
  * minVersion and maxVersion in the targetApplications property to give target
  * application compatibility.
  *
@@ -653,15 +702,33 @@ function writeInstallRDFToDir(aData, aDir, aExtraFile) {
  * @return  A file pointing to where the extension was installed
  */
 function writeInstallRDFForExtension(aData, aDir, aId, aExtraFile) {
+  if (TEST_UNPACKED) {
+    return writeInstallRDFToDir(aData, aDir, aId, aExtraFile);
+  }
+  return writeInstallRDFToXPI(aData, aDir, aId, aExtraFile);
+}
+
+/**
+ * Writes an install.rdf manifest into a packed extension using the properties passed
+ * in a JS object. The objects should contain a property for each property to
+ * appear in the RDF. The object may contain an array of objects with id,
+ * minVersion and maxVersion in the targetApplications property to give target
+ * application compatibility.
+ *
+ * @param   aData
+ *          The object holding data about the add-on
+ * @param   aDir
+ *          The install directory to add the extension to
+ * @param   aId
+ *          An optional string to override the default installation aId
+ * @param   aExtraFile
+ *          An optional dummy file to create in the extension
+ * @return  A file pointing to where the extension was installed
+ */
+function writeInstallRDFToXPI(aData, aDir, aId, aExtraFile) {
   var id = aId ? aId : aData.id
 
   var dir = aDir.clone();
-
-  if (TEST_UNPACKED) {
-    dir.append(id);
-    writeInstallRDFToDir(aData, dir, aExtraFile);
-    return dir;
-  }
 
   if (!dir.exists())
     dir.create(AM_Ci.nsIFile.DIRECTORY_TYPE, FileUtils.PERMS_DIRECTORY);
@@ -689,6 +756,8 @@ function writeInstallRDFForExtension(aData, aDir, aId, aExtraFile) {
  *
  * @param aExt   a file pointing to either the packed extension or its unpacked directory.
  * @param aTime  the time to which we set the lastModifiedTime of the extension
+ *
+ * @deprecated Please use promiseSetExtensionModifiedTime instead
  */
 function setExtensionModifiedTime(aExt, aTime) {
   aExt.lastModifiedTime = aTime;
@@ -699,6 +768,25 @@ function setExtensionModifiedTime(aExt, aTime) {
       setExtensionModifiedTime(entries.nextFile, aTime);
     entries.close();
   }
+}
+function promiseSetExtensionModifiedTime(aPath, aTime) {
+  return Task.spawn(function* () {
+    yield OS.File.setDates(aPath, aTime, aTime);
+    let entries, iterator;
+    try {
+      let iterator = new OS.File.DirectoryIterator(aPath);
+      entries = yield iterator.nextBatch();
+    } catch (ex if ex instanceof OS.File.Error) {
+      return;
+    } finally {
+      if (iterator) {
+        iterator.close();
+      }
+    }
+    for (let entry of entries) {
+      yield promiseSetExtensionModifiedTime(entry.path, aTime);
+    }
+  });
 }
 
 /**
@@ -1080,7 +1168,11 @@ function completeAllInstalls(aInstalls, aCallback) {
 function installAllFiles(aFiles, aCallback, aIgnoreIncompatible) {
   let count = aFiles.length;
   let installs = [];
-
+  function callback() {
+    if (aCallback) {
+      aCallback();
+    }
+  }
   aFiles.forEach(function(aFile) {
     AddonManager.getInstallForFile(aFile, function(aInstall) {
       if (!aInstall)
@@ -1091,9 +1183,16 @@ function installAllFiles(aFiles, aCallback, aIgnoreIncompatible) {
         installs.push(aInstall);
 
       if (--count == 0)
-        completeAllInstalls(installs, aCallback);
+        completeAllInstalls(installs, callback);
     });
   });
+}
+
+function promiseInstallAllFiles(aFiles, aIgnoreIncompatible) {
+  let deferred = Promise.defer();
+  installAllFiles(aFiles, deferred.resolve, aIgnoreIncompatible);
+  return deferred.promise;
+
 }
 
 if ("nsIWindowsRegKey" in AM_Ci) {
@@ -1271,6 +1370,16 @@ var data = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
            "</blocklist>\n";
 stream.write(data, data.length);
 stream.close();
+
+// Copies blocklistFile (an nsIFile) to gProfD/blocklist.xml.
+function copyBlocklistToProfile(blocklistFile) {
+  var dest = gProfD.clone();
+  dest.append("blocklist.xml");
+  if (dest.exists())
+    dest.remove(false);
+  blocklistFile.copyTo(gProfD, "blocklist.xml");
+  dest.lastModifiedTime = Date.now();
+}
 
 // Throw a failure and attempt to abandon the test if it looks like it is going
 // to timeout
@@ -1470,4 +1579,27 @@ function callback_soon(aFunction) {
       aFunction.apply(null, args);
     }, aFunction.name ? "delayed callback " + aFunction.name : "delayed callback");
   }
+}
+
+/**
+ * A promise-based variant of AddonManager.getAddonsByIDs.
+ *
+ * @param {array} list As the first argument of AddonManager.getAddonsByIDs
+ * @return {promise}
+ * @resolve {array} The list of add-ons sent by AddonManaget.getAddonsByIDs to
+ * its callback.
+ */
+function promiseAddonsByIDs(list) {
+  return new Promise((resolve, reject) => AddonManager.getAddonsByIDs(list, resolve));
+}
+
+/**
+ * A promise-based variant of AddonManager.getAddonByID.
+ *
+ * @param {string} aId The ID of the add-on.
+ * @return {promise}
+ * @resolve {AddonWrapper} The corresponding add-on, or null.
+ */
+function promiseAddonByID(aId) {
+  return new Promise((resolve, reject) => AddonManager.getAddonByID(aId, resolve));
 }

@@ -32,9 +32,8 @@
 #include "nssb64.h"
 #include "sechash.h"
 #include "cert.h"
-#include "certt.h"
+#include "certdb.h"
 #include "ocsp.h"
-#include "ocspt.h"
 #include "ocspti.h"
 #include "ocspi.h"
 
@@ -1071,19 +1070,19 @@ ocsp_CreateSelfCAID(PLArenaPool *arena, CERTCertificate *cert, PRTime time)
         goto loser;
     }
 
-    if (CERT_GetSPKIDigest(arena, cert, SEC_OID_SHA1,
-				   &(certID->issuerKeyHash)) == NULL) {
+    if (CERT_GetSubjectPublicKeyDigest(arena, cert, SEC_OID_SHA1,
+				       &certID->issuerKeyHash) == NULL) {
 	goto loser;
     }
     certID->issuerSHA1KeyHash.data = certID->issuerKeyHash.data;
     certID->issuerSHA1KeyHash.len = certID->issuerKeyHash.len;
     /* cache the other two hash algorithms as well */
-    if (CERT_GetSPKIDigest(arena, cert, SEC_OID_MD5,
-				   &(certID->issuerMD5KeyHash)) == NULL) {
+    if (CERT_GetSubjectPublicKeyDigest(arena, cert, SEC_OID_MD5,
+				       &certID->issuerMD5KeyHash) == NULL) {
 	goto loser;
     }
-    if (CERT_GetSPKIDigest(arena, cert, SEC_OID_MD2,
-				   &(certID->issuerMD2KeyHash)) == NULL) {
+    if (CERT_GetSubjectPublicKeyDigest(arena, cert, SEC_OID_MD2,
+				       &certID->issuerMD2KeyHash) == NULL) {
 	goto loser;
     }
 
@@ -1313,8 +1312,10 @@ main(int argc, char **argv)
 	      inFile = PR_Open(revoInfo->crlFilename, PR_RDONLY, 0);
 	      if (inFile) {
 		rv = SECU_ReadDERFromFile(&crlDER, inFile, PR_FALSE, PR_FALSE);
+		PR_Close(inFile);
+		inFile = NULL;
 	      }
-	      if (!inFile || rv != SECSuccess) {
+	      if (rv != SECSuccess) {
 		  fprintf(stderr, "unable to read crl file %s\n",
 			  revoInfo->crlFilename);
 		  exit(1);
@@ -1365,7 +1366,7 @@ main(int argc, char **argv)
 		if (revoInfo->id)
 		    CERT_DestroyOCSPCertID(revoInfo->id);
 		if (revoInfo->crl)
-		    CERT_DestroyCrl(revoInfo->crl);
+		    SEC_DestroyCrl(revoInfo->crl);
 		
 		caRevoIter = PR_NEXT_LINK(caRevoIter);
 	    } while (caRevoIter != &caRevoInfos->link);

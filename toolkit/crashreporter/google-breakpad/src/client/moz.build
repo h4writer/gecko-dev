@@ -8,6 +8,9 @@ SOURCES += [
     'minidump_file_writer.cc',
 ]
 
-XPI_NAME = 'crashreporter'
+FINAL_LIBRARY = 'xul'
 
-FINAL_LIBRARY = 'xulapp_s'
+LOCAL_INCLUDES += [
+    '..',
+]
+

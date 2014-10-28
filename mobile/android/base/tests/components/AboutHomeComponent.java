@@ -4,114 +4,171 @@
 
 package org.mozilla.gecko.tests.components;
 
-import static org.mozilla.gecko.tests.helpers.AssertionHelper.*;
+import static org.mozilla.gecko.tests.helpers.AssertionHelper.fAssertEquals;
+import static org.mozilla.gecko.tests.helpers.AssertionHelper.fAssertTrue;
 
-import org.mozilla.gecko.Actions;
-import org.mozilla.gecko.home.HomePager.Page;
+import java.util.Arrays;
+
+import org.mozilla.gecko.AboutPages;
 import org.mozilla.gecko.R;
-import org.mozilla.gecko.tests.helpers.*;
+import org.mozilla.gecko.Tabs;
+import org.mozilla.gecko.home.HomeConfig.PanelType;
 import org.mozilla.gecko.tests.UITestContext;
+import org.mozilla.gecko.tests.helpers.WaitHelper;
+import org.mozilla.gecko.util.HardwareUtils;
+
+import android.support.v4.view.ViewPager;
+import android.view.View;
+import android.widget.TextView;
 
 import com.jayway.android.robotium.solo.Condition;
 import com.jayway.android.robotium.solo.Solo;
-
-import android.support.v4.view.PagerAdapter;
-import android.support.v4.view.ViewPager;
-import android.view.View;
 
 /**
  * A class representing any interactions that take place on the Awesomescreen.
  */
 public class AboutHomeComponent extends BaseComponent {
-    // TODO: Having a specific ordering of pages is prone to fail and thus temporary.
-    // Hopefully the work in bug 940565 will alleviate the need for these enums.
-    // Explicit ordering of HomePager pages on a phone.
-    private enum PhonePage {
-        HISTORY,
-        TOP_SITES,
-        BOOKMARKS,
-        READING_LIST
-    }
+    private static final String LOGTAG = AboutHomeComponent.class.getSimpleName();
 
-    // Explicit ordering of HomePager pages on a tablet.
-    private enum TabletPage {
-        TOP_SITES,
-        BOOKMARKS,
-        READING_LIST,
-        HISTORY
-    }
+    // TODO: Having a specific ordering of panels is prone to fail and thus temporary.
+    // Hopefully the work in bug 940565 will alleviate the need for these enums.
+    // Explicit ordering of HomePager panels on a phone.
+    private static final PanelType[] PANEL_ORDERING_PHONE = {
+            PanelType.REMOTE_TABS,
+            PanelType.RECENT_TABS,
+            PanelType.HISTORY,
+            PanelType.TOP_SITES,
+            PanelType.BOOKMARKS,
+            PanelType.READING_LIST,
+    };
+
+    private static final PanelType[] PANEL_ORDERING_TABLET = {
+            PanelType.TOP_SITES,
+            PanelType.BOOKMARKS,
+            PanelType.READING_LIST,
+            PanelType.HISTORY,
+            PanelType.RECENT_TABS,
+            PanelType.REMOTE_TABS,
+    };
+
+    // The percentage of the panel to swipe between 0 and 1. This value was set through
+    // testing: 0.55f was tested on try and fails on armv6 devices.
+    private static final float SWIPE_PERCENTAGE = 0.70f;
 
     public AboutHomeComponent(final UITestContext testContext) {
         super(testContext);
+    }
+
+    private View getHomePagerContainer() {
+        return mSolo.getView(R.id.home_pager_container);
     }
 
     private ViewPager getHomePagerView() {
         return (ViewPager) mSolo.getView(R.id.home_pager);
     }
 
-    public AboutHomeComponent assertCurrentPage(final Page expectedPage) {
+    private View getHomeBannerView() {
+        return mSolo.getView(R.id.home_banner);
+    }
+
+    public AboutHomeComponent assertCurrentPanel(final PanelType expectedPanel) {
         assertVisible();
 
-        final int expectedPageIndex = getPageIndexForDevice(expectedPage.ordinal());
-        assertEquals("The current HomePager page is " + expectedPage,
-                     expectedPageIndex, getHomePagerView().getCurrentItem());
+        final int expectedPanelIndex = getPanelIndexForDevice(expectedPanel);
+        fAssertEquals("The current HomePager panel is " + expectedPanel,
+                     expectedPanelIndex, getHomePagerView().getCurrentItem());
         return this;
     }
 
     public AboutHomeComponent assertNotVisible() {
-        assertFalse("The HomePager is not visible",
-                    getHomePagerView().getVisibility() == View.VISIBLE);
+        fAssertTrue("The HomePager is not visible",
+                    getHomePagerContainer().getVisibility() != View.VISIBLE ||
+                    getHomePagerView().getVisibility() != View.VISIBLE);
         return this;
     }
 
     public AboutHomeComponent assertVisible() {
-        assertEquals("The HomePager is visible",
-                     View.VISIBLE, getHomePagerView().getVisibility());
+        fAssertTrue("The HomePager is visible",
+                    getHomePagerContainer().getVisibility() == View.VISIBLE &&
+                    getHomePagerView().getVisibility() == View.VISIBLE);
         return this;
     }
 
-    // TODO: Take specific page as parameter rather than swipe in a direction?
-    public AboutHomeComponent swipeToPageOnRight() {
-        mTestContext.dumpLog("Swiping to the page on the right.");
-        swipe(Solo.LEFT);
+    public AboutHomeComponent assertBannerNotVisible() {
+        View banner = getHomeBannerView();
+        fAssertTrue("The HomeBanner is not visible",
+                    getHomePagerContainer().getVisibility() != View.VISIBLE ||
+                    banner.getVisibility() != View.VISIBLE ||
+                    banner.getTranslationY() == banner.getHeight());
         return this;
     }
 
-    public AboutHomeComponent swipeToPageOnLeft() {
-        mTestContext.dumpLog("Swiping to the page on the left.");
-        swipe(Solo.RIGHT);
+    public AboutHomeComponent assertBannerVisible() {
+        fAssertTrue("The HomeBanner is visible",
+                    getHomePagerContainer().getVisibility() == View.VISIBLE &&
+                    getHomeBannerView().getVisibility() == View.VISIBLE);
         return this;
     }
 
-    private void swipe(final int direction) {
+    public AboutHomeComponent assertBannerText(String text) {
+        assertBannerVisible();
+
+        final TextView textView = (TextView) getHomeBannerView().findViewById(R.id.text);
+        fAssertEquals("The correct HomeBanner text is shown",
+                     text, textView.getText().toString());
+        return this;
+    }
+
+    public AboutHomeComponent clickOnBanner() {
+        assertBannerVisible();
+
+        mTestContext.dumpLog(LOGTAG, "Clicking on HomeBanner.");
+        mSolo.clickOnView(getHomeBannerView());
+        return this;
+    }
+
+    public AboutHomeComponent dismissBanner() {
+        assertBannerVisible();
+
+        mTestContext.dumpLog(LOGTAG, "Clicking on HomeBanner close button.");
+        mSolo.clickOnView(getHomeBannerView().findViewById(R.id.close));
+        return this;
+    }
+
+    public AboutHomeComponent swipeToPanelOnRight() {
+        mTestContext.dumpLog(LOGTAG, "Swiping to the panel on the right.");
+        swipeToPanel(Solo.RIGHT);
+        return this;
+    }
+
+    public AboutHomeComponent swipeToPanelOnLeft() {
+        mTestContext.dumpLog(LOGTAG, "Swiping to the panel on the left.");
+        swipeToPanel(Solo.LEFT);
+        return this;
+    }
+
+    private void swipeToPanel(final int panelDirection) {
+        fAssertTrue("Swiping in a valid direction",
+                panelDirection == Solo.LEFT || panelDirection == Solo.RIGHT);
         assertVisible();
 
-        final int pageIndex = getHomePagerView().getCurrentItem();
-        if (direction == Solo.LEFT) {
-            GestureHelper.swipeLeft();
-        } else {
-            GestureHelper.swipeRight();
-        }
+        final int panelIndex = getHomePagerView().getCurrentItem();
 
-        final PagerAdapter adapter = getHomePagerView().getAdapter();
-        assertNotNull("The HomePager's PagerAdapter is not null", adapter);
+        mSolo.scrollViewToSide(getHomePagerView(), panelDirection, SWIPE_PERCENTAGE);
 
-        // Swiping left goes to next, swiping right goes to previous
-        final int unboundedPageIndex = pageIndex + (direction == Solo.LEFT ? 1 : -1);
-        final int expectedPageIndex = Math.min(Math.max(0, unboundedPageIndex), adapter.getCount() - 1);
+        // The panel on the left is a lower index and vice versa.
+        final int unboundedPanelIndex = panelIndex + (panelDirection == Solo.LEFT ? -1 : 1);
+        final int panelCount = getPanelOrderingForDevice().length;
+        final int maxPanelIndex = panelCount - 1;
+        final int expectedPanelIndex = Math.min(Math.max(0, unboundedPanelIndex), maxPanelIndex);
 
-        waitForPageIndex(expectedPageIndex);
+        waitForPanelIndex(expectedPanelIndex);
     }
 
-    private void waitForPageIndex(final int expectedIndex) {
-        final String pageName;
-        if (DeviceHelper.isTablet()) {
-            pageName = TabletPage.values()[expectedIndex].name();
-        } else {
-            pageName = PhonePage.values()[expectedIndex].name();
-        }
+    private void waitForPanelIndex(final int expectedIndex) {
+        final String panelName = getPanelOrderingForDevice()[expectedIndex].name();
 
-        WaitHelper.waitFor("HomePager " + pageName + " page", new Condition() {
+        WaitHelper.waitFor("HomePager " + panelName + " panel", new Condition() {
             @Override
             public boolean isSatisfied() {
                 return (getHomePagerView().getCurrentItem() == expectedIndex);
@@ -120,13 +177,34 @@ public class AboutHomeComponent extends BaseComponent {
     }
 
     /**
-     * Gets the page index in the device specific Page enum for the given index in the
-     * HomePager.Page enum.
+     * Get the expected panel index for the given PanelType on this device. Different panel
+     * orderings are expected on tables vs. phones.
      */
-    private int getPageIndexForDevice(final int pageIndex) {
-        final String pageName = Page.values()[pageIndex].name();
-        final Class devicePageEnum =
-                DeviceHelper.isTablet() ? TabletPage.class : PhonePage.class;
-        return Enum.valueOf(devicePageEnum, pageName).ordinal();
+    private int getPanelIndexForDevice(final PanelType panelType) {
+        PanelType[] panelOrdering = getPanelOrderingForDevice();
+
+        return Arrays.asList(panelOrdering).indexOf(panelType);
+    }
+
+    /**
+     * Get an array of PanelType objects ordered as we want the panels to be ordered on this device.
+     */
+    public static PanelType[] getPanelOrderingForDevice() {
+        return HardwareUtils.isTablet() ? PANEL_ORDERING_TABLET : PANEL_ORDERING_PHONE;
+    }
+
+    /**
+     * Navigate directly to a built-in panel by its panel type.
+     * <p>
+     * If the panel type is not part of the active Home Panel configuration, the
+     * default about:home panel is displayed. If the panel type is not a
+     * built-in panel, an IllegalArgumentException is thrown.
+     *
+     * @param panelType to navigate to.
+     * @return self, for chaining.
+     */
+    public AboutHomeComponent navigateToBuiltinPanelType(PanelType panelType) throws IllegalArgumentException {
+        Tabs.getInstance().loadUrl(AboutPages.getURLForBuiltinPanelType(panelType));
+        return this;
     }
 }

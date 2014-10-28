@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "mozilla/DebugOnly.h"
+#include "mozilla/Endian.h"
 #include <algorithm>
 
 #ifdef MOZ_ENABLE_GNOMEUI
@@ -32,14 +33,15 @@ extern "C" {
 #include "nsIStringBundle.h"
 
 #include "nsNetUtil.h"
+#include "nsNullPrincipal.h"
 #include "nsIURL.h"
 #include "prlink.h"
 
 #include "nsIconChannel.h"
 
-NS_IMPL_ISUPPORTS2(nsIconChannel,
-                   nsIRequest,
-                   nsIChannel)
+NS_IMPL_ISUPPORTS(nsIconChannel,
+                  nsIRequest,
+                  nsIChannel)
 
 #ifdef MOZ_ENABLE_GNOMEUI
 // These let us have a soft dependency on libgnomeui rather than a hard one. These are just basically the prototypes
@@ -101,7 +103,7 @@ moz_gdk_pixbuf_to_channel(GdkPixbuf* aPixbuf, nsIURI *aURI,
       uint8_t b = *(in++);
       uint8_t a = *(in++);
 #define DO_PREMULTIPLY(c_) uint8_t(uint16_t(c_) * uint16_t(a) / uint16_t(255))
-#ifdef IS_LITTLE_ENDIAN
+#if MOZ_LITTLE_ENDIAN
       *(out++) = DO_PREMULTIPLY(b);
       *(out++) = DO_PREMULTIPLY(g);
       *(out++) = DO_PREMULTIPLY(r);
@@ -121,14 +123,32 @@ moz_gdk_pixbuf_to_channel(GdkPixbuf* aPixbuf, nsIURI *aURI,
   nsresult rv;
   nsCOMPtr<nsIStringInputStream> stream =
     do_CreateInstance("@mozilla.org/io/string-input-stream;1", &rv);
-  NS_ENSURE_SUCCESS(rv, rv);
 
+  // Prevent the leaking of buf
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    NS_Free(buf);
+    return rv;
+  }
+
+  // stream takes ownership of buf and will free it on destruction.
+  // This function cannot fail.
   rv = stream->AdoptData((char*)buf, buf_size);
+
+  // If this no longer holds then re-examine buf's lifetime.
+  MOZ_ASSERT(NS_SUCCEEDED(rv));
   NS_ENSURE_SUCCESS(rv, rv);
 
-  rv = NS_NewInputStreamChannel(aChannel, aURI, stream,
-                                NS_LITERAL_CSTRING(IMAGE_ICON_MS));
-  return rv;
+  nsCOMPtr<nsIPrincipal> nullPrincipal =
+    do_CreateInstance("@mozilla.org/nullprincipal;1", &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  return NS_NewInputStreamChannel(aChannel,
+                                  aURI,
+                                  stream,
+                                  nullPrincipal,
+                                  nsILoadInfo::SEC_NORMAL,
+                                  nsIContentPolicy::TYPE_OTHER,
+                                  NS_LITERAL_CSTRING(IMAGE_ICON_MS));
 }
 
 static GtkWidget *gProtoWindow = nullptr;
@@ -320,11 +340,11 @@ nsIconChannel::InitWithGnome(nsIMozIconURI *aIconURI)
     nsAutoString appName;
 
     if (bundle) {
-      bundle->GetStringFromName(NS_LITERAL_STRING("brandShortName").get(),
+      bundle->GetStringFromName(MOZ_UTF16("brandShortName"),
                                 getter_Copies(appName));
     } else {
       NS_WARNING("brand.properties not present, using default application name");
-      appName.Assign(NS_LITERAL_STRING("Gecko"));
+      appName.AssignLiteral(MOZ_UTF16("Gecko"));
     }
 
     char* empty[] = { "" };

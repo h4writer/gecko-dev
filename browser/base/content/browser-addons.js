@@ -1,4 +1,4 @@
-# -*- Mode: javascript; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+# -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -9,7 +9,7 @@ const gXPInstallObserver = {
     if (aDocShell == aSoughtShell)
       return aDocShell;
 
-    var node = aDocShell.QueryInterface(Components.interfaces.nsIDocShellTreeNode);
+    var node = aDocShell.QueryInterface(Components.interfaces.nsIDocShellTreeItem);
     for (var i = 0; i < node.childCount; ++i) {
       var docShell = node.getChildAt(i);
       docShell = this._findChildShell(docShell, aSoughtShell);
@@ -32,13 +32,23 @@ const gXPInstallObserver = {
   {
     var brandBundle = document.getElementById("bundle_brand");
     var installInfo = aSubject.QueryInterface(Components.interfaces.amIWebInstallInfo);
-    var win = installInfo.originatingWindow;
-    var shell = win.QueryInterface(Components.interfaces.nsIInterfaceRequestor)
-                   .getInterface(Components.interfaces.nsIWebNavigation)
-                   .QueryInterface(Components.interfaces.nsIDocShell);
-    var browser = this._getBrowser(shell);
-    if (!browser)
+    var winOrBrowser = installInfo.originator;
+
+    var browser;
+    try {
+      var shell = winOrBrowser.QueryInterface(Components.interfaces.nsIDOMWindow)
+                              .QueryInterface(Components.interfaces.nsIInterfaceRequestor)
+                              .getInterface(Components.interfaces.nsIWebNavigation)
+                              .QueryInterface(Components.interfaces.nsIDocShell);
+      browser = this._getBrowser(shell);
+    } catch (e) {
+      browser = winOrBrowser;
+    }
+    // Note that the above try/catch will pass through dead object proxies and
+    // other degenerate objects. Make sure the browser is bonafide.
+    if (!browser || gBrowser.browsers.indexOf(browser) == -1)
       return;
+
     const anchorID = "addons-notification-icon";
     var messageString, action;
     var brandShortName = brandBundle.getString("brandShortName");
@@ -73,8 +83,16 @@ const gXPInstallObserver = {
                               action, null, options);
       break;
     case "addon-install-blocked":
+      let originatingHost;
+      try {
+        originatingHost = installInfo.originatingURI.host;
+      } catch (ex) {
+        // Need to deal with missing originatingURI and with about:/data: URIs more gracefully,
+        // see bug 1063418 - but for now, bail:
+        return;
+      }
       messageString = gNavigatorBundle.getFormattedString("xpinstallPromptWarning",
-                        [brandShortName, installInfo.originatingURI.host]);
+                        [brandShortName, originatingHost]);
 
       let secHistogram = Components.classes["@mozilla.org/base/telemetry;1"].getService(Ci.nsITelemetry).getHistogramById("SECURITY_UI");
       action = {
@@ -388,12 +406,14 @@ let LightweightThemeListener = {
     });
 
     Services.obs.addObserver(this, "lightweight-theme-styling-update", false);
+    Services.obs.addObserver(this, "lightweight-theme-optimized", false);
     if (document.documentElement.hasAttribute("lwtheme"))
       this.updateStyleSheet(document.documentElement.style.backgroundImage);
   },
 
   uninit: function () {
     Services.obs.removeObserver(this, "lightweight-theme-styling-update");
+    Services.obs.removeObserver(this, "lightweight-theme-optimized");
   },
 
   /**
@@ -405,21 +425,39 @@ let LightweightThemeListener = {
   updateStyleSheet: function(headerImage) {
     if (!this.styleSheet)
       return;
-    for (let i = 0; i < this.styleSheet.cssRules.length; i++) {
-      let rule = this.styleSheet.cssRules[i];
-      if (!rule.style.backgroundImage)
-        continue;
+    this.substituteRules(this.styleSheet.cssRules, headerImage);
+  },
 
-      if (!this._modifiedStyles[i])
-        this._modifiedStyles[i] = { backgroundImage: rule.style.backgroundImage };
+  substituteRules: function(ruleList, headerImage, existingStyleRulesModified = 0) {
+    let styleRulesModified = 0;
+    for (let i = 0; i < ruleList.length; i++) {
+      let rule = ruleList[i];
+      if (rule instanceof Ci.nsIDOMCSSGroupingRule) {
+        // Add the number of modified sub-rules to the modified count
+        styleRulesModified += this.substituteRules(rule.cssRules, headerImage, existingStyleRulesModified + styleRulesModified);
+      } else if (rule instanceof Ci.nsIDOMCSSStyleRule) {
+        if (!rule.style.backgroundImage)
+          continue;
+        let modifiedIndex = existingStyleRulesModified + styleRulesModified;
+        if (!this._modifiedStyles[modifiedIndex])
+          this._modifiedStyles[modifiedIndex] = { backgroundImage: rule.style.backgroundImage };
 
-      rule.style.backgroundImage = this._modifiedStyles[i].backgroundImage + ", " + headerImage;
+        rule.style.backgroundImage = this._modifiedStyles[modifiedIndex].backgroundImage + ", " + headerImage;
+        styleRulesModified++;
+      } else {
+        Cu.reportError("Unsupported rule encountered");
+      }
     }
+    return styleRulesModified;
   },
 
   // nsIObserver
   observe: function (aSubject, aTopic, aData) {
-    if (aTopic != "lightweight-theme-styling-update" || !this.styleSheet)
+    if ((aTopic != "lightweight-theme-styling-update" && aTopic != "lightweight-theme-optimized") ||
+          !this.styleSheet)
+      return;
+
+    if (aTopic == "lightweight-theme-optimized" && aSubject != window)
       return;
 
     let themeData = JSON.parse(aData);

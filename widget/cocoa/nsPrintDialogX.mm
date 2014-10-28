@@ -20,7 +20,7 @@
 
 using namespace mozilla;
 
-NS_IMPL_ISUPPORTS1(nsPrintDialogServiceX, nsIPrintDialogService)
+NS_IMPL_ISUPPORTS(nsPrintDialogServiceX, nsIPrintDialogService)
 
 nsPrintDialogServiceX::nsPrintDialogServiceX()
 {
@@ -44,12 +44,12 @@ nsPrintDialogServiceX::Show(nsIDOMWindow *aParent, nsIPrintSettings *aSettings,
 
   NS_PRECONDITION(aSettings, "aSettings must not be null");
 
-  nsCOMPtr<nsPrintSettingsX> settingsX(do_QueryInterface(aSettings));
+  nsRefPtr<nsPrintSettingsX> settingsX(do_QueryObject(aSettings));
   if (!settingsX)
     return NS_ERROR_FAILURE;
 
   // Set the print job title
-  PRUnichar** docTitles;
+  char16_t** docTitles;
   uint32_t titleCount;
   nsresult rv = aWebBrowserPrint->EnumerateDocumentNames(&titleCount, &docTitles);
   if (NS_SUCCEEDED(rv) && titleCount > 0) {
@@ -127,7 +127,7 @@ nsPrintDialogServiceX::ShowPageSetup(nsIDOMWindow *aParent,
   NS_PRECONDITION(aNSSettings, "aSettings must not be null");
   NS_ENSURE_TRUE(aNSSettings, NS_ERROR_FAILURE);
 
-  nsCOMPtr<nsPrintSettingsX> settingsX(do_QueryInterface(aNSSettings));
+  nsRefPtr<nsPrintSettingsX> settingsX(do_QueryObject(aNSSettings));
   if (!settingsX)
     return NS_ERROR_FAILURE;
 
@@ -169,7 +169,7 @@ nsPrintDialogServiceX::ShowPageSetup(nsIDOMWindow *aParent,
 - (NSButton*)checkboxWithLabel:(const char*)aLabel andFrame:(NSRect)aRect;
 
 - (NSPopUpButton*)headerFooterItemListWithFrame:(NSRect)aRect
-                                   selectedItem:(const PRUnichar*)aCurrentString;
+                                   selectedItem:(const char16_t*)aCurrentString;
 
 - (void)addOptionsSection;
 
@@ -298,7 +298,7 @@ static const char sHeaderFooterTags[][4] =  {"", "&T", "&U", "&D", "&P", "&PT"};
 }
 
 - (NSPopUpButton*)headerFooterItemListWithFrame:(NSRect)aRect
-                                   selectedItem:(const PRUnichar*)aCurrentString
+                                   selectedItem:(const char16_t*)aCurrentString
 {
   NSPopUpButton* list = [[[NSPopUpButton alloc] initWithFrame:aRect pullsDown:NO] autorelease];
   [list setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];

@@ -140,7 +140,7 @@ struct nsCSSToken {
   int32_t         mInteger;
   int32_t         mInteger2;
   nsCSSTokenType  mType;
-  PRUnichar       mSymbol;
+  char16_t       mSymbol;
   bool            mIntegerValid;
   bool            mHasSign;
 
@@ -149,7 +149,7 @@ struct nsCSSToken {
       mSymbol('\0'), mIntegerValid(false), mHasSign(false)
   {}
 
-  bool IsSymbol(PRUnichar aSymbol) const {
+  bool IsSymbol(char16_t aSymbol) const {
     return mType == eCSSToken_Symbol && mSymbol == aSymbol;
   }
 
@@ -234,7 +234,7 @@ class nsCSSScanner {
   // which, for historical reasons, must make additional function
   // tokens behave like url().  Please do not add new uses to the
   // parser.
-  bool NextURL(nsCSSToken& aTokenResult);
+  void NextURL(nsCSSToken& aTokenResult);
 
   // This is exposed for use by nsCSSParser::ParsePseudoClassWithNthPairArg,
   // because "2n-1" is a single DIMENSION token, and "n-1" is a single
@@ -330,7 +330,7 @@ protected:
   void SetEOFCharacters(uint32_t aEOFCharacters);
   void AddEOFCharacters(uint32_t aEOFCharacters);
 
-  const PRUnichar *mBuffer;
+  const char16_t *mBuffer;
   uint32_t mOffset;
   uint32_t mCount;
 
@@ -351,6 +351,28 @@ protected:
   bool mRecording;
   bool mSeenBadToken;
   bool mSeenVariableReference;
+};
+
+// Token for the grid-template-areas micro-syntax
+// http://dev.w3.org/csswg/css-grid/#propdef-grid-template-areas
+struct MOZ_STACK_CLASS nsCSSGridTemplateAreaToken {
+  nsAutoString mName;  // Empty for a null cell, non-empty for a named cell
+  bool isTrash;  // True for a trash token, mName is ignored in this case.
+};
+
+// Scanner for the grid-template-areas micro-syntax
+class nsCSSGridTemplateAreaScanner {
+public:
+  explicit nsCSSGridTemplateAreaScanner(const nsAString& aBuffer);
+
+  // Get the next token.  Return false on EOF.
+  // aTokenResult is filled in with the data for the token.
+  bool Next(nsCSSGridTemplateAreaToken& aTokenResult);
+
+private:
+  const char16_t *mBuffer;
+  uint32_t mOffset;
+  uint32_t mCount;
 };
 
 #endif /* nsCSSScanner_h___ */

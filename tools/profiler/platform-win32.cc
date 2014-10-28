@@ -31,8 +31,12 @@
 #include <process.h>
 #include "platform.h"
 #include "TableTicker.h"
+#include "ThreadResponsiveness.h"
 #include "ProfileEntry.h"
 #include "UnwinderThread2.h"
+
+// Memory profile
+#include "nsMemoryReporterManager.h"
 
 class PlatformData : public Malloced {
  public:
@@ -116,22 +120,32 @@ class SamplerThread : public Thread {
         ::timeBeginPeriod(interval_);
 
     while (sampler_->IsActive()) {
-      {
+      if (!sampler_->IsPaused()) {
         mozilla::MutexAutoLock lock(*Sampler::sRegisteredThreadsMutex);
         std::vector<ThreadInfo*> threads =
           sampler_->GetRegisteredThreads();
+        bool isFirstProfiledThread = true;
         for (uint32_t i = 0; i < threads.size(); i++) {
           ThreadInfo* info = threads[i];
 
           // This will be null if we're not interested in profiling this thread.
-          if (!info->Profile())
+          if (!info->Profile() || info->IsPendingDelete())
             continue;
+
+          PseudoStack::SleepState sleeping = info->Stack()->observeSleeping();
+          if (sleeping == PseudoStack::SLEEPING_AGAIN) {
+            info->Profile()->DuplicateLastSample();
+            //XXX: This causes flushes regardless of jank-only mode
+            info->Profile()->flush();
+            continue;
+          }
+
+          info->Profile()->GetThreadResponsiveness()->Update();
 
           ThreadProfile* thread_profile = info->Profile();
 
-          if (!sampler_->IsPaused()) {
-            SampleContext(sampler_, thread_profile);
-          }
+          SampleContext(sampler_, thread_profile, isFirstProfiledThread);
+          isFirstProfiledThread = false;
         }
       }
       OS::Sleep(interval_);
@@ -142,7 +156,9 @@ class SamplerThread : public Thread {
         ::timeEndPeriod(interval_);
   }
 
-  void SampleContext(Sampler* sampler, ThreadProfile* thread_profile) {
+  void SampleContext(Sampler* sampler, ThreadProfile* thread_profile,
+                     bool isFirstProfiledThread)
+  {
     uintptr_t thread = Sampler::GetThreadHandle(
                                thread_profile->GetPlatformData());
     HANDLE profiled_thread = reinterpret_cast<HANDLE>(thread);
@@ -159,6 +175,15 @@ class SamplerThread : public Thread {
     // Grab the timestamp before pausing the thread, to avoid deadlocks.
     sample->timestamp = mozilla::TimeStamp::Now();
     sample->threadProfile = thread_profile;
+
+    if (isFirstProfiledThread && Sampler::GetActiveSampler()->ProfileMemory()) {
+      sample->rssMemory = nsMemoryReporterManager::ResidentFast();
+    } else {
+      sample->rssMemory = 0;
+    }
+
+    // Unique Set Size is not supported on Windows.
+    sample->ussMemory = 0;
 
     static const DWORD kSuspendFailed = static_cast<DWORD>(-1);
     if (SuspendThread(profiled_thread) == kSuspendFailed)
@@ -270,6 +295,9 @@ Thread::GetCurrentId()
   return GetCurrentThreadId();
 }
 
+void OS::Startup() {
+}
+
 void OS::Sleep(int milliseconds) {
   ::Sleep(milliseconds);
 }
@@ -288,7 +316,7 @@ bool Sampler::RegisterCurrentThread(const char* aName,
 
   for (uint32_t i = 0; i < sRegisteredThreads->size(); i++) {
     ThreadInfo* info = sRegisteredThreads->at(i);
-    if (info->ThreadId() == id) {
+    if (info->ThreadId() == id && !info->IsPendingDelete()) {
       // Thread already registered. This means the first unregister will be
       // too early.
       ASSERT(false);
@@ -324,10 +352,18 @@ void Sampler::UnregisterCurrentThread()
 
   for (uint32_t i = 0; i < sRegisteredThreads->size(); i++) {
     ThreadInfo* info = sRegisteredThreads->at(i);
-    if (info->ThreadId() == id) {
-      delete info;
-      sRegisteredThreads->erase(sRegisteredThreads->begin() + i);
-      break;
+    if (info->ThreadId() == id && !info->IsPendingDelete()) {
+      if (profiler_is_active()) {
+        // We still want to show the results of this thread if you
+        // save the profile shortly after a thread is terminated.
+        // For now we will defer the delete to profile stop.
+        info->SetPendingDelete();
+        break;
+      } else {
+        delete info;
+        sRegisteredThreads->erase(sRegisteredThreads->begin() + i);
+        break;
+      }
     }
   }
 }

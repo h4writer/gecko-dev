@@ -21,7 +21,7 @@ class UrlClassifierDBServiceWorkerProxy MOZ_FINAL :
   public nsIUrlClassifierDBServiceWorker
 {
 public:
-  UrlClassifierDBServiceWorkerProxy(nsIUrlClassifierDBServiceWorker* aTarget)
+  explicit UrlClassifierDBServiceWorkerProxy(nsIUrlClassifierDBServiceWorker* aTarget)
     : mTarget(aTarget)
   { }
 
@@ -34,9 +34,11 @@ public:
   public:
     LookupRunnable(nsIUrlClassifierDBServiceWorker* aTarget,
                    nsIPrincipal* aPrincipal,
+                   const nsACString& aTables,
                    nsIUrlClassifierCallback* aCB)
       : mTarget(aTarget)
       , mPrincipal(aPrincipal)
+      , mLookupTables(aTables)
       , mCB(aCB)
     { }
 
@@ -45,6 +47,7 @@ public:
   private:
     nsCOMPtr<nsIUrlClassifierDBServiceWorker> mTarget;
     nsCOMPtr<nsIPrincipal> mPrincipal;
+    nsCString mLookupTables;
     nsCOMPtr<nsIUrlClassifierCallback> mCB;
   };
 
@@ -69,12 +72,10 @@ public:
   public:
     BeginUpdateRunnable(nsIUrlClassifierDBServiceWorker* aTarget,
                         nsIUrlClassifierUpdateObserver* aUpdater,
-                        const nsACString& aTables,
-                        const nsACString& aClientKey)
+                        const nsACString& aTables)
       : mTarget(aTarget)
       , mUpdater(aUpdater)
       , mTables(aTables)
-      , mClientKey(aClientKey)
     { }
 
     NS_DECL_NSIRUNNABLE
@@ -82,25 +83,23 @@ public:
   private:
     nsCOMPtr<nsIUrlClassifierDBServiceWorker> mTarget;
     nsCOMPtr<nsIUrlClassifierUpdateObserver> mUpdater;
-    nsCString mTables, mClientKey;
+    nsCString mTables;
   };
 
   class BeginStreamRunnable : public nsRunnable
   {
   public:
     BeginStreamRunnable(nsIUrlClassifierDBServiceWorker* aTarget,
-                        const nsACString& aTable,
-                        const nsACString& aServerMAC)
+                        const nsACString& aTable)
       : mTarget(aTarget)
       , mTable(aTable)
-      , mServerMAC(aServerMAC)
     { }
 
     NS_DECL_NSIRUNNABLE
 
   private:
     nsCOMPtr<nsIUrlClassifierDBServiceWorker> mTarget;
-    nsCString mTable, mServerMAC;
+    nsCString mTable;
   };
 
   class UpdateStreamRunnable : public nsRunnable
@@ -152,6 +151,8 @@ public:
   };
 
 private:
+  ~UrlClassifierDBServiceWorkerProxy() {}
+
   nsCOMPtr<nsIUrlClassifierDBServiceWorker> mTarget;
 };
 
@@ -161,7 +162,7 @@ class UrlClassifierLookupCallbackProxy MOZ_FINAL :
   public nsIUrlClassifierLookupCallback
 {
 public:
-  UrlClassifierLookupCallbackProxy(nsIUrlClassifierLookupCallback* aTarget)
+  explicit UrlClassifierLookupCallbackProxy(nsIUrlClassifierLookupCallback* aTarget)
     : mTarget(new nsMainThreadPtrHolder<nsIUrlClassifierLookupCallback>(aTarget))
   { }
 
@@ -185,13 +186,15 @@ public:
   };
 
 private:
+  ~UrlClassifierLookupCallbackProxy() {}
+
   nsMainThreadPtrHandle<nsIUrlClassifierLookupCallback> mTarget;
 };
 
 class UrlClassifierCallbackProxy MOZ_FINAL : public nsIUrlClassifierCallback
 {
 public:
-  UrlClassifierCallbackProxy(nsIUrlClassifierCallback* aTarget)
+  explicit UrlClassifierCallbackProxy(nsIUrlClassifierCallback* aTarget)
     : mTarget(new nsMainThreadPtrHolder<nsIUrlClassifierCallback>(aTarget))
   { }
 
@@ -215,6 +218,8 @@ public:
   };
 
 private:
+  ~UrlClassifierCallbackProxy() {}
+
   nsMainThreadPtrHandle<nsIUrlClassifierCallback> mTarget;
 };
 
@@ -222,7 +227,7 @@ class UrlClassifierUpdateObserverProxy MOZ_FINAL :
   public nsIUrlClassifierUpdateObserver
 {
 public:
-  UrlClassifierUpdateObserverProxy(nsIUrlClassifierUpdateObserver* aTarget)
+  explicit UrlClassifierUpdateObserverProxy(nsIUrlClassifierUpdateObserver* aTarget)
     : mTarget(new nsMainThreadPtrHolder<nsIUrlClassifierUpdateObserver>(aTarget))
   { }
 
@@ -234,32 +239,17 @@ public:
   public:
     UpdateUrlRequestedRunnable(const nsMainThreadPtrHandle<nsIUrlClassifierUpdateObserver>& aTarget,
                                const nsACString& aURL,
-                               const nsACString& aTable,
-                               const nsACString& aServerMAC)
+                               const nsACString& aTable)
       : mTarget(aTarget)
       , mURL(aURL)
       , mTable(aTable)
-      , mServerMAC(aServerMAC)
     { }
 
     NS_DECL_NSIRUNNABLE
 
   private:
     nsMainThreadPtrHandle<nsIUrlClassifierUpdateObserver> mTarget;
-    nsCString mURL, mTable, mServerMAC;
-  };
-
-  class RekeyRequestedRunnable : public nsRunnable
-  {
-  public:
-    RekeyRequestedRunnable(const nsMainThreadPtrHandle<nsIUrlClassifierUpdateObserver>& aTarget)
-      : mTarget(aTarget)
-    { }
-
-    NS_DECL_NSIRUNNABLE
-
-  private:
-    nsMainThreadPtrHandle<nsIUrlClassifierUpdateObserver> mTarget;
+    nsCString mURL, mTable;
   };
 
   class StreamFinishedRunnable : public nsRunnable
@@ -313,6 +303,8 @@ public:
   };
 
 private:
+  ~UrlClassifierUpdateObserverProxy() {}
+
   nsMainThreadPtrHandle<nsIUrlClassifierUpdateObserver> mTarget;
 };
 

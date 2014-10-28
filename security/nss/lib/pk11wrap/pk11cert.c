@@ -981,8 +981,13 @@ PK11_ImportCert(PK11SlotInfo *slot, CERTCertificate *cert,
      * CERTCertificate, and finish
      */
     nssPKIObject_AddInstance(&c->object, certobj);
+    /* nssTrustDomain_AddCertsToCache may release a reference to 'c' and
+     * replace 'c' with a different value. So we add a reference to 'c' to
+     * prevent 'c' from being destroyed. */
+    nssCertificate_AddRef(c);
     nssTrustDomain_AddCertsToCache(STAN_GetDefaultTrustDomain(), &c, 1);
     (void)STAN_ForceCERTCertificateUpdate(c);
+    nssCertificate_Destroy(c);
     SECITEM_FreeItem(keyID,PR_TRUE);
     return SECSuccess;
 loser:
@@ -2148,7 +2153,6 @@ PK11_FindCertFromDERCertItem(PK11SlotInfo *slot, const SECItem *inDerCert,
 {
     NSSDER derCert;
     NSSToken *tok;
-    NSSTrustDomain *td = STAN_GetDefaultTrustDomain();
     nssCryptokiObject *co = NULL;
     SECStatus rv;
 
@@ -2682,3 +2686,14 @@ PK11_GetAllSlotsForCert(CERTCertificate *cert, void *arg)
     nssCryptokiObjectArray_Destroy(instances);
     return slotList;
 }
+
+SECStatus
+PK11_SetCertificateNickname(CERTCertificate *cert, const char *nickname)
+{
+    /* Can't set nickname of temp cert. */
+    if (!cert->slot || cert->pkcs11ID == CK_INVALID_HANDLE) {
+        return SEC_ERROR_INVALID_ARGS;
+    }
+    return PK11_SetObjectNickname(cert->slot, cert->pkcs11ID, nickname);
+}
+

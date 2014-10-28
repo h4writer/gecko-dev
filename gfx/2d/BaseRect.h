@@ -6,10 +6,13 @@
 #ifndef MOZILLA_GFX_BASERECT_H_
 #define MOZILLA_GFX_BASERECT_H_
 
-#include <cmath>
-#include <mozilla/Assertions.h>
-#include <mozilla/FloatingPoint.h>
 #include <algorithm>
+#include <cmath>
+#include <ostream>
+
+#include "mozilla/Assertions.h"
+#include "mozilla/FloatingPoint.h"
+#include "mozilla/TypeTraits.h"
 
 namespace mozilla {
 namespace gfx {
@@ -60,10 +63,11 @@ struct BaseRect {
   // "Finite" means not inf and not NaN
   bool IsFinite() const
   {
-    return (mozilla::IsFinite(x) &&
-            mozilla::IsFinite(y) &&
-            mozilla::IsFinite(width) &&
-            mozilla::IsFinite(height));
+    typedef typename mozilla::Conditional<mozilla::IsSame<T, float>::value, float, double>::Type FloatType;
+    return (mozilla::IsFinite(FloatType(x)) &&
+            mozilla::IsFinite(FloatType(y)) &&
+            mozilla::IsFinite(FloatType(width)) &&
+            mozilla::IsFinite(FloatType(height)));
   }
 
   // Returns true if this rectangle contains the interior of aRect. Always
@@ -75,13 +79,17 @@ struct BaseRect {
            (x <= aRect.x && aRect.XMost() <= XMost() &&
             y <= aRect.y && aRect.YMost() <= YMost());
   }
-  // Returns true if this rectangle contains the rectangle (aX,aY,1,1).
+  // Returns true if this rectangle contains the point. Points are considered
+  // in the rectangle if they are on the left or top edge, but outside if they
+  // are on the right or bottom edge.
   bool Contains(T aX, T aY) const
   {
-    return x <= aX && aX + 1 <= XMost() &&
-           y <= aY && aY + 1 <= YMost();
+    return x <= aX && aX < XMost() &&
+           y <= aY && aY < YMost();
   }
-  // Returns true if this rectangle contains the rectangle (aPoint.x,aPoint.y,1,1).
+  // Returns true if this rectangle contains the point. Points are considered
+  // in the rectangle if they are on the left or top edge, but outside if they
+  // are on the right or bottom edge.
   bool Contains(const Point& aPoint) const { return Contains(aPoint.x, aPoint.y); }
 
   // Intersection. Returns TRUE if the receiver's area has non-empty
@@ -89,7 +97,8 @@ struct BaseRect {
   // Always returns false if aRect is empty or 'this' is empty.
   bool Intersects(const Sub& aRect) const
   {
-    return x < aRect.XMost() && aRect.x < XMost() &&
+    return !IsEmpty() && !aRect.IsEmpty() &&
+           x < aRect.XMost() && aRect.x < XMost() &&
            y < aRect.YMost() && aRect.y < YMost();
   }
   // Returns the rectangle containing the intersection of the points
@@ -199,6 +208,20 @@ struct BaseRect {
   }
   void Inflate(const SizeT& aSize) { Inflate(aSize.width, aSize.height); }
 
+  void InflateToMultiple(const SizeT& aMultiple)
+  {
+    T xMost = XMost();
+    T yMost = YMost();
+
+    x = static_cast<T>(floor(x / aMultiple.width)) * aMultiple.width;
+    y = static_cast<T>(floor(y / aMultiple.height)) * aMultiple.height;
+    xMost = static_cast<T>(ceil(x / aMultiple.width)) * aMultiple.width;
+    yMost = static_cast<T>(ceil(y / aMultiple.height)) * aMultiple.height;
+
+    width = xMost - x;
+    height = yMost - y;
+  }
+
   void Deflate(T aD) { Deflate(aD, aD); }
   void Deflate(T aDx, T aDy)
   {
@@ -232,13 +255,25 @@ struct BaseRect {
     return IsEqualEdges(aRect) || (IsEmpty() && aRect.IsEmpty());
   }
 
-  Sub operator+(const Point& aPoint) const
+  friend Sub operator+(Sub aSub, const Point& aPoint)
   {
-    return Sub(x + aPoint.x, y + aPoint.y, width, height);
+    aSub += aPoint;
+    return aSub;
   }
-  Sub operator-(const Point& aPoint) const
+  friend Sub operator-(Sub aSub, const Point& aPoint)
   {
-    return Sub(x - aPoint.x, y - aPoint.y, width, height);
+    aSub -= aPoint;
+    return aSub;
+  }
+  friend Sub operator+(Sub aSub, const SizeT& aSize)
+  {
+    aSub += aSize;
+    return aSub;
+  }
+  friend Sub operator-(Sub aSub, const SizeT& aSize)
+  {
+    aSub -= aSize;
+    return aSub;
   }
   Sub& operator+=(const Point& aPoint)
   {
@@ -250,7 +285,18 @@ struct BaseRect {
     MoveBy(-aPoint);
     return *static_cast<Sub*>(this);
   }
-
+  Sub& operator+=(const SizeT& aSize)
+  {
+    width += aSize.width;
+    height += aSize.height;
+    return *static_cast<Sub*>(this);
+  }
+  Sub& operator-=(const SizeT& aSize)
+  {
+    width -= aSize.width;
+    height -= aSize.height;
+    return *static_cast<Sub*>(this);
+  }
   // Find difference as a Margin
   MarginT operator-(const Sub& aRect) const
   {
@@ -441,19 +487,25 @@ struct BaseRect {
   }
 
   /**
-   * Clamp aRect to this rectangle. This returns aRect after it is forced
-   * inside the bounds of this rectangle. It will attempt to retain the size
-   * but will shrink the dimensions that don't fit.
+   * Clamp this rectangle to be inside aRect. The function returns a copy of
+   * this rect after it is forced inside the bounds of aRect. It will attempt to
+   * retain the size but will shrink the dimensions that don't fit.
    */
-  Sub ClampRect(const Sub& aRect) const
+  Sub ForceInside(const Sub& aRect) const
   {
     Sub rect(std::max(aRect.x, x),
              std::max(aRect.y, y),
              std::min(aRect.width, width),
              std::min(aRect.height, height));
-    rect.x = std::min(rect.XMost(), XMost()) - rect.width;
-    rect.y = std::min(rect.YMost(), YMost()) - rect.height;
+    rect.x = std::min(rect.XMost(), aRect.XMost()) - rect.width;
+    rect.y = std::min(rect.YMost(), aRect.YMost()) - rect.height;
     return rect;
+  }
+
+  friend std::ostream& operator<<(std::ostream& stream,
+      const BaseRect<T, Sub, Point, SizeT, MarginT>& aRect) {
+    return stream << '(' << aRect.x << ',' << aRect.y << ','
+                  << aRect.width << ',' << aRect.height << ')';
   }
 
 private:

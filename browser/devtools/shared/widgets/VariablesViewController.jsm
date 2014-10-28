@@ -1,4 +1,4 @@
-/* -*- Mode: javascript; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim: set ft=javascript ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -9,7 +9,7 @@ const { classes: Cc, interfaces: Ci, utils: Cu } = Components;
 
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
-let promise = Cu.import("resource://gre/modules/commonjs/sdk/core/promise.js").Promise;
+let {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
 Cu.import("resource:///modules/devtools/VariablesView.jsm");
 Cu.import("resource:///modules/devtools/ViewHelpers.jsm");
 
@@ -152,8 +152,6 @@ VariablesViewController.prototype = {
       aTarget.setGrip(aGrip.initial + aResponse.substring);
       aTarget.hideArrow();
 
-      // Mark the string as having retrieved.
-      aTarget._retrieved = true;
       deferred.resolve();
     });
 
@@ -172,12 +170,15 @@ VariablesViewController.prototype = {
   _populateFromObject: function(aTarget, aGrip) {
     let deferred = promise.defer();
 
-    // Mark the specified variable as having retrieved all its properties.
-    let finish = variable => {
-      variable._retrieved = true;
-      this.view.commitHierarchy();
-      deferred.resolve();
-    };
+    if (aGrip.class === "Promise" && aGrip.promiseState) {
+      const { state, value, reason } = aGrip.promiseState;
+      aTarget.addItem("<state>", { value: state });
+      if (state === "fulfilled") {
+        this.addExpander(aTarget.addItem("<value>", { value }), value);
+      } else if (state === "rejected") {
+        this.addExpander(aTarget.addItem("<reason>", { value: reason }), reason);
+      }
+    }
 
     let objectClient = this._getObjectClient(aGrip);
     objectClient.getPrototypeAndProperties(aResponse => {
@@ -224,12 +225,12 @@ VariablesViewController.prototype = {
             // in the current scope chain. Not necessarily an actual error,
             // it just means that there's no closure for the function.
             console.warn(aResponse.error + ": " + aResponse.message);
-            return void finish(aTarget);
+            return void deferred.resolve();
           }
-          this._addVarScope(aTarget, aResponse.scope).then(() => finish(aTarget));
+          this._populateWithClosure(aTarget, aResponse.scope).then(deferred.resolve);
         });
       } else {
-        finish(aTarget);
+        deferred.resolve();
       }
     });
 
@@ -237,48 +238,43 @@ VariablesViewController.prototype = {
   },
 
   /**
-   * Adds the scope chain elements (closures) of a function variable to the
-   * view.
+   * Adds the scope chain elements (closures) of a function variable.
    *
    * @param Variable aTarget
    *        The variable where the properties will be placed into.
    * @param Scope aScope
    *        The lexical environment form as specified in the protocol.
    */
-  _addVarScope: function(aTarget, aScope) {
+  _populateWithClosure: function(aTarget, aScope) {
     let objectScopes = [];
     let environment = aScope;
     let funcScope = aTarget.addItem("<Closure>");
-    funcScope._target.setAttribute("scope", "");
-    funcScope._fetched = true;
+    funcScope.target.setAttribute("scope", "");
     funcScope.showArrow();
+
     do {
       // Create a scope to contain all the inspected variables.
       let label = StackFrameUtils.getScopeLabel(environment);
-      // Block scopes have the same label, so make addItem allow duplicates.
+
+      // Block scopes may have the same label, so make addItem allow duplicates.
       let closure = funcScope.addItem(label, undefined, true);
-      closure._target.setAttribute("scope", "");
-      closure._fetched = environment.class == "Function";
+      closure.target.setAttribute("scope", "");
       closure.showArrow();
+
       // Add nodes for every argument and every other variable in scope.
       if (environment.bindings) {
-        this._addBindings(closure, environment.bindings);
-        funcScope._retrieved = true;
-        closure._retrieved = true;
+        this._populateWithEnvironmentBindings(closure, environment.bindings);
       } else {
-        let deferred = Promise.defer();
+        let deferred = promise.defer();
         objectScopes.push(deferred.promise);
         this._getEnvironmentClient(environment).getBindings(response => {
-          this._addBindings(closure, response.bindings);
-          funcScope._retrieved = true;
-          closure._retrieved = true;
+          this._populateWithEnvironmentBindings(closure, response.bindings);
           deferred.resolve();
         });
       }
     } while ((environment = environment.parent));
-    aTarget.expand();
 
-    return Promise.all(objectScopes).then(() => {
+    return promise.all(objectScopes).then(() => {
       // Signal that scopes have been fetched.
       this.view.emit("fetched", "scopes", funcScope);
     });
@@ -287,32 +283,32 @@ VariablesViewController.prototype = {
   /**
    * Adds nodes for every specified binding to the closure node.
    *
-   * @param Variable closure
-   *        The node where the bindings will be placed into.
-   * @param object bindings
+   * @param Variable aTarget
+   *        The variable where the bindings will be placed into.
+   * @param object aBindings
    *        The bindings form as specified in the protocol.
    */
-  _addBindings: function(closure, bindings) {
-    for (let argument of bindings.arguments) {
-      let name = Object.getOwnPropertyNames(argument)[0];
-      let argRef = closure.addItem(name, argument[name]);
-      let argVal = argument[name].value;
-      this.addExpander(argRef, argVal);
-    }
+  _populateWithEnvironmentBindings: function(aTarget, aBindings) {
+    // Add nodes for every argument in the scope.
+    aTarget.addItems(aBindings.arguments.reduce((accumulator, arg) => {
+      let name = Object.getOwnPropertyNames(arg)[0];
+      let descriptor = arg[name];
+      accumulator[name] = descriptor;
+      return accumulator;
+    }, {}), {
+      // Arguments aren't sorted.
+      sorted: false,
+      // Expansion handlers must be set after the properties are added.
+      callback: this.addExpander
+    });
 
-    let aVariables = bindings.variables;
-    let variableNames = Object.keys(aVariables);
-
-    // Sort all of the variables before adding them, if preferred.
-    if (VARIABLES_SORTING_ENABLED) {
-      variableNames.sort();
-    }
-    // Add the variables to the specified scope.
-    for (let name of variableNames) {
-      let varRef = closure.addItem(name, aVariables[name]);
-      let varVal = aVariables[name].value;
-      this.addExpander(varRef, varVal);
-    }
+    // Add nodes for every other variable in the scope.
+    aTarget.addItems(aBindings.variables, {
+      // Not all variables need to force sorted properties.
+      sorted: VARIABLES_SORTING_ENABLED,
+      // Expansion handlers must be set after the properties are added.
+      callback: this.addExpander
+    });
   },
 
   /**
@@ -328,12 +324,10 @@ VariablesViewController.prototype = {
     // Attach evaluation macros as necessary.
     if (aTarget.getter || aTarget.setter) {
       aTarget.evaluationMacro = this._overrideValueEvalMacro;
-
       let getter = aTarget.get("get");
       if (getter) {
         getter.evaluationMacro = this._getterOrSetterEvalMacro;
       }
-
       let setter = aTarget.get("set");
       if (setter) {
         setter.evaluationMacro = this._getterOrSetterEvalMacro;
@@ -352,19 +346,13 @@ VariablesViewController.prototype = {
       aTarget.showArrow();
     }
 
-    if (aSource.type == "block" || aSource.type == "function") {
-      // Block and function environments already contain scope arguments and
-      // corresponding variables as bindings.
-      this.populate(aTarget, aSource);
-    } else {
-      // Make sure that properties are always available on expansion.
-      aTarget.onexpand = () => this.populate(aTarget, aSource);
+    // Make sure that properties are always available on expansion.
+    aTarget.onexpand = () => this.populate(aTarget, aSource);
 
-      // Some variables are likely to contain a very large number of properties.
-      // It's a good idea to be prepared in case of an expansion.
-      if (aTarget.shouldPrefetch) {
-        aTarget.addEventListener("mouseover", aTarget.onexpand, false);
-      }
+    // Some variables are likely to contain a very large number of properties.
+    // It's a good idea to be prepared in case of an expansion.
+    if (aTarget.shouldPrefetch) {
+      aTarget.addEventListener("mouseover", aTarget.onexpand, false);
     }
 
     // Register all the actors that this controller now depends on.
@@ -404,9 +392,11 @@ VariablesViewController.prototype = {
     // If the target is a Variable or Property then we're fetching properties.
     if (VariablesView.isVariable(aTarget)) {
       this._populateFromObject(aTarget, aSource).then(() => {
-        deferred.resolve();
         // Signal that properties have been fetched.
         this.view.emit("fetched", "properties", aTarget);
+        // Commit the hierarchy because new items were added.
+        this.view.commitHierarchy();
+        deferred.resolve();
       });
       return deferred.promise;
     }
@@ -414,43 +404,29 @@ VariablesViewController.prototype = {
     switch (aSource.type) {
       case "longString":
         this._populateFromLongString(aTarget, aSource).then(() => {
-          deferred.resolve();
           // Signal that a long string has been fetched.
           this.view.emit("fetched", "longString", aTarget);
+          deferred.resolve();
         });
         break;
       case "with":
       case "object":
         this._populateFromObject(aTarget, aSource.object).then(() => {
-          deferred.resolve();
           // Signal that variables have been fetched.
           this.view.emit("fetched", "variables", aTarget);
+          // Commit the hierarchy because new items were added.
+          this.view.commitHierarchy();
+          deferred.resolve();
         });
         break;
       case "block":
       case "function":
-        // Add nodes for every argument and every other variable in scope.
-        let args = aSource.bindings.arguments;
-        if (args) {
-          for (let arg of args) {
-            let name = Object.getOwnPropertyNames(arg)[0];
-            let ref = aTarget.addItem(name, arg[name]);
-            let val = arg[name].value;
-            this.addExpander(ref, val);
-          }
-        }
-
-        aTarget.addItems(aSource.bindings.variables, {
-          // Not all variables need to force sorted properties.
-          sorted: VARIABLES_SORTING_ENABLED,
-          // Expansion handlers must be set after the properties are added.
-          callback: this.addExpander
-        });
-
+        this._populateWithEnvironmentBindings(aTarget, aSource.bindings);
         // No need to signal that variables have been fetched, since
         // the scope arguments and variables are already attached to the
         // environment bindings, so pausing the active thread is unnecessary.
-
+        // Commit the hierarchy because new items were added.
+        this.view.commitHierarchy();
         deferred.resolve();
         break;
       default:

@@ -7,22 +7,24 @@
 #include "RtspControllerParent.h"
 #include "RtspController.h"
 #include "nsIAuthPromptProvider.h"
+#include "nsThreadUtils.h"
+#include "nsProxyRelease.h"
 #include "mozilla/ipc/InputStreamUtils.h"
 #include "mozilla/ipc/URIUtils.h"
+#include "mozilla/unused.h"
 #include "nsNetUtil.h"
 #include "prlog.h"
 
 #include <sys/types.h>
-#include <sys/socket.h>
 
 PRLogModuleInfo* gRtspLog;
 #undef LOG
 #define LOG(args) PR_LOG(gRtspLog, PR_LOG_DEBUG, args)
 
 #define SEND_DISCONNECT_IF_ERROR(rv)                         \
-  if (NS_FAILED(rv) && mIPCOpen && mTotalTracks > 0) {       \
-    for (int i = 0; i < mTotalTracks; i++) {                 \
-      SendOnDisconnected(i, rv);                             \
+  if (NS_FAILED(rv) && mIPCOpen && mTotalTracks > 0ul) {     \
+    for (uint32_t i = 0; i < mTotalTracks; i++) {            \
+      unused << SendOnDisconnected(i, rv);                   \
     }                                                        \
   }
 
@@ -31,9 +33,30 @@ using namespace mozilla::ipc;
 namespace mozilla {
 namespace net {
 
-NS_IMPL_ISUPPORTS2(RtspControllerParent,
-                   nsIInterfaceRequestor,
-                   nsIStreamingProtocolListener)
+void
+RtspControllerParent::Destroy()
+{
+  // If we're being destroyed on a non-main thread, we AddRef again and use a
+  // proxy to release the RtspControllerParent on the main thread, where the
+  // RtspControllerParent is deleted. This ensures we only delete the
+  // RtspControllerParent on the main thread.
+  if (!NS_IsMainThread()) {
+    nsCOMPtr<nsIThread> mainThread = do_GetMainThread();
+    NS_ENSURE_TRUE_VOID(mainThread);
+    nsRefPtr<RtspControllerParent> doomed(this);
+    if (NS_FAILED(NS_ProxyRelease(mainThread,
+            static_cast<nsIStreamingProtocolListener*>(doomed), true))) {
+      NS_WARNING("Failed to proxy release to main thread!");
+    }
+  } else {
+    delete this;
+  }
+}
+
+NS_IMPL_ADDREF(RtspControllerParent)
+NS_IMPL_RELEASE_WITH_DESTROY(RtspControllerParent, Destroy())
+NS_IMPL_QUERY_INTERFACE(RtspControllerParent,
+                        nsIStreamingProtocolListener)
 
 RtspControllerParent::RtspControllerParent()
   : mIPCOpen(true)
@@ -56,8 +79,10 @@ RtspControllerParent::ActorDestroy(ActorDestroyReason why)
   mIPCOpen = false;
 
   NS_ENSURE_TRUE_VOID(mController);
-  mController->Stop();
-  mController = nullptr;
+  if (mController) {
+    mController->Stop();
+    mController = nullptr;
+  }
 }
 
 bool
@@ -142,6 +167,17 @@ RtspControllerParent::RecvStop()
   return true;
 }
 
+bool
+RtspControllerParent::RecvPlaybackEnded()
+{
+  LOG(("RtspControllerParent::RecvPlaybackEnded()"));
+  NS_ENSURE_TRUE(mController, true);
+
+  nsresult rv = mController->PlaybackEnded();
+  SEND_DISCONNECT_IF_ERROR(rv)
+  return true;
+}
+
 NS_IMETHODIMP
 RtspControllerParent::OnMediaDataAvailable(uint8_t index,
                                            const nsACString & data,
@@ -153,14 +189,15 @@ RtspControllerParent::OnMediaDataAvailable(uint8_t index,
   uint32_t int32Value;
   uint64_t int64Value;
 
+  nsresult rv = meta->GetTimeStamp(&int64Value);
+  NS_ENSURE_SUCCESS(rv, NS_ERROR_FAILURE);
+
   LOG(("RtspControllerParent:: OnMediaDataAvailable %d:%d time %lld",
        index, length, int64Value));
 
   // Serialize meta data.
   nsCString name;
   name.AssignLiteral("TIMESTAMP");
-  nsresult rv = meta->GetTimeStamp(&int64Value);
-  NS_ENSURE_SUCCESS(rv, NS_ERROR_FAILURE);
   InfallibleTArray<RtspMetadataParam> metaData;
   metaData.AppendElement(RtspMetadataParam(name, int64Value));
 
@@ -258,14 +295,10 @@ RtspControllerParent::OnDisconnected(uint8_t index,
   if (!mIPCOpen || !SendOnDisconnected(index, reason)) {
     return NS_ERROR_FAILURE;
   }
+  if (mController) {
+    mController = nullptr;
+  }
   return NS_OK;
-}
-
-NS_IMETHODIMP
-RtspControllerParent::GetInterface(const nsIID & iid, void **result)
-{
-  LOG(("RtspControllerParent::GetInterface()"));
-  return QueryInterface(iid, result);
 }
 
 } // namespace net

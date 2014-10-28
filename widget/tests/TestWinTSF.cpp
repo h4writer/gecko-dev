@@ -166,7 +166,7 @@ NS_IMETHODIMP
 TestApp::OnStatusChange(nsIWebProgress *aWebProgress,
                          nsIRequest *aRequest,
                          nsresult aStatus,
-                         const PRUnichar *aMessage)
+                         const char16_t *aMessage)
 {
   return NS_OK;
 }
@@ -1412,8 +1412,8 @@ TSFDocumentMgrImpl::Release(void)
   return 0;
 }
 
-NS_IMPL_ISUPPORTS2(TestApp, nsIWebProgressListener,
-                            nsISupportsWeakReference)
+NS_IMPL_ISUPPORTS(TestApp, nsIWebProgressListener,
+                  nsISupportsWeakReference)
 
 nsresult
 TestApp::Run(void)
@@ -1476,6 +1476,8 @@ TestApp::Init(void)
   nsresult rv = baseWindow->GetMainWidget(getter_AddRefs(widget));
   NS_ENSURE_TRUE(widget, NS_ERROR_UNEXPECTED);
 
+  static_assert(false,
+    "GetNativeData() returns pointer to StaticRefPtr<>, fix here for it");
   ITfThreadMgr **threadMgr = reinterpret_cast<ITfThreadMgr**>(
       widget->GetNativeData(NS_NATIVE_TSF_THREAD_MGR));
   if (!threadMgr) {
@@ -1749,7 +1751,7 @@ TestApp::TestClustering(void)
 {
   // Text for testing
   const uint32_t STRING_LENGTH = 2;
-  PRUnichar string[3];
+  char16_t string[3];
   string[0] = 'e';
   string[1] = 0x0301; // U+0301 'acute accent'
   string[2] = nullptr;
@@ -1885,10 +1887,10 @@ TestApp::TestSelection(void)
 
   /* If these fail the cause is probably one or more of:
    * nsTextStore::GetSelection not sending NS_QUERY_SELECTED_TEXT
-   * NS_QUERY_SELECTED_TEXT not handled by nsContentEventHandler
+   * NS_QUERY_SELECTED_TEXT not handled by ContentEventHandler
    * Bug in NS_QUERY_SELECTED_TEXT handler
    * nsTextStore::SetSelection not sending NS_SELECTION_SET
-   * NS_SELECTION_SET not handled by nsContentEventHandler
+   * NS_SELECTION_SET not handled by ContentEventHandler
    * Bug in NS_SELECTION_SET handler
    */
 
@@ -1950,7 +1952,7 @@ TestApp::TestText(void)
   const uint32_t RUNINFO_SIZE = (0x10);
 
   bool succeeded = true, continueTest;
-  PRUnichar buffer[BUFFER_SIZE];
+  char16_t buffer[BUFFER_SIZE];
   TS_RUNINFO runInfo[RUNINFO_SIZE];
   ULONG bufferRet, runInfoRet;
   LONG acpRet, acpCurrent;
@@ -1959,11 +1961,11 @@ TestApp::TestText(void)
 
   /* If these fail the cause is probably one or more of:
    * nsTextStore::GetText not sending NS_QUERY_TEXT_CONTENT
-   * NS_QUERY_TEXT_CONTENT not handled by nsContentEventHandler
+   * NS_QUERY_TEXT_CONTENT not handled by ContentEventHandler
    * Bug in NS_QUERY_TEXT_CONTENT handler
    * nsTextStore::SetText not calling SetSelection or InsertTextAtSelection
    * Bug in SetSelection or InsertTextAtSelection
-   *  NS_SELECTION_SET bug or NS_COMPOSITION_* / NS_TEXT_TEXT bug
+   *  NS_SELECTION_SET bug or NS_COMPOSITION_* / NS_COMPOSITION_CHANGE bug
    */
 
   if (!mMgr->GetFocusedStore()) {
@@ -2320,7 +2322,7 @@ TestApp::TestCompositionSelectionAndText(char* aTestName,
   }
 
   const uint32_t bufferSize = 0x100, runInfoSize = 0x10;
-  PRUnichar buffer[bufferSize];
+  char16_t buffer[bufferSize];
   TS_RUNINFO runInfo[runInfoSize];
   ULONG bufferRet, runInfoRet;
   LONG acpRet, acpCurrent = 0;
@@ -2903,7 +2905,7 @@ TestApp::TestScrollMessages(void)
 #define DO_CHECK(aFailureCondition, aDescription) \
   if (aFailureCondition) { \
     nsAutoCString str(aDescription); \
-    str.Append(": "); \
+    str.AppendLiteral(": "); \
     str.Append(#aFailureCondition); \
     fail(str.get()); \
     mTextArea->SetAttribute(NS_LITERAL_STRING("style"), EmptyString()); \

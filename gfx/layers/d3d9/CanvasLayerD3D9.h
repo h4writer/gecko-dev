@@ -9,8 +9,6 @@
 #include "LayerManagerD3D9.h"
 #include "GLContextTypes.h"
 
-class gfxASurface;
-
 namespace mozilla {
 namespace layers {
 
@@ -39,7 +37,6 @@ protected:
 
   void UpdateSurface();
 
-  nsRefPtr<gfxASurface> mSurface;
   nsRefPtr<GLContext> mGLContext;
   nsRefPtr<IDirect3DTexture9> mTexture;
   RefPtr<gfx::DrawTarget> mDrawTarget;

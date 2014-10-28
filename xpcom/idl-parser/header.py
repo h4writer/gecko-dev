@@ -134,8 +134,8 @@ include = """
 #endif
 """
 
-jspubtd_include = """
-#include "jspubtd.h"
+jsvalue_include = """
+#include "js/Value.h"
 """
 
 infallible_includes = """
@@ -173,7 +173,7 @@ def print_header(idl, fd, filename):
         fd.write(include % {'basename': idl_basename(inc.filename)})
 
     if idl.needsJSTypes():
-        fd.write(jspubtd_include)
+        fd.write(jsvalue_include)
 
     # Include some extra files if any attributes are infallible.
     for iface in [p for p in idl.productions if p.kind == 'interface']:
@@ -267,7 +267,7 @@ protected:
 };
 
 /* Implementation file */
-NS_IMPL_ISUPPORTS1(%(implclass)s, %(name)s)
+NS_IMPL_ISUPPORTS(%(implclass)s, %(name)s)
 
 %(implclass)s::%(implclass)s()
 {
@@ -400,11 +400,11 @@ def write_interface(iface, fd):
 
     for member in iface.members:
         if isinstance(member, xpidl.Attribute):
-            fd.write("\\\n  %s; " % attributeAsNative(member, True))
+            fd.write("\\\n  %s MOZ_OVERRIDE; " % attributeAsNative(member, True))
             if not member.readonly:
-                fd.write("\\\n  %s; " % attributeAsNative(member, False))
+                fd.write("\\\n  %s MOZ_OVERRIDE; " % attributeAsNative(member, False))
         elif isinstance(member, xpidl.Method):
-            fd.write("\\\n  %s; " % methodAsNative(member))
+            fd.write("\\\n  %s MOZ_OVERRIDE; " % methodAsNative(member))
     if len(iface.members) == 0:
         fd.write('\\\n  /* no methods! */')
     elif not member.kind in ('attribute', 'method'):
@@ -438,15 +438,15 @@ def write_interface(iface, fd):
         elif not member.kind in ('attribute', 'method'):
             fd.write('\\')
 
-    emitTemplate("\\\n  %(asNative)s { return _to %(nativeName)s(%(paramList)s); } ")
+    emitTemplate("\\\n  %(asNative)s MOZ_OVERRIDE { return _to %(nativeName)s(%(paramList)s); } ")
 
     fd.write(iface_forward_safe % names)
 
     # Don't try to safely forward notxpcom functions, because we have no
     # sensible default error return.  Instead, the caller will have to
     # implement them.
-    emitTemplate("\\\n  %(asNative)s { return !_to ? NS_ERROR_NULL_POINTER : _to->%(nativeName)s(%(paramList)s); } ",
-                 "\\\n  %(asNative)s; ")
+    emitTemplate("\\\n  %(asNative)s MOZ_OVERRIDE { return !_to ? NS_ERROR_NULL_POINTER : _to->%(nativeName)s(%(paramList)s); } ",
+                 "\\\n  %(asNative)s MOZ_OVERRIDE; ")
 
     fd.write(iface_template_prolog % names)
 

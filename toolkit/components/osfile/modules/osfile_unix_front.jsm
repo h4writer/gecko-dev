@@ -40,10 +40,11 @@
       * to open a file, use function |OS.File.open|.
       *
       * @param fd A OS-specific file descriptor.
+      * @param {string} path File path of the file handle, used for error-reporting.
       * @constructor
       */
-     let File = function File(fd) {
-       exports.OS.Shared.AbstractFile.call(this, fd);
+     let File = function File(fd, path) {
+       exports.OS.Shared.AbstractFile.call(this, fd, path);
        this._closeResult = null;
      };
      File.prototype = Object.create(exports.OS.Shared.AbstractFile.prototype);
@@ -70,7 +71,7 @@
            fd.forget();
          }
          if (result == -1) {
-           this._closeResult = new File.Error("close");
+           this._closeResult = new File.Error("close", ctypes.errno, this._path);
          }
        }
        if (this._closeResult) {
@@ -103,7 +104,8 @@
           OS.Constants.libc.POSIX_FADV_SEQUENTIAL);
        }
        return throw_on_negative("read",
-         UnixFile.read(this.fd, buffer, nbytes)
+         UnixFile.read(this.fd, buffer, nbytes),
+         this._path
        );
      };
 
@@ -122,7 +124,8 @@
       */
      File.prototype._write = function _write(buffer, nbytes, options = {}) {
        return throw_on_negative("write",
-         UnixFile.write(this.fd, buffer, nbytes)
+         UnixFile.write(this.fd, buffer, nbytes),
+         this._path
        );
      };
 
@@ -154,7 +157,8 @@
          whence = Const.SEEK_SET;
        }
        return throw_on_negative("setPosition",
-         UnixFile.lseek(this.fd, pos, whence)
+         UnixFile.lseek(this.fd, pos, whence),
+         this._path
        );
      };
 
@@ -164,14 +168,44 @@
       * @return File.Info The information on |this| file.
       */
      File.prototype.stat = function stat() {
-       throw_on_negative("stat", UnixFile.fstat(this.fd, gStatDataPtr));
-         return new File.Info(gStatData);
+       throw_on_negative("stat", UnixFile.fstat(this.fd, gStatDataPtr),
+                         this._path);
+       return new File.Info(gStatData, this._path);
+     };
+
+     /**
+      * Set the file's access permissions.
+      *
+      * This operation is likely to fail if applied to a file that was
+      * not created by the currently running program (more precisely,
+      * if it was created by a program running under a different OS-level
+      * user account).  It may also fail, or silently do nothing, if the
+      * filesystem containing the file does not support access permissions.
+      *
+      * @param {*=} options Object specifying the requested permissions:
+      *
+      * - {number} unixMode The POSIX file mode to set on the file.  If omitted,
+      *  the POSIX file mode is reset to the default used by |OS.file.open|.  If
+      *  specified, the permissions will respect the process umask as if they
+      *  had been specified as arguments of |OS.File.open|, unless the
+      *  |unixHonorUmask| parameter tells otherwise.
+      * - {bool} unixHonorUmask If omitted or true, any |unixMode| value is
+      *  modified by the process umask, as |OS.File.open| would have done.  If
+      *  false, the exact value of |unixMode| will be applied.
+      */
+     File.prototype.setPermissions = function setPermissions(options = {}) {
+       throw_on_negative("setPermissions",
+                         UnixFile.fchmod(this.fd, unixMode(options)),
+                         this._path);
      };
 
      /**
       * Set the last access and modification date of the file.
       * The time stamp resolution is 1 second at best, but might be worse
       * depending on the platform.
+      *
+      * WARNING: This method is not implemented on Android/B2G. On Android/B2G,
+      * you should use File.setDates instead.
       *
       * @param {Date,number=} accessDate The last access date. If numeric,
       * milliseconds since epoch. If omitted or null, then the current date
@@ -183,17 +217,14 @@
       * @throws {TypeError} In case of invalid parameters.
       * @throws {OS.File.Error} In case of I/O error.
       */
-     File.prototype.setDates = function setDates(accessDate, modificationDate) {
-       accessDate = normalizeDate("File.prototype.setDates", accessDate);
-       modificationDate = normalizeDate("File.prototype.setDates",
-                                        modificationDate);
-       gTimevals[0].tv_sec = (accessDate / 1000) | 0;
-       gTimevals[0].tv_usec = 0;
-       gTimevals[1].tv_sec = (modificationDate / 1000) | 0;
-       gTimevals[1].tv_usec = 0;
-       throw_on_negative("setDates",
-                         UnixFile.futimes(this.fd, gTimevalsPtr));
-     };
+     if (SharedAll.Constants.Sys.Name != "Android") {
+       File.prototype.setDates = function(accessDate, modificationDate) {
+         let {value, ptr} = datesToTimevals(accessDate, modificationDate);
+         throw_on_negative("setDates",
+           UnixFile.futimes(this.fd, ptr),
+           this._path);
+       };
+     }
 
      /**
       * Flushes the file's buffers and causes all buffered data
@@ -207,7 +238,7 @@
       * @throws {OS.File.Error} In case of I/O error.
       */
      File.prototype.flush = function flush() {
-       throw_on_negative("flush", UnixFile.fsync(this.fd));
+       throw_on_negative("flush", UnixFile.fsync(this.fd), this._path);
      };
 
      // The default unix mode for opening (0600)
@@ -260,6 +291,7 @@
       * @throws {OS.File.Error} If the file could not be opened.
       */
      File.open = function Unix_open(path, mode, options = {}) {
+       // We don't need to filter for the umask because "open" does this for us.
        let omode = options.unixMode !== undefined ?
                      options.unixMode : DEFAULT_UNIX_MODE;
        let flags;
@@ -293,7 +325,7 @@
            flags |= Const.O_APPEND;
          }
        }
-       return error_or_file(UnixFile.open(path, flags, omode));
+       return error_or_file(UnixFile.open(path, flags, omode), path);
      };
 
      /**
@@ -328,7 +360,7 @@
              ctypes.errno == Const.ENOENT) {
            return;
          }
-         throw new File.Error("remove");
+         throw new File.Error("remove", ctypes.errno, path);
        }
      };
 
@@ -347,8 +379,29 @@
              ctypes.errno == Const.ENOENT) {
            return;
          }
-         throw new File.Error("removeEmptyDir");
+         throw new File.Error("removeEmptyDir", ctypes.errno, path);
        }
+     };
+
+     /**
+      * Gets the number of bytes available on disk to the current user.
+      *
+      * @param {string} sourcePath Platform-specific path to a directory on
+      * the disk to query for free available bytes.
+      *
+      * @return {number} The number of bytes available for the current user.
+      * @throws {OS.File.Error} In case of any error.
+      */
+     File.getAvailableFreeSpace = function Unix_getAvailableFreeSpace(sourcePath) {
+       let fileSystemInfo = new Type.statvfs.implementation();
+       let fileSystemInfoPtr = fileSystemInfo.address();
+
+       throw_on_negative("statvfs",  (UnixFile.statvfs || UnixFile.statfs)(sourcePath, fileSystemInfoPtr));
+
+       let bytes = new Type.uint64_t.implementation(
+                        fileSystemInfo.f_bsize * fileSystemInfo.f_bavail);
+
+       return bytes.value;
      };
 
      /**
@@ -369,16 +422,23 @@
       * the user, the user can read, write and execute).
       * - {bool} ignoreExisting If |false|, throw error if the directory
       * already exists. |true| by default
-      */
-     File.makeDir = function makeDir(path, options = {}) {
+      * - {string} from If specified, the call to |makeDir| creates all the
+      * ancestors of |path| that are descendants of |from|. Note that |from|
+      * and its existing descendants must be user-writeable and that |path|
+      * must be a descendant of |from|.
+      * Example:
+      *   makeDir(Path.join(profileDir, "foo", "bar"), { from: profileDir });
+      *  creates directories profileDir/foo, profileDir/foo/bar
+       */
+     File._makeDir = function makeDir(path, options = {}) {
        let omode = options.unixMode !== undefined ? options.unixMode : DEFAULT_UNIX_MODE_DIR;
        let result = UnixFile.mkdir(path, omode);
        if (result == -1) {
          if ((!("ignoreExisting" in options) || options.ignoreExisting) &&
-             ctypes.errno == Const.EEXIST) {
+             (ctypes.errno == Const.EEXIST || ctypes.errno == Const.EISDIR)) {
            return;
          }
-         throw new File.Error("makeDir");
+         throw new File.Error("makeDir", ctypes.errno, path);
        }
      };
 
@@ -445,7 +505,8 @@
            flags |= Const.COPYFILE_EXCL;
          }
          throw_on_negative("copy",
-           UnixFile.copyfile(sourcePath, destPath, null, flags)
+           UnixFile.copyfile(sourcePath, destPath, null, flags),
+           sourcePath
          );
        };
      } else {
@@ -623,10 +684,10 @@
          if (fd != -1) {
            fd.dispose();
            // The file exists and we have access
-           throw new File.Error("move", Const.EEXIST);
+           throw new File.Error("move", Const.EEXIST, sourcePath);
          } else if (ctypes.errno == Const.EACCESS) {
            // The file exists and we don't have access
-           throw new File.Error("move", Const.EEXIST);
+           throw new File.Error("move", Const.EEXIST, sourcePath);
          }
        }
 
@@ -640,13 +701,18 @@
        // that prevents us from crossing devices, throw the
        // error.
        if (ctypes.errno != Const.EXDEV || options.noCopy) {
-         throw new File.Error("move");
+         throw new File.Error("move", ctypes.errno, sourcePath);
        }
 
        // Otherwise, copy and remove.
        File.copy(sourcePath, destPath, options);
        // FIXME: Clean-up in case of copy error?
        File.remove(sourcePath);
+     };
+
+     File.unixSymLink = function unixSymLink(sourcePath, destPath) {
+       throw_on_negative("symlink", UnixFile.symlink(sourcePath, destPath),
+           sourcePath);
      };
 
      /**
@@ -668,7 +734,7 @@
        if (this._dir == null) {
          let error = ctypes.errno;
          if (error != Const.ENOENT) {
-           throw new File.Error("DirectoryIterator", error);
+           throw new File.Error("DirectoryIterator", error, path);
          }
          this._exists = false;
          this._closed = true;
@@ -691,7 +757,7 @@
       */
      File.DirectoryIterator.prototype.next = function next() {
        if (!this._exists) {
-         throw File.Error.noSuchFile("DirectoryIterator.prototype.next");
+         throw File.Error.noSuchFile("DirectoryIterator.prototype.next", this._path);
        }
        if (this._closed) {
          throw StopIteration;
@@ -709,7 +775,7 @@
          if (!("d_type" in contents)) {
            // |dirent| doesn't have d_type on some platforms (e.g. Solaris).
            let path = Path.join(this._path, name);
-           throw_on_negative("lstat", UnixFile.lstat(path, gStatDataPtr));
+           throw_on_negative("lstat", UnixFile.lstat(path, gStatDataPtr), this._path);
            isDir = (gStatData.st_mode & Const.S_IFMT) == Const.S_IFDIR;
            isSymLink = (gStatData.st_mode & Const.S_IFMT) == Const.S_IFLNK;
          } else {
@@ -747,8 +813,8 @@
       * Return directory as |File|
       */
      File.DirectoryIterator.prototype.unixAsFile = function unixAsFile() {
-       if (!this._dir) throw File.Error.closed();
-       return error_or_file(UnixFile.dirfd(this._dir));
+       if (!this._dir) throw File.Error.closed("unixAsFile", this._path);
+       return error_or_file(UnixFile.dirfd(this._dir), this._path);
      };
 
      /**
@@ -786,10 +852,9 @@
 
      let gStatData = new Type.stat.implementation();
      let gStatDataPtr = gStatData.address();
-     let gTimevals = new Type.timevals.implementation();
-     let gTimevalsPtr = gTimevals.address();
+
      let MODE_MASK = 4095 /*= 07777*/;
-     File.Info = function Info(stat) {
+     File.Info = function Info(stat, path) {
        let isDir = (stat.st_mode & Const.S_IFMT) == Const.S_IFDIR;
        let isSymLink = (stat.st_mode & Const.S_IFMT) == Const.S_IFLNK;
        let size = Type.off_t.importFromC(stat.st_size);
@@ -802,8 +867,8 @@
        let unixGroup = Type.gid_t.importFromC(stat.st_gid);
        let unixMode = Type.mode_t.importFromC(stat.st_mode & MODE_MASK);
 
-       SysAll.AbstractInfo.call(this, isDir, isSymLink, size, lastAccessDate,
-           lastModificationDate, unixLastStatusChangeDate,
+       SysAll.AbstractInfo.call(this, path, isDir, isSymLink, size,
+           lastAccessDate, lastModificationDate, unixLastStatusChangeDate,
            unixOwner, unixGroup, unixMode);
 
        // Some platforms (e.g. MacOS X, some BSDs) store a file creation date
@@ -864,12 +929,58 @@
       */
      File.stat = function stat(path, options = {}) {
        if (options.unixNoFollowingLinks) {
-         throw_on_negative("stat", UnixFile.lstat(path, gStatDataPtr));
+         throw_on_negative("stat", UnixFile.lstat(path, gStatDataPtr), path);
        } else {
-         throw_on_negative("stat", UnixFile.stat(path, gStatDataPtr));
+         throw_on_negative("stat", UnixFile.stat(path, gStatDataPtr), path);
        }
-       return new File.Info(gStatData);
+       return new File.Info(gStatData, path);
      };
+
+     /**
+      * Set the file's access permissions.
+      *
+      * This operation is likely to fail if applied to a file that was
+      * not created by the currently running program (more precisely,
+      * if it was created by a program running under a different OS-level
+      * user account).  It may also fail, or silently do nothing, if the
+      * filesystem containing the file does not support access permissions.
+      *
+      * @param {string} path The name of the file to reset the permissions of.
+      * @param {*=} options Object specifying the requested permissions:
+      *
+      * - {number} unixMode The POSIX file mode to set on the file.  If omitted,
+      *  the POSIX file mode is reset to the default used by |OS.file.open|.  If
+      *  specified, the permissions will respect the process umask as if they
+      *  had been specified as arguments of |OS.File.open|, unless the
+      *  |unixHonorUmask| parameter tells otherwise.
+      * - {bool} unixHonorUmask If omitted or true, any |unixMode| value is
+      *  modified by the process umask, as |OS.File.open| would have done.  If
+      *  false, the exact value of |unixMode| will be applied.
+      */
+     File.setPermissions = function setPermissions(path, options = {}) {
+       throw_on_negative("setPermissions",
+                         UnixFile.chmod(path, unixMode(options)),
+                         path);
+     };
+
+     /**
+      * Convert an access date and a modification date to an array
+      * of two |timeval|.
+      */
+     function datesToTimevals(accessDate, modificationDate) {
+       accessDate = normalizeDate("File.setDates", accessDate);
+       modificationDate = normalizeDate("File.setDates", modificationDate);
+
+       let timevals = new Type.timevals.implementation();
+       let timevalsPtr = timevals.address();
+
+       timevals[0].tv_sec = (accessDate / 1000) | 0;
+       timevals[0].tv_usec = 0;
+       timevals[1].tv_sec = (modificationDate / 1000) | 0;
+       timevals[1].tv_usec = 0;
+
+       return { value: timevals, ptr: timevalsPtr };
+     }
 
      /**
       * Set the last access and modification date of the file.
@@ -888,28 +999,69 @@
       * @throws {OS.File.Error} In case of I/O error.
       */
      File.setDates = function setDates(path, accessDate, modificationDate) {
-       accessDate = normalizeDate("File.setDates", accessDate);
-       modificationDate = normalizeDate("File.setDates", modificationDate);
-       gTimevals[0].tv_sec = (accessDate / 1000) | 0;
-       gTimevals[0].tv_usec = 0;
-       gTimevals[1].tv_sec = (modificationDate / 1000) | 0;
-       gTimevals[1].tv_usec = 0;
+       let {value, ptr} = datesToTimevals(accessDate, modificationDate);
        throw_on_negative("setDates",
-                         UnixFile.utimes(path, gTimevalsPtr));
+                         UnixFile.utimes(path, ptr),
+                         path);
      };
 
      File.read = exports.OS.Shared.AbstractFile.read;
      File.writeAtomic = exports.OS.Shared.AbstractFile.writeAtomic;
      File.openUnique = exports.OS.Shared.AbstractFile.openUnique;
-     File.removeDir = exports.OS.Shared.AbstractFile.removeDir;
+     File.makeDir = exports.OS.Shared.AbstractFile.makeDir;
+
+     /**
+      * Remove an existing directory and its contents.
+      *
+      * @param {string} path The name of the directory.
+      * @param {*=} options Additional options.
+      *   - {bool} ignoreAbsent If |false|, throw an error if the directory doesn't
+      *     exist. |true| by default.
+      *   - {boolean} ignorePermissions If |true|, remove the file even when lacking write
+      *     permission.
+      *
+      * @throws {OS.File.Error} In case of I/O error, in particular if |path| is
+      *         not a directory.
+      *
+      * Note: This function will remove a symlink even if it points a directory.
+      */
+     File.removeDir = function(path, options = {}) {
+       let isSymLink;
+       try {
+         let info = File.stat(path, {unixNoFollowingLinks: true});
+         isSymLink = info.isSymLink;
+       } catch (e) {
+         if ((!("ignoreAbsent" in options) || options.ignoreAbsent) &&
+             ctypes.errno == Const.ENOENT) {
+           return;
+         }
+         throw e;
+       }
+       if (isSymLink) {
+         // A Unix symlink itself is not a directory even if it points
+         // a directory.
+         File.remove(path, options);
+         return;
+       }
+       exports.OS.Shared.AbstractFile.removeRecursive(path, options);
+     };
 
      /**
       * Get the current directory by getCurrentDirectory.
       */
      File.getCurrentDirectory = function getCurrentDirectory() {
-       let path = UnixFile.get_current_dir_name?UnixFile.get_current_dir_name():
-         UnixFile.getwd_auto(null);
-       throw_on_null("getCurrentDirectory",path);
+       let path, buf;
+       if (UnixFile.get_current_dir_name) {
+	 path = UnixFile.get_current_dir_name();
+       } else if (UnixFile.getwd_auto) {
+         path = UnixFile.getwd_auto(null);
+       } else {
+	 for (let length = Const.PATH_MAX; !path; length *= 2) {
+	   buf = new (ctypes.char.array(length));
+	   path = UnixFile.getcwd(buf, length);
+	 };
+       }
+       throw_on_null("getCurrentDirectory", path);
        return path.readString();
      };
 
@@ -918,7 +1070,8 @@
       */
      File.setCurrentDirectory = function setCurrentDirectory(path) {
        throw_on_negative("setCurrentDirectory",
-         UnixFile.chdir(path)
+         UnixFile.chdir(path),
+         path
        );
      };
 
@@ -939,33 +1092,48 @@
 
      /**
       * Turn the result of |open| into an Error or a File
+      * @param {number} maybe The result of the |open| operation that may
+      * represent either an error or a success. If -1, this function raises
+      * an error holding ctypes.errno, otherwise it returns the opened file.
+      * @param {string=} path The path of the file.
       */
-     function error_or_file(maybe) {
+     function error_or_file(maybe, path) {
        if (maybe == -1) {
-         throw new File.Error("open");
+         throw new File.Error("open", ctypes.errno, path);
        }
-       return new File(maybe);
+       return new File(maybe, path);
      }
 
      /**
       * Utility function to sort errors represented as "-1" from successes.
       *
+      * @param {string=} operation The name of the operation. If unspecified,
+      * the name of the caller function.
       * @param {number} result The result of the operation that may
       * represent either an error or a success. If -1, this function raises
       * an error holding ctypes.errno, otherwise it returns |result|.
-      * @param {string=} operation The name of the operation. If unspecified,
-      * the name of the caller function.
+      * @param {string=} path The path of the file.
       */
-     function throw_on_negative(operation, result) {
+     function throw_on_negative(operation, result, path) {
        if (result < 0) {
-         throw new File.Error(operation);
+         throw new File.Error(operation, ctypes.errno, path);
        }
        return result;
      }
 
-     function throw_on_null(operation, result) {
+     /**
+      * Utility function to sort errors represented as |null| from successes.
+      *
+      * @param {string=} operation The name of the operation. If unspecified,
+      * the name of the caller function.
+      * @param {pointer} result The result of the operation that may
+      * represent either an error or a success. If |null|, this function raises
+      * an error holding ctypes.errno, otherwise it returns |result|.
+      * @param {string=} path The path of the file.
+      */
+     function throw_on_null(operation, result, path) {
        if (result == null || (result.isNull && result.isNull())) {
-         throw new File.Error(operation);
+         throw new File.Error(operation, ctypes.errno, path);
        }
        return result;
      }
@@ -996,6 +1164,22 @@
        }
        return date;
      };
+
+     /**
+      * Helper used by both versions of setPermissions.
+      */
+     function unixMode(options) {
+       let mode = options.unixMode !== undefined ?
+                    options.unixMode : DEFAULT_UNIX_MODE;
+       let unixHonorUmask = true;
+       if ("unixHonorUmask" in options) {
+         unixHonorUmask = options.unixHonorUmask;
+       }
+       if (unixHonorUmask) {
+         mode &= ~SharedAll.Constants.Sys.umask;
+       }
+       return mode;
+     }
 
      File.Unix = exports.OS.Unix.File;
      File.Error = SysAll.Error;

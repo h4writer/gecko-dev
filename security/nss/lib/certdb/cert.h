@@ -79,13 +79,6 @@ extern CERTRDN *CERT_CreateRDN(PLArenaPool *arena, CERTAVA *avas, ...);
 extern SECStatus CERT_CopyRDN(PLArenaPool *arena, CERTRDN *dest, CERTRDN *src);
 
 /*
-** Destory an RDN object.
-**	"rdn" the RDN to destroy
-**	"freeit" if PR_TRUE then free the object as well as its sub-objects
-*/
-extern void CERT_DestroyRDN(CERTRDN *rdn, PRBool freeit);
-
-/*
 ** Add an AVA to an RDN.
 **	"rdn" the RDN to add to
 **	"ava" the AVA to add
@@ -1174,7 +1167,7 @@ CERT_DecodeNameConstraintsExtension(PLArenaPool *arena,
 /* returns addr of a NULL termainated array of pointers to CERTAuthInfoAccess */
 extern CERTAuthInfoAccess **
 CERT_DecodeAuthInfoAccessExtension(PLArenaPool *reqArena,
-				   SECItem     *encodedExtension);
+				   const SECItem *encodedExtension);
 
 extern CERTPrivKeyUsagePeriod *
 CERT_DecodePrivKeyUsagePeriodExtension(PLArenaPool *arena, SECItem *extnValue);
@@ -1504,14 +1497,18 @@ CERT_UnlockCertTrust(const CERTCertificate *cert);
 
 /*
  * Digest the cert's subject public key using the specified algorithm.
+ * NOTE: this digests the value of the BIT STRING subjectPublicKey (excluding
+ * the tag, length, and number of unused bits) rather than the whole
+ * subjectPublicKeyInfo field.
+ *
  * The necessary storage for the digest data is allocated.  If "fill" is
  * non-null, the data is put there, otherwise a SECItem is allocated.
  * Allocation from "arena" if it is non-null, heap otherwise.  Any problem
  * results in a NULL being returned (and an appropriate error set).
  */ 
 extern SECItem *
-CERT_GetSPKIDigest(PLArenaPool *arena, const CERTCertificate *cert,
-                   SECOidTag digestAlg, SECItem *fill);
+CERT_GetSubjectPublicKeyDigest(PLArenaPool *arena, const CERTCertificate *cert,
+                               SECOidTag digestAlg, SECItem *fill);
 
 /*
  * Digest the cert's subject name using the specified algorithm.
@@ -1563,6 +1560,12 @@ CERT_FindNameConstraintsExten(PLArenaPool      *arena,
  */
 extern CERTGeneralName *
 CERT_NewGeneralName(PLArenaPool *arena, CERTGeneralNameType type);
+
+/*
+ * Lookup a CERTGeneralNameType constant by its human readable string.
+ */
+extern CERTGeneralNameType
+CERT_GetGeneralNameTypeFromString(const char *string);
 
 /*
  * PKIX extension encoding routines

@@ -12,35 +12,45 @@
 #include "nsAutoPtr.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/MemoryReporting.h"
+#include "mozilla/StaticPtr.h"
 
-class nsCSSStyleSheet;
 class nsIFile;
 class nsIURI;
 
 namespace mozilla {
+class CSSStyleSheet;
 namespace css {
 class Loader;
 }
 }
 
 class nsLayoutStylesheetCache MOZ_FINAL
- : public mozilla::MemoryUniReporter
- , public nsIObserver
+ : public nsIObserver
+ , public nsIMemoryReporter
 {
   NS_DECL_ISUPPORTS
   NS_DECL_NSIOBSERVER
+  NS_DECL_NSIMEMORYREPORTER
 
-  static nsCSSStyleSheet* ScrollbarsSheet();
-  static nsCSSStyleSheet* FormsSheet();
-  static nsCSSStyleSheet* UserContentSheet();
-  static nsCSSStyleSheet* UserChromeSheet();
-  static nsCSSStyleSheet* UASheet();
-  static nsCSSStyleSheet* QuirkSheet();
-  static nsCSSStyleSheet* FullScreenOverrideSheet();
+  static mozilla::CSSStyleSheet* ScrollbarsSheet();
+  static mozilla::CSSStyleSheet* FormsSheet();
+  // This function is expected to return nullptr when the dom.forms.number
+  // pref is disabled.
+  static mozilla::CSSStyleSheet* NumberControlSheet();
+  static mozilla::CSSStyleSheet* UserContentSheet();
+  static mozilla::CSSStyleSheet* UserChromeSheet();
+  static mozilla::CSSStyleSheet* UASheet();
+  static mozilla::CSSStyleSheet* HTMLSheet();
+  static mozilla::CSSStyleSheet* MinimalXULSheet();
+  static mozilla::CSSStyleSheet* XULSheet();
+  static mozilla::CSSStyleSheet* QuirkSheet();
+  static mozilla::CSSStyleSheet* FullScreenOverrideSheet();
+  static mozilla::CSSStyleSheet* SVGSheet();
+  static mozilla::CSSStyleSheet* MathMLSheet();
+  static mozilla::CSSStyleSheet* CounterStylesSheet();
 
   static void Shutdown();
 
-  int64_t Amount() MOZ_OVERRIDE;
   size_t SizeOfIncludingThis(mozilla::MallocSizeOf aMallocSizeOf) const;
 
 private:
@@ -50,19 +60,30 @@ private:
   static void EnsureGlobal();
   void InitFromProfile();
   void InitMemoryReporter();
-  static void LoadSheetFile(nsIFile* aFile, nsRefPtr<nsCSSStyleSheet> &aSheet);
-  static void LoadSheet(nsIURI* aURI, nsRefPtr<nsCSSStyleSheet> &aSheet,
+  static void LoadSheetURL(const char* aURL,
+                           nsRefPtr<mozilla::CSSStyleSheet>& aSheet,
+                           bool aEnableUnsafeRules);
+  static void LoadSheetFile(nsIFile* aFile,
+                            nsRefPtr<mozilla::CSSStyleSheet>& aSheet);
+  static void LoadSheet(nsIURI* aURI, nsRefPtr<mozilla::CSSStyleSheet>& aSheet,
                         bool aEnableUnsafeRules);
 
-  static nsLayoutStylesheetCache* gStyleCache;
+  static mozilla::StaticRefPtr<nsLayoutStylesheetCache> gStyleCache;
   static mozilla::css::Loader* gCSSLoader;
-  nsRefPtr<nsCSSStyleSheet> mScrollbarsSheet;
-  nsRefPtr<nsCSSStyleSheet> mFormsSheet;
-  nsRefPtr<nsCSSStyleSheet> mUserContentSheet;
-  nsRefPtr<nsCSSStyleSheet> mUserChromeSheet;
-  nsRefPtr<nsCSSStyleSheet> mUASheet;
-  nsRefPtr<nsCSSStyleSheet> mQuirkSheet;
-  nsRefPtr<nsCSSStyleSheet> mFullScreenOverrideSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mCounterStylesSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mFormsSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mFullScreenOverrideSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mHTMLSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mMathMLSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mMinimalXULSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mNumberControlSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mQuirkSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mSVGSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mScrollbarsSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mUASheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mUserChromeSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mUserContentSheet;
+  nsRefPtr<mozilla::CSSStyleSheet> mXULSheet;
 };
 
 #endif

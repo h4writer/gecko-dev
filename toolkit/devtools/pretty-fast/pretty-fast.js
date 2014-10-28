@@ -1,3 +1,4 @@
+/* -*- indent-tabs-mode: nil; js-indent-level: 2; fill-column: 80 -*- */
 /*
  * Copyright 2013 Mozilla Foundation and contributors
  * Licensed under the New BSD license. See LICENSE.md or:
@@ -14,7 +15,7 @@
 }(this, function () {
   "use strict";
 
-  var acorn = this.acorn || require("acorn");
+  var acorn = this.acorn || require("acorn/acorn");
   var sourceMap = this.sourceMap || require("source-map");
   var SourceNode = sourceMap.SourceNode;
 
@@ -194,7 +195,7 @@
    * tokens.
    *
    * @param Object token
-   *        The token we want to determine if it is an array literal.
+   *        The current token.
    * @param Object lastToken
    *        The last token we added to the pretty printed results.
    *
@@ -215,6 +216,30 @@
       return false;
     }
     return true;
+  }
+
+  /**
+   * Determine if we have encountered a getter or setter.
+   *
+   * @param Object token
+   *        The current token. If this is a getter or setter, it would be the
+   *        property name.
+   * @param Object lastToken
+   *        The last token we added to the pretty printed results. If this is a
+   *        getter or setter, it would be the `get` or `set` keyword
+   *        respectively.
+   * @param Array stack
+   *        The stack of open parens/curlies/brackets/etc.
+   *
+   * @returns Boolean
+   *          True if this is a getter or setter.
+   */
+  function isGetterOrSetter(token, lastToken, stack) {
+    return stack[stack.length - 1] == "{"
+      && lastToken
+      && lastToken.type.type == "name"
+      && (lastToken.value == "get" || lastToken.value == "set")
+      && token.type.type == "name";
   }
 
   /**
@@ -299,22 +324,25 @@
       }
 
       var ltk = lastToken.type.keyword;
-      if (ltk != null
-          && ltk != "debugger"
-          && ltk != "null"
-          && ltk != "true"
-          && ltk != "false"
-          && ltk != "this"
-          && ltk != "break"
-          && ltk != "continue"
-          && ltk != "default") {
-        return true;
+      if (ltk != null) {
+        if (ltk == "break" || ltk == "continue" || ltk == "return") {
+          return token.type.type != ";";
+        }
+        if (ltk != "debugger"
+            && ltk != "null"
+            && ltk != "true"
+            && ltk != "false"
+            && ltk != "this"
+            && ltk != "default") {
+          return true;
+        }
       }
 
       if (ltt == ")" && (token.type.type != ")"
                          && token.type.type != "]"
                          && token.type.type != ";"
-                         && token.type.type != ",")) {
+                         && token.type.type != ","
+                         && token.type.type != ".")) {
         return true;
       }
     }
@@ -357,12 +385,13 @@
     var ttk = token.type.keyword;
     var ttt = token.type.type;
     var newlineAdded = addedNewline;
+    var ltt = lastToken ? lastToken.type.type : null;
 
     // Handle whitespace and newlines after "}" here instead of in
     // `isLineDelimiter` because it is only a line delimiter some of the
     // time. For example, we don't want to put "else if" on a new line after
     // the first if's block.
-    if (lastToken && lastToken.type.type == "}") {
+    if (lastToken && ltt == "}") {
       if (ttk == "while" && stack[stack.length - 1] == "do") {
         write(" ",
               lastToken.startLoc.line,
@@ -385,13 +414,19 @@
       }
     }
 
+    if (isGetterOrSetter(token, lastToken, stack)) {
+      write(" ",
+            lastToken.startLoc.line,
+            lastToken.startLoc.column);
+    }
+
     if (ttt == ":" && stack[stack.length - 1] == "?") {
       write(" ",
             lastToken.startLoc.line,
             lastToken.startLoc.column);
     }
 
-    if (lastToken && lastToken.type.type != "}" && ttk == "else") {
+    if (lastToken && ltt != "}" && ttk == "else") {
       write(" ",
             lastToken.startLoc.line,
             lastToken.startLoc.column);
@@ -455,12 +490,42 @@
   }
 
   /**
-   * Make sure that we put "\n" into the output instead of actual newlines.
+   * Make sure that we output the escaped character combination inside string literals
+   * instead of various problematic characters.
    */
-  function sanitizeNewlines(str) {
-    return str.replace(/\n/g, "\\n");
-  }
+  var sanitize = (function () {
+    var escapeCharacters = {
+      // Backslash
+      "\\": "\\\\",
+      // Newlines
+      "\n": "\\n",
+      // Carriage return
+      "\r": "\\r",
+      // Tab
+      "\t": "\\t",
+      // Vertical tab
+      "\v": "\\v",
+      // Form feed
+      "\f": "\\f",
+      // Null character
+      "\0": "\\0",
+      // Single quotes
+      "'": "\\'"
+    };
 
+    var regExpString = "("
+      + Object.keys(escapeCharacters)
+              .map(function (c) { return escapeCharacters[c]; })
+              .join("|")
+      + ")";
+    var escapeCharactersRegExp = new RegExp(regExpString, "g");
+
+    return function(str) {
+      return str.replace(escapeCharactersRegExp, function (_, c) {
+        return escapeCharacters[c];
+      });
+    }
+  }());
   /**
    * Add the given token to the pretty printed results.
    *
@@ -473,7 +538,7 @@
    */
   function addToken(token, write, options) {
     if (token.type.type == "string") {
-      write("'" + sanitizeNewlines(token.value) + "'",
+      write("'" + sanitize(token.value) + "'",
             token.startLoc.line,
             token.startLoc.column);
     } else {
@@ -494,6 +559,7 @@
       || ttt == "["
       || ttt == "?"
       || ttk == "do"
+      || ttk == "switch"
       || ttk == "case"
       || ttk == "default";
   }
@@ -526,7 +592,9 @@
    * level.
    */
   function incrementsIndent(token) {
-    return token.type.type == "{" || token.isArrayLiteral;
+    return token.type.type == "{"
+      || token.isArrayLiteral
+      || token.type.keyword == "switch";
   }
 
   /**
@@ -661,6 +729,7 @@
     //   - "[\n"
     //   - "do"
     //   - "?"
+    //   - "switch"
     //   - "case"
     //   - "default"
     //
@@ -693,7 +762,8 @@
             block: block,
             text: text,
             line: startLoc.line,
-            column: startLoc.column
+            column: startLoc.column,
+            trailing: lastToken.endLoc.line == startLoc.line
           });
         } else {
           addComment(write, indentLevel, options, block, text, startLoc.line,
@@ -728,15 +798,26 @@
 
       if (decrementsIndent(ttt, stack)) {
         indentLevel--;
+        if (ttt == "}"
+            && stack.length > 1
+            && stack[stack.length - 2] == "switch") {
+          indentLevel--;
+        }
       }
 
       prependWhiteSpace(token, lastToken, addedNewline, write, options,
                         indentLevel, stack);
       addToken(token, write, options);
-      addedNewline = appendNewline(token, write, stack);
+      if (commentQueue.length == 0 || !commentQueue[0].trailing) {
+        addedNewline = appendNewline(token, write, stack);
+      }
 
       if (shouldStackPop(token, stack)) {
         stack.pop();
+        if (token == "}" && stack.length
+            && stack[stack.length - 1] == "switch") {
+          stack.pop();
+        }
       }
 
       if (incrementsIndent(token)) {
@@ -762,13 +843,17 @@
 
       // Apply all the comments that have been queued up.
       if (commentQueue.length) {
-        if (!addedNewline) {
+        if (!addedNewline && !commentQueue[0].trailing) {
           write("\n");
+        }
+        if (commentQueue[0].trailing) {
+          write(" ");
         }
         for (var i = 0, n = commentQueue.length; i < n; i++) {
           var comment = commentQueue[i];
-          addComment(write, indentLevel, options, comment.block, comment.text,
-                     comment.line, comment.column);
+          var commentIndentLevel = commentQueue[i].trailing ? 0 : indentLevel;
+          addComment(write, commentIndentLevel, options, comment.block,
+                     comment.text, comment.line, comment.column);
         }
         addedNewline = true;
         commentQueue.splice(0, commentQueue.length);

@@ -9,7 +9,7 @@ interface nsIDOMNode;
 
 /**
  * nsISessionStore keeps track of the current browsing state - i.e.
- * tab history, cookies, scroll state, form data, POSTDATA and window features
+ * tab history, cookies, scroll state, form data, and window features
  * - and allows to restore everything into one browser window.
  *
  * The nsISessionStore API operates mostly on browser windows and the tabbrowser
@@ -25,7 +25,7 @@ interface nsIDOMNode;
  * |gBrowser.tabContainer| such as e.g. |gBrowser.selectedTab|.
  */
 
-[scriptable, uuid(63a4d9f4-373f-11e3-a237-fa91a24410d2)]
+[scriptable, uuid(4580f5eb-693d-423d-b0ce-2cb20a962e4d)]
 interface nsISessionStore : nsISupports
 {
   /**
@@ -101,20 +101,6 @@ interface nsISessionStore : nsISupports
                           [optional] in long aDelta);
 
   /**
-   * Set the number of tabs that was closed during the last close-tabs
-   * operation. This helps us keep track of batch-close operations so
-   * we can restore multiple tabs at once.
-   */
-  void setNumberOfTabsClosedLast(in nsIDOMWindow aWindow, in unsigned long aNumber);
-
-  /**
-   * Get the number of tabs that was closed during the last close-tabs
-   * operation. This helps us keep track of batch-close operations so
-   * we can restore multiple tabs at once.
-   */
-  unsigned long getNumberOfTabsClosedLast(in nsIDOMWindow aWindow);
-
-  /**
    * Get the number of restore-able tabs for a browser window
    */
   unsigned long getClosedTabCount(in nsIDOMWindow aWindow);
@@ -179,7 +165,7 @@ interface nsISessionStore : nsISupports
    * @param aKey         is the value's name.
    * @param aStringValue is the value itself (use JSON.stringify/parse before setting JS objects).
    */
-  void setWindowValue(in nsIDOMWindow aWindow, in AString aKey, in AString aStringValue);
+  void setWindowValue(in nsIDOMWindow aWindow, in AString aKey, in jsval aStringValue);
 
   /**
    * @param aWindow is the browser window to get the value for.
@@ -200,7 +186,7 @@ interface nsISessionStore : nsISupports
    * @param aKey         is the value's name.
    * @param aStringValue is the value itself (use JSON.stringify/parse before setting JS objects).
    */
-  void setTabValue(in nsIDOMNode aTab, in AString aKey, in AString aStringValue);
+  void setTabValue(in nsIDOMNode aTab, in AString aKey, in jsval aStringValue);
 
   /**
    * @param aTab is the tabbrowser tab to get the value for.
@@ -219,7 +205,7 @@ interface nsISessionStore : nsISupports
    * @param aKey         is the value's name.
    * @param aStringValue is the value itself (use JSON.stringify/parse before setting JS objects).
    */
-  void setGlobalValue(in AString aKey, in AString aStringValue);
+  void setGlobalValue(in AString aKey, in jsval aStringValue);
 
   /**
    * @param aTab is the browser tab to get the value for.

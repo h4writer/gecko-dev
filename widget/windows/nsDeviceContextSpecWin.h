@@ -25,7 +25,7 @@ public:
 
   NS_IMETHOD GetSurfaceForPrinter(gfxASurface **surface);
   NS_IMETHOD BeginDocument(const nsAString& aTitle,
-                           PRUnichar*       aPrintToFileName,
+                           char16_t*       aPrintToFileName,
                            int32_t          aStartPage,
                            int32_t          aEndPage) { return NS_OK; }
   NS_IMETHOD EndDocument() { return NS_OK; }
@@ -72,9 +72,10 @@ protected:
 //-------------------------------------------------------------------------
 class nsPrinterEnumeratorWin MOZ_FINAL : public nsIPrinterEnumerator
 {
+  ~nsPrinterEnumeratorWin();
+
 public:
   nsPrinterEnumeratorWin();
-  ~nsPrinterEnumeratorWin();
   NS_DECL_ISUPPORTS
   NS_DECL_NSIPRINTERENUMERATOR
 };

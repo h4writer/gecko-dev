@@ -19,7 +19,6 @@
 #include "nsNSSCertificateFakeTransport.h"
 #include "nsNSSCertificateDB.h"
 #include "nsNSSCertCache.h"
-#include "nsCMS.h"
 #ifdef MOZ_XUL
 #include "nsCertTree.h"
 #endif
@@ -28,7 +27,6 @@
 //For the NS_CRYPTO_CONTRACTID define
 #include "nsDOMCID.h"
 #include "nsNetCID.h"
-#include "nsCMSSecureMessage.h"
 #include "nsCertPicker.h"
 #include "nsCURILoader.h"
 #include "nsICategoryManager.h"
@@ -186,17 +184,13 @@ NS_NSS_GENERIC_FACTORY_CONSTRUCTOR_BYPROCESS(nssEnsureOnChromeOnly,
                                              nsNSSCertificateFakeTransport)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsNSSCertificateDB)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsNSSCertCache)
+NS_NSS_GENERIC_FACTORY_CONSTRUCTOR_BYPROCESS(nssEnsureOnChromeOnly,
+                                             nsNSSCertList,
+                                             nsNSSCertListFakeTransport)
 #ifdef MOZ_XUL
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsCertTree)
 #endif
-#ifndef MOZ_DISABLE_CRYPTOLEGACY
-NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsCrypto)
-#endif
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsPkcs11)
-NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsCMSSecureMessage)
-NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsCMSDecoder)
-NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsCMSEncoder)
-NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsCMSMessage)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsCertPicker)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR_INIT(nssEnsure, nsNTLMAuthModule, InitTest)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsCryptoHash)
@@ -205,7 +199,6 @@ NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsStreamCipher)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsKeyObject)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsKeyObjectFactory)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsDataSignatureVerifier)
-NS_NSS_GENERIC_FACTORY_CONSTRUCTOR_INIT(nssEnsure, nsCertOverrideService, Init)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsure, nsRandomGenerator)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsureOnChromeOnly, nsSSLStatus)
 NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsureOnChromeOnly, TransportSecurityInfo)
@@ -213,6 +206,7 @@ NS_NSS_GENERIC_FACTORY_CONSTRUCTOR(nssEnsureOnChromeOnly, TransportSecurityInfo)
 typedef mozilla::psm::NSSErrorsService NSSErrorsService;
 NS_GENERIC_FACTORY_CONSTRUCTOR_INIT(NSSErrorsService, Init)
 NS_GENERIC_FACTORY_CONSTRUCTOR(nsNSSVersion)
+NS_GENERIC_FACTORY_CONSTRUCTOR_INIT(nsCertOverrideService, Init)
 
 NS_DEFINE_NAMED_CID(NS_NSSCOMPONENT_CID);
 NS_DEFINE_NAMED_CID(NS_SSLSOCKETPROVIDER_CID);
@@ -223,19 +217,13 @@ NS_DEFINE_NAMED_CID(NS_PKCS11MODULEDB_CID);
 NS_DEFINE_NAMED_CID(NS_PSMCONTENTLISTEN_CID);
 NS_DEFINE_NAMED_CID(NS_X509CERT_CID);
 NS_DEFINE_NAMED_CID(NS_X509CERTDB_CID);
+NS_DEFINE_NAMED_CID(NS_X509CERTLIST_CID);
 NS_DEFINE_NAMED_CID(NS_NSSCERTCACHE_CID);
 NS_DEFINE_NAMED_CID(NS_FORMPROCESSOR_CID);
 #ifdef MOZ_XUL
 NS_DEFINE_NAMED_CID(NS_CERTTREE_CID);
 #endif
 NS_DEFINE_NAMED_CID(NS_PKCS11_CID);
-#ifndef MOZ_DISABLE_CRYPTOLEGACY
-NS_DEFINE_NAMED_CID(NS_CRYPTO_CID);
-#endif
-NS_DEFINE_NAMED_CID(NS_CMSSECUREMESSAGE_CID);
-NS_DEFINE_NAMED_CID(NS_CMSDECODER_CID);
-NS_DEFINE_NAMED_CID(NS_CMSENCODER_CID);
-NS_DEFINE_NAMED_CID(NS_CMSMESSAGE_CID);
 NS_DEFINE_NAMED_CID(NS_CRYPTO_HASH_CID);
 NS_DEFINE_NAMED_CID(NS_CRYPTO_HMAC_CID);
 NS_DEFINE_NAMED_CID(NS_CERT_PICKER_CID);
@@ -261,19 +249,13 @@ static const mozilla::Module::CIDEntry kNSSCIDs[] = {
   { &kNS_PSMCONTENTLISTEN_CID, false, nullptr, PSMContentListenerConstructor },
   { &kNS_X509CERT_CID, false, nullptr, nsNSSCertificateConstructor },
   { &kNS_X509CERTDB_CID, false, nullptr, nsNSSCertificateDBConstructor },
+  { &kNS_X509CERTLIST_CID, false, nullptr, nsNSSCertListConstructor },
   { &kNS_NSSCERTCACHE_CID, false, nullptr, nsNSSCertCacheConstructor },
   { &kNS_FORMPROCESSOR_CID, false, nullptr, nsKeygenFormProcessor::Create },
 #ifdef MOZ_XUL
   { &kNS_CERTTREE_CID, false, nullptr, nsCertTreeConstructor },
 #endif
   { &kNS_PKCS11_CID, false, nullptr, nsPkcs11Constructor },
-#ifndef MOZ_DISABLE_CRYPTOLEGACY
-  { &kNS_CRYPTO_CID, false, nullptr, nsCryptoConstructor },
-#endif
-  { &kNS_CMSSECUREMESSAGE_CID, false, nullptr, nsCMSSecureMessageConstructor },
-  { &kNS_CMSDECODER_CID, false, nullptr, nsCMSDecoderConstructor },
-  { &kNS_CMSENCODER_CID, false, nullptr, nsCMSEncoderConstructor },
-  { &kNS_CMSMESSAGE_CID, false, nullptr, nsCMSMessageConstructor },
   { &kNS_CRYPTO_HASH_CID, false, nullptr, nsCryptoHashConstructor },
   { &kNS_CRYPTO_HMAC_CID, false, nullptr, nsCryptoHMACConstructor },
   { &kNS_CERT_PICKER_CID, false, nullptr, nsCertPickerConstructor },
@@ -302,19 +284,13 @@ static const mozilla::Module::ContractIDEntry kNSSContracts[] = {
   { NS_PKCS11MODULEDB_CONTRACTID, &kNS_PKCS11MODULEDB_CID },
   { NS_PSMCONTENTLISTEN_CONTRACTID, &kNS_PSMCONTENTLISTEN_CID },
   { NS_X509CERTDB_CONTRACTID, &kNS_X509CERTDB_CID },
+  { NS_X509CERTLIST_CONTRACTID, &kNS_X509CERTLIST_CID },
   { NS_NSSCERTCACHE_CONTRACTID, &kNS_NSSCERTCACHE_CID },
   { NS_FORMPROCESSOR_CONTRACTID, &kNS_FORMPROCESSOR_CID },
 #ifdef MOZ_XUL
   { NS_CERTTREE_CONTRACTID, &kNS_CERTTREE_CID },
 #endif
   { NS_PKCS11_CONTRACTID, &kNS_PKCS11_CID },
-#ifndef MOZ_DISABLE_CRYPTOLEGACY
-  { NS_CRYPTO_CONTRACTID, &kNS_CRYPTO_CID },
-#endif
-  { NS_CMSSECUREMESSAGE_CONTRACTID, &kNS_CMSSECUREMESSAGE_CID },
-  { NS_CMSDECODER_CONTRACTID, &kNS_CMSDECODER_CID },
-  { NS_CMSENCODER_CONTRACTID, &kNS_CMSENCODER_CID },
-  { NS_CMSMESSAGE_CONTRACTID, &kNS_CMSMESSAGE_CID },
   { NS_CRYPTO_HASH_CONTRACTID, &kNS_CRYPTO_HASH_CID },
   { NS_CRYPTO_HMAC_CONTRACTID, &kNS_CRYPTO_HMAC_CID },
   { NS_CERT_PICKER_CONTRACTID, &kNS_CERT_PICKER_CID },

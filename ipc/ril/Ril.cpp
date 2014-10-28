@@ -11,15 +11,16 @@
 #include <sys/un.h>
 #include <netdb.h> // For gethostbyname.
 
-#undef LOG
+#undef CHROMIUM_LOG
 #if defined(MOZ_WIDGET_GONK)
 #include <android/log.h>
-#define LOG(args...)  __android_log_print(ANDROID_LOG_INFO, "Gonk", args)
+#define CHROMIUM_LOG(args...)  __android_log_print(ANDROID_LOG_INFO, "Gonk", args)
 #else
-#define LOG(args...)  printf(args);
+#define CHROMIUM_LOG(args...)  printf(args);
 #endif
 
 #include "jsfriendapi.h"
+#include "mozilla/ArrayUtils.h"
 #include "nsTArray.h"
 #include "nsThreadUtils.h" // For NS_IsMainThread.
 
@@ -78,55 +79,58 @@ private:
 bool
 PostToRIL(JSContext *aCx,
           unsigned aArgc,
-          JS::Value *aArgv)
+          JS::Value *aVp)
 {
+    JS::CallArgs args = JS::CallArgsFromVp(aArgc, aVp);
     NS_ASSERTION(!NS_IsMainThread(), "Expecting to be on the worker thread");
 
-    if (aArgc != 2) {
+    if (args.length() != 2) {
         JS_ReportError(aCx, "Expecting two arguments with the RIL message");
         return false;
     }
 
-    JS::Value cv = JS_ARGV(aCx, aArgv)[0];
-    int clientId = cv.toInt32();
+    int clientId = args[0].toInt32();
+    JS::Value v = args[1];
 
-    JS::Value v = JS_ARGV(aCx, aArgv)[1];
+    UnixSocketRawData* raw = nullptr;
 
-    JSAutoByteString abs;
-    void *data;
-    size_t size;
-    if (JSVAL_IS_STRING(v)) {
-        JSString *str = JSVAL_TO_STRING(v);
+    if (v.isString()) {
+        JSAutoByteString abs;
+        JS::Rooted<JSString*> str(aCx, v.toString());
         if (!abs.encodeUtf8(aCx, str)) {
             return false;
         }
 
-        data = abs.ptr();
-        size = abs.length();
-    } else if (!JSVAL_IS_PRIMITIVE(v)) {
-        JSObject *obj = JSVAL_TO_OBJECT(v);
+        raw = new UnixSocketRawData(abs.ptr(), abs.length());
+    } else if (!v.isPrimitive()) {
+        JSObject *obj = v.toObjectOrNull();
         if (!JS_IsTypedArrayObject(obj)) {
             JS_ReportError(aCx, "Object passed in wasn't a typed array");
             return false;
         }
 
         uint32_t type = JS_GetArrayBufferViewType(obj);
-        if (type != js::ArrayBufferView::TYPE_INT8 &&
-            type != js::ArrayBufferView::TYPE_UINT8 &&
-            type != js::ArrayBufferView::TYPE_UINT8_CLAMPED) {
+        if (type != js::Scalar::Int8 &&
+            type != js::Scalar::Uint8 &&
+            type != js::Scalar::Uint8Clamped) {
             JS_ReportError(aCx, "Typed array data is not octets");
             return false;
         }
 
-        size = JS_GetTypedArrayByteLength(obj);
-        data = JS_GetArrayBufferViewData(obj);
+        JS::AutoCheckCannotGC nogc;
+        size_t size = JS_GetTypedArrayByteLength(obj);
+        void *data = JS_GetArrayBufferViewData(obj, nogc);
+        raw = new UnixSocketRawData(data, size);
     } else {
         JS_ReportError(aCx,
                        "Incorrect argument. Expecting a string or a typed array");
         return false;
     }
 
-    UnixSocketRawData* raw = new UnixSocketRawData(data, size);
+    if (!raw) {
+        JS_ReportError(aCx, "Unable to post to RIL");
+        return false;
+    }
 
     nsRefPtr<SendRilSocketDataTask> task =
         new SendRilSocketDataTask(clientId, raw);
@@ -141,7 +145,23 @@ ConnectWorkerToRIL::RunTask(JSContext *aCx)
     // communication.
     NS_ASSERTION(!NS_IsMainThread(), "Expecting to be on the worker thread");
     NS_ASSERTION(!JS_IsRunning(aCx), "Are we being called somehow?");
-    JSObject *workerGlobal = JS::CurrentGlobalOrNull(aCx);
+    JS::Rooted<JSObject*> workerGlobal(aCx, JS::CurrentGlobalOrNull(aCx));
+
+    // Check whether |postRILMessage| has been defined.  No one but this class
+    // should ever define |postRILMessage| in a RIL worker, so we call to
+    // |JS_LookupProperty| instead of |JS_GetProperty| here.
+    JS::Rooted<JS::Value> val(aCx);
+    if (!JS_LookupProperty(aCx, workerGlobal, "postRILMessage", &val)) {
+        JS_ReportPendingException(aCx);
+        return false;
+    }
+
+    // |JS_LookupProperty| could still return JS_TRUE with an "undefined"
+    // |postRILMessage|, so we have to make sure that with an additional call
+    // to |JS_TypeOfValue|.
+    if (JSTYPE_FUNCTION == JS_TypeOfValue(aCx, val)) {
+        return true;
+    }
 
     return !!JS_DefineFunction(aCx, workerGlobal,
                                "postRILMessage", PostToRIL, 2, 0);
@@ -150,30 +170,41 @@ ConnectWorkerToRIL::RunTask(JSContext *aCx)
 class DispatchRILEvent : public WorkerTask
 {
 public:
-        DispatchRILEvent(UnixSocketRawData* aMessage)
-            : mMessage(aMessage)
+        DispatchRILEvent(unsigned long aClient,
+                         UnixSocketRawData* aMessage)
+            : mClientId(aClient)
+            , mMessage(aMessage)
         { }
 
         virtual bool RunTask(JSContext *aCx);
 
 private:
+        unsigned long mClientId;
         nsAutoPtr<UnixSocketRawData> mMessage;
 };
 
 bool
 DispatchRILEvent::RunTask(JSContext *aCx)
 {
-    JSObject *obj = JS::CurrentGlobalOrNull(aCx);
+    JS::Rooted<JSObject*> obj(aCx, JS::CurrentGlobalOrNull(aCx));
 
-    JSObject *array = JS_NewUint8Array(aCx, mMessage->mSize);
+    JS::Rooted<JSObject*> array(aCx,
+                                JS_NewUint8Array(aCx, mMessage->GetSize()));
     if (!array) {
         return false;
     }
+    {
+        JS::AutoCheckCannotGC nogc;
+        memcpy(JS_GetArrayBufferViewData(array, nogc),
+               mMessage->GetData(), mMessage->GetSize());
+    }
 
-    memcpy(JS_GetArrayBufferViewData(array), mMessage->mData, mMessage->mSize);
-    JS::Value argv[] = { OBJECT_TO_JSVAL(array) };
-    return JS_CallFunctionName(aCx, obj, "onRILMessage", NS_ARRAY_LENGTH(argv),
-                               argv, argv);
+    JS::AutoValueArray<2> args(aCx);
+    args[0].setNumber((uint32_t)mClientId);
+    args[1].setObject(*array);
+
+    JS::Rooted<JS::Value> rval(aCx);
+    return JS_CallFunctionName(aCx, obj, "onRILMessage", args, &rval);
 }
 
 class RilConnector : public mozilla::ipc::UnixSocketConnector
@@ -251,7 +282,7 @@ RilConnector::CreateAddr(bool aIsServer,
     case AF_INET:
         aAddr.in.sin_family = af;
         aAddr.in.sin_port = htons(RIL_TEST_PORT + mClientId);
-        aAddr.in.sin_addr.s_addr = htons(INADDR_LOOPBACK);
+        aAddr.in.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         aAddrSize = sizeof(sockaddr_in);
         break;
     default:
@@ -353,7 +384,7 @@ RilConsumer::ReceiveSocketData(nsAutoPtr<UnixSocketRawData>& aMessage)
 {
     MOZ_ASSERT(NS_IsMainThread());
 
-    nsRefPtr<DispatchRILEvent> dre(new DispatchRILEvent(aMessage.forget()));
+    nsRefPtr<DispatchRILEvent> dre(new DispatchRILEvent(mClientId, aMessage.forget()));
     mDispatcher->PostTask(dre);
 }
 
@@ -361,22 +392,23 @@ void
 RilConsumer::OnConnectSuccess()
 {
     // Nothing to do here.
-    LOG("RIL[%lu]: %s\n", mClientId, __FUNCTION__);
+    CHROMIUM_LOG("RIL[%lu]: %s\n", mClientId, __FUNCTION__);
 }
 
 void
 RilConsumer::OnConnectError()
 {
-    LOG("RIL[%lu]: %s\n", mClientId, __FUNCTION__);
+    CHROMIUM_LOG("RIL[%lu]: %s\n", mClientId, __FUNCTION__);
     CloseSocket();
 }
 
 void
 RilConsumer::OnDisconnect()
 {
-    LOG("RIL[%lu]: %s\n", mClientId, __FUNCTION__);
+    CHROMIUM_LOG("RIL[%lu]: %s\n", mClientId, __FUNCTION__);
     if (!mShutdown) {
-        ConnectSocket(new RilConnector(mClientId), mAddress.get(), 1000);
+        ConnectSocket(new RilConnector(mClientId), mAddress.get(),
+                      GetSuggestedConnectDelayMs());
     }
 }
 

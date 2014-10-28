@@ -52,6 +52,17 @@
         label="&inspectorCopyUniqueSelector.label;"
         accesskey="&inspectorCopyUniqueSelector.accesskey;"
         oncommand="inspector.copyUniqueSelector()"/>
+      <menuitem id="node-menu-copyimagedatauri"
+        label="&inspectorCopyImageDataUri.label;"
+        oncommand="inspector.copyImageDataUri()"/>
+      <menuitem id="node-menu-showdomproperties"
+        label="&inspectorShowDOMProperties.label;"
+        oncommand="inspector.showDOMProperties()"/>
+      <menuseparator/>
+      <menuitem id="node-menu-pasteouterhtml"
+        label="&inspectorHTMLPasteOuter.label;"
+        accesskey="&inspectorHTMLPasteOuter.accesskey;"
+        oncommand="inspector.pasteOuterHTML()"/>
       <menuseparator/>
       <menuitem id="node-menu-delete"
         label="&inspectorHTMLDelete.label;"
@@ -71,14 +82,10 @@
   </popupset>
 
   <box flex="1" class="devtools-responsive-container theme-body">
-    <vbox flex="1">
+    <vbox flex="1" class="devtools-main-content">
       <toolbar id="inspector-toolbar"
         class="devtools-toolbar"
         nowindowdrag="true">
-        <toolbarbutton id="inspector-inspect-toolbutton"
-          tooltiptext="&inspector.selectButton.tooltip;"
-          class="devtools-toolbarbutton"
-          oncommand="inspector.highlighter.toggleLockState()"/>
         <arrowscrollbox id="inspector-breadcrumbs"
           class="breadcrumbs-widget-container"
           flex="1" orient="horizontal"

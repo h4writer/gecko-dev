@@ -108,11 +108,19 @@
   ERROR(NS_ERROR_GFX_PRINTER_STARTPAGE,                   FAILURE(6)),
   /* The document is still being loaded */
   ERROR(NS_ERROR_GFX_PRINTER_DOC_IS_BUSY,                 FAILURE(7)),
-  /* Cannot Print or Print Preview XUL Documents (bug 136185 / bug 240490) */
-  ERROR(NS_ERROR_GFX_PRINTER_NO_XUL,                      FAILURE(8)),
 
   /* Font cmap is strangely structured - avoid this font! */
   ERROR(NS_ERROR_GFX_CMAP_MALFORMED,                      FAILURE(51)),
+#undef MODULE
+
+
+  /* ======================================================================= */
+  /* 4:  NS_ERROR_MODULE_WIDGET */
+  /* ======================================================================= */
+#define MODULE  NS_ERROR_MODULE_WIDGET
+  /* Used by nsIWidget::NotifyIME(). Returned when the notification is handled
+   * and the notified event is consumed by IME. */
+  ERROR(NS_SUCCESS_EVENT_CONSUMED,                        SUCCESS(1)),
 #undef MODULE
 
 
@@ -203,6 +211,8 @@
   ERROR(NS_ERROR_NET_INTERRUPT,             FAILURE(71)),
   /* The connection attempt to a proxy failed. */
   ERROR(NS_ERROR_PROXY_CONNECTION_REFUSED,  FAILURE(72)),
+  /* A transfer was only partially done when it completed. */
+  ERROR(NS_ERROR_NET_PARTIAL_TRANSFER,      FAILURE(76)),
 
   /* XXX really need to better rationalize these error codes.  are consumers of
    * necko really expected to know how to discern the meaning of these?? */
@@ -488,6 +498,11 @@
   ERROR(NS_ERROR_DOM_ENCODING_NOT_SUPPORTED_ERR,   FAILURE(28)),
   ERROR(NS_ERROR_DOM_ENCODING_NOT_UTF_ERR,         FAILURE(29)),
   ERROR(NS_ERROR_DOM_ENCODING_DECODE_ERR,          FAILURE(30)),
+  ERROR(NS_ERROR_DOM_INVALID_POINTER_ERR,          FAILURE(31)),
+  /* WebCrypto API errors from http://www.w3.org/TR/WebCryptoAPI/ */
+  ERROR(NS_ERROR_DOM_UNKNOWN_ERR,                  FAILURE(32)),
+  ERROR(NS_ERROR_DOM_DATA_ERR,                     FAILURE(33)),
+  ERROR(NS_ERROR_DOM_OPERATION_ERR,                FAILURE(34)),
   /* DOM error codes defined by us */
   ERROR(NS_ERROR_DOM_SECMAN_ERR,                   FAILURE(1001)),
   ERROR(NS_ERROR_DOM_WRONG_TYPE_ERR,               FAILURE(1002)),
@@ -600,10 +615,6 @@
   /* any new errors here should have an associated entry added in xpc.msg */
 
   ERROR(NS_SUCCESS_I_DID_SOMETHING,      SUCCESS(1)),
-  /* Classes that want to only be touched by chrome (or from code whose
-   * filename begins with chrome://global/) shoudl return this from their
-   * scriptable helper's PreCreate hook. */
-  ERROR(NS_SUCCESS_CHROME_ACCESS_ONLY,   SUCCESS(2)),
 #undef MODULE
 
 
@@ -663,6 +674,7 @@
    * blacklist. */
   ERROR(NS_ERROR_MALWARE_URI,           FAILURE(30)),
   ERROR(NS_ERROR_PHISHING_URI,          FAILURE(31)),
+  ERROR(NS_ERROR_TRACKING_URI,          FAILURE(34)),
   /* Used when "Save Link As..." doesn't see the headers quickly enough to
    * choose a filename.  See nsContextMenu.js. */
   ERROR(NS_ERROR_SAVE_LINK_AS_TIMEOUT,  FAILURE(32)),
@@ -812,9 +824,10 @@
 #define MODULE NS_ERROR_MODULE_DOM_FILEHANDLE
   ERROR(NS_ERROR_DOM_FILEHANDLE_UNKNOWN_ERR,              FAILURE(1)),
   ERROR(NS_ERROR_DOM_FILEHANDLE_NOT_ALLOWED_ERR,          FAILURE(2)),
-  ERROR(NS_ERROR_DOM_FILEHANDLE_LOCKEDFILE_INACTIVE_ERR,  FAILURE(3)),
+  ERROR(NS_ERROR_DOM_FILEHANDLE_INACTIVE_ERR,             FAILURE(3)),
   ERROR(NS_ERROR_DOM_FILEHANDLE_ABORT_ERR,                FAILURE(4)),
   ERROR(NS_ERROR_DOM_FILEHANDLE_READ_ONLY_ERR,            FAILURE(5)),
+  ERROR(NS_ERROR_DOM_FILEHANDLE_QUOTA_ERR,                FAILURE(6)),
 #undef MODULE
 
   /* ======================================================================= */
@@ -829,6 +842,42 @@
   ERROR(NS_ERROR_SIGNED_JAR_ENTRY_TOO_LARGE,              FAILURE(6)),
   ERROR(NS_ERROR_SIGNED_JAR_ENTRY_INVALID,                FAILURE(7)),
   ERROR(NS_ERROR_SIGNED_JAR_MANIFEST_INVALID,             FAILURE(8)),
+#undef MODULE
+
+  /* ======================================================================= */
+  /* 36: NS_ERROR_MODULE_DOM_FILESYSTEM */
+  /* ======================================================================= */
+#define MODULE NS_ERROR_MODULE_DOM_FILESYSTEM
+  ERROR(NS_ERROR_DOM_FILESYSTEM_INVALID_PATH_ERR,          FAILURE(1)),
+  ERROR(NS_ERROR_DOM_FILESYSTEM_INVALID_MODIFICATION_ERR,  FAILURE(2)),
+  ERROR(NS_ERROR_DOM_FILESYSTEM_NO_MODIFICATION_ALLOWED_ERR, FAILURE(3)),
+  ERROR(NS_ERROR_DOM_FILESYSTEM_PATH_EXISTS_ERR,           FAILURE(4)),
+  ERROR(NS_ERROR_DOM_FILESYSTEM_TYPE_MISMATCH_ERR,         FAILURE(5)),
+  ERROR(NS_ERROR_DOM_FILESYSTEM_UNKNOWN_ERR,               FAILURE(6)),
+#undef MODULE
+
+  /* ======================================================================= */
+  /* 37: NS_ERROR_MODULE_DOM_BLUETOOTH */
+  /* ======================================================================= */
+#define MODULE NS_ERROR_MODULE_DOM_BLUETOOTH
+  ERROR(NS_ERROR_DOM_BLUETOOTH_FAIL,                      FAILURE(1)),
+  ERROR(NS_ERROR_DOM_BLUETOOTH_NOT_READY,                 FAILURE(2)),
+  ERROR(NS_ERROR_DOM_BLUETOOTH_NOMEM,                     FAILURE(3)),
+  ERROR(NS_ERROR_DOM_BLUETOOTH_BUSY,                      FAILURE(4)),
+  ERROR(NS_ERROR_DOM_BLUETOOTH_DONE,                      FAILURE(5)),
+  ERROR(NS_ERROR_DOM_BLUETOOTH_UNSUPPORTED,               FAILURE(6)),
+  ERROR(NS_ERROR_DOM_BLUETOOTH_PARM_INVALID,              FAILURE(7)),
+  ERROR(NS_ERROR_DOM_BLUETOOTH_UNHANDLED,                 FAILURE(8)),
+  ERROR(NS_ERROR_DOM_BLUETOOTH_AUTH_FAILURE,              FAILURE(9)),
+  ERROR(NS_ERROR_DOM_BLUETOOTH_RMT_DEV_DOWN,              FAILURE(10)),
+  ERROR(NS_ERROR_DOM_BLUETOOTH_AUTH_REJECTED,             FAILURE(11)),
+#undef MODULE
+
+  /* ======================================================================= */
+  /* 38: NS_ERROR_MODULE_SIGNED_APP */
+  /* ======================================================================= */
+#define MODULE NS_ERROR_MODULE_SIGNED_APP
+  ERROR(NS_ERROR_SIGNED_APP_MANIFEST_INVALID,   FAILURE(1)),
 #undef MODULE
 
   /* ======================================================================= */
@@ -857,6 +906,7 @@
    * case in which nsIAppStartup::Quit was called with the eRestart flag. */
   ERROR(NS_SUCCESS_RESTART_APP,          SUCCESS(1)),
   ERROR(NS_SUCCESS_RESTART_METRO_APP,    SUCCESS(2)),
+  ERROR(NS_SUCCESS_RESTART_APP_NOT_SAME_PROFILE,    SUCCESS(3)),
   ERROR(NS_SUCCESS_UNORM_NOTFOUND,  SUCCESS(17)),
 
 

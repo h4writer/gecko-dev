@@ -67,15 +67,14 @@
 #define SDP_SRTP_CONTEXT_SET_ENCRYPT_AUTHENTICATE(cw) \
      ((cw) |= (SDP_SRTP_ENCRYPT_MASK | SDP_SRTP_AUTHENTICATE_MASK | \
                SDP_SRTCP_ENCRYPT_MASK))
-
 #define SDP_SRTP_CONTEXT_RESET_SSRC(cw)     ((cw) &= ~(SDP_SRTCP_SSRC_MASK))
 #define SDP_SRTP_CONTEXT_RESET_ROC(cw)      ((cw) &= ~(SDP_SRTCP_ROC_MASK))
 #define SDP_SRTP_CONTEXT_RESET_KDR(cw)      ((cw) &= ~(SDP_SRTCP_KDR_MASK))
 #define SDP_CONTEXT_RESET_MASTER_KEY(cw)    ((cw) &= ~(SDP_SRTCP_KEY_MASK))
 #define SDP_CONTEXT_RESET_MASTER_SALT(cw)   ((cw) &= ~(SDP_SRTCP_SALT_MASK))
+#define SDP_EXTMAP_AUDIO_LEVEL "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
 
 /* SDP Enum Types */
-
 typedef enum {
     SDP_DEBUG_TRACE,
     SDP_DEBUG_WARNINGS,
@@ -540,6 +539,7 @@ typedef enum sdp_srtp_crypto_suite_t_ {
 
 #define SDP_DEFAULT_PACKETIZATION_MODE_VALUE 0 /* max packetization mode for H.264 */
 #define SDP_MAX_PACKETIZATION_MODE_VALUE 2 /* max packetization mode for H.264 */
+#define SDP_INVALID_PACKETIZATION_MODE_VALUE 255
 
 #define SDP_MAX_LEVEL_ASYMMETRY_ALLOWED_VALUE 1 /* max level asymmetry allowed value for H.264 */
 #define SDP_DEFAULT_LEVEL_ASYMMETRY_ALLOWED_VALUE 1 /* default level asymmetry allowed value for H.264 */
@@ -892,6 +892,16 @@ typedef struct sdp_media_profiles {
     sdp_payload_ind_e payload_indicator[SDP_MAX_PROFILES][SDP_MAX_PAYLOAD_TYPES];
     u16             payload_type[SDP_MAX_PROFILES][SDP_MAX_PAYLOAD_TYPES];
 } sdp_media_profiles_t;
+/*
+ * a=extmap:<value>["/"<direction>] <URI> <extensionattributes>
+ *
+ */
+typedef struct sdp_extmap {
+    u16              id;
+    sdp_direction_e  media_direction;
+    char             uri[SDP_MAX_STRING_LEN+1];
+    char             extension_attributes[SDP_MAX_STRING_LEN+1];
+} sdp_extmap_t;
 
 
 /*
@@ -899,7 +909,6 @@ typedef struct sdp_media_profiles {
  *  This type is used to hold cryptographic context information.
  *
  */
-
 typedef struct sdp_srtp_crypto_context_t_ {
     int32                   tag;
     unsigned long           selection_flags;
@@ -982,10 +991,10 @@ typedef struct sdp_attr {
         sdp_fmtp_fb_t         rtcp_fb;
         sdp_setup_type_e      setup;
         sdp_connection_type_e connection;
+        sdp_extmap_t          extmap;
     } attr;
     struct sdp_attr          *next_p;
 } sdp_attr_t;
-
 typedef struct sdp_srtp_crypto_suite_list_ {
     sdp_srtp_crypto_suite_t crypto_suite_val;
     char * crypto_suite_str;
@@ -1216,6 +1225,7 @@ extern sdp_result_e sdp_add_media_profile_payload_type(void *sdp_ptr,
                                sdp_payload_ind_e indicator);
 
 /* sdp_attr_access.c */
+extern int sdp_find_fmtp_inst(sdp_t *sdp_ptr, u16 level, u16 payload_num);
 extern sdp_result_e sdp_add_new_attr(void *sdp_ptr, u16 level, u8 cap_num,
                                      sdp_attr_e attr_type, u16 *inst_num);
 extern sdp_result_e sdp_copy_attr (void *src_sdp_ptr, void *dst_sdp_ptr,
@@ -1250,6 +1260,8 @@ extern tinybool sdp_attr_get_simple_boolean(void *sdp_ptr,
 extern sdp_result_e sdp_attr_set_simple_boolean(void *sdp_ptr,
                    sdp_attr_e attr_type, u16 level, u8 cap_num,
                    u16 inst_num, u32 bool_parm);
+extern tinybool sdp_attr_is_present (void *sdp_ptr, sdp_attr_e attr_type,
+                                     u16 level, u8 cap_num);
 extern const char* sdp_attr_get_maxprate(void *sdp_ptr, u16 level,
                                          u16 inst_num);
 extern sdp_result_e sdp_attr_set_maxprate(void *sdp_ptr, u16 level,
@@ -2099,9 +2111,16 @@ sdp_attr_set_rtcp_fb_nack(void *sdp_ptr, u16 level, u16 payload_type, u16 inst,
 sdp_result_e
 sdp_attr_set_rtcp_fb_trr_int(void *sdp_ptr, u16 level, u16 payload_type,
                              u16 inst, u32 interval);
-
 sdp_result_e
 sdp_attr_set_rtcp_fb_ccm(void *sdp_ptr, u16 level, u16 payload_type, u16 inst,
                          sdp_rtcp_fb_ccm_type_e);
+const char *
+sdp_attr_get_extmap_uri(void *sdp_ptr, u16 level, u16 inst);
+
+u16
+sdp_attr_get_extmap_id(void *sdp_ptr, u16 level, u16 inst);
+
+sdp_result_e
+sdp_attr_set_extmap(void *sdp_ptr, u16 level, u16 id, const char* uri, u16 inst);
 
 #endif /* _SDP_H_ */

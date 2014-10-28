@@ -52,6 +52,13 @@ function checkCombinations(aCombinations, aResult) {
     url += "?" + combi.cacheControl;
   Services.prefs.setBoolPref(PREF_DISK_CACHE_SSL, combi.diskCacheSSL);
 
+  // Add the test page as a top link so it has a chance to be thumbnailed
+  addVisitsAndRepopulateNewTabLinks(url, _ => {
+    testCombination(combi, url, aCombinations, aResult);
+  });
+}
+
+function testCombination(combi, url, aCombinations, aResult) {
   let tab = gBrowser.selectedTab = gBrowser.addTab(url);
   let browser = gBrowser.selectedBrowser;
 

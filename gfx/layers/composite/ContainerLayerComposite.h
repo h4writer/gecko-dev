@@ -8,9 +8,9 @@
 
 #include "Layers.h"                     // for Layer (ptr only), etc
 #include "mozilla/Attributes.h"         // for MOZ_OVERRIDE
+#include "mozilla/UniquePtr.h"          // for UniquePtr
 #include "mozilla/layers/LayerManagerComposite.h"
 
-class gfx3DMatrix;
 struct nsIntPoint;
 struct nsIntRect;
 
@@ -18,29 +18,69 @@ namespace mozilla {
 namespace layers {
 
 class CompositableHost;
+class CompositingRenderTarget;
+struct PreparedData;
 
 class ContainerLayerComposite : public ContainerLayer,
                                 public LayerComposite
 {
   template<class ContainerT>
+  friend void ContainerPrepare(ContainerT* aContainer,
+                               LayerManagerComposite* aManager,
+                               const RenderTargetIntRect& aClipRect);
+  template<class ContainerT>
   friend void ContainerRender(ContainerT* aContainer,
                               LayerManagerComposite* aManager,
-                              const nsIntRect& aClipRect);
-public:
-  ContainerLayerComposite(LayerManagerComposite *aManager);
+                              const RenderTargetIntRect& aClipRect);
+  template<class ContainerT>
+  friend void RenderLayers(ContainerT* aContainer,
+                           LayerManagerComposite* aManager,
+                           const RenderTargetIntRect& aClipRect);
+  template<class ContainerT>
+  friend void RenderIntermediate(ContainerT* aContainer,
+                   LayerManagerComposite* aManager,
+                   const nsIntRect& aClipRect,
+                   RefPtr<CompositingRenderTarget> surface);
+  template<class ContainerT>
+  friend RefPtr<CompositingRenderTarget>
+  CreateTemporaryTargetAndCopyFromBackground(ContainerT* aContainer,
+                                             LayerManagerComposite* aManager,
+                                             const RenderTargetIntRect& aClipRect);
+  template<class ContainerT>
+  friend RefPtr<CompositingRenderTarget>
+  CreateTemporaryTarget(ContainerT* aContainer,
+                        LayerManagerComposite* aManager,
+                        const RenderTargetIntRect& aClipRect);
 
+public:
+  explicit ContainerLayerComposite(LayerManagerComposite *aManager);
+
+protected:
   ~ContainerLayerComposite();
 
+public:
   // LayerComposite Implementation
   virtual Layer* GetLayer() MOZ_OVERRIDE { return this; }
+
+  virtual void SetLayerManager(LayerManagerComposite* aManager) MOZ_OVERRIDE
+  {
+    LayerComposite::SetLayerManager(aManager);
+    mManager = aManager;
+
+    for (Layer* l = GetFirstChild(); l; l = l->GetNextSibling()) {
+      LayerComposite* child = l->AsLayerComposite();
+      child->SetLayerManager(aManager);
+    }
+  }
 
   virtual void Destroy() MOZ_OVERRIDE;
 
   LayerComposite* GetFirstChildComposite();
 
   virtual void RenderLayer(const nsIntRect& aClipRect) MOZ_OVERRIDE;
+  virtual void Prepare(const RenderTargetIntRect& aClipRect) MOZ_OVERRIDE;
 
-  virtual void ComputeEffectiveTransforms(const gfx3DMatrix& aTransformToSurface) MOZ_OVERRIDE
+  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface) MOZ_OVERRIDE
   {
     DefaultComputeEffectiveTransforms(aTransformToSurface);
   }
@@ -53,19 +93,47 @@ public:
   CompositableHost* GetCompositableHost() MOZ_OVERRIDE { return nullptr; }
 
   virtual const char* Name() const MOZ_OVERRIDE { return "ContainerLayerComposite"; }
+  UniquePtr<PreparedData> mPrepared;
 };
 
 class RefLayerComposite : public RefLayer,
                           public LayerComposite
 {
   template<class ContainerT>
+  friend void ContainerPrepare(ContainerT* aContainer,
+                               LayerManagerComposite* aManager,
+                               const RenderTargetIntRect& aClipRect);
+  template<class ContainerT>
   friend void ContainerRender(ContainerT* aContainer,
                               LayerManagerComposite* aManager,
                               const nsIntRect& aClipRect);
+  template<class ContainerT>
+  friend void RenderLayers(ContainerT* aContainer,
+                           LayerManagerComposite* aManager,
+                           const nsIntRect& aClipRect);
+  template<class ContainerT>
+  friend void RenderIntermediate(ContainerT* aContainer,
+                   LayerManagerComposite* aManager,
+                   const nsIntRect& aClipRect,
+                   RefPtr<CompositingRenderTarget> surface);
+  template<class ContainerT>
+  friend RefPtr<CompositingRenderTarget>
+  CreateTemporaryTargetAndCopyFromBackground(ContainerT* aContainer,
+                                             LayerManagerComposite* aManager,
+                                             const nsIntRect& aClipRect);
+  template<class ContainerT>
+  friend RefPtr<CompositingRenderTarget>
+  CreateTemporaryTarget(ContainerT* aContainer,
+                        LayerManagerComposite* aManager,
+                        const nsIntRect& aClipRect);
+
 public:
-  RefLayerComposite(LayerManagerComposite *aManager);
+  explicit RefLayerComposite(LayerManagerComposite *aManager);
+
+protected:
   ~RefLayerComposite();
 
+public:
   /** LayerOGL implementation */
   Layer* GetLayer() MOZ_OVERRIDE { return this; }
 
@@ -74,8 +142,9 @@ public:
   LayerComposite* GetFirstChildComposite();
 
   virtual void RenderLayer(const nsIntRect& aClipRect) MOZ_OVERRIDE;
+  virtual void Prepare(const RenderTargetIntRect& aClipRect) MOZ_OVERRIDE;
 
-  virtual void ComputeEffectiveTransforms(const gfx3DMatrix& aTransformToSurface) MOZ_OVERRIDE
+  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface) MOZ_OVERRIDE
   {
     DefaultComputeEffectiveTransforms(aTransformToSurface);
   }
@@ -88,6 +157,7 @@ public:
   CompositableHost* GetCompositableHost() MOZ_OVERRIDE { return nullptr; }
 
   virtual const char* Name() const MOZ_OVERRIDE { return "RefLayerComposite"; }
+  UniquePtr<PreparedData> mPrepared;
 };
 
 } /* layers */

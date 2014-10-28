@@ -49,6 +49,9 @@
 
 #define BYTES_PER_KIBIBYTE 1024
 
+// How much time Sqlite can wait before returning a SQLITE_BUSY error.
+#define DATABASE_BUSY_TIMEOUT_MS 100
+
 // Old Sync GUID annotation.
 #define SYNCGUID_ANNO NS_LITERAL_CSTRING("sync/guid")
 
@@ -215,18 +218,19 @@ SetJournalMode(nsCOMPtr<mozIStorageConnection>& aDBConn,
   return JOURNAL_DELETE;
 }
 
-class BlockingConnectionCloseCallback MOZ_FINAL : public mozIStorageCompletionCallback {
+class ConnectionCloseCallback MOZ_FINAL : public mozIStorageCompletionCallback {
   bool mDone;
+
+  ~ConnectionCloseCallback() {}
 
 public:
   NS_DECL_THREADSAFE_ISUPPORTS
   NS_DECL_MOZISTORAGECOMPLETIONCALLBACK
-  BlockingConnectionCloseCallback();
-  void Spin();
+  ConnectionCloseCallback();
 };
 
 NS_IMETHODIMP
-BlockingConnectionCloseCallback::Complete(nsresult, nsISupports*)
+ConnectionCloseCallback::Complete(nsresult, nsISupports*)
 {
   mDone = true;
   nsCOMPtr<nsIObserverService> os = mozilla::services::GetObserverService();
@@ -240,21 +244,14 @@ BlockingConnectionCloseCallback::Complete(nsresult, nsISupports*)
   return NS_OK;
 }
 
-BlockingConnectionCloseCallback::BlockingConnectionCloseCallback()
+ConnectionCloseCallback::ConnectionCloseCallback()
   : mDone(false)
 {
   MOZ_ASSERT(NS_IsMainThread());
 }
 
-void BlockingConnectionCloseCallback::Spin() {
-  nsCOMPtr<nsIThread> thread = do_GetCurrentThread();
-  while (!mDone) {
-    NS_ProcessNextEvent(thread);
-  }
-}
-
-NS_IMPL_ISUPPORTS1(
-  BlockingConnectionCloseCallback
+NS_IMPL_ISUPPORTS(
+  ConnectionCloseCallback
 , mozIStorageCompletionCallback
 )
 
@@ -322,7 +319,7 @@ CreateRoot(nsCOMPtr<mozIStorageConnection>& aDBConn,
 
   // The 'places' root is a folder containing the other roots.
   // The first bookmark in a folder has position 0.
-  if (!aRootName.Equals("places"))
+  if (!aRootName.EqualsLiteral("places"))
     ++itemPosition;
 
   return NS_OK;
@@ -336,7 +333,7 @@ CreateRoot(nsCOMPtr<mozIStorageConnection>& aDBConn,
 
 PLACES_FACTORY_SINGLETON_IMPLEMENTATION(Database, gDatabase)
 
-NS_IMPL_ISUPPORTS2(Database
+NS_IMPL_ISUPPORTS(Database
 , nsIObserver
 , nsISupportsWeakReference
 )
@@ -598,10 +595,14 @@ Database::InitSchema(bool* aDatabaseMigrated)
   // Grow places in |growthIncrementKiB| increments to limit fragmentation on disk.
   // By default, it's 10 MB.
   int32_t growthIncrementKiB =
-    Preferences::GetInt(PREF_GROWTH_INCREMENT_KIB, 10 * BYTES_PER_KIBIBYTE * BYTES_PER_KIBIBYTE);
+    Preferences::GetInt(PREF_GROWTH_INCREMENT_KIB, 10 * BYTES_PER_KIBIBYTE);
   if (growthIncrementKiB > 0) {
     (void)mMainConn->SetGrowthIncrement(growthIncrementKiB * BYTES_PER_KIBIBYTE, EmptyCString());
   }
+
+  nsAutoCString busyTimeoutPragma("PRAGMA busy_timeout = ");
+  busyTimeoutPragma.AppendInt(DATABASE_BUSY_TIMEOUT_MS);
+  (void)mMainConn->ExecuteSimpleSQL(busyTimeoutPragma);
 
   // We use our functions during migration, so initialize them now.
   rv = InitFunctions();
@@ -745,6 +746,12 @@ Database::InitSchema(bool* aDatabaseMigrated)
 
       // Firefox 24 uses schema version 23.
 
+      if (currentSchemaVersion < 24) {
+        rv = MigrateV24Up();
+        NS_ENSURE_SUCCESS(rv, rv);
+      }
+      // Firefox 34 uses schema version 24.
+
       // Schema Upgrades must add migration code here.
 
       rv = UpdateBookmarkRootTitles();
@@ -872,25 +879,25 @@ Database::CreateBookmarkRoots()
   if (NS_FAILED(rv)) return rv;
 
   // Fetch the internationalized folder name from the string bundle.
-  rv = bundle->GetStringFromName(NS_LITERAL_STRING("BookmarksMenuFolderTitle").get(),
+  rv = bundle->GetStringFromName(MOZ_UTF16("BookmarksMenuFolderTitle"),
                                  getter_Copies(rootTitle));
   if (NS_FAILED(rv)) return rv;
   rv = CreateRoot(mMainConn, NS_LITERAL_CSTRING("menu"), rootTitle);
   if (NS_FAILED(rv)) return rv;
 
-  rv = bundle->GetStringFromName(NS_LITERAL_STRING("BookmarksToolbarFolderTitle").get(),
+  rv = bundle->GetStringFromName(MOZ_UTF16("BookmarksToolbarFolderTitle"),
                                  getter_Copies(rootTitle));
   if (NS_FAILED(rv)) return rv;
   rv = CreateRoot(mMainConn, NS_LITERAL_CSTRING("toolbar"), rootTitle);
   if (NS_FAILED(rv)) return rv;
 
-  rv = bundle->GetStringFromName(NS_LITERAL_STRING("TagsFolderTitle").get(),
+  rv = bundle->GetStringFromName(MOZ_UTF16("TagsFolderTitle"),
                                  getter_Copies(rootTitle));
   if (NS_FAILED(rv)) return rv;
   rv = CreateRoot(mMainConn, NS_LITERAL_CSTRING("tags"), rootTitle);
   if (NS_FAILED(rv)) return rv;
 
-  rv = bundle->GetStringFromName(NS_LITERAL_STRING("UnsortedBookmarksFolderTitle").get(),
+  rv = bundle->GetStringFromName(MOZ_UTF16("UnsortedBookmarksFolderTitle"),
                                  getter_Copies(rootTitle));
   if (NS_FAILED(rv)) return rv;
   rv = CreateRoot(mMainConn, NS_LITERAL_CSTRING("unfiled"), rootTitle);
@@ -941,6 +948,8 @@ Database::InitFunctions()
   NS_ENSURE_SUCCESS(rv, rv);
   rv = FixupURLFunction::create(mMainConn);
   NS_ENSURE_SUCCESS(rv, rv);
+  rv = FrecencyNotificationFunction::create(mMainConn);
+  NS_ENSURE_SUCCESS(rv, rv);
 
   return NS_OK;
 }
@@ -963,6 +972,13 @@ Database::InitTempTriggers()
   rv = mMainConn->ExecuteSimpleSQL(CREATE_PLACES_AFTERUPDATE_FRECENCY_TRIGGER);
   NS_ENSURE_SUCCESS(rv, rv);
   rv = mMainConn->ExecuteSimpleSQL(CREATE_PLACES_AFTERUPDATE_TYPED_TRIGGER);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  rv = mMainConn->ExecuteSimpleSQL(CREATE_FOREIGNCOUNT_AFTERDELETE_TRIGGER);
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = mMainConn->ExecuteSimpleSQL(CREATE_FOREIGNCOUNT_AFTERINSERT_TRIGGER);
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = mMainConn->ExecuteSimpleSQL(CREATE_FOREIGNCOUNT_AFTERUPDATE_TRIGGER);
   NS_ENSURE_SUCCESS(rv, rv);
 
   return NS_OK;
@@ -1201,8 +1217,6 @@ Database::MigrateV7Up()
     return NS_ERROR_FILE_CORRUPTED;
   }
 
-  mozStorageTransaction transaction(mMainConn, false);
-
   // We need an index on lastModified to catch quickly last modified bookmark
   // title for tag container's children. This will be useful for Sync, too.
   bool lastModIndexExists = false;
@@ -1382,7 +1396,7 @@ Database::MigrateV7Up()
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
-  return transaction.Commit();
+  return NS_OK;
 }
 
 
@@ -1390,7 +1404,6 @@ nsresult
 Database::MigrateV8Up()
 {
   MOZ_ASSERT(NS_IsMainThread());
-  mozStorageTransaction transaction(mMainConn, false);
 
   nsresult rv = mMainConn->ExecuteSimpleSQL(NS_LITERAL_CSTRING(
       "DROP TRIGGER IF EXISTS moz_historyvisits_afterinsert_v1_trigger"));
@@ -1436,7 +1449,7 @@ Database::MigrateV8Up()
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
-  return transaction.Commit();
+  return NS_OK;
 }
 
 
@@ -1444,7 +1457,6 @@ nsresult
 Database::MigrateV9Up()
 {
   MOZ_ASSERT(NS_IsMainThread());
-  mozStorageTransaction transaction(mMainConn, false);
   // Added in Bug 488966.  The last_visit_date column caches the last
   // visit date, this enhances SELECT performances when we
   // need to sort visits by visit date.
@@ -1476,7 +1488,7 @@ Database::MigrateV9Up()
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
-  return transaction.Commit();
+  return NS_OK;
 }
 
 
@@ -1919,6 +1931,36 @@ Database::MigrateV23Up()
   return NS_OK;
 }
 
+nsresult
+Database::MigrateV24Up()
+{
+  MOZ_ASSERT(NS_IsMainThread());
+
+ // Add a foreign_count column to moz_places
+  nsCOMPtr<mozIStorageStatement> stmt;
+  nsresult rv = mMainConn->CreateStatement(NS_LITERAL_CSTRING(
+    "SELECT foreign_count FROM moz_places"
+  ), getter_AddRefs(stmt));
+  if (NS_FAILED(rv)) {
+    rv = mMainConn->ExecuteSimpleSQL(NS_LITERAL_CSTRING(
+      "ALTER TABLE moz_places ADD COLUMN foreign_count INTEGER DEFAULT 0 NOT NULL"));
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  // Adjust counts for all the rows
+  nsCOMPtr<mozIStorageStatement> updateStmt;
+  rv = mMainConn->CreateStatement(NS_LITERAL_CSTRING(
+    "UPDATE moz_places SET foreign_count = "
+    "(SELECT count(*) FROM moz_bookmarks WHERE fk = moz_places.id) "
+  ), getter_AddRefs(updateStmt));
+  NS_ENSURE_SUCCESS(rv, rv);
+  mozStorageStatementScoper updateScoper(updateStmt);
+  rv = updateStmt->Execute();
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  return NS_OK;
+}
+
 void
 Database::Shutdown()
 {
@@ -1937,12 +1979,11 @@ Database::Shutdown()
         );
   DispatchToAsyncThread(event);
 
-  nsRefPtr<BlockingConnectionCloseCallback> closeListener =
-    new BlockingConnectionCloseCallback();
-  (void)mMainConn->AsyncClose(closeListener);
-  closeListener->Spin();
-
   mClosed = true;
+
+  nsRefPtr<ConnectionCloseCallback> closeListener =
+    new ConnectionCloseCallback();
+  (void)mMainConn->AsyncClose(closeListener);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1951,7 +1992,7 @@ Database::Shutdown()
 NS_IMETHODIMP
 Database::Observe(nsISupports *aSubject,
                   const char *aTopic,
-                  const PRUnichar *aData)
+                  const char16_t *aData)
 {
   MOZ_ASSERT(NS_IsMainThread());
  
@@ -1974,8 +2015,9 @@ Database::Observe(nsISupports *aSubject,
                      getter_AddRefs(e))) && e) {
       bool hasMore = false;
       while (NS_SUCCEEDED(e->HasMoreElements(&hasMore)) && hasMore) {
-        nsCOMPtr<nsIObserver> observer;
-        if (NS_SUCCEEDED(e->GetNext(getter_AddRefs(observer)))) {
+	nsCOMPtr<nsISupports> supports;
+        if (NS_SUCCEEDED(e->GetNext(getter_AddRefs(supports)))) {
+          nsCOMPtr<nsIObserver> observer = do_QueryInterface(supports);
           (void)observer->Observe(observer, TOPIC_PLACES_INIT_COMPLETE, nullptr);
         }
       }

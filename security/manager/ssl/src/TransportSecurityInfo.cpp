@@ -5,6 +5,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "TransportSecurityInfo.h"
+
+#include "pkix/pkixtypes.h"
 #include "nsNSSComponent.h"
 #include "nsIWebProgressListener.h"
 #include "nsNSSCertificate.h"
@@ -18,9 +20,9 @@
 #include "nsIProgrammingLanguage.h"
 #include "nsIArray.h"
 #include "nsComponentManagerUtils.h"
+#include "nsReadableUtils.h"
 #include "nsServiceManagerUtils.h"
 #include "PSMRunnable.h"
-#include "ScopedNSSTypes.h"
 
 #include "secerr.h"
 
@@ -43,8 +45,7 @@ TransportSecurityInfo::TransportSecurityInfo()
     mSubRequestsNoSecurity(0),
     mErrorCode(0),
     mErrorMessageType(PlainErrorMessage),
-    mPort(0),
-    mIsCertIssuerBlacklisted(false)
+    mPort(0)
 {
 }
 
@@ -62,13 +63,13 @@ TransportSecurityInfo::virtualDestroyNSSReference()
 {
 }
 
-NS_IMPL_ISUPPORTS6(TransportSecurityInfo,
-                   nsITransportSecurityInfo,
-                   nsIInterfaceRequestor,
-                   nsISSLStatusProvider,
-                   nsIAssociatedContentSecurity,
-                   nsISerializable,
-                   nsIClassInfo)
+NS_IMPL_ISUPPORTS(TransportSecurityInfo,
+                  nsITransportSecurityInfo,
+                  nsIInterfaceRequestor,
+                  nsISSLStatusProvider,
+                  nsIAssociatedContentSecurity,
+                  nsISerializable,
+                  nsIClassInfo)
 
 nsresult
 TransportSecurityInfo::SetHostName(const char* host)
@@ -172,7 +173,7 @@ TransportSecurityInfo::Flush()
 }
 
 NS_IMETHODIMP
-TransportSecurityInfo::GetErrorMessage(PRUnichar** aText)
+TransportSecurityInfo::GetErrorMessage(char16_t** aText)
 {
   NS_ENSURE_ARG_POINTER(aText);
   *aText = nullptr;
@@ -284,183 +285,132 @@ TransportSecurityInfo::GetInterface(const nsIID & uuid, void * *result)
   return rv;
 }
 
-static NS_DEFINE_CID(kNSSCertificateCID, NS_X509CERT_CID);
-#define TRANSPORTSECURITYINFOMAGIC { 0xa9863a23, 0x26b8, 0x4a9c, \
-  { 0x83, 0xf1, 0xe9, 0xda, 0xdb, 0x36, 0xb8, 0x30 } }
+// This is a new magic value. However, it re-uses the first 4 bytes
+// of the previous value. This is so when older versions attempt to
+// read a newer serialized TransportSecurityInfo, they will actually
+// fail and return NS_ERROR_FAILURE instead of silently failing.
+#define TRANSPORTSECURITYINFOMAGIC { 0xa9863a23, 0x2429, 0x4866, \
+  { 0x92, 0x89, 0x45, 0x51, 0xc2, 0x01, 0xca, 0xf2 } }
 static NS_DEFINE_CID(kTransportSecurityInfoMagic, TRANSPORTSECURITYINFOMAGIC);
 
 NS_IMETHODIMP
 TransportSecurityInfo::Write(nsIObjectOutputStream* stream)
 {
-  stream->WriteID(kTransportSecurityInfoMagic);
+  nsresult rv = stream->WriteID(kTransportSecurityInfoMagic);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
 
   MutexAutoLock lock(mMutex);
 
-  RefPtr<nsSSLStatus> status(mSSLStatus);
-  nsCOMPtr<nsISerializable> certSerializable;
-
-  // Write a redundant copy of the certificate for backward compatibility
-  // with previous versions, which also unnecessarily wrote it.
-  //
-  // As we are reading the object our self, not using ReadObject, we have
-  // to store it here 'manually' as well, mimicking our object stream
-  // implementation.
-
-  if (status) {
-    nsCOMPtr<nsIX509Cert> cert = status->mServerCert;
-    certSerializable = do_QueryInterface(cert);
-
-    if (!certSerializable) {
-      NS_ERROR("certificate is missing or isn't serializable");
-      return NS_ERROR_UNEXPECTED;
-    }
-  } else {
-    NS_WARNING("Serializing nsNSSSocketInfo without mSSLStatus");
+  rv = stream->Write32(mSecurityState);
+  if (NS_FAILED(rv)) {
+    return rv;
   }
-
-  // Store the flag if there is the certificate present
-  stream->WriteBoolean(certSerializable);
-  if (certSerializable) {
-    stream->WriteID(kNSSCertificateCID);
-    stream->WriteID(NS_GET_IID(nsISupports));
-    certSerializable->Write(stream);
+  rv = stream->Write32(mSubRequestsBrokenSecurity);
+  if (NS_FAILED(rv)) {
+    return rv;
   }
-
-  // Store the version number of the binary stream data format.
-  // The 0xFFFF0000 mask is included to the version number
-  // to distinguish version number from mSecurityState
-  // field stored in times before versioning has been introduced.
-  // This mask value has been chosen as mSecurityState could
-  // never be assigned such value.
-  uint32_t version = 3;
-  stream->Write32(version | 0xFFFF0000);
-  stream->Write32(mSecurityState);
-  stream->WriteWStringZ(EmptyString().get()); 
-
+  rv = stream->Write32(mSubRequestsNoSecurity);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
   // XXX: uses nsNSSComponent string bundles off the main thread
-  nsresult rv = formatErrorMessage(lock, 
-                                   mErrorCode, mErrorMessageType,
-                                   true, true, mErrorMessageCached);
-  NS_ENSURE_SUCCESS(rv, rv);
-  stream->WriteWStringZ(mErrorMessageCached.get());
+  rv = formatErrorMessage(lock, mErrorCode, mErrorMessageType, true, true,
+                          mErrorMessageCached);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+  rv = stream->WriteWStringZ(mErrorMessageCached.get());
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
 
-  stream->WriteCompoundObject(NS_ISUPPORTS_CAST(nsISSLStatus*, status),
-                              NS_GET_IID(nsISupports), true);
+  // For successful connections and for connections with overridable errors,
+  // mSSLStatus will be non-null. However, for connections with non-overridable
+  // errors, it will be null.
+  nsCOMPtr<nsISerializable> serializable(mSSLStatus);
+  rv = NS_WriteOptionalCompoundObject(stream,
+                                      serializable,
+                                      NS_GET_IID(nsISSLStatus),
+                                      true);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
 
-  stream->Write32((uint32_t)0);
-  stream->Write32((uint32_t)0);
-  stream->Write32((uint32_t)mSubRequestsBrokenSecurity);
-  stream->Write32((uint32_t)mSubRequestsNoSecurity);
+  rv = NS_WriteOptionalCompoundObject(stream,
+                                      mFailedCertChain,
+                                      NS_GET_IID(nsIX509CertList),
+                                      true);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+
   return NS_OK;
-}
-
-static bool CheckUUIDEquals(uint32_t m0,
-                            nsIObjectInputStream* stream,
-                            const nsCID& id)
-{
-  nsID tempID;
-  tempID.m0 = m0;
-  stream->Read16(&tempID.m1);
-  stream->Read16(&tempID.m2);
-  for (int i = 0; i < 8; ++i)
-    stream->Read8(&tempID.m3[i]);
-  return tempID.Equals(id);
 }
 
 NS_IMETHODIMP
 TransportSecurityInfo::Read(nsIObjectInputStream* stream)
 {
-  nsresult rv;
-
-  uint32_t version;
-  bool certificatePresent;
-
-  // Check what we have here...
-  uint32_t UUID_0;
-  stream->Read32(&UUID_0);
-  if (UUID_0 == kTransportSecurityInfoMagic.m0) {
-    // It seems this stream begins with our magic ID, check it really is there
-    if (!CheckUUIDEquals(UUID_0, stream, kTransportSecurityInfoMagic))
-      return NS_ERROR_FAILURE;
-
-    // OK, this seems to be our stream, now continue to check there is
-    // the certificate
-    stream->ReadBoolean(&certificatePresent);
-    stream->Read32(&UUID_0);
+  nsID id;
+  nsresult rv = stream->ReadID(&id);
+  if (NS_FAILED(rv)) {
+    return rv;
   }
-  else {
-    // There is no magic, assume there is a certificate present as in versions
-    // prior to those with the magic didn't store that flag; we check the 
-    // certificate is present by cheking the CID then
-    certificatePresent = true;
-  }
-
-  if (certificatePresent && UUID_0 == kNSSCertificateCID.m0) {
-    // It seems there is the certificate CID present, check it now; we only
-    // have this single certificate implementation at this time.
-    if (!CheckUUIDEquals(UUID_0, stream, kNSSCertificateCID))
-      return NS_ERROR_FAILURE;
-
-    // OK, we have read the CID of the certificate, check the interface ID
-    nsID tempID;
-    stream->ReadID(&tempID);
-    if (!tempID.Equals(NS_GET_IID(nsISupports)))
-      return NS_ERROR_FAILURE;
-
-    nsCOMPtr<nsISerializable> serializable =
-        do_CreateInstance(kNSSCertificateCID, &rv);
-    NS_ENSURE_SUCCESS(rv, rv);
-
-    // This is the redundant copy of the certificate; just ignore it
-    serializable->Read(stream);
-
-    // We are done with reading the certificate, now read the version
-    // as we did before.
-    stream->Read32(&version);
-  }
-  else {
-    // There seems not to be the certificate present in the stream.
-    version = UUID_0;
+  if (!id.Equals(kTransportSecurityInfoMagic)) {
+    return NS_ERROR_UNEXPECTED;
   }
 
   MutexAutoLock lock(mMutex);
 
-  // If the version field we have just read is not masked with 0xFFFF0000
-  // then it is stored mSecurityState field and this is version 1 of
-  // the binary data stream format.
-  if ((version & 0xFFFF0000) == 0xFFFF0000) {
-    version &= ~0xFFFF0000;
-    stream->Read32(&mSecurityState);
+  rv = stream->Read32(&mSecurityState);
+  if (NS_FAILED(rv)) {
+    return rv;
   }
-  else {
-    mSecurityState = version;
-    version = 1;
+  uint32_t subRequestsBrokenSecurity;
+  rv = stream->Read32(&subRequestsBrokenSecurity);
+  if (NS_FAILED(rv)) {
+    return rv;
   }
-  nsAutoString dummyShortDesc;
-  stream->ReadString(dummyShortDesc);
-  stream->ReadString(mErrorMessageCached);
+  if (subRequestsBrokenSecurity >
+      static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+    return NS_ERROR_UNEXPECTED;
+  }
+  mSubRequestsBrokenSecurity = subRequestsBrokenSecurity;
+  uint32_t subRequestsNoSecurity;
+  rv = stream->Read32(&subRequestsNoSecurity);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+  if (subRequestsNoSecurity >
+      static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+    return NS_ERROR_UNEXPECTED;
+  }
+  mSubRequestsNoSecurity = subRequestsNoSecurity;
+  rv = stream->ReadString(mErrorMessageCached);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+
   mErrorCode = 0;
 
-  nsCOMPtr<nsISupports> obj;
-  stream->ReadObject(true, getter_AddRefs(obj));
-  
-  mSSLStatus = reinterpret_cast<nsSSLStatus*>(obj.get());
+  // For successful connections and for connections with overridable errors,
+  // mSSLStatus will be non-null. For connections with non-overridable errors,
+  // it will be null.
+  nsCOMPtr<nsISupports> supports;
+  rv = NS_ReadOptionalObject(stream, true, getter_AddRefs(supports));
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+  mSSLStatus = reinterpret_cast<nsSSLStatus*>(supports.get());
 
-  if (!mSSLStatus) {
-    NS_WARNING("deserializing nsNSSSocketInfo without mSSLStatus");
+  nsCOMPtr<nsISupports> failedCertChainSupports;
+  rv = NS_ReadOptionalObject(stream, true, getter_AddRefs(failedCertChainSupports));
+  if (NS_FAILED(rv)) {
+    return rv;
   }
+  mFailedCertChain = do_QueryInterface(failedCertChainSupports);
 
-  if (version >= 2) {
-    uint32_t dummySubRequests;
-    stream->Read32((uint32_t*)&dummySubRequests);
-    stream->Read32((uint32_t*)&dummySubRequests);
-    stream->Read32((uint32_t*)&mSubRequestsBrokenSecurity);
-    stream->Read32((uint32_t*)&mSubRequestsNoSecurity);
-  }
-  else {
-    mSubRequestsBrokenSecurity = 0;
-    mSubRequestsNoSecurity = 0;
-  }
   return NS_OK;
 }
 
@@ -559,7 +509,7 @@ formatPlainErrorMessage(const nsXPIDLCString &host, int32_t port,
 {
   static NS_DEFINE_CID(kNSSComponentCID, NS_NSSCOMPONENT_CID);
 
-  const PRUnichar *params[1];
+  const char16_t *params[1];
   nsresult rv;
 
   nsCOMPtr<nsINSSComponent> component = do_GetService(kNSSComponentCID, &rv);
@@ -578,7 +528,7 @@ formatPlainErrorMessage(const nsXPIDLCString &host, int32_t port,
 
     hostWithPort.AssignASCII(host);
     if (!suppressPort443 || port != 443) {
-      hostWithPort.AppendLiteral(":");
+      hostWithPort.Append(':');
       hostWithPort.AppendInt(port);
     }
     params[0] = hostWithPort.get();
@@ -590,7 +540,7 @@ formatPlainErrorMessage(const nsXPIDLCString &host, int32_t port,
     if (NS_SUCCEEDED(rv))
     {
       returnedMessage.Append(formattedString);
-      returnedMessage.Append(NS_LITERAL_STRING("\n\n"));
+      returnedMessage.AppendLiteral("\n\n");
     }
   }
 
@@ -610,13 +560,9 @@ AppendErrorTextUntrusted(PRErrorCode errTrust,
                          nsString &returnedMessage)
 {
   const char *errorID = nullptr;
-  nsCOMPtr<nsIX509Cert3> cert3 = do_QueryInterface(ix509);
-  if (cert3) {
-    bool isSelfSigned;
-    if (NS_SUCCEEDED(cert3->GetIsSelfSigned(&isSelfSigned))
-        && isSelfSigned) {
-      errorID = "certErrorTrust_SelfSigned";
-    }
+  bool isSelfSigned;
+  if (NS_SUCCEEDED(ix509->GetIsSelfSigned(&isSelfSigned)) && isSelfSigned) {
+    errorID = "certErrorTrust_SelfSigned";
   }
 
   if (!errorID) {
@@ -634,9 +580,6 @@ AppendErrorTextUntrusted(PRErrorCode errTrust,
           errorID = "certErrorTrust_UnknownIssuer";
         break;
       }
-      case SEC_ERROR_INADEQUATE_KEY_USAGE:
-        // Should get an individual string in the future
-        // For now, use the same as CaInvalid
       case SEC_ERROR_CA_CERT_INVALID:
         errorID = "certErrorTrust_CaInvalid";
         break;
@@ -662,7 +605,7 @@ AppendErrorTextUntrusted(PRErrorCode errTrust,
   if (NS_SUCCEEDED(rv))
   {
     returnedMessage.Append(formattedString);
-    returnedMessage.Append(NS_LITERAL_STRING("\n"));
+    returnedMessage.Append('\n');
   }
 }
 
@@ -679,22 +622,24 @@ GetSubjectAltNames(CERTCertificate *nssCert,
   allNames.Truncate();
   nameCount = 0;
 
-  PLArenaPool *san_arena = nullptr;
   SECItem altNameExtension = {siBuffer, nullptr, 0 };
   CERTGeneralName *sanNameList = nullptr;
 
   SECStatus rv = CERT_FindCertExtension(nssCert, SEC_OID_X509_SUBJECT_ALT_NAME,
                                         &altNameExtension);
-  if (rv != SECSuccess)
+  if (rv != SECSuccess) {
     return false;
+  }
 
-  san_arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
-  if (!san_arena)
+  ScopedPLArenaPool arena(PORT_NewArena(DER_DEFAULT_CHUNKSIZE));
+  if (!arena) {
     return false;
+  }
 
-  sanNameList = CERT_DecodeAltNameExtension(san_arena, &altNameExtension);
-  if (!sanNameList)
+  sanNameList = CERT_DecodeAltNameExtension(arena.get(), &altNameExtension);
+  if (!sanNameList) {
     return false;
+  }
 
   SECITEM_FreeItem(&altNameExtension, false);
 
@@ -703,12 +648,21 @@ GetSubjectAltNames(CERTCertificate *nssCert,
     nsAutoString name;
     switch (current->type) {
       case certDNSName:
-        name.AssignASCII((char*)current->name.other.data, current->name.other.len);
-        if (!allNames.IsEmpty()) {
-          allNames.Append(NS_LITERAL_STRING(" , "));
+        {
+          nsDependentCSubstring nameFromCert(reinterpret_cast<char*>
+                                              (current->name.other.data),
+                                              current->name.other.len);
+          // dNSName fields are defined as type IA5String and thus should
+          // be limited to ASCII characters.
+          if (IsASCII(nameFromCert)) {
+            name.Assign(NS_ConvertASCIItoUTF16(nameFromCert));
+            if (!allNames.IsEmpty()) {
+              allNames.AppendLiteral(", ");
+            }
+            ++nameCount;
+            allNames.Append(name);
+          }
         }
-        ++nameCount;
-        allNames.Append(name);
         break;
 
       case certIPAddress:
@@ -730,7 +684,7 @@ GetSubjectAltNames(CERTCertificate *nssCert,
           }
           if (!name.IsEmpty()) {
             if (!allNames.IsEmpty()) {
-              allNames.Append(NS_LITERAL_STRING(" , "));
+              allNames.AppendLiteral(", ");
             }
             ++nameCount;
             allNames.Append(name);
@@ -744,7 +698,6 @@ GetSubjectAltNames(CERTCertificate *nssCert,
     current = CERT_GetNextGeneralName(current);
   } while (current != sanNameList); // double linked
 
-  PORT_FreeArena(san_arena, false);
   return true;
 }
 
@@ -755,14 +708,10 @@ AppendErrorTextMismatch(const nsString &host,
                         bool wantsHtml,
                         nsString &returnedMessage)
 {
-  const PRUnichar *params[1];
+  const char16_t *params[1];
   nsresult rv;
 
-  ScopedCERTCertificate nssCert;
-
-  nsCOMPtr<nsIX509Cert2> cert2 = do_QueryInterface(ix509, &rv);
-  if (cert2)
-    nssCert = cert2->GetCert();
+  ScopedCERTCertificate nssCert(ix509->GetCert());
 
   if (!nssCert) {
     // We are unable to extract the valid names, say "not valid for name".
@@ -773,7 +722,7 @@ AppendErrorTextMismatch(const nsString &host,
                                                   formattedString);
     if (NS_SUCCEEDED(rv)) {
       returnedMessage.Append(formattedString);
-      returnedMessage.Append(NS_LITERAL_STRING("\n"));
+      returnedMessage.Append('\n');
     }
     return;
   }
@@ -783,19 +732,20 @@ AppendErrorTextMismatch(const nsString &host,
   bool useSAN = false;
 
   if (nssCert)
-    useSAN = GetSubjectAltNames(nssCert, component, allNames, nameCount);
+    useSAN = GetSubjectAltNames(nssCert.get(), component, allNames, nameCount);
 
   if (!useSAN) {
-    char *certName = nullptr;
-    // currently CERT_FindNSStringExtension is not being exported by NSS.
-    // If it gets exported, enable the following line.
-    //   certName = CERT_FindNSStringExtension(nssCert, SEC_OID_NS_CERT_EXT_SSL_SERVER_NAME);
-    // However, it has been discussed to treat the extension as obsolete and ignore it.
-    if (!certName)
-      certName = CERT_GetCommonName(&nssCert->subject);
+    char *certName = CERT_GetCommonName(&nssCert->subject);
     if (certName) {
-      ++nameCount;
-      allNames.AssignASCII(certName);
+      nsDependentCSubstring commonName(certName, strlen(certName));
+      if (IsUTF8(commonName)) {
+        // Bug 1024781
+        // We should actually check that the common name is a valid dns name or
+        // ip address and not any string value before adding it to the display
+        // list.
+        ++nameCount;
+        allNames.Assign(NS_ConvertUTF8toUTF16(commonName));
+      }
       PORT_Free(certName);
     }
   }
@@ -806,13 +756,13 @@ AppendErrorTextMismatch(const nsString &host,
                                           message);
     if (NS_SUCCEEDED(rv)) {
       returnedMessage.Append(message);
-      returnedMessage.Append(NS_LITERAL_STRING("\n  "));
+      returnedMessage.AppendLiteral("\n  ");
       returnedMessage.Append(allNames);
-      returnedMessage.Append(NS_LITERAL_STRING("  \n"));
+      returnedMessage.AppendLiteral("  \n");
     }
   }
   else if (nameCount == 1) {
-    const PRUnichar *params[1];
+    const char16_t *params[1];
     params[0] = allNames.get();
     
     const char *stringID;
@@ -827,7 +777,7 @@ AppendErrorTextMismatch(const nsString &host,
                                                   formattedString);
     if (NS_SUCCEEDED(rv)) {
       returnedMessage.Append(formattedString);
-      returnedMessage.Append(NS_LITERAL_STRING("\n"));
+      returnedMessage.Append('\n');
     }
   }
   else { // nameCount == 0
@@ -836,7 +786,7 @@ AppendErrorTextMismatch(const nsString &host,
                                                    message);
     if (NS_SUCCEEDED(rv)) {
       returnedMessage.Append(message);
-      returnedMessage.Append(NS_LITERAL_STRING("\n"));
+      returnedMessage.Append('\n');
     }
   }
 }
@@ -895,7 +845,7 @@ AppendErrorTextTime(nsIX509Cert* ix509,
   bool trueExpired_falseNotYetValid;
   GetDateBoundary(ix509, formattedDate, nowDate, trueExpired_falseNotYetValid);
 
-  const PRUnichar *params[2];
+  const char16_t *params[2];
   params[0] = formattedDate.get(); // might be empty, if helper function had a problem 
   params[1] = nowDate.get();
 
@@ -911,7 +861,7 @@ AppendErrorTextTime(nsIX509Cert* ix509,
   if (NS_SUCCEEDED(rv))
   {
     returnedMessage.Append(formattedString);
-    returnedMessage.Append(NS_LITERAL_STRING("\n"));
+    returnedMessage.Append('\n');
   }
 }
 
@@ -927,7 +877,7 @@ AppendErrorTextCode(PRErrorCode errorCodeToReport,
     ToLowerCase(error_id);
     NS_ConvertASCIItoUTF16 idU(error_id);
 
-    const PRUnichar *params[1];
+    const char16_t *params[1];
     params[0] = idU.get();
 
     nsString formattedString;
@@ -936,14 +886,14 @@ AppendErrorTextCode(PRErrorCode errorCodeToReport,
                                                   params, 1, 
                                                   formattedString);
     if (NS_SUCCEEDED(rv)) {
-      returnedMessage.Append(NS_LITERAL_STRING("\n"));
+      returnedMessage.Append('\n');
       returnedMessage.Append(formattedString);
-      returnedMessage.Append(NS_LITERAL_STRING("\n"));
+      returnedMessage.Append('\n');
     }
     else {
-      returnedMessage.Append(NS_LITERAL_STRING(" ("));
+      returnedMessage.AppendLiteral(" (");
       returnedMessage.Append(idU);
-      returnedMessage.Append(NS_LITERAL_STRING(")"));
+      returnedMessage.Append(')');
     }
   }
 }
@@ -962,7 +912,7 @@ formatOverridableCertErrorMessage(nsISSLStatus & sslStatus,
 {
   static NS_DEFINE_CID(kNSSComponentCID, NS_NSSCOMPONENT_CID);
 
-  const PRUnichar *params[1];
+  const char16_t *params[1];
   nsresult rv;
   nsAutoString hostWithPort;
   nsAutoString hostWithoutPort;
@@ -992,7 +942,7 @@ formatOverridableCertErrorMessage(nsISSLStatus & sslStatus,
                                                 returnedMessage);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  returnedMessage.Append(NS_LITERAL_STRING("\n\n"));
+  returnedMessage.AppendLiteral("\n\n");
 
   RefPtr<nsIX509Cert> ix509;
   rv = sslStatus.GetServerCert(byRef(ix509));
@@ -1031,7 +981,7 @@ formatOverridableCertErrorMessage(nsISSLStatus & sslStatus,
 RememberCertErrorsTable::sInstance = nullptr;
 
 RememberCertErrorsTable::RememberCertErrorsTable()
-  : mErrorHosts(16)
+  : mErrorHosts()
   , mMutex("RememberCertErrorsTable::mMutex")
 {
 }
@@ -1145,6 +1095,32 @@ TransportSecurityInfo::SetStatusErrorBits(nsIX509Cert & cert,
   RememberCertErrorsTable::GetInstance().RememberCertHasError(this,
                                                               mSSLStatus,
                                                               SECFailure);
+}
+
+NS_IMETHODIMP
+TransportSecurityInfo::GetFailedCertChain(nsIX509CertList** _result)
+{
+  NS_ASSERTION(_result, "non-NULL destination required");
+
+  *_result = mFailedCertChain;
+  NS_IF_ADDREF(*_result);
+
+  return NS_OK;
+}
+
+nsresult
+TransportSecurityInfo::SetFailedCertChain(ScopedCERTCertList& certList)
+{
+  nsNSSShutDownPreventionLock lock;
+  if (isAlreadyShutDown()) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+
+  nsCOMPtr<nsIX509CertList> comCertList;
+  // nsNSSCertList takes ownership of certList
+  mFailedCertChain = new nsNSSCertList(certList, lock);
+
+  return NS_OK;
 }
 
 } } // namespace mozilla::psm

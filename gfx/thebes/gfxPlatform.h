@@ -7,12 +7,16 @@
 #define GFX_PLATFORM_H
 
 #include "prlog.h"
+#include "mozilla/gfx/Types.h"
 #include "nsTArray.h"
 #include "nsString.h"
 #include "nsCOMPtr.h"
 #include "nsAutoPtr.h"
 
+#include "gfxPrefs.h"
 #include "gfxTypes.h"
+#include "gfxFontFamilyList.h"
+#include "gfxBlur.h"
 #include "nsRect.h"
 
 #include "qcms.h"
@@ -22,18 +26,12 @@
 
 #include "mozilla/layers/CompositorTypes.h"
 
-#ifdef XP_OS2
-#undef OS2EMX_PLAIN_CHAR
-#endif
-
 class gfxASurface;
-class gfxImageSurface;
 class gfxFont;
 class gfxFontGroup;
 struct gfxFontStyle;
 class gfxUserFontSet;
 class gfxFontEntry;
-class gfxProxyFontEntry;
 class gfxPlatformFontList;
 class gfxTextRun;
 class nsIURI;
@@ -44,14 +42,29 @@ struct gfxRGBA;
 namespace mozilla {
 namespace gl {
 class GLContext;
+class SkiaGLGlue;
 }
 namespace gfx {
 class DrawTarget;
 class SourceSurface;
+class DataSourceSurface;
 class ScaledFont;
 class DrawEventRecorder;
+
+inline uint32_t
+BackendTypeBit(BackendType b)
+{
+  return 1 << uint8_t(b);
 }
 }
+}
+
+#define MOZ_PERFORMANCE_WARNING(module, ...) \
+  do { \
+    if (gfxPrefs::PerfWarnings()) { \
+      printf_stderr("[" module "] " __VA_ARGS__); \
+    } \
+  } while (0)
 
 extern cairo_user_data_key_t kDrawTarget;
 
@@ -61,43 +74,36 @@ extern cairo_user_data_key_t kDrawTarget;
 
 enum eFontPrefLang {
     eFontPrefLang_Western     =  0,
-    eFontPrefLang_CentEuro    =  1,
-    eFontPrefLang_Japanese    =  2,
-    eFontPrefLang_ChineseTW   =  3,
-    eFontPrefLang_ChineseCN   =  4,
-    eFontPrefLang_ChineseHK   =  5,
-    eFontPrefLang_Korean      =  6,
-    eFontPrefLang_Cyrillic    =  7,
-    eFontPrefLang_Baltic      =  8,
-    eFontPrefLang_Greek       =  9,
-    eFontPrefLang_Turkish     = 10,
-    eFontPrefLang_Thai        = 11,
-    eFontPrefLang_Hebrew      = 12,
-    eFontPrefLang_Arabic      = 13,
-    eFontPrefLang_Devanagari  = 14,
-    eFontPrefLang_Tamil       = 15,
-    eFontPrefLang_Armenian    = 16,
-    eFontPrefLang_Bengali     = 17,
-    eFontPrefLang_Canadian    = 18,
-    eFontPrefLang_Ethiopic    = 19,
-    eFontPrefLang_Georgian    = 20,
-    eFontPrefLang_Gujarati    = 21,
-    eFontPrefLang_Gurmukhi    = 22,
-    eFontPrefLang_Khmer       = 23,
-    eFontPrefLang_Malayalam   = 24,
-    eFontPrefLang_Oriya       = 25,
-    eFontPrefLang_Telugu      = 26,
-    eFontPrefLang_Kannada     = 27,
-    eFontPrefLang_Sinhala     = 28,
-    eFontPrefLang_Tibetan     = 29,
+    eFontPrefLang_Japanese    =  1,
+    eFontPrefLang_ChineseTW   =  2,
+    eFontPrefLang_ChineseCN   =  3,
+    eFontPrefLang_ChineseHK   =  4,
+    eFontPrefLang_Korean      =  5,
+    eFontPrefLang_Cyrillic    =  6,
+    eFontPrefLang_Greek       =  7,
+    eFontPrefLang_Thai        =  8,
+    eFontPrefLang_Hebrew      =  9,
+    eFontPrefLang_Arabic      = 10,
+    eFontPrefLang_Devanagari  = 11,
+    eFontPrefLang_Tamil       = 12,
+    eFontPrefLang_Armenian    = 13,
+    eFontPrefLang_Bengali     = 14,
+    eFontPrefLang_Canadian    = 15,
+    eFontPrefLang_Ethiopic    = 16,
+    eFontPrefLang_Georgian    = 17,
+    eFontPrefLang_Gujarati    = 18,
+    eFontPrefLang_Gurmukhi    = 19,
+    eFontPrefLang_Khmer       = 20,
+    eFontPrefLang_Malayalam   = 21,
+    eFontPrefLang_Oriya       = 22,
+    eFontPrefLang_Telugu      = 23,
+    eFontPrefLang_Kannada     = 24,
+    eFontPrefLang_Sinhala     = 25,
+    eFontPrefLang_Tibetan     = 26,
 
-    eFontPrefLang_LangCount   = 30, // except Others and UserDefined.
+    eFontPrefLang_Others      = 27, // x-unicode
 
-    eFontPrefLang_Others      = 30, // x-unicode
-    eFontPrefLang_UserDefined = 31,
-
-    eFontPrefLang_CJKSet      = 32, // special code for CJK set
-    eFontPrefLang_AllCount    = 33
+    eFontPrefLang_CJKSet      = 28  // special code for CJK set
 };
 
 enum eCMSMode {
@@ -131,21 +137,21 @@ inline const char*
 GetBackendName(mozilla::gfx::BackendType aBackend)
 {
   switch (aBackend) {
-      case mozilla::gfx::BACKEND_DIRECT2D:
+      case mozilla::gfx::BackendType::DIRECT2D:
         return "direct2d";
-      case mozilla::gfx::BACKEND_COREGRAPHICS_ACCELERATED:
+      case mozilla::gfx::BackendType::COREGRAPHICS_ACCELERATED:
         return "quartz accelerated";
-      case mozilla::gfx::BACKEND_COREGRAPHICS:
+      case mozilla::gfx::BackendType::COREGRAPHICS:
         return "quartz";
-      case mozilla::gfx::BACKEND_CAIRO:
+      case mozilla::gfx::BackendType::CAIRO:
         return "cairo";
-      case mozilla::gfx::BACKEND_SKIA:
+      case mozilla::gfx::BackendType::SKIA:
         return "skia";
-      case mozilla::gfx::BACKEND_RECORDING:
+      case mozilla::gfx::BackendType::RECORDING:
         return "recording";
-      case mozilla::gfx::BACKEND_DIRECT2D1_1:
+      case mozilla::gfx::BackendType::DIRECT2D1_1:
         return "direct2d 1.1";
-      case mozilla::gfx::BACKEND_NONE:
+      case mozilla::gfx::BackendType::NONE:
         return "none";
   }
   MOZ_CRASH("Incomplete switch");
@@ -153,6 +159,12 @@ GetBackendName(mozilla::gfx::BackendType aBackend)
 
 class gfxPlatform {
 public:
+    typedef mozilla::gfx::Color Color;
+    typedef mozilla::gfx::DataSourceSurface DataSourceSurface;
+    typedef mozilla::gfx::DrawTarget DrawTarget;
+    typedef mozilla::gfx::IntSize IntSize;
+    typedef mozilla::gfx::SourceSurface SourceSurface;
+
     /**
      * Return a pointer to the current active platform.
      * This is a singleton; it contains mostly convenience
@@ -167,27 +179,16 @@ public:
      */
     static void Shutdown();
 
+    static void InitLayersIPC();
+    static void ShutdownLayersIPC();
+
     /**
      * Create an offscreen surface of the given dimensions
      * and image format.
      */
-    virtual already_AddRefed<gfxASurface> CreateOffscreenSurface(const gfxIntSize& size,
-                                                                 gfxContentType contentType) = 0;
-
-    /**
-     * Create an offscreen surface of the given dimensions and image format which
-     * can be converted to a gfxImageSurface without copying. If we can provide
-     * a platform-hosted surface, then we will return that instead of an actual
-     * gfxImageSurface.
-     * Sub-classes should override this method if CreateOffscreenSurface returns a
-     * surface which implements GetAsImageSurface
-     */
     virtual already_AddRefed<gfxASurface>
-      CreateOffscreenImageSurface(const gfxIntSize& aSize,
-                                  gfxContentType aContentType);
-
-    virtual already_AddRefed<gfxASurface> OptimizeImage(gfxImageSurface *aSurface,
-                                                        gfxImageFormat format);
+      CreateOffscreenSurface(const IntSize& size,
+                             gfxContentType contentType) = 0;
 
     /**
      * Beware that these methods may return DrawTargets which are not fully supported
@@ -197,10 +198,10 @@ public:
      * support the DrawTarget we get back.
      * See SupportsAzureContentForDrawTarget.
      */
-    virtual mozilla::RefPtr<mozilla::gfx::DrawTarget>
+    virtual mozilla::TemporaryRef<DrawTarget>
       CreateDrawTargetForSurface(gfxASurface *aSurface, const mozilla::gfx::IntSize& aSize);
 
-    virtual mozilla::RefPtr<mozilla::gfx::DrawTarget>
+    virtual mozilla::TemporaryRef<DrawTarget>
       CreateDrawTargetForUpdateSurface(gfxASurface *aSurface, const mozilla::gfx::IntSize& aSize);
 
     /*
@@ -210,59 +211,40 @@ public:
      * surface, even if aTarget changes.
      * aTarget should not keep a reference to the returned surface because that
      * will cause a cycle.
+     *
+     * This function is static so that it can be accessed from
+     * PluginInstanceChild (where we can't call gfxPlatform::GetPlatform()
+     * because the prefs service can only be accessed from the main process).
      */
-    virtual mozilla::RefPtr<mozilla::gfx::SourceSurface>
+    static mozilla::TemporaryRef<SourceSurface>
       GetSourceSurfaceForSurface(mozilla::gfx::DrawTarget *aTarget, gfxASurface *aSurface);
 
     static void ClearSourceSurfaceForSurface(gfxASurface *aSurface);
 
+    static mozilla::TemporaryRef<DataSourceSurface>
+        GetWrappedDataSourceSurface(gfxASurface *aSurface);
+
     virtual mozilla::TemporaryRef<mozilla::gfx::ScaledFont>
       GetScaledFontForFont(mozilla::gfx::DrawTarget* aTarget, gfxFont *aFont);
 
-    /*
-     * Cairo doesn't give us a way to create a surface pointing to a context
-     * without marking it as copy on write. For canvas we want to create
-     * a surface that points to what is currently being drawn by a canvas
-     * without a copy thus we need to create a special case. This works on
-     * most platforms with GetThebesSurfaceForDrawTarget but fails on Mac
-     * because when we create the surface we vm_copy the memory and never
-     * notify the context that the canvas has drawn to it thus we end up
-     * with a static snapshot.
-     *
-     * This function guarantes that the gfxASurface reflects the DrawTarget.
-     */
-    virtual already_AddRefed<gfxASurface>
-      CreateThebesSurfaceAliasForDrawTarget_hack(mozilla::gfx::DrawTarget *aTarget) {
-      // Overwrite me on platform where GetThebesSurfaceForDrawTarget returns
-      // a snapshot of the draw target.
-      return GetThebesSurfaceForDrawTarget(aTarget);
-    }
-
-    virtual already_AddRefed<gfxASurface>
-      GetThebesSurfaceForDrawTarget(mozilla::gfx::DrawTarget *aTarget);
-
-    mozilla::RefPtr<mozilla::gfx::DrawTarget>
+    mozilla::TemporaryRef<DrawTarget>
       CreateOffscreenContentDrawTarget(const mozilla::gfx::IntSize& aSize, mozilla::gfx::SurfaceFormat aFormat);
 
-    mozilla::RefPtr<mozilla::gfx::DrawTarget>
+    mozilla::TemporaryRef<DrawTarget>
       CreateOffscreenCanvasDrawTarget(const mozilla::gfx::IntSize& aSize, mozilla::gfx::SurfaceFormat aFormat);
 
-    virtual mozilla::RefPtr<mozilla::gfx::DrawTarget>
+    virtual mozilla::TemporaryRef<DrawTarget>
       CreateDrawTargetForData(unsigned char* aData, const mozilla::gfx::IntSize& aSize, 
                               int32_t aStride, mozilla::gfx::SurfaceFormat aFormat);
 
     /**
-     * Returns true if we will render content using Azure using a gfxPlatform
-     * provided DrawTarget.
-     * Prefer using SupportsAzureContentForDrawTarget or 
-     * SupportsAzureContentForType.
-     * This function is potentially misleading and dangerous because we might
-     * support a certain Azure backend on the current platform, but when you
-     * ask for a DrawTarget you get one for a different backend which is not
-     * supported for content drawing.
+     * Returns true if rendering to data surfaces produces the same results as
+     * rendering to offscreen surfaces on this platform, making it safe to
+     * render content to data surfaces. This is generally false on platforms
+     * which use different backends for each type of DrawTarget.
      */
-    bool SupportsAzureContent() {
-      return GetContentBackend() != mozilla::gfx::BACKEND_NONE;
+    virtual bool CanRenderContentToDataSurface() const {
+      return false;
     }
 
     /**
@@ -275,18 +257,25 @@ public:
     bool SupportsAzureContentForDrawTarget(mozilla::gfx::DrawTarget* aTarget);
 
     bool SupportsAzureContentForType(mozilla::gfx::BackendType aType) {
-      return (1 << aType) & mContentBackendBitmask;
+      return BackendTypeBit(aType) & mContentBackendBitmask;
     }
 
     virtual bool UseAcceleratedSkiaCanvas();
+    virtual void InitializeSkiaCacheLimits();
 
-    virtual void InitializeSkiaCaches();
+    /// This should be used instead of directly accessing the preference,
+    /// as different platforms may override the behaviour.
+    virtual bool UseTiling() { return gfxPrefs::LayersTilesEnabledDoNotUseDirectly(); }
 
     void GetAzureBackendInfo(mozilla::widget::InfoObject &aObj) {
       aObj.DefineProperty("AzureCanvasBackend", GetBackendName(mPreferredCanvasBackend));
       aObj.DefineProperty("AzureSkiaAccelerated", UseAcceleratedSkiaCanvas());
       aObj.DefineProperty("AzureFallbackCanvasBackend", GetBackendName(mFallbackCanvasBackend));
       aObj.DefineProperty("AzureContentBackend", GetBackendName(mContentBackend));
+    }
+
+    mozilla::gfx::BackendType GetContentBackend() {
+      return mContentBackend;
     }
 
     mozilla::gfx::BackendType GetPreferredCanvasBackend() {
@@ -297,7 +286,7 @@ public:
      * Font bits
      */
 
-    virtual void SetupClusterBoundaries(gfxTextRun *aTextRun, const PRUnichar *aString);
+    virtual void SetupClusterBoundaries(gfxTextRun *aTextRun, const char16_t *aString);
 
     /**
      * Fill aListOfFonts with the results of querying the list of font names
@@ -324,19 +313,6 @@ public:
     }
 
     /**
-     * Font name resolver, this returns actual font name(s) by the callback
-     * function. If the font doesn't exist, the callback function is not called.
-     * If the callback function returns false, the aAborted value is set to
-     * true, otherwise, false.
-     */
-    typedef bool (*FontResolverCallback) (const nsAString& aName,
-                                            void *aClosure);
-    virtual nsresult ResolveFontName(const nsAString& aFontName,
-                                     FontResolverCallback aCallback,
-                                     void *aClosure,
-                                     bool& aAborted) = 0;
-
-    /**
      * Resolving a font name to family name. The result MUST be in the result of GetFontList().
      * If the name doesn't in the system, aFamilyName will be empty string, but not failed.
      */
@@ -345,9 +321,10 @@ public:
     /**
      * Create the appropriate platform font group
      */
-    virtual gfxFontGroup *CreateFontGroup(const nsAString& aFamilies,
-                                          const gfxFontStyle *aStyle,
-                                          gfxUserFontSet *aUserFontSet) = 0;
+    virtual gfxFontGroup
+    *CreateFontGroup(const mozilla::FontFamilyList& aFontFamilyList,
+                     const gfxFontStyle *aStyle,
+                     gfxUserFontSet *aUserFontSet) = 0;
                                           
                                           
     /**
@@ -356,8 +333,10 @@ public:
      * Ownership of the returned gfxFontEntry is passed to the caller,
      * who must either AddRef() or delete.
      */
-    virtual gfxFontEntry* LookupLocalFont(const gfxProxyFontEntry *aProxyEntry,
-                                          const nsAString& aFontName)
+    virtual gfxFontEntry* LookupLocalFont(const nsAString& aFontName,
+                                          uint16_t aWeight,
+                                          int16_t aStretch,
+                                          bool aItalic)
     { return nullptr; }
 
     /**
@@ -368,8 +347,11 @@ public:
      * Ownership of the returned gfxFontEntry is passed to the caller,
      * who must either AddRef() or delete.
      */
-    virtual gfxFontEntry* MakePlatformFont(const gfxProxyFontEntry *aProxyEntry,
-                                           const uint8_t *aFontData,
+    virtual gfxFontEntry* MakePlatformFont(const nsAString& aFontName,
+                                           uint16_t aWeight,
+                                           int16_t aStretch,
+                                           bool aItalic,
+                                           const uint8_t* aFontData,
                                            uint32_t aLength);
 
     /**
@@ -428,15 +410,10 @@ public:
      */
     bool UseGraphiteShaping();
 
-    /**
-     * Whether to use the harfbuzz shaper (depending on script complexity).
-     *
-     * This allows harfbuzz to be enabled selectively via the preferences.
-     */
-    bool UseHarfBuzzForScript(int32_t aScriptCode);
-
     // check whether format is supported on a platform or not (if unclear, returns true)
     virtual bool IsFontFormatSupported(nsIURI *aFontURI, uint32_t aFormatFlags) { return false; }
+
+    virtual bool DidRenderingDeviceReset() { return false; }
 
     void GetPrefFonts(nsIAtom *aLanguage, nsString& array, bool aAppendUnicode = true);
 
@@ -474,49 +451,25 @@ public:
 
     // returns a list of commonly used fonts for a given character
     // these are *possible* matches, no cmap-checking is done at this level
-    virtual void GetCommonFallbackFonts(const uint32_t /*aCh*/,
+    virtual void GetCommonFallbackFonts(uint32_t /*aCh*/, uint32_t /*aNextCh*/,
                                         int32_t /*aRunScript*/,
                                         nsTArray<const char*>& /*aFontList*/)
     {
         // platform-specific override, by default do nothing
     }
 
-    // Break large OMTC tiled thebes layer painting into small paints.
-    static bool UseProgressiveTilePainting();
-
-    // When a critical display-port is set, render the visible area outside of
-    // it into a buffer at a lower precision. Requires tiled buffers.
-    static bool UseLowPrecisionBuffer();
-
-    // Retrieve the resolution that a low precision buffer should render at.
-    static float GetLowPrecisionResolution();
-
     static bool OffMainThreadCompositingEnabled();
 
-    /** Use gfxPlatform::GetPref* methods instead of direct calls to Preferences
-     * to get the values for layers preferences.  These will only be evaluated
-     * only once, and remain the same until restart.
-     */
-    static bool GetPrefLayersOffMainThreadCompositionEnabled();
-    static bool GetPrefLayersOffMainThreadCompositionForceEnabled();
-    static bool GetPrefLayersAccelerationForceEnabled();
-    static bool GetPrefLayersAccelerationDisabled();
-    static bool GetPrefLayersPreferOpenGL();
-    static bool GetPrefLayersPreferD3D9();
     static bool CanUseDirect3D9();
-    static int  GetPrefLayoutFrameRate();
-    static bool GetPrefLayersDump();
-    static bool GetPrefLayersScrollGraph();
-
-    static bool OffMainThreadCompositionRequired();
+    static bool CanUseDirect3D11();
 
     /**
-     * Is it possible to use buffer rotation
+     * Is it possible to use buffer rotation.  Note that these
+     * check the preference, but also allow for the override to
+     * disable it using DisableBufferRotation.
      */
     static bool BufferRotationEnabled();
     static void DisableBufferRotation();
-
-    static bool ComponentAlphaEnabled();
 
     /**
      * Are we going to try color management?
@@ -540,7 +493,7 @@ public:
      *
      * Sets 'out' to 'in' if transform is nullptr.
      */
-    static void TransformPixel(const gfxRGBA& in, gfxRGBA& out, qcms_transform *transform);
+    static void TransformPixel(const Color& in, Color& out, qcms_transform *transform);
 
     /**
      * Return the output device ICC profile.
@@ -569,8 +522,6 @@ public:
 
     virtual void FontsPrefsChanged(const char *aPref);
 
-    void OrientationSyncPrefsObserverChanged();
-
     int32_t GetBidiNumeralOption();
 
     /**
@@ -585,42 +536,34 @@ public:
     virtual gfxImageFormat OptimalFormatForContent(gfxContentType aContent);
 
     virtual gfxImageFormat GetOffscreenFormat()
-    { return gfxImageFormatRGB24; }
+    { return gfxImageFormat::RGB24; }
 
     /**
      * Returns a logger if one is available and logging is enabled
      */
     static PRLogModuleInfo* GetLog(eGfxLog aWhichLog);
 
-    bool WorkAroundDriverBugs() const { return mWorkAroundDriverBugs; }
-
     virtual int GetScreenDepth() const;
-
-    bool WidgetUpdateFlashing() const { return mWidgetUpdateFlashing; }
-
-    uint32_t GetOrientationSyncMillis() const;
 
     /**
      * Return the layer debugging options to use browser-wide.
      */
     mozilla::layers::DiagnosticTypes GetLayerDiagnosticTypes();
 
-    static bool DrawFrameCounter();
     static nsIntRect FrameCounterBounds() {
       int bits = 16;
       int sizeOfBit = 3;
       return nsIntRect(0, 0, bits * sizeOfBit, sizeOfBit);
     }
 
-    /**
-     * Returns true if we should use raw memory to send data to the compositor
-     * rather than using shmems.
-     *
-     * This method should not be called from the compositor thread.
-     */
-    bool PreferMemoryOverShmem() const;
-    bool UseDeprecatedTextures() const { return mLayersUseDeprecated; }
+    mozilla::gl::SkiaGLGlue* GetSkiaGLGlue();
+    void PurgeSkiaCache();
 
+    virtual bool IsInGonkEmulator() const { return false; }
+
+    static bool UsesOffMainThreadCompositing();
+
+    bool HasEnoughTotalSystemMemoryForSkiaGL();
 protected:
     gfxPlatform();
     virtual ~gfxPlatform();
@@ -632,7 +575,7 @@ protected:
      * Helper method, creates a draw target for a specific Azure backend.
      * Used by CreateOffscreenDrawTarget.
      */
-    mozilla::RefPtr<mozilla::gfx::DrawTarget>
+    mozilla::TemporaryRef<DrawTarget>
       CreateDrawTargetForBackend(mozilla::gfx::BackendType aBackend,
                                  const mozilla::gfx::IntSize& aSize,
                                  mozilla::gfx::SurfaceFormat aFormat);
@@ -671,9 +614,8 @@ protected:
      */
     static mozilla::gfx::BackendType BackendTypeForName(const nsCString& aName);
 
-    mozilla::gfx::BackendType GetContentBackend() {
-      return mContentBackend;
-    }
+    static mozilla::TemporaryRef<mozilla::gfx::ScaledFont>
+      GetScaledFontForFontWithCairoSkia(mozilla::gfx::DrawTarget* aTarget, gfxFont* aFont);
 
     int8_t  mAllowDownloadableFonts;
     int8_t  mGraphiteShapingEnabled;
@@ -685,14 +627,13 @@ protected:
     // when doing system font fallback
     int8_t  mFallbackUsesCmaps;
 
-    // which scripts should be shaped with harfbuzz
-    int32_t mUseHarfBuzzScripts;
-
     // max character limit for words in word cache
     int32_t mWordCacheCharLimit;
 
     // max number of entries in word cache
     int32_t mWordCacheMaxEntries;
+
+    uint32_t mTotalSystemMemory;
 
 private:
     /**
@@ -702,18 +643,17 @@ private:
 
     static void CreateCMSOutputProfile();
 
+    static void GetCMSOutputProfileData(void *&mem, size_t &size);
+
     friend void RecordingPrefChanged(const char *aPrefName, void *aClosure);
 
-    virtual qcms_profile* GetPlatformCMSOutputProfile();
-
-    virtual bool SupportsOffMainThreadCompositing() { return true; }
+    virtual void GetPlatformCMSOutputProfile(void *&mem, size_t &size);
 
     nsRefPtr<gfxASurface> mScreenReferenceSurface;
     mozilla::RefPtr<mozilla::gfx::DrawTarget> mScreenReferenceDrawTarget;
     nsTArray<uint32_t> mCJKPrefLangs;
     nsCOMPtr<nsIObserver> mSRGBOverrideObserver;
     nsCOMPtr<nsIObserver> mFontPrefsObserver;
-    nsCOMPtr<nsIObserver> mOrientationSyncPrefsObserver;
     nsCOMPtr<nsIObserver> mMemoryPressureObserver;
 
     // The preferred draw target backend to use for canvas
@@ -726,16 +666,9 @@ private:
     uint32_t mContentBackendBitmask;
 
     mozilla::widget::GfxInfoCollector<gfxPlatform> mAzureCanvasBackendCollector;
-    bool mWorkAroundDriverBugs;
 
     mozilla::RefPtr<mozilla::gfx::DrawEventRecorder> mRecorder;
-    bool mWidgetUpdateFlashing;
-    uint32_t mOrientationSyncMillis;
-    bool mLayersPreferMemoryOverShmem;
-    bool mLayersUseDeprecated;
-    bool mDrawLayerBorders;
-    bool mDrawTileBorders;
-    bool mDrawBigImageBorders;
+    mozilla::RefPtr<mozilla::gl::SkiaGLGlue> mSkiaGlue;
 };
 
 #endif /* GFX_PLATFORM_H */

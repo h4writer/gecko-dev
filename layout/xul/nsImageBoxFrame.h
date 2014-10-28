@@ -19,12 +19,11 @@ class nsImageBoxFrame;
 
 class nsDisplayXULImage;
 
-class nsImageBoxListener : public imgINotificationObserver,
-                           public imgIOnloadBlocker
+class nsImageBoxListener MOZ_FINAL : public imgINotificationObserver,
+                                     public imgIOnloadBlocker
 {
 public:
   nsImageBoxListener();
-  virtual ~nsImageBoxListener();
 
   NS_DECL_ISUPPORTS
   NS_DECL_IMGINOTIFICATIONOBSERVER
@@ -33,10 +32,12 @@ public:
   void SetFrame(nsImageBoxFrame *frame) { mFrame = frame; }
 
 private:
+  virtual ~nsImageBoxListener();
+
   nsImageBoxFrame *mFrame;
 };
 
-class nsImageBoxFrame : public nsLeafBoxFrame
+class nsImageBoxFrame MOZ_FINAL : public nsLeafBoxFrame
 {
 public:
   typedef mozilla::layers::LayerManager LayerManager;
@@ -47,27 +48,27 @@ public:
   virtual nsSize GetPrefSize(nsBoxLayoutState& aBoxLayoutState) MOZ_OVERRIDE;
   virtual nsSize GetMinSize(nsBoxLayoutState& aBoxLayoutState) MOZ_OVERRIDE;
   virtual nscoord GetBoxAscent(nsBoxLayoutState& aBoxLayoutState) MOZ_OVERRIDE;
-  virtual void MarkIntrinsicWidthsDirty() MOZ_OVERRIDE;
+  virtual void MarkIntrinsicISizesDirty() MOZ_OVERRIDE;
 
   nsresult Notify(imgIRequest *aRequest, int32_t aType, const nsIntRect* aData);
 
   friend nsIFrame* NS_NewImageBoxFrame(nsIPresShell* aPresShell, nsStyleContext* aContext);
 
-  virtual void Init(nsIContent*      aContent,
-                    nsIFrame*        aParent,
-                    nsIFrame*        asPrevInFlow) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         asPrevInFlow) MOZ_OVERRIDE;
 
-  NS_IMETHOD AttributeChanged(int32_t aNameSpaceID,
-                              nsIAtom* aAttribute,
-                              int32_t aModType) MOZ_OVERRIDE;
+  virtual nsresult AttributeChanged(int32_t aNameSpaceID,
+                                    nsIAtom* aAttribute,
+                                    int32_t aModType) MOZ_OVERRIDE;
 
   virtual void DidSetStyleContext(nsStyleContext* aOldStyleContext) MOZ_OVERRIDE;
 
   virtual void DestroyFrom(nsIFrame* aDestructRoot) MOZ_OVERRIDE;
 
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE;
 #endif
 
   /** 

@@ -73,10 +73,8 @@ NS_IMPL_CYCLE_COLLECTING_ADDREF(nsHtml5StreamParser)
 NS_IMPL_CYCLE_COLLECTING_RELEASE(nsHtml5StreamParser)
 
 NS_INTERFACE_TABLE_HEAD(nsHtml5StreamParser)
-  NS_INTERFACE_TABLE3(nsHtml5StreamParser,
-                      nsIStreamListener, 
-                      nsICharsetDetectionObserver,
-                      nsIThreadRetargetableStreamListener)
+  NS_INTERFACE_TABLE(nsHtml5StreamParser,
+                     nsICharsetDetectionObserver)
   NS_INTERFACE_TABLE_TO_MAP_SEGUE_CYCLE_COLLECTION(nsHtml5StreamParser)
 NS_INTERFACE_MAP_END
 
@@ -110,7 +108,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(nsHtml5StreamParser)
   // hack: count self if held by mChardet
   if (tmp->mChardet) {
     NS_CYCLE_COLLECTION_NOTE_EDGE_NAME(cb, "mChardet->mObserver");
-    cb.NoteXPCOMChild(static_cast<nsIStreamListener*>(tmp));
+    cb.NoteXPCOMChild(static_cast<nsICharsetDetectionObserver*>(tmp));
   }
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
@@ -119,7 +117,7 @@ class nsHtml5ExecutorFlusher : public nsRunnable
   private:
     nsRefPtr<nsHtml5TreeOpExecutor> mExecutor;
   public:
-    nsHtml5ExecutorFlusher(nsHtml5TreeOpExecutor* aExecutor)
+    explicit nsHtml5ExecutorFlusher(nsHtml5TreeOpExecutor* aExecutor)
       : mExecutor(aExecutor)
     {}
     NS_IMETHODIMP Run()
@@ -136,7 +134,7 @@ class nsHtml5LoadFlusher : public nsRunnable
   private:
     nsRefPtr<nsHtml5TreeOpExecutor> mExecutor;
   public:
-    nsHtml5LoadFlusher(nsHtml5TreeOpExecutor* aExecutor)
+    explicit nsHtml5LoadFlusher(nsHtml5TreeOpExecutor* aExecutor)
       : mExecutor(aExecutor)
     {}
     NS_IMETHODIMP Run()
@@ -183,7 +181,7 @@ nsHtml5StreamParser::nsHtml5StreamParser(nsHtml5TreeOpExecutor* aExecutor,
     mTreeBuilder->EnableViewSource(highlighter); // doesn't own
   }
 
-  // Chardet instantiation adapted from nsDOMFile.
+  // Chardet instantiation adapted from File.
   // Chardet is initialized here even if it turns out to be useless
   // to make the chardet refcount its observer (nsHtml5StreamParser)
   // on the main thread.
@@ -236,11 +234,8 @@ nsHtml5StreamParser::Notify(const char* aCharset, nsDetectionConfident aConf)
   if (aConf == eBestAnswer || aConf == eSureAnswer) {
     mFeedChardet = false; // just in case
     nsAutoCString encoding;
-    if (!EncodingUtils::FindEncodingForLabel(nsDependentCString(aCharset),
-                                             encoding)) {
-      return NS_OK;
-    }
-    if (encoding.EqualsLiteral("replacement")) {
+    if (!EncodingUtils::FindEncodingForLabelNoReplacement(
+        nsDependentCString(aCharset), encoding)) {
       return NS_OK;
     }
     if (HasDecoder()) {
@@ -378,9 +373,9 @@ nsHtml5StreamParser::SniffBOMlessUTF16BasicLatin(const uint8_t* aFromSegment,
   }
 
   if (byteNonZero[0]) {
-    mCharset.Assign("UTF-16LE");
+    mCharset.AssignLiteral("UTF-16LE");
   } else {
-    mCharset.Assign("UTF-16BE");
+    mCharset.AssignLiteral("UTF-16BE");
   }
   mCharsetSource = kCharsetFromIrreversibleAutoDetection;
   mTreeBuilder->SetDocumentCharset(mCharset, mCharsetSource);
@@ -392,7 +387,7 @@ nsHtml5StreamParser::SniffBOMlessUTF16BasicLatin(const uint8_t* aFromSegment,
 }
 
 void
-nsHtml5StreamParser::SetEncodingFromExpat(const PRUnichar* aEncoding)
+nsHtml5StreamParser::SetEncodingFromExpat(const char16_t* aEncoding)
 {
   if (aEncoding) {
     nsDependentString utf16(aEncoding);
@@ -432,7 +427,7 @@ HandleXMLDeclaration(void* aUserData,
 {
   UserData* ud = static_cast<UserData*>(aUserData);
   ud->mStreamParser->SetEncodingFromExpat(
-      reinterpret_cast<const PRUnichar*>(aEncoding));
+      reinterpret_cast<const char16_t*>(aEncoding));
   XML_StopParser(ud->mExpat, false);
 }
 
@@ -487,9 +482,9 @@ nsHtml5StreamParser::FinalizeSniffing(const uint8_t* aFromSegment, // can be nul
         moz_free
       };
 
-    static const PRUnichar kExpatSeparator[] = { 0xFFFF, '\0' };
+    static const char16_t kExpatSeparator[] = { 0xFFFF, '\0' };
 
-    static const PRUnichar kISO88591[] =
+    static const char16_t kISO88591[] =
         { 'I', 'S', 'O', '-', '8', '8', '5', '9', '-', '1', '\0' };
 
     UserData ud;
@@ -852,7 +847,6 @@ nsHtml5StreamParser::WriteStreamBytes(const uint8_t* aFromSegment,
   }
 }
 
-// nsIRequestObserver methods:
 nsresult
 nsHtml5StreamParser::OnStartRequest(nsIRequest* aRequest, nsISupports* aContext)
 {
@@ -939,14 +933,18 @@ nsHtml5StreamParser::OnStartRequest(nsIRequest* aRequest, nsISupports* aContext)
       mReparseForbidden = true;
       mFeedChardet = false; // can't restart anyway
     }
+  }
 
-    // Attempt to retarget delivery of data (via OnDataAvailable) to the parser
-    // thread, rather than through the main thread.
-    nsCOMPtr<nsIThreadRetargetableRequest> threadRetargetableRequest =
-      do_QueryInterface(mRequest);
-    if (threadRetargetableRequest) {
-      threadRetargetableRequest->RetargetDeliveryTo(mThread);
-    }
+  // Attempt to retarget delivery of data (via OnDataAvailable) to the parser
+  // thread, rather than through the main thread.
+  nsCOMPtr<nsIThreadRetargetableRequest> threadRetargetableRequest =
+    do_QueryInterface(mRequest, &rv);
+  if (threadRetargetableRequest) {
+    rv = threadRetargetableRequest->RetargetDeliveryTo(mThread);
+  }
+
+  if (NS_FAILED(rv)) {
+    NS_WARNING("Failed to retarget HTML data delivery to the parser thread.");
   }
 
   if (mCharsetSource == kCharsetFromParentFrame) {
@@ -974,7 +972,7 @@ nsHtml5StreamParser::OnStartRequest(nsIRequest* aRequest, nsISupports* aContext)
   return NS_OK;
 }
 
-NS_IMETHODIMP
+nsresult
 nsHtml5StreamParser::CheckListenerChain()
 {
   NS_ASSERTION(NS_IsMainThread(), "Should be on the main thread!");
@@ -1026,7 +1024,7 @@ class nsHtml5RequestStopper : public nsRunnable
   private:
     nsHtml5RefPtr<nsHtml5StreamParser> mStreamParser;
   public:
-    nsHtml5RequestStopper(nsHtml5StreamParser* aStreamParser)
+    explicit nsHtml5RequestStopper(nsHtml5StreamParser* aStreamParser)
       : mStreamParser(aStreamParser)
     {}
     NS_IMETHODIMP Run()
@@ -1125,13 +1123,12 @@ class nsHtml5DataAvailable : public nsRunnable
     }
 };
 
-// nsIStreamListener method:
 nsresult
 nsHtml5StreamParser::OnDataAvailable(nsIRequest* aRequest,
-                               nsISupports* aContext,
-                               nsIInputStream* aInStream,
-                               uint64_t aSourceOffset,
-                               uint32_t aLength)
+                                     nsISupports* aContext,
+                                     nsIInputStream* aInStream,
+                                     uint64_t aSourceOffset,
+                                     uint32_t aLength)
 {
   nsresult rv;
   if (NS_FAILED(rv = mExecutor->IsBroken())) {
@@ -1203,13 +1200,20 @@ nsHtml5StreamParser::PreferredForInternalEncodingDecl(nsACString& aEncoding)
     return false;
   }
 
-  if (newEncoding.EqualsLiteral("UTF-16") ||
-      newEncoding.EqualsLiteral("UTF-16BE") ||
+  if (newEncoding.EqualsLiteral("UTF-16BE") ||
       newEncoding.EqualsLiteral("UTF-16LE")) {
     mTreeBuilder->MaybeComplainAboutCharset("EncMetaUtf16",
                                             true,
                                             mTokenizer->getLineNumber());
-    newEncoding.Assign("UTF-8");
+    newEncoding.AssignLiteral("UTF-8");
+  }
+
+  if (newEncoding.EqualsLiteral("x-user-defined")) {
+    // WebKit/Blink hack for Indian and Armenian legacy sites
+    mTreeBuilder->MaybeComplainAboutCharset("EncMetaUserDefined",
+                                            true,
+                                            mTokenizer->getLineNumber());
+    newEncoding.AssignLiteral("windows-1252");
   }
 
   if (newEncoding.Equals(mCharset)) {
@@ -1406,7 +1410,7 @@ class nsHtml5StreamParserContinuation : public nsRunnable
 private:
   nsHtml5RefPtr<nsHtml5StreamParser> mStreamParser;
 public:
-  nsHtml5StreamParserContinuation(nsHtml5StreamParser* aStreamParser)
+  explicit nsHtml5StreamParserContinuation(nsHtml5StreamParser* aStreamParser)
     : mStreamParser(aStreamParser)
   {}
   NS_IMETHODIMP Run()
@@ -1571,7 +1575,7 @@ class nsHtml5TimerKungFu : public nsRunnable
 private:
   nsHtml5RefPtr<nsHtml5StreamParser> mStreamParser;
 public:
-  nsHtml5TimerKungFu(nsHtml5StreamParser* aStreamParser)
+  explicit nsHtml5TimerKungFu(nsHtml5StreamParser* aStreamParser)
     : mStreamParser(aStreamParser)
   {}
   NS_IMETHODIMP Run()

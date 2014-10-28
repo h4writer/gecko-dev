@@ -11,10 +11,17 @@
 #include "GLConsts.h"
 #include "nsSize.h"
 #include "mozilla/Attributes.h"
-
-struct nsIntSize;
+#include "mozilla/gfx/Point.h"
 
 namespace mozilla {
+
+namespace layers {
+class Image;
+class PlanarYCbCrImage;
+class GrallocImage;
+class SurfaceTextureImage;
+}
+
 namespace gl {
 
 class GLContext;
@@ -26,7 +33,7 @@ class GLContext;
  * See mozilla::gl::CreateTexture.
  */
 GLuint CreateTextureForOffscreen(GLContext* aGL, const GLFormats& aFormats,
-                                 const gfxIntSize& aSize);
+                                 const gfx::IntSize& aSize);
 
 /**
  * Helper function that creates a 2D texture aSize.width x aSize.height with
@@ -39,7 +46,7 @@ GLuint CreateTextureForOffscreen(GLContext* aGL, const GLFormats& aFormats,
  *    GL_TEXTURE_WRAP_T = GL_CLAMP_TO_EDGE
  */
 GLuint CreateTexture(GLContext* aGL, GLenum aInternalFormat, GLenum aFormat,
-                     GLenum aType, const gfxIntSize& aSize);
+                     GLenum aType, const gfx::IntSize& aSize, bool linear = true);
 
 /**
  * Helper function to create, potentially, multisample render buffers suitable
@@ -47,7 +54,7 @@ GLuint CreateTexture(GLContext* aGL, GLenum aInternalFormat, GLenum aFormat,
  * storage specified by aFormat. returns GL render buffer object id.
  */
 GLuint CreateRenderbuffer(GLContext* aGL, GLenum aFormat, GLsizei aSamples,
-                          const gfxIntSize& aSize);
+                          const gfx::IntSize& aSize);
 
 /**
  * Helper function to create, potentially, multisample render buffers suitable
@@ -56,7 +63,7 @@ GLuint CreateRenderbuffer(GLContext* aGL, GLenum aFormat, GLsizei aSamples,
  * aColorMSRB, aDepthRB, and aStencilRB
  */
 void CreateRenderbuffersForOffscreen(GLContext* aGL, const GLFormats& aFormats,
-                                     const gfxIntSize& aSize, bool aMultisample,
+                                     const gfx::IntSize& aSize, bool aMultisample,
                                      GLuint* aColorMSRB, GLuint* aDepthRB,
                                      GLuint* aStencilRB);
 
@@ -64,6 +71,35 @@ void CreateRenderbuffersForOffscreen(GLContext* aGL, const GLFormats& aFormats,
 /** Buffer blitting helper */
 class GLBlitHelper MOZ_FINAL
 {
+    enum Channel
+    {
+        Channel_Y = 0,
+        Channel_Cb,
+        Channel_Cr,
+        Channel_Max,
+    };
+
+    /**
+     * BlitTex2D is used to copy blit the content of a GL_TEXTURE_2D object,
+     * BlitTexRect is used to copy blit the content of a GL_TEXTURE_RECT object,
+     * The difference between BlitTex2D and BlitTexRect is the texture type, which affect
+     * the fragment shader a bit.
+     *
+     * ConvertGralloc is used to color convert copy blit the GrallocImage into a
+     * normal RGB texture by egl_image_external extension
+     * ConvertPlnarYcbCr is used to color convert copy blit the PlanarYCbCrImage
+     * into a normal RGB texture by create textures of each color channel, and
+     * convert it in GPU.
+     * Convert type is created for canvas.
+     */
+    enum BlitType
+    {
+        BlitTex2D,
+        BlitTexRect,
+        ConvertGralloc,
+        ConvertPlanarYCbCr,
+        ConvertSurfaceTexture
+    };
     // The GLContext is the sole owner of the GLBlitHelper.
     GLContext* mGL;
 
@@ -74,41 +110,84 @@ class GLBlitHelper MOZ_FINAL
     GLuint mTex2DBlit_Program;
     GLuint mTex2DRectBlit_Program;
 
+    GLint mYFlipLoc;
+
+    GLint mTextureTransformLoc;
+
+    // Data for image blit path
+    GLuint mTexExternalBlit_FragShader;
+    GLuint mTexYUVPlanarBlit_FragShader;
+    GLuint mTexExternalBlit_Program;
+    GLuint mTexYUVPlanarBlit_Program;
+    GLuint mFBO;
+    GLuint mSrcTexY;
+    GLuint mSrcTexCb;
+    GLuint mSrcTexCr;
+    GLuint mSrcTexEGL;
+    GLint mYTexScaleLoc;
+    GLint mCbCrTexScaleLoc;
+    int mTexWidth;
+    int mTexHeight;
+
+    // Cache some uniform values
+    float mCurYScale;
+    float mCurCbCrScale;
+
     void UseBlitProgram();
     void SetBlitFramebufferForDestTexture(GLuint aTexture);
 
-    bool UseTexQuadProgram(GLenum target, const nsIntSize& srcSize);
-    bool InitTexQuadProgram(GLenum target = LOCAL_GL_TEXTURE_2D);
+    bool UseTexQuadProgram(BlitType target, const gfx::IntSize& srcSize);
+    bool InitTexQuadProgram(BlitType target = BlitTex2D);
     void DeleteTexBlitProgram();
+    void BindAndUploadYUVTexture(Channel which, uint32_t width, uint32_t height, void* data, bool allocation);
+
+#ifdef MOZ_WIDGET_GONK
+    void BindAndUploadExternalTexture(EGLImage image);
+    bool BlitGrallocImage(layers::GrallocImage* grallocImage, bool yFlip = false);
+#endif
+    bool BlitPlanarYCbCrImage(layers::PlanarYCbCrImage* yuvImage, bool yFlip = false);
+#ifdef MOZ_WIDGET_ANDROID
+    bool BlitSurfaceTextureImage(layers::SurfaceTextureImage* stImage);
+#endif
 
 public:
 
-    GLBlitHelper(GLContext* gl);
+    explicit GLBlitHelper(GLContext* gl);
     ~GLBlitHelper();
 
     // If you don't have |srcFormats| for the 2nd definition,
     // then you'll need the framebuffer_blit extensions to use
     // the first BlitFramebufferToFramebuffer.
     void BlitFramebufferToFramebuffer(GLuint srcFB, GLuint destFB,
-                                      const nsIntSize& srcSize,
-                                      const nsIntSize& destSize);
+                                      const gfx::IntSize& srcSize,
+                                      const gfx::IntSize& destSize,
+                                      bool internalFBs = false);
     void BlitFramebufferToFramebuffer(GLuint srcFB, GLuint destFB,
-                                      const nsIntSize& srcSize,
-                                      const nsIntSize& destSize,
-                                      const GLFormats& srcFormats);
+                                      const gfx::IntSize& srcSize,
+                                      const gfx::IntSize& destSize,
+                                      const GLFormats& srcFormats,
+                                      bool internalFBs = false);
     void BlitTextureToFramebuffer(GLuint srcTex, GLuint destFB,
-                                  const nsIntSize& srcSize,
-                                  const nsIntSize& destSize,
-                                  GLenum srcTarget = LOCAL_GL_TEXTURE_2D);
+                                  const gfx::IntSize& srcSize,
+                                  const gfx::IntSize& destSize,
+                                  GLenum srcTarget = LOCAL_GL_TEXTURE_2D,
+                                  bool internalFBs = false);
     void BlitFramebufferToTexture(GLuint srcFB, GLuint destTex,
-                                  const nsIntSize& srcSize,
-                                  const nsIntSize& destSize,
-                                  GLenum destTarget = LOCAL_GL_TEXTURE_2D);
+                                  const gfx::IntSize& srcSize,
+                                  const gfx::IntSize& destSize,
+                                  GLenum destTarget = LOCAL_GL_TEXTURE_2D,
+                                  bool internalFBs = false);
     void BlitTextureToTexture(GLuint srcTex, GLuint destTex,
-                              const nsIntSize& srcSize,
-                              const nsIntSize& destSize,
+                              const gfx::IntSize& srcSize,
+                              const gfx::IntSize& destSize,
                               GLenum srcTarget = LOCAL_GL_TEXTURE_2D,
                               GLenum destTarget = LOCAL_GL_TEXTURE_2D);
+    bool BlitImageToFramebuffer(layers::Image* srcImage, const gfx::IntSize& destSize,
+                                GLuint destFB, bool yFlip = false, GLuint xoffset = 0,
+                                GLuint yoffset = 0, GLuint width = 0, GLuint height = 0);
+    bool BlitImageToTexture(layers::Image* srcImage, const gfx::IntSize& destSize,
+                            GLuint destTex, GLenum destTarget, bool yFlip = false, GLuint xoffset = 0,
+                            GLuint yoffset = 0, GLuint width = 0, GLuint height = 0);
 };
 
 }

@@ -50,6 +50,9 @@
 
 using namespace mozilla;
 
+#ifdef XP_MACOSX
+#define kOSXResourcesFolder "Resources"
+#endif
 #define kDesktopFolder "browser"
 #define kMetroFolder "metro"
 #define kMetroAppIniFilename "metroapp.ini"
@@ -83,8 +86,8 @@ static void Output(const char *fmt, ... )
   // This is a rare codepath, so we can load user32 at run-time instead.
   HMODULE user32 = LoadLibraryW(L"user32.dll");
   if (user32) {
-    typedef int (WINAPI * MessageBoxWFn)(HWND, LPCWSTR, LPCWSTR, UINT);
-    MessageBoxWFn messageBoxW = (MessageBoxWFn)GetProcAddress(user32, "MessageBoxW");
+    decltype(MessageBoxW)* messageBoxW =
+      (decltype(MessageBoxW)*) GetProcAddress(user32, "MessageBoxW");
     if (messageBoxW) {
       messageBoxW(nullptr, wide_msg, L"Firefox", MB_OK
                                                | MB_ICONERROR
@@ -110,7 +113,7 @@ static bool IsArg(const char* arg, const char* s)
     return !strcasecmp(arg, s);
   }
 
-#if defined(XP_WIN) || defined(XP_OS2)
+#if defined(XP_WIN)
   if (*arg == '/')
     return !strcasecmp(++arg, s);
 #endif
@@ -241,6 +244,7 @@ static int do_main(int argc, char* argv[], nsIFile *xreDirectory)
       // relaunches Metro Firefox with this command line arg.
       mainFlags = XRE_MAIN_FLAG_USE_METRO;
     } else {
+#ifndef RELEASE_BUILD
       // This command-line flag is used to test the metro browser in a desktop
       // environment.
       for (int idx = 1; idx < argc; idx++) {
@@ -252,6 +256,7 @@ static int do_main(int argc, char* argv[], nsIFile *xreDirectory)
           break;
         } 
       }
+#endif
     }
   }
 #endif
@@ -268,7 +273,9 @@ static int do_main(int argc, char* argv[], nsIFile *xreDirectory)
 
     nsCOMPtr<nsIFile> greDir;
     exeFile->GetParent(getter_AddRefs(greDir));
-
+#ifdef XP_MACOSX
+    greDir->SetNativeLeafName(NS_LITERAL_CSTRING(kOSXResourcesFolder));
+#endif
     nsCOMPtr<nsIFile> appSubdir;
     greDir->Clone(getter_AddRefs(appSubdir));
     appSubdir->Append(NS_LITERAL_STRING(kDesktopFolder));
@@ -295,13 +302,6 @@ static int do_main(int argc, char* argv[], nsIFile *xreDirectory)
   nsAutoCString path;
   if (NS_FAILED(iniFile->GetNativePath(path))) {
     Output("Couldn't get ini file path.\n");
-    return 255;
-  }
-
-  char appEnv[MAXPATHLEN];
-  snprintf(appEnv, MAXPATHLEN, "XUL_APP_FILE=%s", path.get());
-  if (putenv(appEnv)) {
-    Output("Couldn't set %s.\n", appEnv);
     return 255;
   }
 
@@ -565,10 +565,18 @@ InitXPCOMGlue(const char *argv0, nsIFile **xreDirectory)
     return rv;
   }
 
+#ifndef MOZ_METRO
+  // This will set this thread as the main thread, which in metro land is
+  // wrong. We initialize this later from the right thread in nsAppRunner.
   NS_LogInit();
+#endif
 
   // chop XPCOM_DLL off exePath
   *lastSlash = '\0';
+#ifdef XP_MACOSX
+  lastSlash = strrchr(exePath, XPCOM_FILE_PATH_SEPARATOR[0]);
+  strcpy(lastSlash + 1, kOSXResourcesFolder);
+#endif
 #ifdef XP_WIN
   rv = NS_NewLocalFile(NS_ConvertUTF8toUTF16(exePath), false,
                        xreDirectory);

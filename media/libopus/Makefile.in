@@ -1,41 +1,25 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0. If a copy of the MPL was not distributed with this file,
-# You can obtain one at http://mozilla.org/MPL/2.0/.
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-LOCAL_INCLUDES += \
-  -I$(srcdir)/include \
-  -I$(srcdir)/celt \
-  -I$(srcdir)/silk \
-  -I$(srcdir)/src \
-  $(NULL)
+include $(topsrcdir)/config/rules.mk
 
-VPATH += \
-  $(srcdir)/celt \
-  $(srcdir)/silk \
-  $(srcdir)/src \
-  $(NULL)
+ifdef GNU_AS
+ifeq ($(CPU_ARCH),arm)
 
-include $(srcdir)/celt_sources.mk
-include $(srcdir)/silk_sources.mk
-include $(srcdir)/opus_sources.mk
+# These flags are a lie; they're just used to enable the requisite
+# opcodes; actual arch detection is done at runtime.
+ASFLAGS = -march=armv7-a -mfpu=neon
 
-CSRCS = \
-  $(notdir $(CELT_SOURCES)) \
-  $(notdir $(SILK_SOURCES)) \
-  $(notdir $(OPUS_SOURCES)) \
-  $(NULL)
+celt_pitch_xcorr_arm-gnu.$(ASM_SUFFIX): celt/arm/armopts-gnu.S
 
-ifndef MOZ_SAMPLE_TYPE_FLOAT32
-  MOZ_OPUS_FIXED = 1
+# armopts needs a specific rule, because arm2gnu.pl will always add the .S
+# suffix when translating the files that include it.
+celt/arm/armopts-gnu.S: celt/arm/armopts.s $(call mkdir_deps,celt/arm) $(GLOBAL_DEPS)
+	$(PERL) $(srcdir)/celt/arm/arm2gnu.pl < $< > $@
+# For all others, we can use an implicit rule with the configured $(ASM_SUFFIX).
+%-gnu.$(ASM_SUFFIX): celt/arm/%.s $(GLOBAL_DEPS)
+	$(PERL) $(srcdir)/celt/arm/arm2gnu.pl < $< > $@
+
 endif
-
-ifdef MOZ_OPUS_FIXED
-LOCAL_INCLUDES += -I$(srcdir)/silk/fixed
-VPATH += $(srcdir)/silk/fixed
-CSRCS += $(notdir $(SILK_SOURCES_FIXED))
-else
-LOCAL_INCLUDES += -I$(srcdir)/silk/float
-VPATH += $(srcdir)/silk/float
-CSRCS += $(notdir $(SILK_SOURCES_FLOAT)) \
-         $(notdir $(OPUS_SOURCES_FLOAT))
 endif

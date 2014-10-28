@@ -9,20 +9,43 @@ import java.util.Map;
 import java.util.Set;
 
 import org.mozilla.gecko.background.helpers.AndroidSyncTestCase;
-import org.mozilla.gecko.sync.PrefsSource;
 import org.mozilla.gecko.sync.SyncConfiguration;
 
 import android.content.SharedPreferences;
 
-public class TestSyncConfiguration extends AndroidSyncTestCase implements PrefsSource {
+public class TestSyncConfiguration extends AndroidSyncTestCase {
   public static final String TEST_PREFS_NAME = "test";
 
-  /*
-   * PrefsSource methods.
-   */
-  @Override
   public SharedPreferences getPrefs(String name, int mode) {
     return this.getApplicationContext().getSharedPreferences(name, mode);
+  }
+
+  /**
+   * Ensure that declined engines persist through prefs.
+   */
+  public void testDeclinedEngineNames() {
+    SyncConfiguration config = null;
+    SharedPreferences prefs = getPrefs(TEST_PREFS_NAME, 0);
+
+    config = newSyncConfiguration();
+    config.declinedEngineNames = new HashSet<String>();
+    config.declinedEngineNames.add("test1");
+    config.declinedEngineNames.add("test2");
+    config.persistToPrefs();
+    assertTrue(prefs.contains(SyncConfiguration.PREF_DECLINED_ENGINE_NAMES));
+    config = newSyncConfiguration();
+    Set<String> expected = new HashSet<String>();
+    for (String name : new String[] { "test1", "test2" }) {
+      expected.add(name);
+    }
+    assertEquals(expected, config.declinedEngineNames);
+
+    config.declinedEngineNames = null;
+    config.persistToPrefs();
+    assertFalse(prefs.contains(SyncConfiguration.PREF_DECLINED_ENGINE_NAMES));
+    config = newSyncConfiguration();
+    assertNotNull(config.declinedEngineNames);
+    assertTrue(config.declinedEngineNames.isEmpty());
   }
 
   public void testEnabledEngineNames() {
@@ -118,6 +141,6 @@ public class TestSyncConfiguration extends AndroidSyncTestCase implements PrefsS
   }
 
   protected SyncConfiguration newSyncConfiguration() {
-    return new SyncConfiguration(null, null, TEST_PREFS_NAME, this);
+    return new SyncConfiguration(null, null, getPrefs(TEST_PREFS_NAME, 0));
   }
 }

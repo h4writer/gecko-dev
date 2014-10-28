@@ -41,14 +41,9 @@
  */
 #define JS_OLD_GETTER_SETTER_METHODS    1
 
-/* A kill-switch for bug 586842.  Embedders shouldn't touch this! */
-#define JS_USE_NEW_OBJECT_REPRESENTATION 0
-
-#if JS_USE_NEW_OBJECT_REPRESENTATION
-# define JS_NEW_OBJECT_REPRESENTATION_ONLY() ((void)0)
-#else
-# define JS_NEW_OBJECT_REPRESENTATION_ONLY() \
-     MOZ_ASSUME_UNREACHABLE("don't call this!  to be used in the new object representation")
+/* Support for Symbols - Nightly-only for now. */
+#ifdef NIGHTLY_BUILD
+#define JS_HAS_SYMBOLS 1
 #endif
 
 #endif /* jsversion_h */

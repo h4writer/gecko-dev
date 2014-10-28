@@ -14,6 +14,7 @@
 #include "nsString.h"
 #include "nsCOMPtr.h"
 #include "nsIObserver.h"
+#include "nsIContentPolicy.h"
 #include "imgRequestProxy.h"
 
 using namespace mozilla;
@@ -113,11 +114,14 @@ typedef NSInteger NSUserNotificationActivationType;
 
 namespace mozilla {
 
-class OSXNotificationInfo : public RefCounted<OSXNotificationInfo> {
+class OSXNotificationInfo {
+private:
+  ~OSXNotificationInfo();
+
 public:
+  NS_INLINE_DECL_REFCOUNTING(OSXNotificationInfo)
   OSXNotificationInfo(NSString *name, nsIObserver *observer,
                       const nsAString & alertCookie);
-  ~OSXNotificationInfo();
 
   NSString *mName;
   nsCOMPtr<nsIObserver> mObserver;
@@ -180,7 +184,7 @@ OSXNotificationCenter::~OSXNotificationCenter()
   NS_OBJC_END_TRY_ABORT_BLOCK;
 }
 
-NS_IMPL_ISUPPORTS3(OSXNotificationCenter, nsIAlertsService, imgINotificationObserver, nsITimerCallback)
+NS_IMPL_ISUPPORTS(OSXNotificationCenter, nsIAlertsService, imgINotificationObserver, nsITimerCallback)
 
 nsresult OSXNotificationCenter::Init()
 {
@@ -199,6 +203,7 @@ OSXNotificationCenter::ShowAlertNotification(const nsAString & aImageUrl, const 
                                              const nsAString & aAlertName,
                                              const nsAString & aBidi,
                                              const nsAString & aLang,
+                                             const nsAString & aData,
                                              nsIPrincipal * aPrincipal)
 {
   NS_OBJC_BEGIN_TRY_ABORT_BLOCK_NSRESULT;
@@ -240,7 +245,8 @@ OSXNotificationCenter::ShowAlertNotification(const nsAString & aImageUrl, const 
       if (imageUri) {
         nsresult rv = il->LoadImage(imageUri, nullptr, nullptr, aPrincipal, nullptr,
                                     this, nullptr, nsIRequest::LOAD_NORMAL, nullptr,
-                                    nullptr, getter_AddRefs(osxni->mIconRequest));
+                                    nsIContentPolicy::TYPE_IMAGE, EmptyString(),
+                                    getter_AddRefs(osxni->mIconRequest));
         if (NS_SUCCEEDED(rv)) {
           // Set a timer for six seconds. If we don't have an icon by the time this
           // goes off then we go ahead without an icon.

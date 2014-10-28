@@ -13,6 +13,8 @@
 
 class nsIHttpHeaderVisitor;
 
+namespace mozilla { namespace net {
+
 class nsHttpHeaderArray
 {
 public:
@@ -51,6 +53,8 @@ public:
                              char **value=nullptr);
 
     void Flatten(nsACString &, bool pruneProxyHeaders=false);
+
+    void ParseHeaderSet(char *buffer);
 
     uint32_t Count() const { return mHeaders.Length(); }
 
@@ -177,5 +181,7 @@ nsHttpHeaderArray::IsSuspectDuplicateHeader(nsHttpAtom header)
 
     return retval;
 }
+
+}} // namespace mozilla::net
 
 #endif

@@ -4,6 +4,8 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+JAR_MANIFESTS += ['jar.mn']
+
 interfaces = [
     'base',
     'canvas',
@@ -32,33 +34,49 @@ interfaces = [
     'gamepad',
 ]
 
-PARALLEL_DIRS += ['interfaces/' + i for i in interfaces]
+DIRS += ['interfaces/' + i for i in interfaces]
 
-PARALLEL_DIRS += [
+DIRS += [
+    'animation',
     'apps',
     'base',
     'activities',
+    'archivereader',
     'bindings',
     'battery',
-    'bluetooth',
     'browser-element',
+    'canvas',
+    'cellbroadcast',
     'contacts',
+    'crypto',
     'phonenumberutils',
     'alarm',
     'datastore',
     'devicestorage',
     'encoding',
-    'file',
+    'events',
+    'fetch',
+    'filehandle',
+    'filesystem',
     'fmradio',
+    'geolocation',
+    'html',
+    'json',
+    'jsurl',
     'asmjscache',
+    'mathml',
     'media',
     'messages',
+    'mobileconnection',
+    'notification',
+    'offline',
     'power',
     'push',
     'quota',
     'settings',
+    'storage',
+    'svg',
     'mobilemessage',
-    'src',
     'time',
     'locales',
     'network',
@@ -73,48 +91,60 @@ PARALLEL_DIRS += [
     'camera',
     'audiochannel',
     'promise',
+    'smil',
     'telephony',
+    'voicemail',
     'inputmethod',
     'webidl',
+    'xbl',
+    'xml',
+    'xslt',
+    'xul',
+    'resourcestats',
 ]
 
 if CONFIG['OS_ARCH'] == 'WINNT':
-    PARALLEL_DIRS += ['plugins/ipc/hangui']
+    DIRS += ['plugins/ipc/hangui']
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'gonk':
-    PARALLEL_DIRS += [
+    DIRS += [
         'speakermanager',
+        'tethering',
         'wifi',
     ]
 
 if CONFIG['MOZ_B2G_RIL']:
-    PARALLEL_DIRS += [
+    DIRS += [
         'icc',
-        'cellbroadcast',
-        'voicemail',
         'wappush',
     ]
 
 if CONFIG['MOZ_PAY']:
-    PARALLEL_DIRS += ['payment']
+    DIRS += ['payment']
 
 if CONFIG['MOZ_GAMEPAD']:
-    PARALLEL_DIRS += ['gamepad']
+    DIRS += ['gamepad']
 
 if CONFIG['MOZ_NFC']:
-    PARALLEL_DIRS += ['nfc']
+    DIRS += ['nfc']
 
 if CONFIG['MOZ_B2G']:
-    PARALLEL_DIRS += ['downloads']
+    DIRS += [
+        'downloads',
+        'mobileid',
+        'engineeringmode'
+    ]
 
-# bindings/test is here, because it needs to build after bindings/, and
-# we build subdirectories before ourselves.
+if CONFIG['MOZ_B2G_BT_API_V2']:
+    DIRS += ['bluetooth2']
+else:
+    DIRS += ['bluetooth']
+
 TEST_DIRS += [
     'tests',
     'imptests',
-    'bindings/test',
 ]
 
-if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk2', 'cocoa', 'windows', 'android', 'qt', 'os2'):
+if CONFIG['MOZ_WIDGET_TOOLKIT'] in ('gtk2', 'gtk3', 'cocoa', 'windows', 'android', 'qt'):
     TEST_DIRS += ['plugins/test']
 

@@ -22,6 +22,7 @@
 #include "nsDiskCacheDevice.h"
 #include "nsDiskCacheDeviceSQL.h"
 #include "nsCacheUtils.h"
+#include "../cache2/CacheObserver.h"
 
 #include "nsIObserverService.h"
 #include "nsIPrefService.h"
@@ -119,6 +120,8 @@ const int32_t PRE_GECKO_2_0_DEFAULT_CACHE_SIZE = 50 * 1024;
 
 class nsCacheProfilePrefObserver : public nsIObserver
 {
+    virtual ~nsCacheProfilePrefObserver() {}
+
 public:
     NS_DECL_THREADSAFE_ISUPPORTS
     NS_DECL_NSIOBSERVER
@@ -140,8 +143,6 @@ public:
         , mClearCacheOnShutdown(false)
     {
     }
-
-    virtual ~nsCacheProfilePrefObserver() {}
     
     nsresult        Install();
     void            Remove();
@@ -200,10 +201,12 @@ private:
     bool                    mClearCacheOnShutdown;
 };
 
-NS_IMPL_ISUPPORTS1(nsCacheProfilePrefObserver, nsIObserver)
+NS_IMPL_ISUPPORTS(nsCacheProfilePrefObserver, nsIObserver)
 
 class nsSetDiskSmartSizeCallback MOZ_FINAL : public nsITimerCallback
 {
+    ~nsSetDiskSmartSizeCallback() {}
+
 public:
     NS_DECL_THREADSAFE_ISUPPORTS
 
@@ -217,14 +220,14 @@ public:
     }
 };
 
-NS_IMPL_ISUPPORTS1(nsSetDiskSmartSizeCallback, nsITimerCallback)
+NS_IMPL_ISUPPORTS(nsSetDiskSmartSizeCallback, nsITimerCallback)
 
 // Runnable sent to main thread after the cache IO thread calculates available
 // disk space, so that there is no race in setting mDiskCacheCapacity.
 class nsSetSmartSizeEvent: public nsRunnable 
 {
 public:
-    nsSetSmartSizeEvent(int32_t smartSize)
+    explicit nsSetSmartSizeEvent(int32_t smartSize)
         : mSmartSize(smartSize) {}
 
     NS_IMETHOD Run() 
@@ -380,7 +383,7 @@ nsCacheProfilePrefObserver::SetDiskCacheCapacity(int32_t capacity)
 NS_IMETHODIMP
 nsCacheProfilePrefObserver::Observe(nsISupports *     subject,
                                     const char *      topic,
-                                    const PRUnichar * data_unicode)
+                                    const char16_t * data_unicode)
 {
     nsresult rv;
     NS_ConvertUTF16toUTF8 data(data_unicode);
@@ -971,7 +974,7 @@ nsCacheProfilePrefObserver::CacheCompressionLevel()
 
 class nsProcessRequestEvent : public nsRunnable {
 public:
-    nsProcessRequestEvent(nsCacheRequest *aRequest)
+    explicit nsProcessRequestEvent(nsCacheRequest *aRequest)
     {
         MOZ_EVENT_TRACER_NAME_OBJECT(aRequest, aRequest->mKey.get());
         MOZ_EVENT_TRACER_WAIT(aRequest, "net::cache::ProcessRequest");
@@ -1071,8 +1074,8 @@ private:
  *****************************************************************************/
 nsCacheService *   nsCacheService::gService = nullptr;
 
-NS_IMPL_ISUPPORTS3(nsCacheService, nsICacheService, nsICacheServiceInternal,
-                   nsIMemoryReporter)
+NS_IMPL_ISUPPORTS(nsCacheService, nsICacheService, nsICacheServiceInternal,
+                  nsIMemoryReporter)
 
 nsCacheService::nsCacheService()
     : mObserver(nullptr),
@@ -1308,12 +1311,21 @@ nsCacheService::CreateSession(const char *          clientID,
 {
     *result = nullptr;
 
-    if (this == nullptr)  return NS_ERROR_NOT_AVAILABLE;
+    if (net::CacheObserver::UseNewCache())
+        return NS_ERROR_NOT_IMPLEMENTED;
 
-    nsCacheSession * session = new nsCacheSession(clientID, storagePolicy, streamBased);
-    if (!session)  return NS_ERROR_OUT_OF_MEMORY;
+    return CreateSessionInternal(clientID, storagePolicy, streamBased, result);
+}
 
-    NS_ADDREF(*result = session);
+nsresult
+nsCacheService::CreateSessionInternal(const char *          clientID,
+                                      nsCacheStoragePolicy  storagePolicy,
+                                      bool                  streamBased,
+                                      nsICacheSession     **result)
+{
+    nsRefPtr<nsCacheSession> session =
+        new nsCacheSession(clientID, storagePolicy, streamBased);
+    session.forget(result);
 
     return NS_OK;
 }
@@ -1332,7 +1344,7 @@ namespace {
 class EvictionNotifierRunnable : public nsRunnable
 {
 public:
-    EvictionNotifierRunnable(nsISupports* aSubject)
+    explicit EvictionNotifierRunnable(nsISupports* aSubject)
         : mSubject(aSubject)
     { }
 
@@ -1460,6 +1472,14 @@ nsCacheService::IsStorageEnabledForPolicy_Locked(nsCacheStoragePolicy  storagePo
 
 NS_IMETHODIMP nsCacheService::VisitEntries(nsICacheVisitor *visitor)
 {
+    if (net::CacheObserver::UseNewCache())
+        return NS_ERROR_NOT_IMPLEMENTED;
+
+    return VisitEntriesInternal(visitor);
+}
+
+nsresult nsCacheService::VisitEntriesInternal(nsICacheVisitor *visitor)
+{
     NS_ENSURE_ARG_POINTER(visitor);
 
     nsCacheServiceAutoLock lock(LOCK_TELEM(NSCACHESERVICE_VISITENTRIES));
@@ -1514,12 +1534,20 @@ void nsCacheService::FireClearNetworkCacheStoredAnywhereNotification()
 
 NS_IMETHODIMP nsCacheService::EvictEntries(nsCacheStoragePolicy storagePolicy)
 {
+    if (net::CacheObserver::UseNewCache())
+        return NS_ERROR_NOT_IMPLEMENTED;
+
+    return EvictEntriesInternal(storagePolicy);
+}
+
+nsresult nsCacheService::EvictEntriesInternal(nsCacheStoragePolicy storagePolicy)
+{
     if (storagePolicy == nsICache::STORE_ANYWHERE) {
         // if not called on main thread, dispatch the notification to the main thread to notify observers
         if (!NS_IsMainThread()) { 
             nsCOMPtr<nsIRunnable> event = NS_NewRunnableMethod(this,
                                                                &nsCacheService::FireClearNetworkCacheStoredAnywhereNotification);
-            NS_DispatchToMainThread(event, NS_DISPATCH_NORMAL);
+            NS_DispatchToMainThread(event);
         } else {
             // else you're already on main thread - notify observers
             FireClearNetworkCacheStoredAnywhereNotification(); 
@@ -3053,6 +3081,51 @@ nsCacheService::GetClearingEntries()
     return gService->mClearingEntries;
 }
 
+// static
+void nsCacheService::GetCacheBaseDirectoty(nsIFile ** result)
+{
+    *result = nullptr;
+    if (!gService || !gService->mObserver)
+        return;
+
+    nsCOMPtr<nsIFile> directory =
+        gService->mObserver->DiskCacheParentDirectory();
+    if (!directory)
+        return;
+
+    directory->Clone(result);
+}
+
+// static
+void nsCacheService::GetDiskCacheDirectory(nsIFile ** result)
+{
+    nsCOMPtr<nsIFile> directory;
+    GetCacheBaseDirectoty(getter_AddRefs(directory));
+    if (!directory)
+        return;
+
+    nsresult rv = directory->AppendNative(NS_LITERAL_CSTRING("Cache"));
+    if (NS_FAILED(rv))
+        return;
+
+    directory.forget(result);
+}
+
+// static
+void nsCacheService::GetAppCacheDirectory(nsIFile ** result)
+{
+    nsCOMPtr<nsIFile> directory;
+    GetCacheBaseDirectoty(getter_AddRefs(directory));
+    if (!directory)
+        return;
+
+    nsresult rv = directory->AppendNative(NS_LITERAL_CSTRING("OfflineCache"));
+    if (NS_FAILED(rv))
+        return;
+
+    directory.forget(result);
+}
+
 
 #if defined(PR_LOGGING)
 void
@@ -3090,6 +3163,10 @@ nsresult
 nsCacheService::SetDiskSmartSize_Locked()
 {
     nsresult rv;
+
+    if (mozilla::net::CacheObserver::UseNewCache()) {
+        return NS_ERROR_NOT_AVAILABLE;
+    }
 
     if (!mObserver->DiskCacheParentDirectory())
         return NS_ERROR_NOT_AVAILABLE;
@@ -3150,13 +3227,15 @@ nsCacheService::MoveOrRemoveDiskCache(nsIFile *aOldCacheDir,
     if (NS_SUCCEEDED(aNewCacheSubdir->Exists(&exists)) && !exists) {
         // New cache directory does not exist, try to move the old one here
         // rename needs an empty target directory
-        rv = aNewCacheSubdir->Create(nsIFile::DIRECTORY_TYPE, 0777); 
-        if (NS_SUCCEEDED(rv)) {
+
+        // Make sure the parent of the target sub-dir exists
+        rv = aNewCacheDir->Create(nsIFile::DIRECTORY_TYPE, 0777);
+        if (NS_SUCCEEDED(rv) || NS_ERROR_FILE_ALREADY_EXISTS == rv) {
             nsAutoCString oldPath;
             rv = aOldCacheSubdir->GetNativePath(oldPath);
             if (NS_FAILED(rv))
                 return;
-            if(rename(oldPath.get(), newPath.get()) == 0)
+            if (rename(oldPath.get(), newPath.get()) == 0)
                 return;
         }
     }
@@ -3188,7 +3267,7 @@ MOZ_DEFINE_MALLOC_SIZE_OF(DiskCacheDeviceMallocSizeOf)
 
 NS_IMETHODIMP
 nsCacheService::CollectReports(nsIHandleReportCallback* aHandleReport,
-                               nsISupports* aData)
+                               nsISupports* aData, bool aAnonymize)
 {
     size_t disk = 0;
     if (mDiskDevice) {

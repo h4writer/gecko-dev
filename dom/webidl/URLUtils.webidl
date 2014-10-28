@@ -13,21 +13,39 @@
  * http://www.openwebfoundation.org/legal/the-owf-1-0-agreements/owfa-1-0.
  */
 
-[NoInterfaceObject]
+[NoInterfaceObject,
+ Exposed=(Window, Worker)]
 interface URLUtils {
-  [SetterThrows]
-  stringifier attribute DOMString href;
-  readonly attribute DOMString origin;
+  // Bug 824857: no support for stringifier attributes yet.
+  //  stringifier attribute ScalarValueString href;
+  [Throws, CrossOriginWritable=Location]
+           attribute ScalarValueString href;
+  [Throws]
+  readonly attribute ScalarValueString origin;
 
-           attribute DOMString protocol;
-           attribute DOMString username;
-           attribute DOMString password;
-           attribute DOMString host;
-           attribute DOMString hostname;
-           attribute DOMString port;
-           attribute DOMString pathname;
-           attribute DOMString search;
-           attribute URLSearchParams? searchParams;
-           attribute DOMString hash;
+  [Throws]
+           attribute ScalarValueString protocol;
+  [Throws]
+           attribute ScalarValueString username;
+  [Throws]
+           attribute ScalarValueString password;
+  [Throws]
+           attribute ScalarValueString host;
+  [Throws]
+           attribute ScalarValueString hostname;
+  [Throws]
+           attribute ScalarValueString port;
+  [Throws]
+           attribute ScalarValueString pathname;
+  [Throws]
+           attribute ScalarValueString search;
+
+           attribute URLSearchParams searchParams;
+
+  [Throws]
+           attribute ScalarValueString hash;
+
+  // Bug 824857 should remove this.
+  [Throws]
+  stringifier;
 };
-

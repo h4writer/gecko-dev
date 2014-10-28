@@ -19,8 +19,8 @@ namespace jit {
 template <typename T>
 class FixedList
 {
-    size_t length_;
     T *list_;
+    size_t length_;
 
   private:
     FixedList(const FixedList&); // no copy definition.
@@ -28,7 +28,7 @@ class FixedList
 
   public:
     FixedList()
-      : length_(0)
+      : list_(nullptr), length_(0)
     { }
 
     // Dynamic memory allocation requires the ability to report failure.
@@ -37,8 +37,14 @@ class FixedList
         if (length == 0)
             return true;
 
+        if (length & mozilla::tl::MulOverflowMask<sizeof(T)>::value)
+            return false;
         list_ = (T *)alloc.allocate(length * sizeof(T));
         return list_ != nullptr;
+    }
+
+    size_t empty() const {
+        return length_ == 0;
     }
 
     size_t length() const {
@@ -46,11 +52,16 @@ class FixedList
     }
 
     void shrink(size_t num) {
-        JS_ASSERT(num < length_);
+        MOZ_ASSERT(num < length_);
         length_ -= num;
     }
 
     bool growBy(TempAllocator &alloc, size_t num) {
+        size_t newlength = length_ + num;
+        if (newlength < length_)
+            return false;
+        if (newlength & mozilla::tl::MulOverflowMask<sizeof(T)>::value)
+            return false;
         T *list = (T *)alloc.allocate((length_ + num) * sizeof(T));
         if (!list)
             return false;
@@ -64,12 +75,19 @@ class FixedList
     }
 
     T &operator[](size_t index) {
-        JS_ASSERT(index < length_);
+        MOZ_ASSERT(index < length_);
         return list_[index];
     }
     const T &operator [](size_t index) const {
-        JS_ASSERT(index < length_);
+        MOZ_ASSERT(index < length_);
         return list_[index];
+    }
+
+    T *begin() {
+        return list_;
+    }
+    T *end() {
+        return list_ + length_;
     }
 };
 

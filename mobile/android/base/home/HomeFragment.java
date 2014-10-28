@@ -5,24 +5,35 @@
 
 package org.mozilla.gecko.home;
 
+import java.util.EnumSet;
+
+import org.json.JSONException;
+import org.json.JSONObject;
 import org.mozilla.gecko.EditBookmarkDialog;
-import org.mozilla.gecko.favicons.Favicons;
 import org.mozilla.gecko.GeckoAppShell;
 import org.mozilla.gecko.GeckoEvent;
 import org.mozilla.gecko.GeckoProfile;
 import org.mozilla.gecko.R;
 import org.mozilla.gecko.ReaderModeUtils;
-import org.mozilla.gecko.Tabs;
-import org.mozilla.gecko.db.BrowserContract.Combined;
+import org.mozilla.gecko.Telemetry;
+import org.mozilla.gecko.TelemetryContract;
+import org.mozilla.gecko.db.BrowserContract.SuggestedSites;
 import org.mozilla.gecko.db.BrowserDB;
-import org.mozilla.gecko.home.HomeListView.HomeContextMenuInfo;
+import org.mozilla.gecko.favicons.Favicons;
+import org.mozilla.gecko.home.HomeContextMenuInfo.RemoveItemType;
+import org.mozilla.gecko.home.HomePager.OnUrlOpenInBackgroundListener;
+import org.mozilla.gecko.home.HomePager.OnUrlOpenListener;
+import org.mozilla.gecko.home.TopSitesGridView.TopSitesGridContextMenuInfo;
+import org.mozilla.gecko.util.Clipboard;
+import org.mozilla.gecko.util.StringUtils;
 import org.mozilla.gecko.util.ThreadUtils;
-import org.mozilla.gecko.util.UiAsyncTask;
+import org.mozilla.gecko.util.UIAsyncTask;
 
+import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
-import android.graphics.Bitmap;
+import android.content.res.Configuration;
 import android.os.Bundle;
 import android.support.v4.app.Fragment;
 import android.util.Log;
@@ -35,14 +46,16 @@ import android.widget.Toast;
 
 /**
  * HomeFragment is an empty fragment that can be added to the HomePager.
- * Subclasses can add their own views. 
+ * Subclasses can add their own views.
+ * <p>
+ * The containing activity <b>must</b> implement {@link OnUrlOpenListener}.
  */
-abstract class HomeFragment extends Fragment {
+public abstract class HomeFragment extends Fragment {
     // Log Tag.
     private static final String LOGTAG="GeckoHomeFragment";
 
     // Share MIME type.
-    private static final String SHARE_MIME_TYPE = "text/plain";
+    protected static final String SHARE_MIME_TYPE = "text/plain";
 
     // Default value for "can load" hint
     static final boolean DEFAULT_CAN_LOAD_HINT = false;
@@ -54,6 +67,38 @@ abstract class HomeFragment extends Fragment {
 
     // Whether the fragment has loaded its content
     private boolean mIsLoaded;
+
+    // On URL open listener
+    protected OnUrlOpenListener mUrlOpenListener;
+
+    // Helper for opening a tab in the background.
+    private OnUrlOpenInBackgroundListener mUrlOpenInBackgroundListener;
+
+    @Override
+    public void onAttach(Activity activity) {
+        super.onAttach(activity);
+
+        try {
+            mUrlOpenListener = (OnUrlOpenListener) activity;
+        } catch (ClassCastException e) {
+            throw new ClassCastException(activity.toString()
+                    + " must implement HomePager.OnUrlOpenListener");
+        }
+
+        try {
+            mUrlOpenInBackgroundListener = (OnUrlOpenInBackgroundListener) activity;
+        } catch (ClassCastException e) {
+            throw new ClassCastException(activity.toString()
+                    + " must implement HomePager.OnUrlOpenInBackgroundListener");
+        }
+    }
+
+    @Override
+    public void onDetach() {
+        super.onDetach();
+        mUrlOpenListener = null;
+        mUrlOpenInBackgroundListener = null;
+    }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -71,7 +116,7 @@ abstract class HomeFragment extends Fragment {
 
     @Override
     public void onCreateContextMenu(ContextMenu menu, View view, ContextMenuInfo menuInfo) {
-        if (menuInfo == null || !(menuInfo instanceof HomeContextMenuInfo)) {
+        if (!(menuInfo instanceof HomeContextMenuInfo)) {
             return;
         }
 
@@ -87,21 +132,25 @@ abstract class HomeFragment extends Fragment {
 
         menu.setHeaderTitle(info.getDisplayTitle());
 
+        // Hide unused menu items.
+        menu.findItem(R.id.top_sites_edit).setVisible(false);
+        menu.findItem(R.id.top_sites_pin).setVisible(false);
+        menu.findItem(R.id.top_sites_unpin).setVisible(false);
+
         // Hide the "Edit" menuitem if this item isn't a bookmark,
         // or if this is a reading list item.
-        if (info.bookmarkId < 0 || info.inReadingList) {
+        if (!info.hasBookmarkId() || info.isInReadingList()) {
             menu.findItem(R.id.home_edit_bookmark).setVisible(false);
         }
 
-        // Hide the "Remove" menuitem if this item doesn't have a bookmark or history ID.
-        if (info.bookmarkId < 0 && info.historyId < 0) {
+        // Hide the "Remove" menuitem if this item not removable.
+        if (!info.canRemove()) {
             menu.findItem(R.id.home_remove).setVisible(false);
         }
 
-        menu.findItem(R.id.home_share).setVisible(!GeckoProfile.get(getActivity()).inGuestMode());
-
-        final boolean canOpenInReader = (info.display == Combined.DISPLAY_READER);
-        menu.findItem(R.id.home_open_in_reader).setVisible(canOpenInReader);
+        if (!StringUtils.isShareableUrl(info.url) || GeckoProfile.get(getActivity()).inGuestMode()) {
+            menu.findItem(R.id.home_share).setVisible(false);
+        }
     }
 
     @Override
@@ -112,20 +161,40 @@ abstract class HomeFragment extends Fragment {
         // between the activity and its fragments.
 
         ContextMenuInfo menuInfo = item.getMenuInfo();
-        if (menuInfo == null || !(menuInfo instanceof HomeContextMenuInfo)) {
+        if (!(menuInfo instanceof HomeContextMenuInfo)) {
             return false;
         }
 
         final HomeContextMenuInfo info = (HomeContextMenuInfo) menuInfo;
-        final Context context = getActivity().getApplicationContext();
+        final Context context = getActivity();
 
         final int itemId = item.getItemId();
+
+        // Track the menu action. We don't know much about the context, but we can use this to determine
+        // the frequency of use for various actions.
+        Telemetry.sendUIEvent(TelemetryContract.Event.ACTION, TelemetryContract.Method.CONTEXT_MENU, getResources().getResourceEntryName(itemId));
+
+        if (itemId == R.id.home_copyurl) {
+            if (info.url == null) {
+                Log.e(LOGTAG, "Can't copy address because URL is null");
+                return false;
+            }
+
+            Clipboard.setText(info.url);
+            return true;
+        }
+
         if (itemId == R.id.home_share) {
             if (info.url == null) {
                 Log.e(LOGTAG, "Can't share because URL is null");
+                return false;
             } else {
                 GeckoAppShell.openUriExternal(info.url, SHARE_MIME_TYPE, "", "",
                                               Intent.ACTION_SEND, info.getDisplayTitle());
+
+                // Context: Sharing via chrome homepage contextmenu list (home session should be active)
+                Telemetry.sendUIEvent(TelemetryContract.Event.SHARE, TelemetryContract.Method.LIST);
+                return true;
             }
         }
 
@@ -135,8 +204,8 @@ abstract class HomeFragment extends Fragment {
                 return false;
             }
 
-            // Fetch the largest cacheable icon size.
-            Favicons.getLargestFaviconForPage(info.url, new GeckoAppShell.CreateShortcutFaviconLoadedListener(info.url, info.getDisplayTitle()));
+            // Fetch an icon big enough for use as a home screen icon.
+            Favicons.getPreferredSizeFaviconForPage(context, info.url, new GeckoAppShell.CreateShortcutFaviconLoadedListener(info.url, info.getDisplayTitle()));
             return true;
         }
 
@@ -146,41 +215,38 @@ abstract class HomeFragment extends Fragment {
                 return false;
             }
 
-            int flags = Tabs.LOADURL_NEW_TAB | Tabs.LOADURL_BACKGROUND;
-            if (item.getItemId() == R.id.home_open_private_tab)
-                flags |= Tabs.LOADURL_PRIVATE;
+            // Some pinned site items have "user-entered" urls. URLs entered in
+            // the PinSiteDialog are wrapped in a special URI until we can get a
+            // valid URL. If the url is a user-entered url, decode the URL
+            // before loading it.
+            final String url = StringUtils.decodeUserEnteredUrl(info.isInReadingList()
+                    ? ReaderModeUtils.getAboutReaderForUrl(info.url)
+                    : info.url);
 
-            final String url = (info.inReadingList ? ReaderModeUtils.getAboutReaderForUrl(info.url) : info.url);
-            Tabs.getInstance().loadUrl(url, flags);
-            Toast.makeText(context, R.string.new_tab_opened, Toast.LENGTH_SHORT).show();
+            final EnumSet<OnUrlOpenInBackgroundListener.Flags> flags = EnumSet.noneOf(OnUrlOpenInBackgroundListener.Flags.class);
+            if (item.getItemId() == R.id.home_open_private_tab) {
+                flags.add(OnUrlOpenInBackgroundListener.Flags.PRIVATE);
+            }
+
+            mUrlOpenInBackgroundListener.onUrlOpenInBackground(url, flags);
+
+            Telemetry.sendUIEvent(TelemetryContract.Event.LOAD_URL, TelemetryContract.Method.CONTEXT_MENU);
+
             return true;
         }
 
         if (itemId == R.id.home_edit_bookmark) {
             // UI Dialog associates to the activity context, not the applications'.
-            new EditBookmarkDialog(getActivity()).show(info.url);
-            return true;
-        }
-
-        if (itemId == R.id.home_open_in_reader) {
-            final String url = ReaderModeUtils.getAboutReaderForUrl(info.url);
-            Tabs.getInstance().loadUrl(url, Tabs.LOADURL_NONE);
+            new EditBookmarkDialog(context).show(info.url);
             return true;
         }
 
         if (itemId == R.id.home_remove) {
-            // Prioritize removing a history entry over a bookmark in the case of a combined item.
-            final int historyId = info.historyId;
-            if (historyId > -1) {
-                new RemoveHistoryTask(context, historyId).execute();
-                return true;
-            }
+            // For Top Sites grid items, position is required in case item is Pinned.
+            final int position = info instanceof TopSitesGridContextMenuInfo ? info.position : -1;
 
-            final int bookmarkId = info.bookmarkId;
-            if (bookmarkId > -1) {
-                new RemoveBookmarkTask(context, bookmarkId, info.url, info.inReadingList).execute();
-                return true;
-            }
+            (new RemoveItemByUrlTask(context, info.url, info.itemType, position)).execute();
+            return true;
         }
 
         return false;
@@ -194,6 +260,37 @@ abstract class HomeFragment extends Fragment {
 
         super.setUserVisibleHint(isVisibleToUser);
         loadIfVisible();
+    }
+
+    /**
+     * Handle a configuration change by detaching and re-attaching.
+     * <p>
+     * A HomeFragment only needs to handle onConfiguration change (i.e.,
+     * re-attach) if its UI needs to change (i.e., re-inflate layouts, use
+     * different styles, etc) for different device orientations. Handling
+     * configuration changes in all HomeFragments will simply cause some
+     * redundant re-inflations on device rotation. This slight inefficiency
+     * avoids potentially not handling a needed onConfigurationChanged in a
+     * subclass.
+     */
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+
+        // Reattach the fragment, forcing a re-inflation of its view.
+        // We use commitAllowingStateLoss() instead of commit() here to avoid
+        // an IllegalStateException. If the phone is rotated while Fennec
+        // is in the background, onConfigurationChanged() is fired.
+        // onConfigurationChanged() is called before onResume(), so
+        // using commit() would throw an IllegalStateException since it can't
+        // be used between the Activity's onSaveInstanceState() and
+        // onResume().
+        if (isVisible()) {
+            getFragmentManager().beginTransaction()
+                                .detach(this)
+                                .attach(this)
+                                .commitAllowingStateLoss();
+        }
     }
 
     void setCanLoadHint(boolean canLoadHint) {
@@ -211,74 +308,73 @@ abstract class HomeFragment extends Fragment {
 
     protected abstract void load();
 
+    protected boolean canLoad() {
+        return (mCanLoadHint && isVisible() && getUserVisibleHint());
+    }
+
     protected void loadIfVisible() {
-        if (!mCanLoadHint || !isVisible() || !getUserVisibleHint()) {
+        if (!canLoad() || mIsLoaded) {
             return;
         }
 
-        if (!mIsLoaded) {
-            load();
-            mIsLoaded = true;
-        }
+        load();
+        mIsLoaded = true;
     }
 
-    private static class RemoveBookmarkTask extends UiAsyncTask<Void, Void, Void> {
+    protected static class RemoveItemByUrlTask extends UIAsyncTask.WithoutParams<Void> {
         private final Context mContext;
-        private final int mId;
         private final String mUrl;
-        private final boolean mInReadingList;
+        private final RemoveItemType mType;
+        private final int mPosition;
 
-        public RemoveBookmarkTask(Context context, int id, String url, boolean inReadingList) {
+        /**
+         * Remove bookmark/history/reading list type item by url, and also unpin the
+         * Top Sites grid item at index <code>position</code>.
+         */
+        public RemoveItemByUrlTask(Context context, String url, RemoveItemType type, int position) {
             super(ThreadUtils.getBackgroundHandler());
 
             mContext = context;
-            mId = id;
             mUrl = url;
-            mInReadingList = inReadingList;
+            mType = type;
+            mPosition = position;
         }
 
         @Override
-        public Void doInBackground(Void... params) {
+        public Void doInBackground() {
             ContentResolver cr = mContext.getContentResolver();
-            BrowserDB.removeBookmark(cr, mId);
-            if (mInReadingList) {
-                GeckoEvent e = GeckoEvent.createBroadcastEvent("Reader:Remove", mUrl);
-                GeckoAppShell.sendEventToGecko(e);
 
-                int count = BrowserDB.getReadingListCount(cr);
-                e = GeckoEvent.createBroadcastEvent("Reader:ListCountUpdated", Integer.toString(count));
-                GeckoAppShell.sendEventToGecko(e);
+            if (mPosition > -1) {
+                BrowserDB.unpinSite(cr, mPosition);
+                if (BrowserDB.hideSuggestedSite(mUrl)) {
+                    cr.notifyChange(SuggestedSites.CONTENT_URI, null);
+                }
+            }
+
+            switch(mType) {
+                case BOOKMARKS:
+                    BrowserDB.removeBookmarksWithURL(cr, mUrl);
+                    break;
+
+                case HISTORY:
+                    BrowserDB.removeHistoryEntry(cr, mUrl);
+                    break;
+
+                case READING_LIST:
+                    BrowserDB.removeReadingListItemWithURL(cr, mUrl);
+                    GeckoAppShell.sendEventToGecko(GeckoEvent.createBroadcastEvent("Reader:Removed", mUrl));
+                    break;
+
+                default:
+                    Log.e(LOGTAG, "Can't remove item type " + mType.toString());
+                    break;
             }
             return null;
         }
 
         @Override
         public void onPostExecute(Void result) {
-            int messageId = mInReadingList ? R.string.reading_list_removed : R.string.bookmark_removed;
-            Toast.makeText(mContext, messageId, Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    private static class RemoveHistoryTask extends UiAsyncTask<Void, Void, Void> {
-        private final Context mContext;
-        private final int mId;
-
-        public RemoveHistoryTask(Context context, int id) {
-            super(ThreadUtils.getBackgroundHandler());
-
-            mContext = context;
-            mId = id;
-        }
-
-        @Override
-        public Void doInBackground(Void... params) {
-            BrowserDB.removeHistoryEntry(mContext.getContentResolver(), mId);
-            return null;
-        }
-
-        @Override
-        public void onPostExecute(Void result) {
-            Toast.makeText(mContext, R.string.history_removed, Toast.LENGTH_SHORT).show();
+            Toast.makeText(mContext, R.string.page_removed, Toast.LENGTH_SHORT).show();
         }
     }
 }

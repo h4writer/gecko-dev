@@ -25,6 +25,8 @@
 #include "nsCExternalHandlerService.h"
 #include "nsIExternalProtocolService.h"
 
+class nsILoadInfo;
+
 ////////////////////////////////////////////////////////////////////////
 // a stub channel implemenation which will map calls to AsyncRead and OpenInputStream
 // to calls in the OS for loading the url.
@@ -38,11 +40,12 @@ public:
     NS_DECL_NSIREQUEST
 
     nsExtProtocolChannel();
-    virtual ~nsExtProtocolChannel();
 
     nsresult SetURI(nsIURI*);
 
 private:
+    virtual ~nsExtProtocolChannel();
+
     nsresult OpenURL();
     void Finish(nsresult aResult);
     
@@ -253,13 +256,21 @@ nsExtProtocolChannel::SetContentLength(int64_t aContentLength)
 
 NS_IMETHODIMP nsExtProtocolChannel::GetOwner(nsISupports * *aPrincipal)
 {
-  NS_NOTREACHED("GetOwner");
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
 NS_IMETHODIMP nsExtProtocolChannel::SetOwner(nsISupports * aPrincipal)
 {
-  NS_NOTREACHED("SetOwner");
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP nsExtProtocolChannel::GetLoadInfo(nsILoadInfo * *aLoadInfo)
+{
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP nsExtProtocolChannel::SetLoadInfo(nsILoadInfo * aLoadInfo)
+{
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
@@ -384,7 +395,10 @@ NS_IMETHODIMP nsExternalProtocolHandler::NewURI(const nsACString &aSpec,
   return NS_OK;
 }
 
-NS_IMETHODIMP nsExternalProtocolHandler::NewChannel(nsIURI *aURI, nsIChannel **_retval)
+NS_IMETHODIMP
+nsExternalProtocolHandler::NewChannel2(nsIURI* aURI,
+                                       nsILoadInfo* aLoadInfo,
+                                       nsIChannel** _retval)
 {
   // Only try to return a channel if we have a protocol handler for the url.
   // nsOSHelperAppService::LoadUriInternal relies on this to check trustedness
@@ -408,6 +422,11 @@ NS_IMETHODIMP nsExternalProtocolHandler::NewChannel(nsIURI *aURI, nsIChannel **_
   }
 
   return NS_ERROR_UNKNOWN_PROTOCOL;
+}
+
+NS_IMETHODIMP nsExternalProtocolHandler::NewChannel(nsIURI *aURI, nsIChannel **_retval)
+{
+  return NewChannel2(aURI, nullptr, _retval);
 }
 
 ///////////////////////////////////////////////////////////////////////

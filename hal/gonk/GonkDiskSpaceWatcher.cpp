@@ -168,7 +168,7 @@ GonkDiskSpaceWatcher::DoStart()
   if (mFd == -1) {
     NS_WARNING("Error calling inotify_init()");
     if (errno == ENOSYS) {
-      printf_stderr("Warning: No fanotify support in this device's kernel.\n");
+      NS_WARNING("Warning: No fanotify support in this device's kernel.\n");
     }
     return;
   }
@@ -206,7 +206,7 @@ GonkDiskSpaceWatcher::DoStop()
 
   // Dispatch the cleanup to the main thread.
   nsCOMPtr<nsIRunnable> runnable = new DiskSpaceCleaner();
-  NS_DispatchToMainThread(runnable, NS_DISPATCH_NORMAL);
+  NS_DispatchToMainThread(runnable);
 }
 
 // We are called off the main thread, so we proxy first to the main thread
@@ -219,7 +219,7 @@ GonkDiskSpaceWatcher::NotifyUpdate()
 
   nsCOMPtr<nsIRunnable> runnable =
     new DiskSpaceNotifier(mIsDiskFull, mFreeSpace);
-  NS_DispatchToMainThread(runnable, NS_DISPATCH_NORMAL);
+  NS_DispatchToMainThread(runnable);
 }
 
 void
@@ -241,8 +241,7 @@ GonkDiskSpaceWatcher::OnFileCanReadWithoutBlocking(int aFd)
 
   // We should get an exact multiple of fanotify_event_metadata
   if (len <= 0 || (len % FAN_EVENT_METADATA_LEN != 0)) {
-    printf_stderr("About to crash: fanotify_event_metadata read error.");
-    MOZ_CRASH();
+    MOZ_CRASH("About to crash: fanotify_event_metadata read error.");
   }
 
   fem = reinterpret_cast<fanotify_event_metadata *>(buf);

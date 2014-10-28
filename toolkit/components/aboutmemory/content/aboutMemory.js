@@ -1,4 +1,4 @@
-/* -*- Mode: js2; tab-width: 8; indent-tabs-mode: nil; js2-basic-offset: 2 -*-*/
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*-*/
 /* vim: set ts=8 sts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -26,6 +26,7 @@ const CC = Components.Constructor;
 const KIND_NONHEAP           = Ci.nsIMemoryReporter.KIND_NONHEAP;
 const KIND_HEAP              = Ci.nsIMemoryReporter.KIND_HEAP;
 const KIND_OTHER             = Ci.nsIMemoryReporter.KIND_OTHER;
+
 const UNITS_BYTES            = Ci.nsIMemoryReporter.UNITS_BYTES;
 const UNITS_COUNT            = Ci.nsIMemoryReporter.UNITS_COUNT;
 const UNITS_COUNT_CUMULATIVE = Ci.nsIMemoryReporter.UNITS_COUNT_CUMULATIVE;
@@ -48,7 +49,7 @@ XPCOMUtils.defineLazyGetter(this, "nsGzipConverter",
 let gMgr = Cc["@mozilla.org/memory-reporter-manager;1"]
              .getService(Ci.nsIMemoryReporterManager);
 
-let gUnnamedProcessStr = "Main Process";
+const gUnnamedProcessStr = "Main Process";
 
 let gIsDiff = false;
 
@@ -129,6 +130,9 @@ let gFooter;
 // The "verbose" checkbox.
 let gVerbose;
 
+// The "anonymize" checkbox.
+let gAnonymize;
+
 // Values for the second argument to updateMainAndFooter.
 let HIDE_FOOTER = 0;
 let SHOW_FOOTER = 1;
@@ -147,12 +151,13 @@ function updateMainAndFooter(aMsg, aFooterAction, aClassName)
     gMain.classList.add(gVerbose.checked ? 'verbose' : 'non-verbose');
   }
 
+  let msgElement;
   if (aMsg) {
     let className = "section"
     if (aClassName) {
       className = className + " " + aClassName;
     }
-    appendElementWithText(gMain, 'div', className, aMsg);
+    msgElement = appendElementWithText(gMain, 'div', className, aMsg);
   }
 
   switch (aFooterAction) {
@@ -160,6 +165,7 @@ function updateMainAndFooter(aMsg, aFooterAction, aClassName)
    case SHOW_FOOTER:   gFooter.classList.remove('hidden'); break;
    default: assertInput(false, "bad footer action in updateMainAndFooter");
   }
+  return msgElement;
 }
 
 function appendTextNode(aP, aText)
@@ -283,18 +289,30 @@ function onLoad()
                  "process to reduce memory usage in other ways, e.g. by " +
                  "flushing various caches.";
 
+  const GCAndCCLogDesc = "Save garbage collection log and concise cycle " +
+                         "collection log.\n" +
+                         "WARNING: These logs may be large (>1GB).";
+  const GCAndCCAllLogDesc = "Save garbage collection log and verbose cycle " +
+                            "collection log.\n" +
+                            "WARNING: These logs may be large (>1GB).";
+
+  const DMDEnabledDesc = "Analyze memory reports coverage and save the " +
+                         "output to the temp directory.\n";
+  const DMDDisabledDesc = "DMD is not running. Please re-start with $DMD and " +
+                          "the other relevant environment variables set " +
+                          "appropriately.";
+
   let ops = appendElement(header, "div", "");
 
   let row1 = appendElement(ops, "div", "opsRow");
 
-  let labelDiv =
+  let labelDiv1 =
    appendElementWithText(row1, "div", "opsRowLabel", "Show memory reports");
-  let label = appendElementWithText(labelDiv, "label", "");
-  gVerbose = appendElement(label, "input", "");
+  let label1 = appendElementWithText(labelDiv1, "label", "");
+  gVerbose = appendElement(label1, "input", "");
   gVerbose.type = "checkbox";
   gVerbose.id = "verbose";   // used for testing
-
-  appendTextNode(label, "verbose");
+  appendTextNode(label1, "verbose");
 
   const kEllipsis = "\u2026";
 
@@ -308,8 +326,16 @@ function onLoad()
 
   let row2 = appendElement(ops, "div", "opsRow");
 
-  appendElementWithText(row2, "div", "opsRowLabel", "Save memory reports");
+  let labelDiv2 =
+    appendElementWithText(row2, "div", "opsRowLabel", "Save memory reports");
   appendButton(row2, SvDesc, saveReportsToFile, "Measure and save" + kEllipsis);
+
+  // XXX: this isn't a great place for this checkbox, but I can't think of
+  // anywhere better.
+  let label2 = appendElementWithText(labelDiv2, "label", "");
+  gAnonymize = appendElement(label2, "input", "");
+  gAnonymize.type = "checkbox";
+  appendTextNode(label2, "anonymize");
 
   let row3 = appendElement(ops, "div", "opsRow");
 
@@ -318,10 +344,35 @@ function onLoad()
   appendButton(row3, CCDesc, doCC,  "CC");
   appendButton(row3, MMDesc, doMMU, "Minimize memory usage");
 
+  let row4 = appendElement(ops, "div", "opsRow");
+
+  appendElementWithText(row4, "div", "opsRowLabel", "Save GC & CC logs");
+  appendButton(row4, GCAndCCLogDesc,
+               saveGCLogAndConciseCCLog, "Save concise", 'saveLogsConcise');
+  appendButton(row4, GCAndCCAllLogDesc,
+               saveGCLogAndVerboseCCLog, "Save verbose", 'saveLogsVerbose');
+
+  // Three cases here:
+  // - DMD is disabled (i.e. not built): don't show the button.
+  // - DMD is enabled but is not running: show the button, but disable it.
+  // - DMD is enabled and is running: show the button and enable it.
+  if (gMgr.isDMDEnabled) {
+    let row5 = appendElement(ops, "div", "opsRow");
+
+    appendElementWithText(row5, "div", "opsRowLabel", "Save DMD output");
+    let enableButtons = gMgr.isDMDRunning;
+
+    let dmdButton =
+      appendButton(row5, enableButtons ? DMDEnabledDesc : DMDDisabledDesc,
+                   doDMD, "Save");
+    dmdButton.disabled = !enableButtons;
+  }
+
   // Generate the main div, where content ("section" divs) will go.  It's
   // hidden at first.
 
   gMain = appendElement(document.body, 'div', '');
+  gMain.id = 'mainDiv';
 
   // Generate the footer.  It's hidden at first.
 
@@ -385,6 +436,59 @@ function doMeasure()
   updateAboutMemoryFromReporters();
 }
 
+function saveGCLogAndConciseCCLog()
+{
+  dumpGCLogAndCCLog(false);
+}
+
+function saveGCLogAndVerboseCCLog()
+{
+  dumpGCLogAndCCLog(true);
+}
+
+function doDMD()
+{
+  updateMainAndFooter("Saving memory reports and DMD output...", HIDE_FOOTER);
+  try {
+    let dumper = Cc["@mozilla.org/memory-info-dumper;1"]
+                   .getService(Ci.nsIMemoryInfoDumper);
+
+    dumper.dumpMemoryInfoToTempDir(/* identifier = */ "",
+                                   gAnonymize.checked,
+                                   /* minimize = */ false);
+    updateMainAndFooter("Saved memory reports and DMD reports analysis " +
+                        "to the temp directory",
+                        HIDE_FOOTER);
+  } catch (ex) {
+    updateMainAndFooter(ex.toString(), HIDE_FOOTER);
+  }
+}
+
+function dumpGCLogAndCCLog(aVerbose)
+{
+  let dumper = Cc["@mozilla.org/memory-info-dumper;1"]
+                .getService(Ci.nsIMemoryInfoDumper);
+
+  let inProgress = updateMainAndFooter("Saving logs...", HIDE_FOOTER);
+  let section = appendElement(gMain, 'div', "section");
+
+  function displayInfo(gcLog, ccLog, isParent) {
+    appendElementWithText(section, 'div', "",
+                          "Saved GC log to " + gcLog.path);
+
+    let ccLogType = aVerbose ? "verbose" : "concise";
+    appendElementWithText(section, 'div', "",
+                          "Saved " + ccLogType + " CC log to " + ccLog.path);
+  }
+
+  dumper.dumpGCAndCCLogsToFile("", aVerbose, /* dumpChildProcesses = */ true,
+                               { onDump: displayInfo,
+                                 onFinish: function() {
+                                   inProgress.remove();
+                                 }
+                               });
+}
+
 /**
  * Top-level function that does the work of generating the page from the memory
  * reporters.
@@ -407,8 +511,8 @@ function updateAboutMemoryFromReporters()
         aDisplayReports();
       }
 
-      gMgr.getReports(handleReport, null,
-                      displayReportsAndFooter, null);
+      gMgr.getReports(handleReport, null, displayReportsAndFooter, null,
+                      gAnonymize.checked);
     }
 
     // Process the reports from the live memory reporters.
@@ -422,16 +526,33 @@ function updateAboutMemoryFromReporters()
 
 // Increment this if the JSON format changes.
 //
-// If/when this changes to 2, the beLenient() function and its use can be
-// removed.
 var gCurrentFileFormatVersion = 1;
+
+
+/**
+ * Parse a string as JSON and extract the |memory_report| property if it has
+ * one, which indicates the string is from a crash dump.
+ *
+ * @param aStr
+ *        The string.
+ * @return The extracted object.
+ */
+function parseAndUnwrapIfCrashDump(aStr) {
+  let obj = JSON.parse(aStr);
+  if (obj.memory_report !== undefined) {
+    // It looks like a crash dump. The memory reports should be in the
+    // |memory_report| property.
+    obj = obj.memory_report;
+  }
+  return obj;
+}
 
 /**
  * Populate about:memory using the data in the given JSON object.
  *
  * @param aObj
- *        An object containing JSON data that (hopefully!) conforms to the
- *        schema used by nsIMemoryInfoDumper.
+ *        An object that (hopefully!) conforms to the JSON schema used by
+ *        nsIMemoryInfoDumper.
  */
 function updateAboutMemoryFromJSONObject(aObj)
 {
@@ -480,7 +601,7 @@ function updateAboutMemoryFromJSONObject(aObj)
 function updateAboutMemoryFromJSONString(aStr)
 {
   try {
-    let obj = JSON.parse(aStr);
+    let obj = parseAndUnwrapIfCrashDump(aStr);
     updateAboutMemoryFromJSONObject(obj);
   } catch (ex) {
     handleException(ex);
@@ -570,10 +691,10 @@ function updateAboutMemoryFromFile(aFilename)
 function updateAboutMemoryFromTwoFiles(aFilename1, aFilename2)
 {
   loadMemoryReportsFromFile(aFilename1, function(aStr1) {
-    loadMemoryReportsFromFile(aFilename2, function f2(aStr2) {
+    loadMemoryReportsFromFile(aFilename2, function(aStr2) {
       try {
-        let obj1 = JSON.parse(aStr1);
-        let obj2 = JSON.parse(aStr2);
+        let obj1 = parseAndUnwrapIfCrashDump(aStr1);
+        let obj2 = parseAndUnwrapIfCrashDump(aStr2);
         gIsDiff = true;
         updateAboutMemoryFromJSONObject(diffJSONObjects(obj1, obj2));
         gIsDiff = false;
@@ -673,10 +794,11 @@ DReport.prototype = {
   }
 };
 
-// Constants that indicate if a DReport was present in both data sets, or
-// added/removed in the second data set.
+// Constants that indicate if a DReport was present only in one of the data
+// sets, or had to be added for balance.
 DReport.PRESENT_IN_FIRST_ONLY  = 1;
 DReport.PRESENT_IN_SECOND_ONLY = 2;
+DReport.ADDED_FOR_BALANCE = 3;
 
 /**
  * Make a report map, which has combined path+process strings for keys, and
@@ -699,12 +821,41 @@ function makeDReportMap(aJSONReports)
     assert(jr.amount      !== undefined, "Missing amount");
     assert(jr.description !== undefined, "Missing description");
 
-    // Strip out some non-deterministic stuff that prevents clean diffs --
-    // e.g. PIDs, addresses.
-    let strippedProcess = jr.process.replace(/pid \d+/, "pid NNN");
-    let strippedPath = jr.path.replace(/0x[0-9A-Fa-f]+/, "0xNNN");
-    let processPath = strippedProcess + kProcessPathSep + strippedPath;
+    // Strip out some non-deterministic stuff that prevents clean diffs.
+    // Ideally the memory reports themselves would contain information about
+    // which parts of the the process and path need to be stripped -- saving us
+    // from hardwiring knowledge of specific reporters here -- but we have no
+    // mechanism for that. (Any future redesign of how memory reporters work
+    // should include such a mechanism.)
 
+    // Strip PIDs:
+    // - pid 123
+    // - pid=123
+    let pidRegex = /pid([ =])\d+/g;
+    let pidSubst = "pid$1NNN";
+    let process = jr.process.replace(pidRegex, pidSubst);
+    let path = jr.path.replace(pidRegex, pidSubst);
+
+    // Strip addresses:
+    // - .../js-zone(0x12345678)/...
+    // - .../zone(0x12345678)/...
+    // - .../worker(<URL>, 0x12345678)/...
+    path = path.replace(/zone\(0x[0-9A-Fa-f]+\)\//, "zone(0xNNN)/");
+    path = path.replace(/\/worker\((.+), 0x[0-9A-Fa-f]+\)\//,
+                        "/worker($1, 0xNNN)/");
+
+    // Strip top window IDs:
+    // - explicit/window-objects/top(<URL>, id=123)/...
+    path = path.replace(/^(explicit\/window-objects\/top\(.*, id=)\d+\)/,
+                        "$1NNN)");
+
+    // Strip null principal UUIDs (but not other UUIDs, because they may be
+    // deterministic, such as those used by add-ons).
+    path = path.replace(
+      /moz-nullprincipal:{........-....-....-....-............}/g,
+      "moz-nullprincipal:{NNNNNNNN-NNNN-NNNN-NNNN-NNNNNNNNNNNN}");
+
+    let processPath = process + kProcessPathSep + path;
     let rOld = dreportMap[processPath];
     if (rOld === undefined) {
       dreportMap[processPath] =
@@ -777,7 +928,6 @@ function makeJSONReports(aDReportMap)
   return reports;
 }
 
-
 // Diff two JSON objects holding memory reports.
 function diffJSONObjects(aJson1, aJson2)
 {
@@ -822,11 +972,6 @@ function appendAboutMemoryMain(aProcessReports, aHasMozMallocUsableSize)
 {
   let pcollsByProcess = {};
 
-  // This regexp matches sentences and sentence fragments, i.e. strings that
-  // start with a capital letter and ends with a '.'.  (The final sentence may
-  // be in parentheses, so a ')' might appear after the '.'.)
-  const gSentenceRegExp = /^[A-Z].*\.\)?$/m;
-
   function handleReport(aProcess, aUnsafePath, aKind, aUnits, aAmount,
                         aDescription, aPresence)
   {
@@ -834,33 +979,6 @@ function appendAboutMemoryMain(aProcessReports, aHasMozMallocUsableSize)
       assertInput(aKind === KIND_HEAP || aKind === KIND_NONHEAP,
                   "bad explicit kind");
       assertInput(aUnits === UNITS_BYTES, "bad explicit units");
-      assertInput(gSentenceRegExp.test(aDescription),
-                  "non-sentence explicit description");
-
-    } else {
-      const kLenientPrefixes =
-        ['rss/', 'pss/', 'size/', 'swap/', 'compartments/', 'ghost-windows/'];
-      let beLenient = function(aUnsafePath) {
-        for (let i = 0; i < kLenientPrefixes.length; i++) {
-          if (aUnsafePath.startsWith(kLenientPrefixes[i])) {
-            return true;
-          }
-        }
-        return false;
-      }
-
-      // In general, non-explicit reports should have a description that is a
-      // complete sentence.  However, we want to be able to read old saved
-      // reports, so we are lenient in a couple of situations where we used to
-      // allow non-sentence descriptions:
-      // - smaps reports (which were removed in bug 912165);
-      // - compartment and ghost-window reports (which had empty descriptions
-      //   prior to bug 911641).
-      if (!beLenient(aUnsafePath)) {
-        assertInput(gSentenceRegExp.test(aDescription),
-                    "non-sentence other description: " + aUnsafePath + ", " +
-                    aDescription);
-      }
     }
 
     assert(aPresence === undefined ||
@@ -1008,6 +1126,7 @@ function TreeNode(aUnsafeName, aUnits, aIsDegenerate)
   // - _amount
   // - _description
   // - _hideKids (only defined if true)
+  // - _maxAbsDescendant (on-demand, only when gIsDiff is set)
 }
 
 TreeNode.prototype = {
@@ -1022,6 +1141,32 @@ TreeNode.prototype = {
     return undefined;
   },
 
+  // When gIsDiff is false, tree operations -- sorting and determining if a
+  // sub-tree is significant -- are straightforward. But when gIsDiff is true,
+  // the combination of positive and negative values within a tree complicates
+  // things. So for a non-leaf node, instead of just looking at _amount, we
+  // instead look at the maximum absolute value of the node and all of its
+  // descendants.
+  maxAbsDescendant: function() {
+    if (!this._kids) {
+      // No kids? Just return the absolute value of the amount.
+      return Math.abs(this._amount);
+    }
+
+    if ('_maxAbsDescendant' in this) {
+      // We've computed this before? Return the saved value.
+      return this._maxAbsDescendant;
+    }
+
+    // Compute the maximum absolute value of all descendants.
+    let max = Math.abs(this._amount);
+    for (let i = 0; i < this._kids.length; i++) {
+      max = Math.max(max, this._kids[i].maxAbsDescendant());
+    }
+    this._maxAbsDescendant = max;
+    return max;
+  },
+
   toString: function() {
     switch (this._units) {
       case UNITS_BYTES:            return formatBytes(this._amount);
@@ -1034,14 +1179,14 @@ TreeNode.prototype = {
   }
 };
 
-// Sort TreeNodes first by size, then by name.  This is particularly important
-// for the about:memory tests, which need a predictable ordering of reporters
-// which have the same amount.
+// Sort TreeNodes first by size, then by name.  The latter is important for the
+// about:memory tests, which need a predictable ordering of reporters which
+// have the same amount.
 TreeNode.compareAmounts = function(aA, aB) {
   let a, b;
   if (gIsDiff) {
-    a = Math.abs(aA._amount);
-    b = Math.abs(aB._amount);
+    a = aA.maxAbsDescendant();
+    b = aB.maxAbsDescendant();
   } else {
     a = aA._amount;
     b = aB._amount;
@@ -1097,13 +1242,31 @@ function fillInTree(aRoot)
 
     } else {
       // Non-leaf node with multiple children.  Derive its _amount and
-      // _description entirely from its children.
+      // _description entirely from its children...
       let kidsBytes = 0;
       for (let i = 0; i < aT._kids.length; i++) {
         kidsBytes += fillInNonLeafNodes(aT._kids[i]);
       }
-      assert(aT._amount === undefined, "_amount already set for non-leaf node");
-      aT._amount = kidsBytes;
+
+      // ... except in one special case. When diffing two memory report sets,
+      // if one set has a node with children and the other has the same node
+      // but without children -- e.g. the first has "a/b/c" and "a/b/d", but
+      // the second only has "a/b" -- we need to add a fake node "a/b/(fake)"
+      // to the second to make the trees comparable. It's ugly, but it works.
+      if (aT._amount !== undefined &&
+          (aT._presence === DReport.PRESENT_IN_FIRST_ONLY ||
+           aT._presence === DReport.PRESENT_IN_SECOND_ONLY)) {
+        aT._amount += kidsBytes;
+        let fake = new TreeNode('(fake child)', aT._units);
+        fake._presence = DReport.ADDED_FOR_BALANCE;
+        fake._amount = aT._amount - kidsBytes;
+        aT._kids.push(fake);
+        delete aT._presence;
+      } else {
+        assert(aT._amount === undefined,
+               "_amount already set for non-leaf node")
+        aT._amount = kidsBytes;
+      }
       aT._description = "The sum of all entries below this one.";
     }
     return aT._amount;
@@ -1122,7 +1285,7 @@ function fillInTree(aRoot)
  * @param aHeapAllocatedNode
  *        The "heap-allocated" tree node.
  * @param aHeapTotal
- *        The sum of all explicit HEAP reporters for this process.
+ *        The sum of all explicit HEAP reports for this process.
  * @return A boolean indicating if "heap-allocated" is known for the process.
  */
 function addHeapUnclassifiedNode(aT, aHeapAllocatedNode, aHeapTotal)
@@ -1130,12 +1293,18 @@ function addHeapUnclassifiedNode(aT, aHeapAllocatedNode, aHeapTotal)
   if (aHeapAllocatedNode === undefined)
     return false;
 
+  if (aT.findKid("heap-unclassified")) {
+    // heap-unclassified was already calculated, there's nothing left to do.
+    // This can happen when memory reports are exported from areweslimyet.com.
+    return true;
+  }
+
   assert(aHeapAllocatedNode._isDegenerate, "heap-allocated is not degenerate");
   let heapAllocatedBytes = aHeapAllocatedNode._amount;
   let heapUnclassifiedT = new TreeNode("heap-unclassified", UNITS_BYTES);
   heapUnclassifiedT._amount = heapAllocatedBytes - aHeapTotal;
   heapUnclassifiedT._description =
-      "Memory not classified by a more specific reporter. This includes " +
+      "Memory not classified by a more specific report. This includes " +
       "slop bytes due to internal fragmentation in the heap allocator " +
       "(caused when the allocator rounds up request sizes).";
   aT._kids.push(heapUnclassifiedT);
@@ -1158,8 +1327,13 @@ function sortTreeAndInsertAggregateNodes(aTotalBytes, aT)
 
   function isInsignificant(aT)
   {
-    return !gVerbose.checked &&
-           (100 * aT._amount / aTotalBytes) < kSignificanceThresholdPerc;
+    if (gVerbose.checked)
+      return false;
+
+    let perc = gIsDiff
+             ? 100 * aT.maxAbsDescendant() / Math.abs(aTotalBytes)
+             : 100 * aT._amount / aTotalBytes;
+    return perc < kSignificanceThresholdPerc;
   }
 
   if (!aT._kids) {
@@ -1321,12 +1495,14 @@ function appendProcessAboutMemoryElements(aP, aN, aProcess, aTrees,
   let warningsDiv = appendElement(aP, "div", "accuracyWarning");
 
   // The explicit tree.
+  let hasExplicitTree;
   let hasKnownHeapAllocated;
   {
     let treeName = "explicit";
-    let pre = appendSectionHeader(aP, "Explicit Allocations");
     let t = aTrees[treeName];
     if (t) {
+      let pre = appendSectionHeader(aP, "Explicit Allocations");
+      hasExplicitTree = true;
       fillInTree(t);
       // Using the "heap-allocated" reporter here instead of
       // nsMemoryReporterManager.heapAllocated goes against the usual pattern.
@@ -1384,11 +1560,13 @@ function appendProcessAboutMemoryElements(aP, aN, aProcess, aTrees,
   }
   appendTextNode(aP, "\n");  // gives nice spacing when we copy and paste
 
-  // Add any warnings about inaccuracies due to platform limitations.
-  // These must be computed after generating all the text.  The newlines give
-  // nice spacing if we copy+paste into a text buffer.
-  appendWarningElements(warningsDiv, hasKnownHeapAllocated,
-                        aHasMozMallocUsableSize);
+  // Add any warnings about inaccuracies in the "explicit" tree due to platform
+  // limitations.  These must be computed after generating all the text.  The
+  // newlines give nice spacing if we copy+paste into a text buffer.
+  if (hasExplicitTree) {
+    appendWarningElements(warningsDiv, hasKnownHeapAllocated,
+                          aHasMozMallocUsableSize);
+  }
 
   appendElementWithText(aP, "h3", "", "End of " + aProcess);
   appendLink("end", "start", kUpwardsArrow);
@@ -1557,27 +1735,32 @@ function appendMrNameSpan(aP, aDescription, aUnsafeName, aIsInvalid, aNMerged,
     let noteSpan = appendElementWithText(aP, "span", "mrNote", noteText);
     noteSpan.title =
       "This value is the sum of " + aNMerged +
-      " memory reporters that all have the same path.";
+      " memory reports that all have the same path.";
   }
 
   if (aPresence) {
-    let c, nth;
+    let c, title;
     switch (aPresence) {
      case DReport.PRESENT_IN_FIRST_ONLY:
       c = '-';
-      nth = "first";
+      title = "This value was only present in the first set of memory reports.";
       break;
      case DReport.PRESENT_IN_SECOND_ONLY:
       c = '+';
-      nth = "second";
+      title = "This value was only present in the second set of memory reports.";
+      break;
+     case DReport.ADDED_FOR_BALANCE:
+      c = '!';
+      title = "One of the sets of memory reports lacked children for this " +
+              "node's parent. This is a fake child node added to make the " +
+              "two memory sets comparable.";
       break;
      default: assert(false, "bad presence");
       break;
     }
     let noteSpan = appendElementWithText(aP, "span", "mrNote",
                                          " [" + c + "]\n");
-    noteSpan.title =
-      "This value was only present in the " + nth + " set of memory reports.";
+    noteSpan.title = title;
   }
 }
 
@@ -1825,26 +2008,38 @@ function appendSectionHeader(aP, aText)
 function saveReportsToFile()
 {
   let fp = Cc["@mozilla.org/filepicker;1"].createInstance(Ci.nsIFilePicker);
-  fp.init(window, "Save Memory Reports", Ci.nsIFilePicker.modeSave);
   fp.appendFilter("Zipped JSON files", "*.json.gz");
   fp.appendFilters(Ci.nsIFilePicker.filterAll);
   fp.filterIndex = 0;
   fp.addToRecentDocs = true;
   fp.defaultString = "memory-report.json.gz";
 
+  let fpFinish = function(file) {
+    let dumper = Cc["@mozilla.org/memory-info-dumper;1"]
+                   .getService(Ci.nsIMemoryInfoDumper);
+    let finishDumping = () => {
+      updateMainAndFooter("Saved memory reports to " + file.path, HIDE_FOOTER);
+    }
+    dumper.dumpMemoryReportsToNamedFile(file.path, finishDumping, null,
+                                        gAnonymize.checked);
+  }
+
   let fpCallback = function(aResult) {
     if (aResult == Ci.nsIFilePicker.returnOK ||
         aResult == Ci.nsIFilePicker.returnReplace) {
-
-      let dumper = Cc["@mozilla.org/memory-info-dumper;1"]
-                     .getService(Ci.nsIMemoryInfoDumper);
-
-      let finishDumping = () => {
-        updateMainAndFooter("Saved reports to " + fp.file.path, HIDE_FOOTER);
-      }
-
-      dumper.dumpMemoryReportsToNamedFile(fp.file.path, finishDumping, null);
+      fpFinish(fp.file);
     }
   };
+
+  try {
+    fp.init(window, "Save Memory Reports", Ci.nsIFilePicker.modeSave);
+  } catch(ex) {
+    // This will fail on Android, since there is no Save as file picker there.
+    // Just save to the default downloads dir if it does.
+    let file = Services.dirsvc.get("DfltDwnld", Ci.nsIFile);
+    file.append(fp.defaultString);
+    fpFinish(file);
+    return;
+  }
   fp.open(fpCallback);
 }

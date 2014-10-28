@@ -240,16 +240,18 @@ typedef enum {
     SDP_ATTR_ICE_CANDIDATE,
     SDP_ATTR_ICE_UFRAG,
     SDP_ATTR_ICE_PWD,
+    SDP_ATTR_ICE_LITE,
     SDP_ATTR_RTCP_MUX,
     SDP_ATTR_DTLS_FINGERPRINT,
     SDP_ATTR_MAXPTIME,
     SDP_ATTR_RTCP_FB,  /* RFC 4585 */
     SDP_ATTR_SETUP,
     SDP_ATTR_CONNECTION,
+    SDP_ATTR_EXTMAP,  /* RFC 5285 */
+    SDP_ATTR_IDENTITY,
     SDP_MAX_ATTR_TYPES,
     SDP_ATTR_INVALID
 } sdp_attr_e;
-
 /* This is here so that it can be used in the VcmSIPCCBinding interface */
 typedef enum {
     SDP_SETUP_NOT_FOUND = -1,
@@ -260,6 +262,17 @@ typedef enum {
     SDP_MAX_SETUP,
     SDP_SETUP_UNKNOWN
 } sdp_setup_type_e;
+
+/**
+ * Returns the inst_num value for the specified FTMP attr
+ *
+ * @param[in]  sdp_handle     The SDP handle
+ * @param[in]  level       The level to check for the attribute.
+ *
+ * @return     inst_num    The attribute instance number to check, or -1 for failure
+ */
+
+int ccsdpAttrGetFmtpInst(void *sdp_handle, uint16_t level, uint16_t payload_num);
 
 /**
  * Gets the value of the fmtp attribute- parameter-sets parameter for H.264 codec

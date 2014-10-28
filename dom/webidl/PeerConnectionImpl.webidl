@@ -25,9 +25,9 @@ interface PeerConnectionImpl  {
                   nsISupports thread);
   /* JSEP calls */
   [Throws]
-  void createOffer(optional MediaConstraintsInternal constraints);
+  void createOffer(optional RTCOfferOptions options);
   [Throws]
-  void createAnswer(optional MediaConstraintsInternal constraints);
+  void createAnswer();
   [Throws]
   void setLocalDescription(long action, DOMString sdp);
   [Throws]
@@ -36,19 +36,16 @@ interface PeerConnectionImpl  {
   /* Stats call, calls either |onGetStatsSuccess| or |onGetStatsError| on our
      observer. (see the |PeerConnectionObserver| interface) */
   [Throws]
-  void getStats(MediaStreamTrack? selector, boolean internalStats);
+  void getStats(MediaStreamTrack? selector);
 
-  /* Scrapes the RLogRingbuffer, and calls either |onGetLoggingSuccess|
-     or |onGetLoggingError| on our observer.
-     (see the |PeerConnectionObserver| interface) */
+  /* Adds the tracks created by GetUserMedia */
   [Throws]
-  void getLogging(DOMString pattern);
-
-  /* Adds the stream created by GetUserMedia */
+  void addTrack(MediaStreamTrack track, MediaStream... streams);
   [Throws]
-  void addStream(MediaStream stream);
+  void removeTrack(MediaStreamTrack track);
   [Throws]
-  void removeStream(MediaStream stream);
+  void replaceTrack(MediaStreamTrack thisTrack, MediaStreamTrack withTrack,
+                    MediaStream stream);
   [Throws]
   void closeStreams();
 
@@ -66,6 +63,9 @@ interface PeerConnectionImpl  {
   /* Puts the SIPCC engine back to 'kIdle', shuts down threads, deletes state */
   void close();
 
+  /* Notify DOM window if this plugin crash is ours. */
+  boolean pluginCrash(unsigned long long pluginId, DOMString name, DOMString pluginDumpID);
+
   /* Attributes */
   readonly attribute DOMString fingerprint;
   readonly attribute DOMString localDescription;
@@ -73,9 +73,12 @@ interface PeerConnectionImpl  {
 
   readonly attribute PCImplIceConnectionState iceConnectionState;
   readonly attribute PCImplIceGatheringState iceGatheringState;
-  readonly attribute PCImplReadyState readyState;
   readonly attribute PCImplSignalingState signalingState;
   readonly attribute PCImplSipccState sipccState;
+  readonly attribute DOMString id;
+
+  attribute DOMString peerIdentity;
+  readonly attribute boolean privacyRequested;
 
   /* Data channels */
   [Throws]

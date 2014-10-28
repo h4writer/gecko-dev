@@ -31,7 +31,6 @@
 #define HB_BUFFER_PRIVATE_HH
 
 #include "hb-private.hh"
-#include "hb-buffer.h"
 #include "hb-object-private.hh"
 #include "hb-unicode-private.hh"
 
@@ -53,6 +52,7 @@ struct hb_buffer_t {
   hb_unicode_funcs_t *unicode; /* Unicode functions */
   hb_segment_properties_t props; /* Script, language, direction */
   hb_buffer_flags_t flags; /* BOT / EOT / etc. */
+  hb_codepoint_t replacement; /* U+FFFD or something else. */
 
   /* Buffer contents */
 

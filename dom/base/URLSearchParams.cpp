@@ -5,11 +5,13 @@
 
 #include "URLSearchParams.h"
 #include "mozilla/dom/URLSearchParamsBinding.h"
+#include "mozilla/dom/EncodingUtils.h"
+#include "nsDOMString.h"
 
 namespace mozilla {
 namespace dom {
 
-NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE_1(URLSearchParams, mObserver)
+NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(URLSearchParams, mObservers)
 NS_IMPL_CYCLE_COLLECTING_ADDREF(URLSearchParams)
 NS_IMPL_CYCLE_COLLECTING_RELEASE(URLSearchParams)
 
@@ -19,9 +21,7 @@ NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(URLSearchParams)
 NS_INTERFACE_MAP_END
 
 URLSearchParams::URLSearchParams()
-  : mValid(false)
 {
-  SetIsDOMBinding();
 }
 
 URLSearchParams::~URLSearchParams()
@@ -30,9 +30,9 @@ URLSearchParams::~URLSearchParams()
 }
 
 JSObject*
-URLSearchParams::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope)
+URLSearchParams::WrapObject(JSContext* aCx)
 {
-  return URLSearchParamsBinding::Wrap(aCx, aScope, this);
+  return URLSearchParamsBinding::Wrap(aCx, this);
 }
 
 /* static */ already_AddRefed<URLSearchParams>
@@ -41,7 +41,7 @@ URLSearchParams::Constructor(const GlobalObject& aGlobal,
                              ErrorResult& aRv)
 {
   nsRefPtr<URLSearchParams> sp = new URLSearchParams();
-  sp->ParseInput(NS_ConvertUTF16toUTF8(aInit));
+  sp->ParseInput(NS_ConvertUTF16toUTF8(aInit), nullptr);
   return sp.forget();
 }
 
@@ -51,13 +51,13 @@ URLSearchParams::Constructor(const GlobalObject& aGlobal,
                              ErrorResult& aRv)
 {
   nsRefPtr<URLSearchParams> sp = new URLSearchParams();
-  aInit.mSearchParams.EnumerateRead(CopyEnumerator, sp);
-  sp->mValid = true;
+  sp->mSearchParams = aInit.mSearchParams;
   return sp.forget();
 }
 
 void
-URLSearchParams::ParseInput(const nsACString& aInput)
+URLSearchParams::ParseInput(const nsACString& aInput,
+                            URLSearchParamsObserver* aObserver)
 {
   // Remove all the existing data before parsing a new input.
   DeleteAll();
@@ -99,30 +99,31 @@ URLSearchParams::ParseInput(const nsACString& aInput)
       name.Assign(string);
     }
 
-    nsAutoCString decodedName;
+    nsAutoString decodedName;
     DecodeString(name, decodedName);
 
-    nsAutoCString decodedValue;
+    nsAutoString decodedValue;
     DecodeString(value, decodedValue);
 
-    AppendInternal(NS_ConvertUTF8toUTF16(decodedName),
-                   NS_ConvertUTF8toUTF16(decodedValue));
+    AppendInternal(decodedName, decodedValue);
   }
 
-  mValid = true;
+  NotifyObservers(aObserver);
 }
 
 void
-URLSearchParams::DecodeString(const nsACString& aInput, nsACString& aOutput)
+URLSearchParams::DecodeString(const nsACString& aInput, nsAString& aOutput)
 {
   nsACString::const_iterator start, end;
   aInput.BeginReading(start);
   aInput.EndReading(end);
 
+  nsCString unescaped;
+
   while (start != end) {
     // replace '+' with U+0020
     if (*start == '+') {
-      aOutput.Append(' ');
+      unescaped.Append(' ');
       ++start;
       continue;
     }
@@ -149,163 +150,181 @@ URLSearchParams::DecodeString(const nsACString& aInput, nsACString& aOutput)
 
       if (first != end && second != end &&
           ASCII_HEX_DIGIT(*first) && ASCII_HEX_DIGIT(*second)) {
-        aOutput.Append(HEX_DIGIT(first) * 16 + HEX_DIGIT(second));
+        unescaped.Append(HEX_DIGIT(first) * 16 + HEX_DIGIT(second));
         start = ++second;
         continue;
 
       } else {
-        aOutput.Append('%');
+        unescaped.Append('%');
         ++start;
         continue;
       }
     }
 
-    aOutput.Append(*start);
+    unescaped.Append(*start);
     ++start;
   }
+
+  ConvertString(unescaped, aOutput);
 }
 
 void
-URLSearchParams::CopyFromURLSearchParams(URLSearchParams& aSearchParams)
+URLSearchParams::ConvertString(const nsACString& aInput, nsAString& aOutput)
 {
-  // The other SearchParams must be valid before copying its data.
-  aSearchParams.Validate();
+  aOutput.Truncate();
 
-  // Remove all the existing data before parsing a new input.
-  DeleteAll();
-  aSearchParams.mSearchParams.EnumerateRead(CopyEnumerator, this);
-  mValid = true;
-}
-
-/* static */ PLDHashOperator
-URLSearchParams::CopyEnumerator(const nsAString& aName,
-                                nsTArray<nsString>* aArray,
-                                void *userData)
-{
-  URLSearchParams* aSearchParams = static_cast<URLSearchParams*>(userData);
-
-  nsTArray<nsString>* newArray = new nsTArray<nsString>();
-  newArray->AppendElements(*aArray);
-
-  aSearchParams->mSearchParams.Put(aName, newArray);
-  return PL_DHASH_NEXT;
-}
-
-void
-URLSearchParams::SetObserver(URLSearchParamsObserver* aObserver)
-{
-  MOZ_ASSERT(!mObserver);
-  mObserver = aObserver;
-}
-
-void
-URLSearchParams::Validate()
-{
-  MOZ_ASSERT(mValid || mObserver);
-  if (!mValid) {
-    mObserver->URLSearchParamsNeedsUpdates();
-    MOZ_ASSERT(mValid);
+  if (!mDecoder) {
+    mDecoder = EncodingUtils::DecoderForEncoding("UTF-8");
+    if (!mDecoder) {
+      MOZ_ASSERT(mDecoder, "Failed to create a decoder.");
+      return;
+    }
   }
+
+  int32_t inputLength = aInput.Length();
+  int32_t outputLength = 0;
+
+  nsresult rv = mDecoder->GetMaxLength(aInput.BeginReading(), inputLength,
+                                       &outputLength);
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    return;
+  }
+
+  if (!aOutput.SetLength(outputLength, fallible_t())) {
+    return;
+  }
+
+  int32_t newOutputLength = outputLength;
+  rv = mDecoder->Convert(aInput.BeginReading(), &inputLength,
+                         aOutput.BeginWriting(), &newOutputLength);
+  if (NS_FAILED(rv)) {
+    aOutput.Truncate();
+    return;
+  }
+
+  if (newOutputLength < outputLength) {
+    aOutput.Truncate(newOutputLength);
+  }
+}
+
+void
+URLSearchParams::AddObserver(URLSearchParamsObserver* aObserver)
+{
+  MOZ_ASSERT(aObserver);
+  MOZ_ASSERT(!mObservers.Contains(aObserver));
+  mObservers.AppendElement(aObserver);
+}
+
+void
+URLSearchParams::RemoveObserver(URLSearchParamsObserver* aObserver)
+{
+  MOZ_ASSERT(aObserver);
+  mObservers.RemoveElement(aObserver);
+}
+
+void
+URLSearchParams::RemoveObservers()
+{
+  mObservers.Clear();
 }
 
 void
 URLSearchParams::Get(const nsAString& aName, nsString& aRetval)
 {
-  Validate();
+  SetDOMStringToNull(aRetval);
 
-  nsTArray<nsString>* array;
-  if (!mSearchParams.Get(aName, &array)) {
-    aRetval.Truncate();
-    return;
+  for (uint32_t i = 0, len = mSearchParams.Length(); i < len; ++i) {
+    if (mSearchParams[i].mKey.Equals(aName)) {
+      aRetval.Assign(mSearchParams[i].mValue);
+      break;
+    }
   }
-
-  aRetval.Assign(array->ElementAt(0));
 }
 
 void
 URLSearchParams::GetAll(const nsAString& aName, nsTArray<nsString>& aRetval)
 {
-  Validate();
+  aRetval.Clear();
 
-  nsTArray<nsString>* array;
-  if (!mSearchParams.Get(aName, &array)) {
-    return;
+  for (uint32_t i = 0, len = mSearchParams.Length(); i < len; ++i) {
+    if (mSearchParams[i].mKey.Equals(aName)) {
+      aRetval.AppendElement(mSearchParams[i].mValue);
+    }
   }
-
-  aRetval.AppendElements(*array);
 }
 
 void
 URLSearchParams::Set(const nsAString& aName, const nsAString& aValue)
 {
-  // Before setting any new value we have to be sure to have all the previous
-  // values in place.
-  Validate();
-
-  nsTArray<nsString>* array;
-  if (!mSearchParams.Get(aName, &array)) {
-    array = new nsTArray<nsString>();
-    array->AppendElement(aValue);
-    mSearchParams.Put(aName, array);
-  } else {
-    array->ElementAt(0) = aValue;
+  Param* param = nullptr;
+  for (uint32_t i = 0, len = mSearchParams.Length(); i < len;) {
+    if (!mSearchParams[i].mKey.Equals(aName)) {
+      ++i;
+      continue;
+    }
+    if (!param) {
+      param = &mSearchParams[i];
+      ++i;
+      continue;
+    }
+    // Remove duplicates.
+    mSearchParams.RemoveElementAt(i);
+    --len;
   }
 
-  NotifyObserver();
+  if (!param) {
+    param = mSearchParams.AppendElement();
+    param->mKey = aName;
+  }
+
+  param->mValue = aValue;
+
+  NotifyObservers(nullptr);
 }
 
 void
 URLSearchParams::Append(const nsAString& aName, const nsAString& aValue)
 {
-  // Before setting any new value we have to be sure to have all the previous
-  // values in place.
-  Validate();
-
   AppendInternal(aName, aValue);
-  NotifyObserver();
+  NotifyObservers(nullptr);
 }
 
 void
 URLSearchParams::AppendInternal(const nsAString& aName, const nsAString& aValue)
 {
-  nsTArray<nsString>* array;
-  if (!mSearchParams.Get(aName, &array)) {
-    array = new nsTArray<nsString>();
-    mSearchParams.Put(aName, array);
-  }
-
-  array->AppendElement(aValue);
+  Param* param = mSearchParams.AppendElement();
+  param->mKey = aName;
+  param->mValue = aValue;
 }
 
 bool
 URLSearchParams::Has(const nsAString& aName)
 {
-  Validate();
-  return mSearchParams.Get(aName, nullptr);
+  for (uint32_t i = 0, len = mSearchParams.Length(); i < len; ++i) {
+    if (mSearchParams[i].mKey.Equals(aName)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 void
 URLSearchParams::Delete(const nsAString& aName)
 {
-  // Before deleting any value we have to be sure to have all the previous
-  // values in place.
-  Validate();
-
-  nsTArray<nsString>* array;
-  if (!mSearchParams.Get(aName, &array)) {
-    return;
+  bool found = false;
+  for (uint32_t i = 0; i < mSearchParams.Length();) {
+    if (mSearchParams[i].mKey.Equals(aName)) {
+      mSearchParams.RemoveElementAt(i);
+      found = true;
+    } else {
+      ++i;
+    }
   }
 
-  mSearchParams.Remove(aName);
-
-  NotifyObserver();
-}
-
-uint32_t
-URLSearchParams::Size()
-{
-  Validate();
-  return mSearchParams.Count();
+  if (found) {
+    NotifyObservers(nullptr);
+  }
 }
 
 void
@@ -314,83 +333,59 @@ URLSearchParams::DeleteAll()
   mSearchParams.Clear();
 }
 
-class MOZ_STACK_CLASS SerializeData
+namespace {
+
+void SerializeString(const nsCString& aInput, nsAString& aValue)
 {
-public:
-  SerializeData()
-    : mFirst(true)
-  {}
+  const unsigned char* p = (const unsigned char*) aInput.get();
 
-  nsAutoString mValue;
-  bool mFirst;
-
-  void Serialize(const nsCString& aInput)
-  {
-    const unsigned char* p = (const unsigned char*) aInput.get();
-
-    while (p && *p) {
-      // ' ' to '+'
-      if (*p == 0x20) {
-        mValue.Append(0x2B);
-      // Percent Encode algorithm
-      } else if (*p == 0x2A || *p == 0x2D || *p == 0x2E ||
-                 (*p >= 0x30 && *p <= 0x39) ||
-                 (*p >= 0x41 && *p <= 0x5A) || *p == 0x5F ||
-                 (*p >= 0x61 && *p <= 0x7A)) {
-        mValue.Append(*p);
-      } else {
-        mValue.AppendPrintf("%%%X", *p);
-      }
-
-      ++p;
-    }
-  }
-};
-
-void
-URLSearchParams::Serialize(nsAString& aValue)
-{
-  MOZ_ASSERT(mValid);
-
-  SerializeData data;
-  mSearchParams.EnumerateRead(SerializeEnumerator, &data);
-  aValue.Assign(data.mValue);
-}
-
-/* static */ PLDHashOperator
-URLSearchParams::SerializeEnumerator(const nsAString& aName,
-                                     nsTArray<nsString>* aArray,
-                                     void *userData)
-{
-  SerializeData* data = static_cast<SerializeData*>(userData);
-
-  for (uint32_t i = 0, len = aArray->Length(); i < len; ++i) {
-    if (data->mFirst) {
-      data->mFirst = false;
+  while (p && *p) {
+    // ' ' to '+'
+    if (*p == 0x20) {
+      aValue.Append(0x2B);
+    // Percent Encode algorithm
+    } else if (*p == 0x2A || *p == 0x2D || *p == 0x2E ||
+               (*p >= 0x30 && *p <= 0x39) ||
+               (*p >= 0x41 && *p <= 0x5A) || *p == 0x5F ||
+               (*p >= 0x61 && *p <= 0x7A)) {
+      aValue.Append(*p);
     } else {
-      data->mValue.Append(NS_LITERAL_STRING("&"));
+      aValue.AppendPrintf("%%%.2X", *p);
     }
 
-    data->Serialize(NS_ConvertUTF16toUTF8(aName));
-    data->mValue.Append(NS_LITERAL_STRING("="));
-    data->Serialize(NS_ConvertUTF16toUTF8(aArray->ElementAt(i)));
-  }
-
-  return PL_DHASH_NEXT;
-}
-
-void
-URLSearchParams::NotifyObserver()
-{
-  if (mObserver) {
-    mObserver->URLSearchParamsUpdated();
+    ++p;
   }
 }
 
+} // anonymous namespace
+
 void
-URLSearchParams::Invalidate()
+URLSearchParams::Serialize(nsAString& aValue) const
 {
-  mValid = false;
+  aValue.Truncate();
+  bool first = true;
+
+  for (uint32_t i = 0, len = mSearchParams.Length(); i < len; ++i) {
+    if (first) {
+      first = false;
+    } else {
+      aValue.Append('&');
+    }
+
+    SerializeString(NS_ConvertUTF16toUTF8(mSearchParams[i].mKey), aValue);
+    aValue.Append('=');
+    SerializeString(NS_ConvertUTF16toUTF8(mSearchParams[i].mValue), aValue);
+  }
+}
+
+void
+URLSearchParams::NotifyObservers(URLSearchParamsObserver* aExceptObserver)
+{
+  for (uint32_t i = 0; i < mObservers.Length(); ++i) {
+    if (mObservers[i] != aExceptObserver) {
+      mObservers[i]->URLSearchParamsUpdated(this);
+    }
+  }
 }
 
 } // namespace dom

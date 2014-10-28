@@ -51,8 +51,8 @@ static void notify_closed_marshal(GClosure* closure,
   NS_RELEASE(alert);
 }
 
-NS_IMPL_ISUPPORTS3(nsAlertsIconListener, imgINotificationObserver,
-                   nsIObserver, nsISupportsWeakReference)
+NS_IMPL_ISUPPORTS(nsAlertsIconListener, imgINotificationObserver,
+                  nsIObserver, nsISupportsWeakReference)
 
 nsAlertsIconListener::nsAlertsIconListener()
 : mLoadedFrame(false),
@@ -226,7 +226,7 @@ nsAlertsIconListener::SendClosed()
 
 NS_IMETHODIMP
 nsAlertsIconListener::Observe(nsISupports *aSubject, const char *aTopic,
-                              const PRUnichar *aData) {
+                              const char16_t *aData) {
   // We need to close any open notifications upon application exit, otherwise
   // we will leak since libnotify holds a ref for us.
   if (!nsCRT::strcmp(aTopic, "quit-application") && mNotification) {
@@ -262,7 +262,7 @@ nsAlertsIconListener::InitAlertAsync(const nsAString & aImageUrl,
       nsAutoString appName;
 
       if (bundle) {
-        bundle->GetStringFromName(NS_LITERAL_STRING("brandShortName").get(),
+        bundle->GetStringFromName(MOZ_UTF16("brandShortName"),
                                   getter_Copies(appName));
         appShortName = NS_ConvertUTF16toUTF8(appName);
       } else {

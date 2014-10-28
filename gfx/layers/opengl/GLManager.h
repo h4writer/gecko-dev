@@ -31,12 +31,10 @@ public:
   virtual ~GLManager() {}
 
   virtual gl::GLContext* gl() const = 0;
-  virtual ShaderProgramOGL* GetProgram(ShaderProgramType aType) = 0;
-  virtual void BindAndDrawQuad(ShaderProgramOGL *aProg) = 0;
-
-  ShaderProgramOGL* GetProgram(gfx::SurfaceFormat aFormat) {
-    return GetProgram(ShaderProgramFromSurfaceFormat(aFormat));
-  }
+  virtual ShaderProgramOGL* GetProgram(GLenum aTarget, gfx::SurfaceFormat aFormat) = 0;
+  virtual const gfx::Matrix4x4& GetProjMatrix() const = 0;
+  virtual void BindAndDrawQuad(ShaderProgramOGL *aProg, const gfx::Rect& aLayerRect,
+                               const gfx::Rect& aTextureRect) = 0;
 };
 
 }

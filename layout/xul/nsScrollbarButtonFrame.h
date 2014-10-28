@@ -33,9 +33,9 @@ public:
 
   friend nsIFrame* NS_NewScrollbarButtonFrame(nsIPresShell* aPresShell, nsStyleContext* aContext);
 
-  NS_IMETHOD HandleEvent(nsPresContext* aPresContext,
-                         mozilla::WidgetGUIEvent* aEvent,
-                         nsEventStatus* aEventStatus) MOZ_OVERRIDE;
+  virtual nsresult HandleEvent(nsPresContext* aPresContext,
+                               mozilla::WidgetGUIEvent* aEvent,
+                               nsEventStatus* aEventStatus) MOZ_OVERRIDE;
 
   static nsresult GetChildWithTag(nsPresContext* aPresContext,
                                   nsIAtom* atom, nsIFrame* start, nsIFrame*& result);
@@ -67,7 +67,6 @@ public:
 protected:
   virtual void MouseClicked(nsPresContext* aPresContext,
                             mozilla::WidgetGUIEvent* aEvent) MOZ_OVERRIDE;
-  void DoButtonAction(bool aSmoothScroll);
 
   void StartRepeat() {
     nsRepeatService::GetInstance()->Start(Notify, this);
@@ -80,7 +79,6 @@ protected:
     static_cast<nsScrollbarButtonFrame*>(aData)->Notify();
   }
   
-  int32_t mIncrement;  
   bool mCursorOnThis;
 };
 

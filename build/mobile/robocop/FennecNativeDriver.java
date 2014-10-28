@@ -4,45 +4,40 @@
 
 package org.mozilla.gecko;
 
-import org.mozilla.gecko.gfx.LayerView;
-import org.mozilla.gecko.gfx.PanningPerfAPI;
-import org.mozilla.gecko.util.GeckoEventListener;
-
 import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.FileWriter;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.nio.IntBuffer;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import android.app.Activity;
-import android.opengl.GLSurfaceView;
-import android.view.View;
-import android.util.Log;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.mozilla.gecko.gfx.LayerView;
+import org.mozilla.gecko.gfx.PanningPerfAPI;
+import org.mozilla.gecko.util.GeckoEventListener;
 
-import org.json.*;
+import android.app.Activity;
+import android.util.Log;
+import android.view.View;
 
 import com.jayway.android.robotium.solo.Solo;
 
 public class FennecNativeDriver implements Driver {
     private static final int FRAME_TIME_THRESHOLD = 25;     // allow 25ms per frame (40fps)
 
-    // Map of IDs to element names.
-    private HashMap mLocators = null;
-    private Activity mActivity;
-    private Solo mSolo;
-    private String mRootPath;
+    private final Activity mActivity;
+    private final Solo mSolo;
+    private final String mRootPath;
 
-    private static String mLogFile = null;
+    private static String mLogFile;
     private static LogLevel mLogLevel = LogLevel.INFO;
 
     public enum LogLevel {
@@ -51,7 +46,7 @@ public class FennecNativeDriver implements Driver {
         WARN(3),
         ERROR(4);
 
-        private int mValue;
+        private final int mValue;
         LogLevel(int value) {
             mValue = value;
         }
@@ -67,9 +62,6 @@ public class FennecNativeDriver implements Driver {
         mActivity = activity;
         mSolo = robocop;
         mRootPath = rootPath;
-
-        // Set up table of fennec_ids.
-        mLocators = convertTextToTable(getFile(mRootPath + "/fennec_ids.txt"));
     }
 
     //Information on the location of the Gecko Frame.
@@ -80,7 +72,7 @@ public class FennecNativeDriver implements Driver {
     private int mGeckoWidth = 1024;
 
     private void getGeckoInfo() {
-        View geckoLayout = mActivity.findViewById(Integer.decode((String)mLocators.get("gecko_layout")));
+        View geckoLayout = mActivity.findViewById(R.id.gecko_layout);
         if (geckoLayout != null) {
             int[] pos = new int[2];
             geckoLayout.getLocationOnScreen(pos);
@@ -94,6 +86,7 @@ public class FennecNativeDriver implements Driver {
         }
     }
 
+    @Override
     public int getGeckoTop() {
         if (!mGeckoInfo) {
             getGeckoInfo();
@@ -101,6 +94,7 @@ public class FennecNativeDriver implements Driver {
         return mGeckoTop;
     }
 
+    @Override
     public int getGeckoLeft() {
         if (!mGeckoInfo) {
             getGeckoInfo();
@@ -108,6 +102,7 @@ public class FennecNativeDriver implements Driver {
         return mGeckoLeft;
     }
 
+    @Override
     public int getGeckoHeight() {
         if (!mGeckoInfo) {
             getGeckoInfo();
@@ -115,6 +110,7 @@ public class FennecNativeDriver implements Driver {
         return mGeckoHeight;
     }
 
+    @Override
     public int getGeckoWidth() {
         if (!mGeckoInfo) {
             getGeckoInfo();
@@ -122,27 +118,21 @@ public class FennecNativeDriver implements Driver {
         return mGeckoWidth;
     }
 
-    /** Find the named element in the list of known Fennec views. 
+    /** Find the element with given id.
+     *
      *  @return An Element representing the view, or null if the view is not found.
      */
-    public Element findElement(Activity activity, String name) {
-        if (name == null) {
-            FennecNativeDriver.log(FennecNativeDriver.LogLevel.ERROR,
-                "Can not findElements when passed a null");
-            return null;
-        }
-        if (mLocators.containsKey(name)) {
-            return new FennecNativeElement(Integer.decode((String)mLocators.get(name)), activity, mSolo);
-        }
-        FennecNativeDriver.log(FennecNativeDriver.LogLevel.ERROR,
-            "findElement: Element '"+name+"' does not exist in the list");
-        return null;
+    @Override
+    public Element findElement(Activity activity, int id) {
+        return new FennecNativeElement(id, activity);
     }
 
+    @Override
     public void startFrameRecording() {
         PanningPerfAPI.startFrameTimeRecording();
     }
 
+    @Override
     public int stopFrameRecording() {
         final List<Long> frames = PanningPerfAPI.stopFrameTimeRecording();
         int badness = 0;
@@ -161,10 +151,12 @@ public class FennecNativeDriver implements Driver {
         return badness;
     }
 
+    @Override
     public void startCheckerboardRecording() {
         PanningPerfAPI.startCheckerboardRecording();
     }
 
+    @Override
     public float stopCheckerboardRecording() {
         final List<Float> checkerboard = PanningPerfAPI.stopCheckerboardRecording();
         float total = 0;
@@ -186,6 +178,7 @@ public class FennecNativeDriver implements Driver {
         return layerView;
     }
 
+    @Override
     public PaintedSurface getPaintedSurface() {
         final LayerView view = getSurfaceView();
         if (view == null) {
@@ -240,18 +233,22 @@ public class FennecNativeDriver implements Driver {
     public int mScrollHeight=0;
     public int mPageHeight=10;
 
+    @Override
     public int getScrollHeight() {
         return mScrollHeight;
     }
+    @Override
     public int getPageHeight() {
         return mPageHeight;
     }
+    @Override
     public int getHeight() {
         return mHeight;
     }
 
+    @Override
     public void setupScrollHandling() {
-        GeckoAppShell.registerEventListener("robocop:scroll", new GeckoEventListener() {
+        EventDispatcher.getInstance().registerGeckoThreadListener(new GeckoEventListener() {
             @Override
             public void handleMessage(final String event, final JSONObject message) {
                 try {
@@ -267,7 +264,7 @@ public class FennecNativeDriver implements Driver {
                             "expected fields: " + e);
                 }
             }
-        });
+        }, "robocop:scroll");
     }
 
     /**
@@ -300,9 +297,9 @@ public class FennecNativeDriver implements Driver {
     /**
      *  Takes a string of "key=value" pairs split by \n and creates a hash table.
      */
-    public static HashMap convertTextToTable(String data)
+    public static Map<String, String> convertTextToTable(String data)
     {
-        HashMap retVal = new HashMap();
+        HashMap<String, String> retVal = new HashMap<String, String>();
 
         String[] lines = data.split("\n");
         for (int i = 0; i < lines.length; i++) {

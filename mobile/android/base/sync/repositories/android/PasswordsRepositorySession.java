@@ -49,11 +49,11 @@ public class PasswordsRepositorySession extends
   }
 
   private static final String LOG_TAG = "PasswordsRepoSession";
-  private static String COLLECTION = "passwords";
+  private static final String COLLECTION = "passwords";
 
-  private RepoUtils.QueryHelper passwordsHelper;
-  private RepoUtils.QueryHelper deletedPasswordsHelper;
-  private ContentProviderClient passwordsProvider;
+  private final RepoUtils.QueryHelper passwordsHelper;
+  private final RepoUtils.QueryHelper deletedPasswordsHelper;
+  private final ContentProviderClient passwordsProvider;
 
   private final Context context;
 
@@ -326,6 +326,13 @@ public class PasswordsRepositorySession extends
           return;
         }
         // End deletion logic.
+
+        // Validate the incoming record.
+        if (!remoteRecord.isValid()) {
+            Logger.warn(LOG_TAG, "Incoming record is invalid. Reporting store failed.");
+            delegate.onRecordStoreFailed(new RuntimeException("Can't store invalid password record."), record.guid);
+            return;
+        }
 
         // Now we're processing a non-deleted incoming record.
         if (existingRecord == null) {

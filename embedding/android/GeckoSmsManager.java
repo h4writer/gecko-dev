@@ -298,7 +298,7 @@ public class GeckoSmsManager
 
   /*
    * Make sure that the following error codes are in sync with the ones
-   * defined in dom/mobilemessage/interfaces/nsISmsRequestManager.idl. They are owned
+   * defined in dom/mobilemessage/interfaces/nsIMobileMessageCallback.idl. They are owned
    * owned by the interface.
    */
   public final static int kNoError               = 0;
@@ -311,6 +311,8 @@ public class GeckoSmsManager
   public final static int kInvalidAddressError   = 7;
   public final static int kFdnCheckError         = 8;
   public final static int kNonActiveSimCardError = 9;
+  public final static int kStorageFullError      = 10;
+  public final static int kSimNotMatchedError    = 11;
 
   private final static int kMaxMessageSize    = 160;
 
@@ -322,7 +324,7 @@ public class GeckoSmsManager
 
   /*
    * Keep the following state codes in syng with |DeliveryState| in:
-   * dom/mobilemessage/src/Types.h
+   * dom/mobilemessage/Types.h
    */
   private final static int kDeliveryStateSent          = 0;
   private final static int kDeliveryStateReceived      = 1;
@@ -334,7 +336,7 @@ public class GeckoSmsManager
 
   /*
    * Keep the following status codes in sync with |DeliveryStatus| in:
-   * dom/mobilemessage/src/Types.h
+   * dom/mobilemessage/Types.h
    */
   private final static int kDeliveryStatusNotApplicable = 0;
   private final static int kDeliveryStatusSuccess       = 1;
@@ -352,7 +354,7 @@ public class GeckoSmsManager
 
   /*
    * Keep the following values in sync with |MessageClass| in:
-   * dom/mobilemessage/src/Types.h
+   * dom/mobilemessage/Types.h
    */
   private final static int kMessageClassNormal  = 0;
   private final static int kMessageClassClass0  = 1;
@@ -428,7 +430,7 @@ public class GeckoSmsManager
                                  ? Envelope.SubParts.SENT_PART
                                  : Envelope.SubParts.DELIVERED_PART;
       envelope.decreaseRemainingParts(part);
- 
+
 
       if (getResultCode() != Activity.RESULT_OK) {
         switch (getResultCode()) {

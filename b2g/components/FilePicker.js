@@ -1,4 +1,4 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -32,7 +32,7 @@ const AUDIO_FILTERS = ['audio/basic', 'audio/L24', 'audio/mp4',
                        'audio/webm'];
 
 Cu.import('resource://gre/modules/XPCOMUtils.jsm');
-Cu.import("resource://gre/modules/FileUtils.jsm");
+Cu.import("resource://gre/modules/osfile.jsm");
 
 XPCOMUtils.defineLazyServiceGetter(this, 'cpmm',
                                    '@mozilla.org/childprocessmessagemanager;1',
@@ -181,7 +181,7 @@ FilePicker.prototype = {
     }
 
     // The name to be shown can be part of the message, or can be taken from
-    // the DOMFile (if the blob is a DOMFile).
+    // the File (if the blob is a File).
     let name = data.result.name;
     if (!name &&
         (data.result.blob instanceof this.mParent.File) &&
@@ -191,10 +191,8 @@ FilePicker.prototype = {
 
     // Let's try to remove the full path and take just the filename.
     if (name) {
-      let file = new FileUtils.File(data.result.blob.name);
-      if (file && file.leafName) {
-        name = file.leafName;
-      }
+      let names = OS.Path.split(name);
+      name = names.components[names.components.length - 1];
     }
 
     // the fallback is a filename composed by 'blob' + extension.
@@ -209,9 +207,9 @@ FilePicker.prototype = {
       }
     }
 
-    let file = new this.mParent.File(data.result.blob,
-                                     { name: name,
-                                       type: data.result.blob.type });
+    let file = new this.mParent.File([data.result.blob],
+                                     name,
+                                     { type: data.result.blob.type });
 
     if (file) {
       this.fireSuccess(file);

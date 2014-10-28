@@ -9,28 +9,29 @@ let outgoingCall;
 function dial() {
   log("Make an outgoing call.");
 
-  outgoingCall = telephony.dial(outNumber);
-  ok(outgoingCall);
-  is(outgoingCall.number, outNumber);
-  is(outgoingCall.state, "dialing");
+  telephony.dial(outNumber).then(call => {
+    outgoingCall = call;
+    ok(outgoingCall);
+    is(outgoingCall.id.number, outNumber);
+    is(outgoingCall.state, "dialing");
 
-  is(outgoingCall, telephony.active);
-  is(telephony.calls.length, 1);
-  is(telephony.calls[0], outgoingCall);
+    is(outgoingCall, telephony.active);
+    is(telephony.calls.length, 1);
+    is(telephony.calls[0], outgoingCall);
 
-  outgoingCall.onalerting = function onalerting(event) {
-    log("Received 'alerting' call event.");
+    outgoingCall.onalerting = function onalerting(event) {
+      log("Received 'alerting' call event.");
 
-    is(outgoingCall, event.call);
-    is(outgoingCall.state, "alerting");
+      is(outgoingCall, event.call);
+      is(outgoingCall.state, "alerting");
 
-    emulator.run("gsm list", function(result) {
-      log("Call list is now: " + result);
-      is(result[0], "outbound to  " + outNumber + " : ringing");
-      is(result[1], "OK");
-      answer();
-    });
-  };
+      emulator.runCmdWithCallback("gsm list", function(result) {
+        log("Call list is now: " + result);
+        is(result[0], "outbound to  " + outNumber + " : ringing");
+        answer();
+      });
+    };
+  });
 }
 
 function answer() {
@@ -45,14 +46,13 @@ function answer() {
 
     is(outgoingCall, telephony.active);
 
-    emulator.run("gsm list", function(result) {
+    emulator.runCmdWithCallback("gsm list", function(result) {
       log("Call list is now: " + result);
       is(result[0], "outbound to  " + outNumber + " : active");
-      is(result[1], "OK");
       hold();
     });
   };
-  emulator.run("gsm accept " + outNumber);
+  emulator.runCmdWithCallback("gsm accept " + outNumber);
 }
 
 function hold() {
@@ -75,10 +75,9 @@ function hold() {
     is(telephony.calls.length, 1);
     is(telephony.calls[0], outgoingCall);
 
-    emulator.run("gsm list", function(result) {
+    emulator.runCmdWithCallback("gsm list", function(result) {
       log("Call list is now: " + result);
       is(result[0], "outbound to  " + outNumber + " : held");
-      is(result[1], "OK");
       hangUp();
     });
   };
@@ -98,13 +97,12 @@ function hangUp() {
     is(telephony.active, null);
     is(telephony.calls.length, 0);
 
-    emulator.run("gsm list", function(result) {
+    emulator.runCmdWithCallback("gsm list", function(result) {
       log("Call list is now: " + result);
-      is(result[0], "OK");
       cleanUp();
     });
   };
-  emulator.run("gsm cancel " + outNumber);
+  emulator.runCmdWithCallback("gsm cancel " + outNumber);
 }
 
 function cleanUp() {

@@ -12,7 +12,6 @@
 #include "nsIServiceManager.h"
 #include "nsXPCOM.h"
 #include "nsISupportsPrimitives.h"
-#include "nsIScriptExternalNameSet.h"
 #include "nsIScriptNameSpaceManager.h"
 #include "nsIScriptContext.h"
 #include "nsIInterfaceInfoManager.h"
@@ -116,17 +115,14 @@ GlobalNameHashInitEntry(PLDHashTable *table, PLDHashEntryHdr *entry,
   return true;
 }
 
-NS_IMPL_ISUPPORTS_INHERITED2(
+NS_IMPL_ISUPPORTS(
   nsScriptNameSpaceManager,
-  MemoryUniReporter,
   nsIObserver,
-  nsISupportsWeakReference)
+  nsISupportsWeakReference,
+  nsIMemoryReporter)
 
 nsScriptNameSpaceManager::nsScriptNameSpaceManager()
-  : MemoryUniReporter("explicit/script-namespace-manager",
-                      KIND_HEAP, UNITS_BYTES,
-                      "Memory used for the script namespace manager.")
-  , mIsInitialized(false)
+  : mIsInitialized(false)
 {
   MOZ_COUNT_CTOR(nsScriptNameSpaceManager);
 }
@@ -144,7 +140,7 @@ nsScriptNameSpaceManager::~nsScriptNameSpaceManager()
 
 nsGlobalNameStruct *
 nsScriptNameSpaceManager::AddToHash(PLDHashTable *aTable, const nsAString *aKey,
-                                    const PRUnichar **aClassName)
+                                    const char16_t **aClassName)
 {
   GlobalNameMapEntry *entry =
     static_cast<GlobalNameMapEntry *>
@@ -318,7 +314,7 @@ nsScriptNameSpaceManager::RegisterInterface(const char* aIfName,
   return NS_OK;
 }
 
-#define GLOBALNAME_HASHTABLE_INITIAL_SIZE	1024
+#define GLOBALNAME_HASHTABLE_INITIAL_LENGTH   512
 
 nsresult
 nsScriptNameSpaceManager::Init()
@@ -335,14 +331,16 @@ nsScriptNameSpaceManager::Init()
     GlobalNameHashInitEntry
   };
 
-  mIsInitialized = PL_DHashTableInit(&mGlobalNames, &hash_table_ops, nullptr,
-                                     sizeof(GlobalNameMapEntry), 
-                                     GLOBALNAME_HASHTABLE_INITIAL_SIZE);
+  mIsInitialized = PL_DHashTableInit(&mGlobalNames, &hash_table_ops,
+                                     nullptr, sizeof(GlobalNameMapEntry),
+                                     fallible_t(),
+                                     GLOBALNAME_HASHTABLE_INITIAL_LENGTH);
   NS_ENSURE_TRUE(mIsInitialized, NS_ERROR_OUT_OF_MEMORY);
 
-  mIsInitialized = PL_DHashTableInit(&mNavigatorNames, &hash_table_ops, nullptr,
-                                     sizeof(GlobalNameMapEntry), 
-                                     GLOBALNAME_HASHTABLE_INITIAL_SIZE);
+  mIsInitialized = PL_DHashTableInit(&mNavigatorNames, &hash_table_ops,
+                                     nullptr, sizeof(GlobalNameMapEntry),
+                                     fallible_t(),
+                                     GLOBALNAME_HASHTABLE_INITIAL_LENGTH);
   if (!mIsInitialized) {
     PL_DHashTableFinish(&mGlobalNames);
 
@@ -369,12 +367,6 @@ nsScriptNameSpaceManager::Init()
   rv = FillHash(cm, JAVASCRIPT_GLOBAL_PRIVILEGED_PROPERTY_CATEGORY);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  rv = FillHash(cm, JAVASCRIPT_GLOBAL_STATIC_NAMESET_CATEGORY);
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  rv = FillHash(cm, JAVASCRIPT_GLOBAL_DYNAMIC_NAMESET_CATEGORY);
-  NS_ENSURE_SUCCESS(rv, rv);
-
   rv = FillHash(cm, JAVASCRIPT_NAVIGATOR_PROPERTY_CATEGORY);
   NS_ENSURE_SUCCESS(rv, rv);
 
@@ -391,56 +383,16 @@ nsScriptNameSpaceManager::Init()
   return NS_OK;
 }
 
-struct NameSetClosure {
-  nsIScriptContext* ctx;
-  nsresult rv;
-};
-
-static PLDHashOperator
-NameSetInitCallback(PLDHashTable *table, PLDHashEntryHdr *hdr,
-                    uint32_t number, void *arg)
-{
-  GlobalNameMapEntry *entry = static_cast<GlobalNameMapEntry *>(hdr);
-
-  if (entry->mGlobalName.mType == nsGlobalNameStruct::eTypeStaticNameSet) {
-    nsresult rv = NS_OK;
-    nsCOMPtr<nsIScriptExternalNameSet> ns =
-      do_CreateInstance(entry->mGlobalName.mCID, &rv);
-    NS_ENSURE_SUCCESS(rv, PL_DHASH_NEXT);
-
-    NameSetClosure *closure = static_cast<NameSetClosure *>(arg);
-    closure->rv = ns->InitializeNameSet(closure->ctx);
-    if (NS_FAILED(closure->rv)) {
-      NS_ERROR("Initing external script classes failed!");
-      return PL_DHASH_STOP;
-    }
-  }
-
-  return PL_DHASH_NEXT;
-}
-
-nsresult
-nsScriptNameSpaceManager::InitForContext(nsIScriptContext *aContext)
-{
-  NameSetClosure closure;
-  closure.ctx = aContext;
-  closure.rv = NS_OK;
-  PL_DHashTableEnumerate(&mGlobalNames, NameSetInitCallback, &closure);
-
-  return closure.rv;
-}
-
 nsGlobalNameStruct*
 nsScriptNameSpaceManager::LookupNameInternal(const nsAString& aName,
-                                             const PRUnichar **aClassName)
+                                             const char16_t **aClassName)
 {
   GlobalNameMapEntry *entry =
     static_cast<GlobalNameMapEntry *>
                (PL_DHashTableOperate(&mGlobalNames, &aName,
                                         PL_DHASH_LOOKUP));
 
-  if (PL_DHASH_ENTRY_IS_BUSY(entry) &&
-      !((&entry->mGlobalName)->mDisabled)) {
+  if (PL_DHASH_ENTRY_IS_BUSY(entry)) {
     if (aClassName) {
       *aClassName = entry->mKey.get();
     }
@@ -461,8 +413,7 @@ nsScriptNameSpaceManager::LookupNavigatorName(const nsAString& aName)
                (PL_DHashTableOperate(&mNavigatorNames, &aName,
                                      PL_DHASH_LOOKUP));
 
-  if (!PL_DHASH_ENTRY_IS_BUSY(entry) ||
-      entry->mGlobalName.mDisabled) {
+  if (!PL_DHASH_ENTRY_IS_BUSY(entry)) {
     return nullptr;
   }
 
@@ -474,8 +425,7 @@ nsScriptNameSpaceManager::RegisterClassName(const char *aClassName,
                                             int32_t aDOMClassInfoID,
                                             bool aPrivileged,
                                             bool aXBLAllowed,
-                                            bool aDisabled,
-                                            const PRUnichar **aResult)
+                                            const char16_t **aResult)
 {
   if (!nsCRT::IsAscii(aClassName)) {
     NS_ERROR("Trying to register a non-ASCII class name");
@@ -504,7 +454,6 @@ nsScriptNameSpaceManager::RegisterClassName(const char *aClassName,
   s->mDOMClassInfoID = aDOMClassInfoID;
   s->mChromeOnly = aPrivileged;
   s->mAllowXBL = aXBLAllowed;
-  s->mDisabled = aDisabled;
 
   return NS_OK;
 }
@@ -569,7 +518,7 @@ nsScriptNameSpaceManager::RegisterDOMCIData(const char *aName,
                                             bool aHasClassInterface,
                                             const nsCID *aConstructorCID)
 {
-  const PRUnichar* className;
+  const char16_t* className;
   nsGlobalNameStruct *s = AddToHash(&mGlobalNames, aName, &className);
   NS_ENSURE_TRUE(s, NS_ERROR_OUT_OF_MEMORY);
 
@@ -627,10 +576,6 @@ nsScriptNameSpaceManager::OperateCategoryEntryHash(nsICategoryManager* aCategory
     type = nsGlobalNameStruct::eTypeProperty;
   } else if (strcmp(aCategory, JAVASCRIPT_NAVIGATOR_PROPERTY_CATEGORY) == 0) {
     type = nsGlobalNameStruct::eTypeNavigatorProperty;
-  } else if (strcmp(aCategory, JAVASCRIPT_GLOBAL_STATIC_NAMESET_CATEGORY) == 0) {
-    type = nsGlobalNameStruct::eTypeStaticNameSet;
-  } else if (strcmp(aCategory, JAVASCRIPT_GLOBAL_DYNAMIC_NAMESET_CATEGORY) == 0) {
-    type = nsGlobalNameStruct::eTypeDynamicNameSet;
   } else {
     return NS_OK;
   }
@@ -766,7 +711,7 @@ nsScriptNameSpaceManager::RemoveCategoryEntryFromHash(nsICategoryManager* aCateg
 
 NS_IMETHODIMP
 nsScriptNameSpaceManager::Observe(nsISupports* aSubject, const char* aTopic,
-                                  const PRUnichar* aData)
+                                  const char16_t* aData)
 {
   if (!aData) {
     return NS_OK;
@@ -840,7 +785,7 @@ EnumerateName(PLDHashTable*, PLDHashEntryHdr *hdr, uint32_t, void* aClosure)
 {
   GlobalNameMapEntry *entry = static_cast<GlobalNameMapEntry *>(hdr);
   NameClosure* closure = static_cast<NameClosure*>(aClosure);
-  return closure->enumerator(entry->mKey, closure->closure);
+  return closure->enumerator(entry->mKey, entry->mGlobalName, closure->closure);
 }
 
 void
@@ -863,14 +808,20 @@ static size_t
 SizeOfEntryExcludingThis(PLDHashEntryHdr *aHdr, MallocSizeOf aMallocSizeOf,
                          void *aArg)
 {
-    GlobalNameMapEntry* entry = static_cast<GlobalNameMapEntry*>(aHdr);
-    return entry->SizeOfExcludingThis(aMallocSizeOf);
+  GlobalNameMapEntry* entry = static_cast<GlobalNameMapEntry*>(aHdr);
+  return entry->SizeOfExcludingThis(aMallocSizeOf);
 }
 
-int64_t
-nsScriptNameSpaceManager::Amount()
+MOZ_DEFINE_MALLOC_SIZE_OF(ScriptNameSpaceManagerMallocSizeOf)
+
+NS_IMETHODIMP
+nsScriptNameSpaceManager::CollectReports(
+  nsIHandleReportCallback* aHandleReport, nsISupports* aData, bool aAnonymize)
 {
-  return SizeOfIncludingThis(MallocSizeOf);
+  return MOZ_COLLECT_REPORT(
+    "explicit/script-namespace-manager", KIND_HEAP, UNITS_BYTES,
+    SizeOfIncludingThis(ScriptNameSpaceManagerMallocSizeOf),
+    "Memory used for the script namespace manager.");
 }
 
 size_t

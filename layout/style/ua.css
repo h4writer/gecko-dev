@@ -2,9 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-@import url(resource://gre-resources/html.css);
-@import url(chrome://global/content/xul.css);
-
 @namespace parsererror url(http://www.mozilla.org/newlayout/xml/parsererror.xml);
 @namespace xul url(http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul);
 
@@ -16,12 +13,12 @@
 
 *|*::-moz-table {
   display: table !important;
-  -moz-box-sizing: border-box; /* XXX do we really want this? */
+  box-sizing: border-box; /* XXX do we really want this? */
 }
 
 *|*::-moz-inline-table {
   display: inline-table !important;
-  -moz-box-sizing: border-box; /* XXX do we really want this? */
+  box-sizing: border-box; /* XXX do we really want this? */
 }
 
 *|*::-moz-table-outer {
@@ -56,7 +53,7 @@
   display: table-row !important;
 }
 
-/* The ::-moz-table-column pseudo-element is for extra columns at the end 
+/* The ::-moz-table-column pseudo-element is for extra columns at the end
    of a table. */
 *|*::-moz-table-column {
   display: table-column !important;
@@ -65,7 +62,7 @@
 *|*::-moz-table-column-group {
   display: table-column-group !important;
 }
- 
+
 *|*::-moz-table-row-group {
   display: table-row-group !important;
 }
@@ -75,15 +72,37 @@
   white-space: inherit;
 }
 
+/* Ruby */
+@supports(display:ruby) {
+  *|*::-moz-ruby {
+    display: ruby;
+  }
+  *|*::-moz-ruby-base {
+    display: ruby-base;
+  }
+  *|*::-moz-ruby-text {
+    display: ruby-text;
+  }
+  *|*::-moz-ruby-base-container {
+    display: ruby-base-container;
+  }
+  *|*::-moz-ruby-text-container {
+    display: ruby-text-container;
+  }
+}
+
 /* Lists */
 
 *|*::-moz-list-bullet, *|*::-moz-list-number {
   display: inline;
   vertical-align: baseline;
-  /* Note that this padding is suppressed for some CJK numbering styles;
-   * see bug 934072 */
-  -moz-padding-end: 0.5em;
+  font-variant-numeric: tabular-nums;
 }
+
+/* SVG documents don't always load this file but they do have links.
+ * If you change the link rules, consider carefully whether to make
+ * the same changes to svg.css.
+ */
 
 /* Links */
 
@@ -103,6 +122,7 @@
   position: static !important;
   unicode-bidi: inherit;
   text-overflow: inherit;
+  overflow-clip-box: inherit;
 }
 
 *|*::-moz-anonymous-block, *|*::-moz-anonymous-positioned-block {
@@ -115,6 +135,7 @@
   opacity: inherit;
   text-decoration: inherit;
   -moz-box-ordinal-group: inherit !important;
+  overflow-clip-box: inherit;
 }
 
 *|*::-moz-xul-anonymous-block {
@@ -123,6 +144,7 @@
   float: none ! important;
   -moz-box-ordinal-group: inherit !important;
   text-overflow: inherit;
+  overflow-clip-box: inherit;
 }
 
 *|*::-moz-scrolled-content, *|*::-moz-scrolled-canvas,
@@ -151,6 +173,7 @@
      frame tree. */
   position: static !important;
   float: none !important;
+  overflow-clip-box: inherit;
 }
 
 *|*::-moz-viewport, *|*::-moz-viewport-scroll, *|*::-moz-canvas, *|*::-moz-scrolled-canvas {
@@ -165,7 +188,7 @@
 %endif
 }
 
-*|*::-moz-column-content { 
+*|*::-moz-column-content {
   /* the column boxes inside a column-flowed block */
   /* make unicode-bidi inherit, otherwise it has no effect on column boxes */
   unicode-bidi: inherit;
@@ -177,9 +200,10 @@
   height: 100%;
 }
 
-*|*::-moz-anonymous-flex-item {
-  /* Anonymous blocks that wrap contiguous runs of inline non-replaced
-   * content inside of a flex container. */
+*|*::-moz-anonymous-flex-item,
+*|*::-moz-anonymous-grid-item {
+  /* Anonymous blocks that wrap contiguous runs of text
+   * inside of a flex or grid container. */
   display: block;
 }
 
@@ -248,7 +272,7 @@
   max-width: none !important;
   min-height: 0 !important;
   max-height: none !important;
-  -moz-box-sizing: border-box !important; 
+  box-sizing: border-box !important;
 }
 
 /* If there is a full-screen element that is not the root then
@@ -283,4 +307,86 @@ parsererror|sourcetext {
   color: red;
   font-weight: bold;
   font-size: 12pt;
+}
+
+div:-moz-native-anonymous.moz-touchcaret,
+div:-moz-native-anonymous.moz-selectioncaret-left,
+div:-moz-native-anonymous.moz-selectioncaret-right {
+  background-image: url("resource://gre/res/text_caret.png");
+  position: absolute;
+  width: 29px;
+  height: 31px;
+  margin-left: -15px;
+  background-position: center center;
+  background-size: 100% 100%;
+  z-index: 2147483647;
+}
+
+div:-moz-native-anonymous.moz-selectioncaret-left.tilt {
+  background-image: url("resource://gre/res/text_caret_tilt_left.png");
+  margin-left: -29px;
+  width: 29px;
+}
+
+div:-moz-native-anonymous.moz-selectioncaret-right.tilt {
+  background-image: url("resource://gre/res/text_caret_tilt_right.png");
+  margin-left: 0px;
+  width: 29px;
+}
+
+@media (min-resolution: 1.5dppx) {
+  div:-moz-native-anonymous.moz-touchcaret,
+  div:-moz-native-anonymous.moz-selectioncaret-left,
+  div:-moz-native-anonymous.moz-selectioncaret-right {
+    background-image: url("resource://gre/res/text_caret@1.5x.png");
+  }
+
+  div:-moz-native-anonymous.moz-selectioncaret-left.tilt {
+    background-image: url("resource://gre/res/text_caret_tilt_left@1.5x.png");
+  }
+
+  div:-moz-native-anonymous.moz-selectioncaret-right.tilt {
+    background-image: url("resource://gre/res/text_caret_tilt_right@1.5x.png");
+  }
+}
+
+@media (min-resolution: 2dppx) {
+  div:-moz-native-anonymous.moz-touchcaret,
+  div:-moz-native-anonymous.moz-selectioncaret-left,
+  div:-moz-native-anonymous.moz-selectioncaret-right {
+    background-image: url("resource://gre/res/text_caret@2x.png");
+  }
+
+  div:-moz-native-anonymous.moz-selectioncaret-left.tilt {
+    background-image: url("resource://gre/res/text_caret_tilt_left@2x.png");
+  }
+
+  div:-moz-native-anonymous.moz-selectioncaret-right.tilt {
+    background-image: url("resource://gre/res/text_caret_tilt_right@2x.png");
+  }
+}
+
+@media (min-resolution: 2.25dppx) {
+  div:-moz-native-anonymous.moz-touchcaret,
+  div:-moz-native-anonymous.moz-selectioncaret-left,
+  div:-moz-native-anonymous.moz-selectioncaret-right {
+    background-image: url("resource://gre/res/text_caret@2.25x.png");
+  }
+
+  div:-moz-native-anonymous.moz-selectioncaret-left.tilt {
+    background-image: url("resource://gre/res/text_caret_tilt_left@2.25x.png");
+  }
+
+  div:-moz-native-anonymous.moz-selectioncaret-right.tilt {
+    background-image: url("resource://gre/res/text_caret_tilt_right@2.25x.png");
+  }
+}
+
+div:-moz-native-anonymous.moz-touchcaret.hidden,
+div:-moz-native-anonymous.moz-selectioncaret-left.hidden,
+div:-moz-native-anonymous.moz-selectioncaret-right.hidden {
+  width: 0px;
+  height: 0px;
+  margin: 0px;
+  visibility: hidden;
 }

@@ -5,33 +5,33 @@
 const TAB_STATE_NEEDS_RESTORE = 1;
 const TAB_STATE_RESTORING = 2;
 
-const FRAME_SCRIPT = "chrome://mochitests/content/browser/browser/components/" +
-                     "sessionstore/test/content.js";
+const ROOT = getRootDirectory(gTestPath);
+const FRAME_SCRIPTS = [
+  ROOT + "content.js",
+  ROOT + "content-forms.js"
+];
 
 let mm = Cc["@mozilla.org/globalmessagemanager;1"]
            .getService(Ci.nsIMessageListenerManager);
-mm.loadFrameScript(FRAME_SCRIPT, true);
-mm.addMessageListener("SessionStore:setupSyncHandler", onSetupSyncHandler);
 
-/**
- * This keeps track of all SyncHandlers passed to chrome from frame scripts.
- * We need this to let tests communicate with frame scripts and cause (a)sync
- * flushes.
- */
-let SyncHandlers = new WeakMap();
-function onSetupSyncHandler(msg) {
-  SyncHandlers.set(msg.target, msg.objects.handler);
+for (let script of FRAME_SCRIPTS) {
+  mm.loadFrameScript(script, true);
 }
 
 registerCleanupFunction(() => {
-  mm.removeDelayedFrameScript(FRAME_SCRIPT);
-  mm.removeMessageListener("SessionStore:setupSyncHandler", onSetupSyncHandler);
+  for (let script of FRAME_SCRIPTS) {
+    mm.removeDelayedFrameScript(script, true);
+  }
 });
 
 let tmp = {};
 Cu.import("resource://gre/modules/Promise.jsm", tmp);
+Cu.import("resource://gre/modules/Task.jsm", tmp);
 Cu.import("resource:///modules/sessionstore/SessionStore.jsm", tmp);
-let {Promise, SessionStore} = tmp;
+Cu.import("resource:///modules/sessionstore/SessionSaver.jsm", tmp);
+Cu.import("resource:///modules/sessionstore/SessionFile.jsm", tmp);
+Cu.import("resource:///modules/sessionstore/TabState.jsm", tmp);
+let {Promise, Task, SessionStore, SessionSaver, SessionFile, TabState} = tmp;
 
 let ss = Cc["@mozilla.org/browser/sessionstore;1"].getService(Ci.nsISessionStore);
 
@@ -61,7 +61,7 @@ function provideWindow(aCallback, aURL, aFeatures) {
     });
   }
 
-  let win = openDialog(getBrowserURL(), "", aFeatures || "chrome,all,dialog=no", aURL);
+  let win = openDialog(getBrowserURL(), "", aFeatures || "chrome,all,dialog=no", aURL || "about:blank");
   whenWindowLoaded(win, function onWindowLoaded(aWin) {
     if (!aURL) {
       info("Loaded a blank window.");
@@ -78,6 +78,12 @@ function provideWindow(aCallback, aURL, aFeatures) {
 
 // This assumes that tests will at least have some state/entries
 function waitForBrowserState(aState, aSetStateCallback) {
+  if (typeof aState == "string") {
+    aState = JSON.parse(aState);
+  }
+  if (typeof aState != "object") {
+    throw new TypeError("Argument must be an object or a JSON representation of an object");
+  }
   let windows = [window];
   let tabsRestored = 0;
   let expectedTabsRestored = 0;
@@ -155,8 +161,15 @@ function waitForBrowserState(aState, aSetStateCallback) {
   listening = true;
   gBrowser.tabContainer.addEventListener("SSTabRestored", onSSTabRestored, true);
 
+  // Ensure setBrowserState() doesn't remove the initial tab.
+  gBrowser.selectedTab = gBrowser.tabs[0];
+
   // Finally, call setBrowserState
   ss.setBrowserState(JSON.stringify(aState));
+}
+
+function promiseBrowserState(aState) {
+  return new Promise(resolve => waitForBrowserState(aState, resolve));
 }
 
 // Doesn't assume that the tab needs to be closed in a cleanup function.
@@ -184,21 +197,21 @@ function waitForTabState(aTab, aState, aCallback) {
  * Wait for a content -> chrome message.
  */
 function promiseContentMessage(browser, name) {
-  let deferred = Promise.defer();
   let mm = browser.messageManager;
 
-  function removeListener() {
-    mm.removeMessageListener(name, listener);
-  }
+  return new Promise(resolve => {
+    function removeListener() {
+      mm.removeMessageListener(name, listener);
+    }
 
-  function listener(msg) {
-    removeListener();
-    deferred.resolve(msg);
-  }
+    function listener(msg) {
+      removeListener();
+      resolve(msg.data);
+    }
 
-  mm.addMessageListener(name, listener);
-  registerCleanupFunction(removeListener);
-  return deferred.promise;
+    mm.addMessageListener(name, listener);
+    registerCleanupFunction(removeListener);
+  });
 }
 
 function waitForTopic(aTopic, aTimeout, aCallback) {
@@ -234,12 +247,7 @@ function waitForTopic(aTopic, aTimeout, aCallback) {
 
 /**
  * Wait until session restore has finished collecting its data and is
- * getting ready to write that data ("sessionstore-state-write").
- *
- * This function is meant to be called immediately after the code
- * that will trigger the saving.
- *
- * Note that this does not wait for the disk write to be complete.
+ * has written that data ("sessionstore-state-write-complete").
  *
  * @param {function} aCallback If sessionstore-state-write is sent
  * within buffering interval + 100 ms, the callback is passed |true|,
@@ -248,47 +256,59 @@ function waitForTopic(aTopic, aTimeout, aCallback) {
 function waitForSaveState(aCallback) {
   let timeout = 100 +
     Services.prefs.getIntPref("browser.sessionstore.interval");
-  return waitForTopic("sessionstore-state-write", timeout, aCallback);
+  return waitForTopic("sessionstore-state-write-complete", timeout, aCallback);
 }
 function promiseSaveState() {
-  let deferred = Promise.defer();
-  waitForSaveState(isSuccessful => {
-    if (isSuccessful) {
-      deferred.resolve();
-    } else {
-      deferred.reject(new Error("timeout"));
-    }});
-  return deferred.promise;
+  return new Promise(resolve => {
+    waitForSaveState(isSuccessful => {
+      if (!isSuccessful) {
+        throw new Error("timeout");
+      }
+
+      resolve();
+    });
+  });
 }
 function forceSaveState() {
-  let promise = promiseSaveState();
-  const PREF = "browser.sessionstore.interval";
-  // Set interval to an arbitrary non-0 duration
-  // to ensure that setting it to 0 will notify observers
-  Services.prefs.setIntPref(PREF, 1000);
-  Services.prefs.setIntPref(PREF, 0);
-  return promise.then(
-    function onSuccess(x) {
-      Services.prefs.clearUserPref(PREF);
-      return x;
-    },
-    function onError(x) {
-      Services.prefs.clearUserPref(PREF);
-      throw x;
-    }
-  );
+  return SessionSaver.run();
 }
 
-function whenBrowserLoaded(aBrowser, aCallback = next) {
-  aBrowser.addEventListener("load", function onLoad() {
-    aBrowser.removeEventListener("load", onLoad, true);
-    executeSoon(aCallback);
-  }, true);
+function promiseRecoveryFileContents() {
+  let promise = forceSaveState();
+  return promise.then(function() {
+    return OS.File.read(SessionFile.Paths.recovery, { encoding: "utf-8" });
+  });
 }
-function promiseBrowserLoaded(aBrowser) {
-  let deferred = Promise.defer();
-  whenBrowserLoaded(aBrowser, deferred.resolve);
-  return deferred.promise;
+
+let promiseForEachSessionRestoreFile = Task.async(function*(cb) {
+  for (let key of SessionFile.Paths.loadOrder) {
+    let data = "";
+    try {
+      data = yield OS.File.read(SessionFile.Paths[key], { encoding: "utf-8" });
+    } catch (ex if ex instanceof OS.File.Error
+	     && ex.becauseNoSuchFile) {
+      // Ignore missing files
+    }
+    cb(data, key);
+  }
+});
+
+function whenBrowserLoaded(aBrowser, aCallback = next, ignoreSubFrames = true, expectedURL = null) {
+  aBrowser.messageManager.addMessageListener("ss-test:loadEvent", function onLoad(msg) {
+    if (expectedURL && aBrowser.currentURI.spec != expectedURL) {
+      return;
+    }
+
+    if (!ignoreSubFrames || !msg.data.subframe) {
+      aBrowser.messageManager.removeMessageListener("ss-test:loadEvent", onLoad);
+      executeSoon(aCallback);
+    }
+  });
+}
+function promiseBrowserLoaded(aBrowser, ignoreSubFrames = true) {
+  return new Promise(resolve => {
+    whenBrowserLoaded(aBrowser, resolve, ignoreSubFrames);
+  });
 }
 function whenBrowserUnloaded(aBrowser, aContainer, aCallback = next) {
   aBrowser.addEventListener("unload", function onUnload() {
@@ -297,9 +317,9 @@ function whenBrowserUnloaded(aBrowser, aContainer, aCallback = next) {
   }, true);
 }
 function promiseBrowserUnloaded(aBrowser, aContainer) {
-  let deferred = Promise.defer();
-  whenBrowserUnloaded(aBrowser, aContainer, deferred.resolve);
-  return deferred.promise;
+  return new Promise(resolve => {
+    whenBrowserUnloaded(aBrowser, aContainer, resolve);
+  });
 }
 
 function whenWindowLoaded(aWindow, aCallback = next) {
@@ -309,6 +329,9 @@ function whenWindowLoaded(aWindow, aCallback = next) {
       aCallback(aWindow);
     });
   }, false);
+}
+function promiseWindowLoaded(aWindow) {
+  return new Promise(resolve => whenWindowLoaded(aWindow, resolve));
 }
 
 function whenTabRestored(aTab, aCallback = next) {
@@ -335,39 +358,64 @@ function BrowserWindowIterator() {
   }
 }
 
-let gProgressListener = {
+let gWebProgressListener = {
   _callback: null,
-  _checkRestoreState: true,
 
-  setCallback: function gProgressListener_setCallback(aCallback, aCheckRestoreState = true) {
+  setCallback: function (aCallback) {
     if (!this._callback) {
       window.gBrowser.addTabsProgressListener(this);
     }
     this._callback = aCallback;
-    this._checkRestoreState = aCheckRestoreState;
   },
 
-  unsetCallback: function gProgressListener_unsetCallback() {
+  unsetCallback: function () {
     if (this._callback) {
       this._callback = null;
       window.gBrowser.removeTabsProgressListener(this);
     }
   },
 
-  onStateChange:
-  function gProgressListener_onStateChange(aBrowser, aWebProgress, aRequest,
-                                           aStateFlags, aStatus) {
-    if ((!this._checkRestoreState ||
-         (aBrowser.__SS_restoreState && aBrowser.__SS_restoreState == TAB_STATE_RESTORING)) &&
-        aStateFlags & Ci.nsIWebProgressListener.STATE_STOP &&
+  onStateChange: function (aBrowser, aWebProgress, aRequest,
+                           aStateFlags, aStatus) {
+    if (aStateFlags & Ci.nsIWebProgressListener.STATE_STOP &&
         aStateFlags & Ci.nsIWebProgressListener.STATE_IS_NETWORK &&
         aStateFlags & Ci.nsIWebProgressListener.STATE_IS_WINDOW) {
-      let args = [aBrowser].concat(this._countTabs());
-      this._callback.apply(this, args);
+      this._callback(aBrowser);
+    }
+  }
+};
+
+registerCleanupFunction(function () {
+  gWebProgressListener.unsetCallback();
+});
+
+let gProgressListener = {
+  _callback: null,
+
+  setCallback: function (callback) {
+    Services.obs.addObserver(this, "sessionstore-debug-tab-restored", false);
+    this._callback = callback;
+  },
+
+  unsetCallback: function () {
+    if (this._callback) {
+      this._callback = null;
+    Services.obs.removeObserver(this, "sessionstore-debug-tab-restored");
     }
   },
 
-  _countTabs: function gProgressListener_countTabs() {
+  observe: function (browser, topic, data) {
+    gProgressListener.onRestored(browser);
+  },
+
+  onRestored: function (browser) {
+    if (browser.__SS_restoreState == TAB_STATE_RESTORING) {
+      let args = [browser].concat(gProgressListener._countTabs());
+      gProgressListener._callback.apply(gProgressListener, args);
+    }
+  },
+
+  _countTabs: function () {
     let needsRestore = 0, isRestoring = 0, wasRestored = 0;
 
     for (let win in BrowserWindowIterator()) {
@@ -408,14 +456,20 @@ function closeAllButPrimaryWindow() {
  * expected (e.g. reading a big session state from disk).
  */
 function whenNewWindowLoaded(aOptions, aCallback) {
-  let win = OpenBrowserWindow(aOptions);
+  let features = "";
+  let url = "about:blank";
+
+  if (aOptions && aOptions.private || false) {
+    features = ",private";
+    url = "about:privatebrowsing";
+  }
+
+  let win = openDialog(getBrowserURL(), "", "chrome,all,dialog=no" + features, url);
   whenDelayedStartupFinished(win, () => aCallback(win));
   return win;
 }
 function promiseNewWindowLoaded(aOptions) {
-  let deferred = Promise.defer();
-  whenNewWindowLoaded(aOptions, deferred.resolve);
-  return deferred.promise;
+  return new Promise(resolve => whenNewWindowLoaded(aOptions, resolve));
 }
 
 /**
@@ -423,16 +477,26 @@ function promiseNewWindowLoaded(aOptions) {
  * a window and wait until we received the "domwindowclosed" notification for it.
  */
 function promiseWindowClosed(win) {
-  let deferred = Promise.defer();
-
-  Services.obs.addObserver(function obs(subject, topic) {
-    if (subject == win) {
-      Services.obs.removeObserver(obs, topic);
-      deferred.resolve();
-    }
-  }, "domwindowclosed", false);
+  let promise = new Promise(resolve => {
+    Services.obs.addObserver(function obs(subject, topic) {
+      if (subject == win) {
+        Services.obs.removeObserver(obs, topic);
+        resolve();
+      }
+    }, "domwindowclosed", false);
+  });
 
   win.close();
+  return promise;
+}
+
+function runInContent(browser, func, arg, callback = null) {
+  let deferred = Promise.defer();
+
+  let mm = browser.messageManager;
+  mm.sendAsyncMessage("ss-test:run", {code: func.toSource()}, {arg: arg});
+  mm.addMessageListener("ss-test:runFinished", ({data}) => deferred.resolve(data));
+
   return deferred.promise;
 }
 
@@ -448,6 +512,9 @@ function whenDelayedStartupFinished(aWindow, aCallback) {
       executeSoon(aCallback);
     }
   }, "browser-delayed-startup-finished", false);
+}
+function promiseDelayedStartupFinished(aWindow) {
+  return new Promise(resolve => whenDelayedStartupFinished(aWindow, resolve));
 }
 
 /**
@@ -491,6 +558,7 @@ let TestRunner = {
    */
   finish: function () {
     closeAllButPrimaryWindow();
+    gBrowser.selectedTab = gBrowser.tabs[0];
     waitForBrowserState(this.backupState, finish);
   }
 };
@@ -500,17 +568,32 @@ function next() {
 }
 
 function promiseTabRestored(tab) {
-  let deferred = Promise.defer();
-
-  tab.addEventListener("SSTabRestored", function onRestored() {
-    tab.removeEventListener("SSTabRestored", onRestored);
-    deferred.resolve();
+  return new Promise(resolve => {
+    tab.addEventListener("SSTabRestored", function onRestored() {
+      tab.removeEventListener("SSTabRestored", onRestored);
+      resolve();
+    });
   });
-
-  return deferred.promise;
 }
 
 function sendMessage(browser, name, data = {}) {
   browser.messageManager.sendAsyncMessage(name, data);
   return promiseContentMessage(browser, name);
+}
+
+// This creates list of functions that we will map to their corresponding
+// ss-test:* messages names. Those will be sent to the frame script and
+// be used to read and modify form data.
+const FORM_HELPERS = [
+  "getTextContent",
+  "getInputValue", "setInputValue",
+  "getInputChecked", "setInputChecked",
+  "getSelectedIndex", "setSelectedIndex",
+  "getMultipleSelected", "setMultipleSelected",
+  "getFileNameArray", "setFileNameArray",
+];
+
+for (let name of FORM_HELPERS) {
+  let msg = "ss-test:" + name;
+  this[name] = (browser, data) => sendMessage(browser, msg, data);
 }

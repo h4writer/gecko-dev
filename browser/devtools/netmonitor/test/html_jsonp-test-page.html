@@ -5,6 +5,9 @@
 <html>
   <head>
     <meta charset="utf-8"/>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>Network Monitor test page</title>
   </head>
 
@@ -26,7 +29,9 @@
 
       function performRequests() {
         get("sjs_content-type-test-server.sjs?fmt=jsonp&jsonp=$_0123Fun", function() {
-          // Done.
+          get("sjs_content-type-test-server.sjs?fmt=jsonp2&jsonp=$_4567Sad", function() {
+            // Done.
+          });
         });
       }
     </script>

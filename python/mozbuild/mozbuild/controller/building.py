@@ -8,8 +8,10 @@ import getpass
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
+import which
 
 from collections import (
     namedtuple,
@@ -30,6 +32,26 @@ from ..compilation.warnings import (
     WarningsDatabase,
 )
 
+from textwrap import TextWrapper
+
+INSTALL_TESTS_CLOBBER = ''.join([TextWrapper().fill(line) + '\n' for line in
+'''
+The build system was unable to install tests because the CLOBBER file has \
+been updated. This means if you edited any test files, your changes may not \
+be picked up until a full/clobber build is performed.
+
+The easiest and fastest way to perform a clobber build is to run:
+
+ $ mach clobber
+ $ mach build
+
+If you did not modify any test files, it is safe to ignore this message \
+and proceed with running tests. To do this run:
+
+ $ touch {clobber_file}
+'''.splitlines()])
+
+
 
 BuildOutputResult = namedtuple('BuildOutputResult',
     ('warning', 'state_changed', 'for_display'))
@@ -40,20 +62,12 @@ class TierStatus(object):
 
     The build system is organized into linear phases called tiers. Each tier
     executes in the order it was defined, 1 at a time.
-
-    Tiers can have subtiers. Subtiers can execute in any order. Some subtiers
-    execute sequentially. Others are concurrent.
-
-    Subtiers can have directories. Directories can execute in any order, just
-    like subtiers.
     """
 
     def __init__(self, resources):
         """Accepts a SystemResourceMonitor to record results against."""
         self.tiers = OrderedDict()
-        self.active_tier = None
-        self.active_subtiers = set()
-        self.active_dirs = {}
+        self.active_tiers = set()
         self.resources = resources
 
     def set_tiers(self, tiers):
@@ -63,120 +77,30 @@ class TierStatus(object):
                 begin_time=None,
                 finish_time=None,
                 duration=None,
-                subtiers=OrderedDict(),
             )
 
-    def begin_tier(self, tier, subtiers):
+    def begin_tier(self, tier):
         """Record that execution of a tier has begun."""
         t = self.tiers[tier]
         # We should ideally use a monotonic clock here. Unfortunately, we won't
         # have one until Python 3.
         t['begin_time'] = time.time()
-        self.resources.begin_phase(self._phase(tier))
-        for subtier in subtiers:
-            t['subtiers'][subtier] = dict(
-                begin_time=None,
-                finish_time=None,
-                duration=None,
-                concurrent=False,
-                dirs=OrderedDict(),
-                dirs_complete=0,
-            )
-
-        self.active_tier = tier
-        self.active_subtiers = set()
-        self.active_dirs = {}
+        self.resources.begin_phase(tier)
+        self.active_tiers.add(tier)
 
     def finish_tier(self, tier):
         """Record that execution of a tier has finished."""
         t = self.tiers[tier]
         t['finish_time'] = time.time()
-        t['duration'] = self.resources.finish_phase(self._phase(tier))
-
-    def begin_subtier(self, tier, subtier, dirs):
-        """Record that execution of a subtier has begun."""
-        self.resources.begin_phase(self._phase(tier, subtier))
-
-        st = self.tiers[tier]['subtiers'][subtier]
-        st['begin_time'] = time.time()
-
-        for d in dirs:
-            st['dirs'][d] = dict(
-                begin_time=None,
-                finish_time=None,
-                duration=None,
-                concurrent=False,
-            )
-
-        if self.active_subtiers:
-            st['concurrent'] = True
-
-        self.active_subtiers.add(subtier)
-
-    def finish_subtier(self, tier, subtier):
-        """Record that execution of a subtier has finished."""
-        st = self.tiers[tier]['subtiers'][subtier]
-        st['finish_time'] = time.time()
-
-        self.active_subtiers.remove(subtier)
-        if self.active_subtiers:
-            st['concurrent'] = True
-
-        # A subtier may not have directories.
-        try:
-            del self.active_dirs[subtier]
-        except KeyError:
-            pass
-
-        st['duration'] = self.resources.finish_phase(self._phase(tier, subtier))
-
-    def begin_dir(self, tier, subtier, d):
-        """Record that execution of a directory has begun."""
-        self.resources.begin_phase(self._phase(tier, subtier, d))
-        entry = self.tiers[tier]['subtiers'][subtier]['dirs'][d]
-        entry['begin_time'] = time.time()
-
-        self.active_dirs.setdefault(subtier, set()).add(d)
-
-        if len(self.active_dirs[subtier]) > 1:
-            entry['concurrent'] = True
-
-    def finish_dir(self, tier, subtier, d):
-        """Record that execution of a directory has finished."""
-        st = self.tiers[tier]['subtiers'][subtier]
-        st['dirs_complete'] += 1
-
-        entry = st['dirs'][d]
-        entry['finish_time'] = time.time()
-
-        self.active_dirs[subtier].remove(d)
-        if self.active_dirs[subtier]:
-            entry['concurrent'] = True
-
-        entry['duration'] = self.resources.finish_phase(self._phase(tier,
-            subtier, d))
+        t['duration'] = self.resources.finish_phase(tier)
+        self.active_tiers.remove(tier)
 
     def tier_status(self):
         for tier, state in self.tiers.items():
-            active = self.active_tier == tier
+            active = tier in self.active_tiers
             finished = state['finish_time'] is not None
 
             yield tier, active, finished
-
-    def current_subtier_status(self):
-        if self.active_tier not in self.tiers:
-            return
-
-        for subtier, state in self.tiers[self.active_tier]['subtiers'].items():
-            active = subtier in self.active_subtiers
-            finished = state['finish_time'] is not None
-
-            yield subtier, active, finished
-
-    def current_dirs_status(self):
-        for subtier, dirs in self.active_dirs.items():
-            st = self.tiers[self.active_tier]['subtiers'][subtier]
-            yield subtier, st['dirs'].keys(), dirs, st['dirs_complete']
 
     def tiered_resource_usage(self):
         """Obtains an object containing resource usage for tiers.
@@ -191,38 +115,9 @@ class TierStatus(object):
                 start=state['begin_time'],
                 end=state['finish_time'],
                 duration=state['duration'],
-                subtiers=[],
             )
 
-            self.add_resources_to_dict(t_entry, phase=self._phase(tier))
-
-            for subtier, state in state['subtiers'].items():
-                st_entry = dict(
-                    name=subtier,
-                    start=state['begin_time'],
-                    end=state['finish_time'],
-                    duration=state['duration'],
-                    concurrent=state['concurrent'],
-                    dirs=[],
-                )
-
-                self.add_resources_to_dict(st_entry, phase=self._phase(tier,
-                    subtier))
-
-                for d, state in state['dirs'].items():
-                    d_entry = dict(
-                        name=d,
-                        start=state['begin_time'],
-                        end=state['finish_time'],
-                        duration=state['duration'],
-                    )
-
-                    self.add_resources_to_dict(d_entry, phase=self._phase(tier,
-                        subtier, d))
-
-                    st_entry['dirs'].append(d_entry)
-
-                t_entry['subtiers'].append(st_entry)
+            self.add_resources_to_dict(t_entry, phase=tier)
 
             o.append(t_entry)
 
@@ -256,15 +151,6 @@ class TierStatus(object):
 
             return d
 
-    def _phase(self, tier, subtier=None, d=None):
-        parts = [tier]
-        if subtier:
-            parts.append(subtier)
-        if d:
-            parts.append(d)
-
-        return '_'.join(parts)
-
 
 class BuildMonitor(MozbuildObject):
     """Monitors the output of the build."""
@@ -297,12 +183,6 @@ class BuildMonitor(MozbuildObject):
 
     def start_resource_recording(self):
         # This should be merged into start() once bug 892342 lands.
-
-        # Resource monitoring on Windows is currently busted because of
-        # multiprocessing issues. Bug 914563.
-        if self._is_windows():
-            return
-
         self.resources.start()
         self._resources_started = True
 
@@ -336,24 +216,10 @@ class BuildMonitor(MozbuildObject):
                 update_needed = False
             elif action == 'TIER_START':
                 tier = args[0]
-                subtiers = args[1:]
-                self.tiers.begin_tier(tier, subtiers)
+                self.tiers.begin_tier(tier)
             elif action == 'TIER_FINISH':
                 tier, = args
                 self.tiers.finish_tier(tier)
-            elif action == 'SUBTIER_START':
-                tier, subtier = args[0:2]
-                dirs = args[2:]
-                self.tiers.begin_subtier(tier, subtier, dirs)
-            elif action == 'SUBTIER_FINISH':
-                tier, subtier = args
-                self.tiers.finish_subtier(tier, subtier)
-            elif action == 'TIERDIR_START':
-                tier, subtier, d = args
-                self.tiers.begin_dir(tier, subtier, d)
-            elif action == 'TIERDIR_FINISH':
-                tier, subtier, d = args
-                self.tiers.finish_dir(tier, subtier, d)
             else:
                 raise Exception('Unknown build status: %s' % action)
 
@@ -568,12 +434,209 @@ class BuildMonitor(MozbuildObject):
 
         self.log(logging.WARNING, m_type, params, message)
 
+    def ccache_stats(self):
+        ccache_stats = None
+
+        try:
+            ccache = which.which('ccache')
+            output = subprocess.check_output([ccache, '-s'])
+            ccache_stats = CCacheStats(output)
+        except which.WhichError:
+            pass
+        except ValueError as e:
+            self.log(logging.WARNING, 'ccache', {'msg': str(e)}, '{msg}')
+
+        return ccache_stats
+
+
+class CCacheStats(object):
+    """Holds statistics from ccache.
+
+    Instances can be subtracted from each other to obtain differences.
+    print() or str() the object to show a ``ccache -s`` like output
+    of the captured stats.
+
+    """
+    STATS_KEYS = [
+        # (key, description)
+        # Refer to stats.c in ccache project for all the descriptions.
+        ('cache_hit_direct', 'cache hit (direct)'),
+        ('cache_hit_preprocessed', 'cache hit (preprocessed)'),
+        ('cache_miss', 'cache miss'),
+        ('link', 'called for link'),
+        ('preprocessing', 'called for preprocessing'),
+        ('multiple', 'multiple source files'),
+        ('stdout', 'compiler produced stdout'),
+        ('no_output', 'compiler produced no output'),
+        ('empty_output', 'compiler produced empty output'),
+        ('failed', 'compile failed'),
+        ('error', 'ccache internal error'),
+        ('preprocessor_error', 'preprocessor error'),
+        ('cant_use_pch', "can't use precompiled header"),
+        ('compiler_missing', "couldn't find the compiler"),
+        ('cache_file_missing', 'cache file missing'),
+        ('bad_args', 'bad compiler arguments'),
+        ('unsupported_lang', 'unsupported source language'),
+        ('compiler_check_failed', 'compiler check failed'),
+        ('autoconf', 'autoconf compile/link'),
+        ('unsupported_compiler_option', 'unsupported compiler option'),
+        ('out_stdout', 'output to stdout'),
+        ('out_device', 'output to a non-regular file'),
+        ('no_input', 'no input file'),
+        ('bad_extra_file', 'error hashing extra file'),
+        ('cache_files', 'files in cache'),
+        ('cache_size', 'cache size'),
+        ('cache_max_size', 'max cache size'),
+    ]
+
+    DIRECTORY_DESCRIPTION = "cache directory"
+    ABSOLUTE_KEYS = {'cache_max_size'}
+    FORMAT_KEYS = {'cache_size', 'cache_max_size'}
+
+    GiB = 1024 ** 3
+    MiB = 1024 ** 2
+    KiB = 1024
+
+    def __init__(self, output=None):
+        """Construct an instance from the output of ccache -s."""
+        self._values = {}
+        self.cache_dir = ""
+
+        if not output:
+            return
+
+        for line in output.splitlines():
+            line = line.strip()
+            if line:
+                self._parse_line(line)
+
+    def _parse_line(self, line):
+        if line.startswith(self.DIRECTORY_DESCRIPTION):
+            self.cache_dir = self._strip_prefix(line, self.DIRECTORY_DESCRIPTION)
+            return
+
+        for stat_key, stat_description in self.STATS_KEYS:
+            if line.startswith(stat_description):
+                raw_value = self._strip_prefix(line, stat_description)
+                self._values[stat_key] = self._parse_value(raw_value)
+                break
+        else:
+            raise ValueError('Failed to parse ccache stats output: %s' % line)
+
+    @staticmethod
+    def _strip_prefix(line, prefix):
+        return line[len(prefix):].strip() if line.startswith(prefix) else line
+
+    @staticmethod
+    def _parse_value(raw_value):
+        value = raw_value.split()
+        unit = ''
+        if len(value) == 1:
+            numeric = value[0]
+        elif len(value) == 2:
+            numeric, unit = value
+        else:
+            raise ValueError('Failed to parse ccache stats value: %s' % raw_value)
+
+        if '.' in numeric:
+            numeric = float(numeric)
+        else:
+            numeric = int(numeric)
+
+        if unit in ('GB', 'Gbytes'):
+            unit = CCacheStats.GiB
+        elif unit in ('MB', 'Mbytes'):
+            unit = CCacheStats.MiB
+        elif unit in ('KB', 'Kbytes'):
+            unit = CCacheStats.KiB
+        else:
+            unit = 1
+
+        return int(numeric * unit)
+
+    def hit_rate_message(self):
+        return 'ccache (direct) hit rate: {:.1%}; (preprocessed) hit rate: {:.1%}; miss rate: {:.1%}'.format(*self.hit_rates())
+
+    def hit_rates(self):
+        direct = self._values['cache_hit_direct']
+        preprocessed = self._values['cache_hit_preprocessed']
+        miss = self._values['cache_miss']
+        total = float(direct + preprocessed + miss)
+
+        if total > 0:
+            direct /= total
+            preprocessed /= total
+            miss /= total
+
+        return (direct, preprocessed, miss)
+
+    def __sub__(self, other):
+        result = CCacheStats()
+        result.cache_dir = self.cache_dir
+
+        for k, prefix in self.STATS_KEYS:
+            if k not in self._values and k not in other._values:
+                continue
+
+            our_value = self._values.get(k, 0)
+            other_value = other._values.get(k, 0)
+
+            if k in self.ABSOLUTE_KEYS:
+                result._values[k] = our_value
+            else:
+                result._values[k] = our_value - other_value
+
+        return result
+
+    def __str__(self):
+        LEFT_ALIGN = 34
+        lines = []
+
+        if self.cache_dir:
+            lines.append('%s%s' % (self.DIRECTORY_DESCRIPTION.ljust(LEFT_ALIGN),
+                                   self.cache_dir))
+
+        for stat_key, stat_description in self.STATS_KEYS:
+            if stat_key not in self._values:
+                continue
+
+            value = self._values[stat_key]
+
+            if stat_key in self.FORMAT_KEYS:
+                value = '%15s' % self._format_value(value)
+            else:
+                value = '%8u' % value
+
+            lines.append('%s%s' % (stat_description.ljust(LEFT_ALIGN), value))
+
+        return '\n'.join(lines)
+
+    def __nonzero__(self):
+        relative_values = [v for k, v in self._values.items()
+                           if k not in self.ABSOLUTE_KEYS]
+        return (all(v >= 0 for v in relative_values) and
+                any(v > 0 for v in relative_values))
+
+    @staticmethod
+    def _format_value(v):
+        if v > CCacheStats.GiB:
+            return '%.1f Gbytes' % (float(v) / CCacheStats.GiB)
+        elif v > CCacheStats.MiB:
+            return '%.1f Mbytes' % (float(v) / CCacheStats.MiB)
+        else:
+            return '%.1f Kbytes' % (float(v) / CCacheStats.KiB)
+
 
 class BuildDriver(MozbuildObject):
     """Provides a high-level API for build actions."""
 
     def install_tests(self, remove=True):
         """Install test files (through manifest)."""
+
+        if self.is_clobber_needed():
+            print(INSTALL_TESTS_CLOBBER.format(
+                  clobber_file=os.path.join(self.topobjdir, 'CLOBBER')))
+            sys.exit(1)
 
         env = {}
         if not remove:

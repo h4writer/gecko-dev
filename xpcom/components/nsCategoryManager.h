@@ -34,9 +34,7 @@ class nsIMemoryReporter;
 class CategoryLeaf : public nsDepCharHashKey
 {
 public:
-  CategoryLeaf(const char* aKey)
-    : nsDepCharHashKey(aKey),
-      value(nullptr) { }
+  explicit CategoryLeaf(const char* aKey) : nsDepCharHashKey(aKey), value(nullptr) {}
   const char* value;
 };
 
@@ -50,40 +48,40 @@ class CategoryNode
 {
 public:
   NS_METHOD GetLeaf(const char* aEntryName,
-                    char** _retval);
+                    char** aResult);
 
   NS_METHOD AddLeaf(const char* aEntryName,
                     const char* aValue,
                     bool aReplace,
-                    char** _retval,
+                    char** aResult,
                     PLArenaPool* aArena);
 
   void DeleteLeaf(const char* aEntryName);
 
-  void Clear() {
+  void Clear()
+  {
     mozilla::MutexAutoLock lock(mLock);
     mTable.Clear();
   }
 
-  uint32_t Count() {
+  uint32_t Count()
+  {
     mozilla::MutexAutoLock lock(mLock);
     uint32_t tCount = mTable.Count();
     return tCount;
   }
 
-  NS_METHOD Enumerate(nsISimpleEnumerator** _retval);
+  NS_METHOD Enumerate(nsISimpleEnumerator** aResult);
 
   // CategoryNode is arena-allocated, with the strings
   static CategoryNode* Create(PLArenaPool* aArena);
   ~CategoryNode();
-  void operator delete(void*) { }
+  void operator delete(void*) {}
 
   size_t SizeOfExcludingThis(mozilla::MallocSizeOf aMallocSizeOf);
 
 private:
-  CategoryNode()
-    : mLock("CategoryLeaf")
-  { }
+  CategoryNode() : mLock("CategoryLeaf") {}
 
   void* operator new(size_t aSize, PLArenaPool* aArena);
 
@@ -98,12 +96,13 @@ private:
  * This implementation is thread-safe.
  */
 class nsCategoryManager MOZ_FINAL
-  : public mozilla::MemoryUniReporter
-  , public nsICategoryManager
+  : public nsICategoryManager
+  , public nsIMemoryReporter
 {
 public:
   NS_DECL_ISUPPORTS
   NS_DECL_NSICATEGORYMANAGER
+  NS_DECL_NSIMEMORYREPORTER
 
   /**
    * Suppress or unsuppress notifications of category changes to the
@@ -123,8 +122,6 @@ public:
 
   static nsCategoryManager* GetSingleton();
   static void Destroy();
-
-  int64_t Amount() MOZ_OVERRIDE;
 
 private:
   static nsCategoryManager* gCategoryManager;

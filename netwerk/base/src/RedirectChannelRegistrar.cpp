@@ -7,11 +7,11 @@
 namespace mozilla {
 namespace net {
 
-NS_IMPL_ISUPPORTS1(RedirectChannelRegistrar, nsIRedirectChannelRegistrar)
+NS_IMPL_ISUPPORTS(RedirectChannelRegistrar, nsIRedirectChannelRegistrar)
 
 RedirectChannelRegistrar::RedirectChannelRegistrar()
-  : mRealChannels(64)
-  , mParentChannels(64)
+  : mRealChannels(32)
+  , mParentChannels(32)
   , mId(1)
 {
 }

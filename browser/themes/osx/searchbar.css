@@ -2,9 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+.searchbar-dropmarker-image {
+  --searchbar-dropmarker-url: url("chrome://browser/skin/searchbar-dropmarker.png");
+  --searchbar-dropmarker-2x-url: url("chrome://browser/skin/searchbar-dropmarker@2x.png");
+}
+
 .searchbar-textbox {
   border-radius: 10000px;
-  min-width: 6em;
 }
 
 .searchbar-engine-button {
@@ -34,7 +38,7 @@
 }
 
 .searchbar-dropmarker-image {
-  list-style-image: url("chrome://browser/skin/searchbar-dropmarker.png");
+  list-style-image: var(--searchbar-dropmarker-url);
   -moz-margin-start: 2px;
 }
 
@@ -48,17 +52,12 @@
 }
 
 @media (min-resolution: 2dppx) {
-  .searchbar-engine-image,
-  .searchbar-engine-menuitem > .menu-iconic-left > .menu-iconic-icon {
-    image-rendering: -moz-crisp-edges;
-  }
-
   .searchbar-engine-image {
     list-style-image: url("chrome://mozapps/skin/places/defaultFavicon@2x.png");
   }
 
   .searchbar-dropmarker-image {
-    list-style-image: url("chrome://browser/skin/searchbar-dropmarker@2x.png");
+    list-style-image: var(--searchbar-dropmarker-2x-url);
     width: 7px;
   }
 

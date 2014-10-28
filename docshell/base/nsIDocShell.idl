@@ -11,6 +11,13 @@
 #include "js/TypeDecls.h"
 class nsPresContext;
 class nsIPresShell;
+
+namespace mozilla {
+namespace dom {
+class URLSearchParams;
+}
+}
+
 %}
 
 /**
@@ -19,6 +26,7 @@ class nsIPresShell;
 
 [ptr] native nsPresContext(nsPresContext);
 [ptr] native nsIPresShell(nsIPresShell);
+[ptr] native URLSearchParams(mozilla::dom::URLSearchParams);
 
 interface nsIURI;
 interface nsIChannel;
@@ -41,10 +49,12 @@ interface nsIWebBrowserPrint;
 interface nsIVariant;
 interface nsIPrivacyTransitionObserver;
 interface nsIReflowObserver;
-
+interface nsIScrollObserver;
+interface nsITabParent;
+ 
 typedef unsigned long nsLoadFlags;
 
-[scriptable, builtinclass, uuid(55ca6545-7ce4-49ad-8117-8286ca9c61bb)]
+[scriptable, builtinclass, uuid(da8f78f1-8f20-4d6d-be56-fe53e177b630)]
 interface nsIDocShell : nsIDocShellTreeItem
 {
   /**
@@ -111,6 +121,10 @@ interface nsIDocShell : nsIDocShellTreeItem
   // Whether the load should be treated as srcdoc load, rather than a URI one.
   const long INTERNAL_LOAD_FLAGS_IS_SRCDOC               = 0x40;
 
+  const long INTERNAL_LOAD_FLAGS_NO_OPENER               = 0x100;
+
+  // NB: 0x80 is available.
+
   /**
    * Loads the given URI.  This method is identical to loadURI(...) except
    * that its parameter list is broken out instead of being packaged inside
@@ -136,6 +150,10 @@ interface nsIDocShell : nsIDocShellTreeItem
    * @param aSrcdoc           When INTERNAL_LOAD_FLAGS_IS_SRCDOC is set, the
    *                          contents of this parameter will be loaded instead
    *                          of aURI.
+   * @param aSourceDocShell - The source browsing context for the navigation.
+   * @param aBaseURI        - The base URI to be used for the load.  Set in
+   *                          srcdoc loads as it cannot otherwise be inferred
+   *                          in certain situations such as view-source.
    */
   [noscript]void internalLoad(in nsIURI aURI,
                               in nsIURI aReferrer,
@@ -150,6 +168,8 @@ interface nsIDocShell : nsIDocShellTreeItem
                               in nsISHEntry aSHEntry,
                               in boolean firstParty,
                               in AString aSrcdoc,
+                              in nsIDocShell aSourceDocShell,
+                              in nsIURI aBaseURI,
                               out nsIDocShell aDocShell,
                               out nsIRequest aRequest);
 
@@ -438,6 +458,11 @@ interface nsIDocShell : nsIDocShellTreeItem
                         in wstring aURL,
                         [optional] in nsIChannel aFailedChannel);
 
+  /**
+   * The channel that failed to load and resulted in an error page.
+   * May be null. Relevant only to error pages.
+   */
+  readonly attribute nsIChannel failedChannel;
 
   /**
    * Keeps track of the previous SHTransaction index and the current
@@ -544,6 +569,19 @@ interface nsIDocShell : nsIDocShellTreeItem
    */
   [infallible] readonly attribute boolean hasMixedDisplayContentBlocked;
 
+   /**
+   * This attribute determines whether a document has Tracking Content
+   * that has been blocked from loading.
+   */
+   [infallible] readonly attribute boolean hasTrackingContentBlocked;
+
+   /**
+   * This attribute determines whether Tracking Content is loaded on the
+   * document. When it is true, tracking content was not blocked and has
+   * loaded (or is about to load) on the page.
+   */
+  [infallible] readonly attribute boolean hasTrackingContentLoaded;
+
   /**
    * Disconnects this docshell's editor from its window, and stores the
    * editor data in the open document's session history entry.  This
@@ -630,6 +668,25 @@ interface nsIDocShell : nsIDocShellTreeItem
     out nsIPrincipal parentCharsetPrincipal);
 
   /**
+   * Whether the docShell records profile timeline markers at the moment
+   */
+  [infallible] attribute boolean recordProfileTimelineMarkers;
+
+  /**
+   * Return a DOMHighResTimeStamp representing the number of
+   * milliseconds from an arbitrary point in time.  The reference
+   * point is shared by all DocShells and is also used by timestamps
+   * on markers.
+   */
+  DOMHighResTimeStamp now();
+
+  /**
+   * Returns and flushes the profile timeline markers gathered by the docShell
+   */
+  [implicit_jscontext]
+  jsval popProfileTimelineMarkers();
+
+  /**
    * Add an observer to the list of parties to be notified when this docshell's
    * private browsing status is changed. |obs| must support weak references.
    */
@@ -658,6 +715,24 @@ interface nsIDocShell : nsIDocShellTreeItem
   [noscript] void notifyReflowObservers(in bool interruptible,
                                         in DOMHighResTimeStamp start,
                                         in DOMHighResTimeStamp end);
+
+  /**
+   * Add an observer to the list of parties to be notified when scroll position
+   * of some elements is changed.
+   */
+  [noscript] void addWeakScrollObserver(in nsIScrollObserver obs);
+
+  /**
+   * Add an observer to the list of parties to be notified when scroll position
+   * of some elements is changed.
+   */
+  [noscript] void removeWeakScrollObserver(in nsIScrollObserver obs);
+
+  /**
+   * Notify all attached observers that the scroll position of some element
+   * has changed.
+   */
+  [noscript] void notifyScrollObservers();
 
   /**
    * Returns true if this docshell corresponds to an <iframe mozbrowser>.
@@ -782,6 +857,12 @@ interface nsIDocShell : nsIDocShellTreeItem
    * navigated by it.  This is the "one permitted sandboxed navigator".
    */
   attribute nsIDocShell onePermittedSandboxedNavigator;
+
+  /**
+   * Returns true if we are sandboxed from aTargetDocShell.
+   * aTargetDocShell - the browsing context we are attempting to navigate.
+   */
+  [noscript,notxpcom,nostdcall] bool isSandboxedFrom(in nsIDocShell aTargetDocShell);
 
   /**
    * This member variable determines whether a document has Mixed Active Content that
@@ -925,4 +1006,30 @@ interface nsIDocShell : nsIDocShellTreeItem
    * docshell.device_size_is_page_size pref.
    */
   [infallible] attribute boolean deviceSizeIsPageSize;
+
+  /**
+   * Regarding setOpener / getOpener - We can't use XPIDL's "attribute"
+   * for notxpcom, so we're relegated to using explicit gets / sets. This
+   * should be fine, considering that these methods should only ever be
+   * called from native code.
+   */
+  [noscript,notxpcom,nostdcall] void setOpener(in nsITabParent aOpener);
+  [noscript,notxpcom,nostdcall] nsITabParent getOpener();
+
+  /**
+   * See the documentation for setOpener and getOpener about why we
+   * don't use attribute here instead.
+   */
+  [noscript,notxpcom,nostdcall] void setOpenedRemote(in nsITabParent aOpenedRemote);
+  [noscript,notxpcom,nostdcall] nsITabParent getOpenedRemote();
+
+  // URLSearchParams for the window.location is owned by the docShell.
+  [noscript,notxpcom] URLSearchParams getURLSearchParams();
+
+  /**
+   * This attribute determines whether a document which is not about:blank has
+   * already be loaded by this docShell.
+   */
+  [infallible] readonly attribute boolean hasLoadedNonBlankURI;
+
 };

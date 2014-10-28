@@ -16,9 +16,6 @@
 #include <unistd.h>
 #elif defined(XP_WIN)
 #include <windows.h>
-#elif defined(XP_OS2)
-#define INCL_DOSERRORS
-#include <os2.h>
 #else
 // XXX add necessary include file for ftruncate (or equivalent)
 #endif
@@ -87,7 +84,7 @@ private:
 
 class nsEvictDiskCacheEntriesEvent : public nsRunnable {
 public:
-    nsEvictDiskCacheEntriesEvent(nsDiskCacheDevice *device)
+    explicit nsEvictDiskCacheEntriesEvent(nsDiskCacheDevice *device)
         : mDevice(device) {}
 
     NS_IMETHOD Run()
@@ -185,18 +182,18 @@ public:
     NS_DECL_ISUPPORTS
     NS_DECL_NSICACHEDEVICEINFO
 
-    nsDiskCacheDeviceInfo(nsDiskCacheDevice* device)
+    explicit nsDiskCacheDeviceInfo(nsDiskCacheDevice* device)
         :   mDevice(device)
     {
     }
 
-    virtual ~nsDiskCacheDeviceInfo() {}
-    
 private:
+    virtual ~nsDiskCacheDeviceInfo() {}
+
     nsDiskCacheDevice* mDevice;
 };
 
-NS_IMPL_ISUPPORTS1(nsDiskCacheDeviceInfo, nsICacheDeviceInfo)
+NS_IMPL_ISUPPORTS(nsDiskCacheDeviceInfo, nsICacheDeviceInfo)
 
 /* readonly attribute string description; */
 NS_IMETHODIMP nsDiskCacheDeviceInfo::GetDescription(char ** aDescription)
@@ -352,11 +349,6 @@ nsDiskCache::Truncate(PRFileDesc *  fd, uint32_t  newEOF)
         return NS_ERROR_FAILURE;
     }
 
-#elif defined(XP_OS2)
-    if (DosSetFileSize((HFILE) PR_FileDesc2NativeHandle(fd), newEOF) != NO_ERROR) {
-        NS_ERROR("DosSetFileSize failed");
-        return NS_ERROR_FAILURE;
-    }
 #else
     // add implementations for other platforms here
 #endif
@@ -401,8 +393,6 @@ nsDiskCacheDevice::Init()
     rv = mBindery.Init();
     if (NS_FAILED(rv))
         return rv;
-
-    nsDeleteDir::RemoveOldTrashes(mCacheDirectory);
 
     // Open Disk Cache
     rv = OpenDiskCache();

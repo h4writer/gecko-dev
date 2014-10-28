@@ -5,8 +5,10 @@
 
 #include "ContainerLayerD3D9.h"
 
-#include "ThebesLayerD3D9.h"
+#include "PaintedLayerD3D9.h"
 #include "ReadbackProcessor.h"
+
+using namespace mozilla::gfx;
 
 namespace mozilla {
 namespace layers {
@@ -89,21 +91,21 @@ ContainerLayerD3D9::RenderLayer()
       // don't need a background, we're going to paint all opaque stuff
       mSupportsComponentAlphaChildren = true;
     } else {
-      const gfx3DMatrix& transform3D = GetEffectiveTransform();
-      gfxMatrix transform;
+      Matrix4x4 transform3D = GetEffectiveTransform();
+      Matrix transform;
       // If we have an opaque ancestor layer, then we can be sure that
       // all the pixels we draw into are either opaque already or will be
       // covered by something opaque. Otherwise copying up the background is
       // not safe.
       HRESULT hr = E_FAIL;
       if (HasOpaqueAncestorLayer(this) &&
-          transform3D.Is2D(&transform) && !transform.HasNonIntegerTranslation()) {
+          transform3D.Is2D(&transform) && !ThebesMatrix(transform).HasNonIntegerTranslation()) {
         // Copy background up from below
         RECT dest = { 0, 0, visibleRect.width, visibleRect.height };
         RECT src = dest;
         ::OffsetRect(&src,
-                     visibleRect.x + int32_t(transform.x0),
-                     visibleRect.y + int32_t(transform.y0));
+                     visibleRect.x + int32_t(transform._31),
+                     visibleRect.y + int32_t(transform._32));
         if (!mD3DManager->CompositingDisabled()) {
           hr = device()->
             StretchRect(previousRenderTarget, &src, renderSurface, &dest, D3DTEXF_NONE);
@@ -157,9 +159,9 @@ ContainerLayerD3D9::RenderLayer()
     if (layerToRender->GetLayer()->GetEffectiveVisibleRegion().IsEmpty()) {
       continue;
     }
-    
+
     nsIntRect scissorRect =
-      layerToRender->GetLayer()->CalculateScissorRect(oldScissor, nullptr);
+      RenderTargetPixel::ToUntyped(layerToRender->GetLayer()->CalculateScissorRect(RenderTargetPixel::FromUntyped(oldScissor)));
     if (scissorRect.IsEmpty()) {
       continue;
     }
@@ -171,8 +173,8 @@ ContainerLayerD3D9::RenderLayer()
     d3drect.bottom = scissorRect.y + scissorRect.height;
     device()->SetScissorRect(&d3drect);
 
-    if (layerToRender->GetLayer()->GetType() == TYPE_THEBES) {
-      static_cast<ThebesLayerD3D9*>(layerToRender)->RenderThebesLayer(&readback);
+    if (layerToRender->GetLayer()->GetType() == TYPE_PAINTED) {
+      static_cast<PaintedLayerD3D9*>(layerToRender)->RenderPaintedLayer(&readback);
     } else {
       layerToRender->RenderLayer();
     }

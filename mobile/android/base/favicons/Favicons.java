@@ -7,38 +7,45 @@ package org.mozilla.gecko.favicons;
 
 import org.mozilla.gecko.AboutPages;
 import org.mozilla.gecko.AppConstants;
+import org.mozilla.gecko.GeckoAppShell;
+import org.mozilla.gecko.NewTabletUI;
 import org.mozilla.gecko.R;
 import org.mozilla.gecko.Tab;
 import org.mozilla.gecko.Tabs;
 import org.mozilla.gecko.db.BrowserDB;
 import org.mozilla.gecko.favicons.cache.FaviconCache;
-import org.mozilla.gecko.gfx.BitmapUtils;
 import org.mozilla.gecko.util.GeckoJarReader;
 import org.mozilla.gecko.util.NonEvictingLruCache;
 import org.mozilla.gecko.util.ThreadUtils;
 
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.text.TextUtils;
 import android.util.Log;
+import android.util.SparseArray;
 
 import java.io.File;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Iterator;
-import java.util.Map;
-import java.util.Set;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Favicons {
     private static final String LOGTAG = "GeckoFavicons";
 
     // A magic URL representing the app's own favicon, used for about: pages.
     private static final String BUILT_IN_FAVICON_URL = "about:favicon";
+
+    // A magic URL representing the app's search favicon, used for about:home.
+    private static final String BUILT_IN_SEARCH_URL = "about:search";
 
     // Size of the favicon bitmap cache, in bytes (Counting payload only).
     public static final int FAVICON_CACHE_SIZE_BYTES = 512 * 1024;
@@ -48,25 +55,30 @@ public class Favicons {
 
     public static final int NOT_LOADING  = 0;
     public static final int LOADED       = 1;
-    public static final int FLAG_PERSIST = 2;
-    public static final int FLAG_SCALE   = 4;
-
-    protected static Context sContext;
 
     // The default Favicon to show if no other can be found.
-    public static Bitmap sDefaultFavicon;
+    public static Bitmap defaultFavicon;
 
     // The density-adjusted default Favicon dimensions.
-    public static int sDefaultFaviconSize;
+    public static int defaultFaviconSize;
 
-    private static final Map<Integer, LoadFaviconTask> sLoadTasks = Collections.synchronizedMap(new HashMap<Integer, LoadFaviconTask>());
+    // The density-adjusted maximum Favicon dimensions.
+    public static int largestFaviconSize;
+
+    // Used to prevent multiple-initialisation.
+    public static final AtomicBoolean isInitialized = new AtomicBoolean(false);
+
+    // Executor for long-running Favicon Tasks.
+    public static final ExecutorService longRunningExecutor = Executors.newSingleThreadExecutor();
+
+    private static final SparseArray<LoadFaviconTask> loadTasks = new SparseArray<>();
 
     // Cache to hold mappings between page URLs and Favicon URLs. Used to avoid going to the DB when
     // doing so is not necessary.
-    private static final NonEvictingLruCache<String, String> sPageURLMappings = new NonEvictingLruCache<String, String>(NUM_PAGE_URL_MAPPINGS_TO_STORE);
+    private static final NonEvictingLruCache<String, String> pageURLMappings = new NonEvictingLruCache<>(NUM_PAGE_URL_MAPPINGS_TO_STORE);
 
     public static String getFaviconURLForPageURLFromCache(String pageURL) {
-        return sPageURLMappings.get(pageURL);
+        return pageURLMappings.get(pageURL);
     }
 
     /**
@@ -74,10 +86,10 @@ public class Favicons {
      * Useful for short-circuiting local database access.
      */
     public static void putFaviconURLForPageURLInCache(String pageURL, String faviconURL) {
-        sPageURLMappings.put(pageURL, faviconURL);
+        pageURLMappings.put(pageURL, faviconURL);
     }
 
-    private static FaviconCache sFaviconsCache;
+    private static FaviconCache faviconsCache;
 
     /**
      * Returns either NOT_LOADING, or LOADED if the onFaviconLoaded call could
@@ -111,8 +123,8 @@ public class Favicons {
      *
      * Returns null otherwise.
      */
-    public static Bitmap getCachedFaviconForSize(final String pageURL, int targetSize) {
-        final String faviconURL = sPageURLMappings.get(pageURL);
+    public static Bitmap getSizedFaviconForPageFromCache(final String pageURL, int targetSize) {
+        final String faviconURL = pageURLMappings.get(pageURL);
         if (faviconURL == null) {
             return null;
         }
@@ -134,11 +146,11 @@ public class Favicons {
      * @return The id of the asynchronous task created, NOT_LOADING if none is created, or
      *         LOADED if the value could be dispatched on the current thread.
      */
-    public static int getFaviconForSize(String pageURL, String faviconURL, int targetSize, int flags, OnFaviconLoadedListener listener) {
+    public static int getSizedFavicon(Context context, String pageURL, String faviconURL, int targetSize, int flags, OnFaviconLoadedListener listener) {
         // Do we know the favicon URL for this page already?
         String cacheURL = faviconURL;
         if (cacheURL == null) {
-            cacheURL = sPageURLMappings.get(pageURL);
+            cacheURL = pageURLMappings.get(pageURL);
         }
 
         // If there's no favicon URL given, try and hit the cache with the default one.
@@ -148,7 +160,7 @@ public class Favicons {
 
         // If it's something we can't even figure out a default URL for, just give up.
         if (cacheURL == null) {
-            return dispatchResult(pageURL, null, sDefaultFavicon, listener);
+            return dispatchResult(pageURL, null, defaultFavicon, listener);
         }
 
         Bitmap cachedIcon = getSizedFaviconFromCache(cacheURL, targetSize);
@@ -157,12 +169,12 @@ public class Favicons {
         }
 
         // Check if favicon has failed.
-        if (sFaviconsCache.isFailedFavicon(cacheURL)) {
-            return dispatchResult(pageURL, cacheURL, sDefaultFavicon, listener);
+        if (faviconsCache.isFailedFavicon(cacheURL)) {
+            return dispatchResult(pageURL, cacheURL, defaultFavicon, listener);
         }
 
         // Failing that, try and get one from the database or internet.
-        return loadUncachedFavicon(pageURL, faviconURL, flags, targetSize, listener);
+        return loadUncachedFavicon(context, pageURL, faviconURL, flags, targetSize, listener);
     }
 
     /**
@@ -176,7 +188,7 @@ public class Favicons {
      *         null if no applicable Favicon exists in the cache.
      */
     public static Bitmap getSizedFaviconFromCache(String faviconURL, int targetSize) {
-        return sFaviconsCache.getFaviconForDimensions(faviconURL, targetSize);
+        return faviconsCache.getFaviconForDimensions(faviconURL, targetSize);
     }
 
     /**
@@ -193,18 +205,19 @@ public class Favicons {
      * @param callback Callback to fire with the result.
      * @return The job ID of the spawned async task, if any.
      */
-    public static int getSizedFaviconForPageFromLocal(final String pageURL, final int targetSize, final OnFaviconLoadedListener callback) {
+    public static int getSizedFaviconForPageFromLocal(Context context, final String pageURL, final int targetSize,
+                                                      final OnFaviconLoadedListener callback) {
         // Firstly, try extremely hard to cheat.
         // Have we cached this favicon URL? If we did, we can consult the memcache right away.
-        String targetURL = sPageURLMappings.get(pageURL);
+        final String targetURL = pageURLMappings.get(pageURL);
         if (targetURL != null) {
             // Check if favicon has failed.
-            if (sFaviconsCache.isFailedFavicon(targetURL)) {
+            if (faviconsCache.isFailedFavicon(targetURL)) {
                 return dispatchResult(pageURL, targetURL, null, callback);
             }
 
             // Do we have a Favicon in the cache for this favicon URL?
-            Bitmap result = getSizedFaviconFromCache(targetURL, targetSize);
+            final Bitmap result = getSizedFaviconFromCache(targetURL, targetSize);
             if (result != null) {
                 // Victory - immediate response!
                 return dispatchResult(pageURL, targetURL, result, callback);
@@ -212,16 +225,21 @@ public class Favicons {
         }
 
         // No joy using in-memory resources. Go to background thread and ask the database.
-        LoadFaviconTask task = new LoadFaviconTask(ThreadUtils.getBackgroundHandler(), pageURL, targetURL, 0, callback, targetSize, true);
-        int taskId = task.getId();
-        sLoadTasks.put(taskId, task);
+        final LoadFaviconTask task =
+            new LoadFaviconTask(context, pageURL, targetURL, 0, callback, targetSize, true);
+        final int taskId = task.getId();
+        synchronized(loadTasks) {
+            loadTasks.put(taskId, task);
+        }
         task.execute();
+
         return taskId;
     }
 
-    public static int getSizedFaviconForPageFromLocal(final String pageURL, final OnFaviconLoadedListener callback) {
-        return getSizedFaviconForPageFromLocal(pageURL, sDefaultFaviconSize, callback);
+    public static int getSizedFaviconForPageFromLocal(Context context, final String pageURL, final OnFaviconLoadedListener callback) {
+        return getSizedFaviconForPageFromLocal(context, pageURL, defaultFaviconSize, callback);
     }
+
     /**
      * Helper method to determine the URL of the Favicon image for a given page URL by querying the
      * history database. Should only be called from the background thread - does database access.
@@ -230,11 +248,11 @@ public class Favicons {
      * @return The URL of the Favicon used by that webpage, according to either the History database
      *         or a somewhat educated guess.
      */
-    public static String getFaviconUrlForPageUrl(String pageURL) {
+    public static String getFaviconURLForPageURL(Context context, String pageURL) {
         // Attempt to determine the Favicon URL from the Tabs datastructure. Can dodge having to use
         // the database sometimes by doing this.
         String targetURL;
-        Tab theTab = Tabs.getInstance().getTabForUrl(pageURL);
+        Tab theTab = Tabs.getInstance().getFirstTabForUrl(pageURL);
         if (theTab != null) {
             targetURL = theTab.getFaviconURL();
             if (targetURL != null) {
@@ -242,12 +260,15 @@ public class Favicons {
             }
         }
 
-        targetURL = BrowserDB.getFaviconUrlForHistoryUrl(sContext.getContentResolver(), pageURL);
-        if (targetURL == null) {
-            // Nothing in the history database. Fall back to the default URL and hope for the best.
-            targetURL = guessDefaultFaviconURL(pageURL);
+        // Try to find the faviconURL in the history and/or bookmarks table.
+        final ContentResolver resolver = context.getContentResolver();
+        targetURL = BrowserDB.getFaviconURLFromPageURL(resolver, pageURL);
+        if (targetURL != null) {
+            return targetURL;
         }
-        return targetURL;
+
+        // If we still can't find it, fall back to the default URL and hope for the best.
+        return guessDefaultFaviconURL(pageURL);
     }
 
     /**
@@ -255,8 +276,8 @@ public class Favicons {
      * Contains logic to prevent the repeated loading of Favicons which have previously failed.
      * There is no support for recovery from transient failures.
      *
-     * @param pageUrl URL of the page for which to load a Favicon. If null, no job is created.
-     * @param faviconUrl The URL of the Favicon to load. If null, an attempt to infer the value from
+     * @param pageURL URL of the page for which to load a Favicon. If null, no job is created.
+     * @param faviconURL The URL of the Favicon to load. If null, an attempt to infer the value from
      *                   the history database will be made, and ultimately an attempt to guess will
      *                   be made.
      * @param flags Flags to be used by the LoadFaviconTask while loading. Currently only one flag
@@ -268,38 +289,52 @@ public class Favicons {
      * @param listener The OnFaviconLoadedListener to invoke with the result of this Favicon load.
      * @return The id of the LoadFaviconTask handling this job.
      */
-    private static int loadUncachedFavicon(String pageUrl, String faviconUrl, int flags, int targetSize, OnFaviconLoadedListener listener) {
+    private static int loadUncachedFavicon(Context context, String pageURL, String faviconURL, int flags,
+                                           int targetSize, OnFaviconLoadedListener listener) {
         // Handle the case where we have no page url.
-        if (TextUtils.isEmpty(pageUrl)) {
+        if (TextUtils.isEmpty(pageURL)) {
             dispatchResult(null, null, null, listener);
             return NOT_LOADING;
         }
 
-        LoadFaviconTask task = new LoadFaviconTask(ThreadUtils.getBackgroundHandler(), pageUrl, faviconUrl, flags, listener, targetSize, false);
-
-        int taskId = task.getId();
-        sLoadTasks.put(taskId, task);
-
+        final LoadFaviconTask task =
+            new LoadFaviconTask(context, pageURL, faviconURL, flags, listener, targetSize, false);
+        final int taskId = task.getId();
+        synchronized(loadTasks) {
+            loadTasks.put(taskId, task);
+        }
         task.execute();
 
         return taskId;
     }
 
     public static void putFaviconInMemCache(String pageUrl, Bitmap image) {
-        sFaviconsCache.putSingleFavicon(pageUrl, image);
+        faviconsCache.putSingleFavicon(pageUrl, image);
     }
 
+    /**
+     * Adds the bitmaps given by the specified iterator to the cache associated with the url given.
+     * Future requests for images will be able to select the least larger image than the target
+     * size from this new set of images.
+     *
+     * @param pageUrl The URL to associate the new favicons with.
+     * @param images An iterator over the new favicons to put in the cache.
+     */
     public static void putFaviconsInMemCache(String pageUrl, Iterator<Bitmap> images, boolean permanently) {
-        sFaviconsCache.putFavicons(pageUrl, images, permanently);
+        faviconsCache.putFavicons(pageUrl, images, permanently);
+    }
+
+    public static void putFaviconsInMemCache(String pageUrl, Iterator<Bitmap> images) {
+        putFaviconsInMemCache(pageUrl, images, false);
     }
 
     public static void clearMemCache() {
-        sFaviconsCache.evictAll();
-        sPageURLMappings.evictAll();
+        faviconsCache.evictAll();
+        pageURLMappings.evictAll();
     }
 
     public static void putFaviconInFailedCache(String faviconURL) {
-        sFaviconsCache.putFailed(faviconURL);
+        faviconsCache.putFailed(faviconURL);
     }
 
     public static boolean cancelFaviconLoad(int taskId) {
@@ -307,31 +342,30 @@ public class Favicons {
             return false;
         }
 
-        boolean cancelled;
-        synchronized (sLoadTasks) {
-            if (!sLoadTasks.containsKey(taskId))
+        synchronized (loadTasks) {
+            if (loadTasks.indexOfKey(taskId) < 0) {
                 return false;
+            }
 
-            Log.d(LOGTAG, "Cancelling favicon load (" + taskId + ")");
-
-            LoadFaviconTask task = sLoadTasks.get(taskId);
-            cancelled = task.cancel(false);
+            Log.v(LOGTAG, "Cancelling favicon load " + taskId + ".");
+            LoadFaviconTask task = loadTasks.get(taskId);
+            return task.cancel();
         }
-        return cancelled;
     }
 
     public static void close() {
         Log.d(LOGTAG, "Closing Favicons database");
 
+        // Close the Executor to new tasks.
+        longRunningExecutor.shutdown();
+
         // Cancel any pending tasks
-        synchronized (sLoadTasks) {
-            Set<Integer> taskIds = sLoadTasks.keySet();
-            Iterator<Integer> iter = taskIds.iterator();
-            while (iter.hasNext()) {
-                int taskId = iter.next();
-                cancelFaviconLoad(taskId);
+        synchronized (loadTasks) {
+            final int count = loadTasks.size();
+            for (int i = 0; i < count; i++) {
+                cancelFaviconLoad(loadTasks.keyAt(i));
             }
-            sLoadTasks.clear();
+            loadTasks.clear();
         }
 
         LoadFaviconTask.closeHTTPClient();
@@ -344,7 +378,7 @@ public class Favicons {
      * @return The dominant colour of the provided Favicon.
      */
     public static int getFaviconColor(String url) {
-        return sFaviconsCache.getDominantColor(url);
+        return faviconsCache.getDominantColor(url);
     }
 
     /**
@@ -354,30 +388,52 @@ public class Favicons {
      *
      * @param context A reference to the GeckoApp instance.
      */
-    public static void attachToContext(Context context) throws Exception {
-        final Resources res = context.getResources();
-        sContext = context;
-
-        // Decode the default Favicon ready for use.
-        sDefaultFavicon = BitmapFactory.decodeResource(res, R.drawable.favicon);
-        if (sDefaultFavicon == null) {
-            throw new Exception("Null default favicon was returned from the resources system!");
+    public static void initializeWithContext(Context context) throws IllegalStateException {
+        // Prevent multiple-initialisation.
+        if (!isInitialized.compareAndSet(false, true)) {
+            return;
         }
 
-        sDefaultFaviconSize = res.getDimensionPixelSize(R.dimen.favicon_bg);
-        sFaviconsCache = new FaviconCache(FAVICON_CACHE_SIZE_BYTES, res.getDimensionPixelSize(R.dimen.favicon_largest_interesting_size));
+        final boolean isNewTabletEnabled = NewTabletUI.isEnabled(context);
+        final Resources res = context.getResources();
+
+        // Decode the default Favicon ready for use. We'd preferably override the drawable for
+        // different screen sizes, but since we need phone's default favicon on tablet (in
+        // ToolbarDisplayLayout), we can't.
+        final int defaultFaviconDrawableID =
+                isNewTabletEnabled ? R.drawable.new_tablet_default_favicon : R.drawable.favicon;
+        defaultFavicon = BitmapFactory.decodeResource(res, defaultFaviconDrawableID);
+        if (defaultFavicon == null) {
+            throw new IllegalStateException("Null default favicon was returned from the resources system!");
+        }
+
+        defaultFaviconSize = res.getDimensionPixelSize(R.dimen.favicon_bg);
+
+        // Screen-density-adjusted upper limit on favicon size. Favicons larger than this are
+        // downscaled to this size or discarded.
+        largestFaviconSize = res.getDimensionPixelSize(R.dimen.favicon_largest_interesting_size);
+
+        // TODO: Remove this branch when old tablet is removed.
+        final int browserToolbarFaviconSizeDimenID = NewTabletUI.isEnabled(context) ?
+                R.dimen.new_tablet_tab_strip_favicon_size : R.dimen.browser_toolbar_favicon_size;
+
+        faviconsCache = new FaviconCache(FAVICON_CACHE_SIZE_BYTES, largestFaviconSize);
 
         // Initialize page mappings for each of our special pages.
         for (String url : AboutPages.getDefaultIconPages()) {
-            sPageURLMappings.putWithoutEviction(url, BUILT_IN_FAVICON_URL);
+            pageURLMappings.putWithoutEviction(url, BUILT_IN_FAVICON_URL);
         }
 
         // Load and cache the built-in favicon in each of its sizes.
         // TODO: don't open the zip twice!
-        ArrayList<Bitmap> toInsert = new ArrayList<Bitmap>(2);
-        toInsert.add(loadBrandingBitmap(context, "favicon64.png"));
-        toInsert.add(loadBrandingBitmap(context, "favicon32.png"));
+        List<Bitmap> toInsert = Arrays.asList(loadBrandingBitmap(context, "favicon64.png"),
+                                              loadBrandingBitmap(context, "favicon32.png"));
+
         putFaviconsInMemCache(BUILT_IN_FAVICON_URL, toInsert.iterator(), true);
+
+        pageURLMappings.putWithoutEviction(AboutPages.HOME, BUILT_IN_SEARCH_URL);
+        List<Bitmap> searchIcons = Collections.singletonList(BitmapFactory.decodeResource(res, R.drawable.favicon_search));
+        putFaviconsInMemCache(BUILT_IN_SEARCH_URL, searchIcons.iterator(), true);
     }
 
     /**
@@ -429,7 +485,9 @@ public class Favicons {
     }
 
     public static void removeLoadTask(int taskId) {
-        sLoadTasks.remove(taskId);
+        synchronized(loadTasks) {
+            loadTasks.delete(taskId);
+        }
     }
 
     /**
@@ -438,19 +496,23 @@ public class Favicons {
      * @param faviconURL Favicon URL to check for failure.
      */
     static boolean isFailedFavicon(String faviconURL) {
-        return sFaviconsCache.isFailedFavicon(faviconURL);
+        return faviconsCache.isFailedFavicon(faviconURL);
     }
 
     /**
-     * Sidestep the cache and get, from either the database or the internet, the largest available
-     * Favicon for the given page URL. Useful for creating homescreen shortcuts without being limited
-     * by possibly low-resolution values in the cache.
-     * Deduces the favicon URL from the history database and, ultimately, guesses.
+     * Sidestep the cache and get, from either the database or the internet, a favicon
+     * suitable for use as an app icon for the provided URL.
      *
-     * @param url Page URL to get a large favicon image fro.
-     * @param onFaviconLoadedListener Listener to call back with the result.
+     * Useful for creating homescreen shortcuts without being limited
+     * by possibly low-resolution values in the cache.
+     *
+     * Deduces the favicon URL from the browser database, guessing if necessary.
+     *
+     * @param url page URL to get a large favicon image for.
+     * @param onFaviconLoadedListener listener to call back with the result.
      */
-    public static void getLargestFaviconForPage(String url, OnFaviconLoadedListener onFaviconLoadedListener) {
-        loadUncachedFavicon(url, null, 0, -1, onFaviconLoadedListener);
+    public static void getPreferredSizeFaviconForPage(Context context, String url, OnFaviconLoadedListener onFaviconLoadedListener) {
+        int preferredSize = GeckoAppShell.getPreferredIconSize();
+        loadUncachedFavicon(context, url, null, 0, preferredSize, onFaviconLoadedListener);
     }
 }

@@ -15,7 +15,7 @@
 namespace mozilla {
 namespace net {
 
-NS_IMPL_ISUPPORTS0(NullHttpTransaction)
+NS_IMPL_ISUPPORTS(NullHttpTransaction, NullHttpTransaction, nsISupportsWeakReference)
 
 NullHttpTransaction::NullHttpTransaction(nsHttpConnectionInfo *ci,
                                          nsIInterfaceRequestor *callbacks,
@@ -23,10 +23,10 @@ NullHttpTransaction::NullHttpTransaction(nsHttpConnectionInfo *ci,
   : mStatus(NS_OK)
   , mCaps(caps | NS_HTTP_ALLOW_KEEPALIVE)
   , mCapsToClear(0)
-  , mCallbacks(callbacks)
-  , mConnectionInfo(ci)
   , mRequestHead(nullptr)
   , mIsDone(false)
+  , mCallbacks(callbacks)
+  , mConnectionInfo(ci)
 {
 }
 
@@ -52,8 +52,7 @@ void
 NullHttpTransaction::GetSecurityCallbacks(nsIInterfaceRequestor **outCB)
 {
   nsCOMPtr<nsIInterfaceRequestor> copyCB(mCallbacks);
-  *outCB = copyCB;
-  copyCB.forget();
+  *outCB = copyCB.forget().take();
 }
 
 void
@@ -136,7 +135,7 @@ NullHttpTransaction::RequestHead()
     // CONNECT tunnels may also want Proxy-Authorization but that is a lot
     // harder to determine, so for now we will let those connections fail in
     // the NullHttpTransaction and let them be retried from the pending queue
-    // with a bound transcation
+    // with a bound transaction
   }
 
   return mRequestHead;
@@ -160,6 +159,12 @@ NullHttpTransaction::Close(nsresult reason)
   mStatus = reason;
   mConnection = nullptr;
   mIsDone = true;
+}
+
+nsHttpConnectionInfo *
+NullHttpTransaction::ConnectionInfo()
+{
+  return mConnectionInfo;
 }
 
 nsresult

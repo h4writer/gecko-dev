@@ -4,12 +4,14 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "nsFormControlFrame.h"
+
 #include "nsGkAtoms.h"
 #include "nsLayoutUtils.h"
 #include "nsIDOMHTMLInputElement.h"
-#include "nsEventStateManager.h"
+#include "mozilla/EventStateManager.h"
 #include "mozilla/LookAndFeel.h"
 #include "nsDeviceContext.h"
+#include "nsIContent.h"
 
 using namespace mozilla;
 
@@ -45,7 +47,7 @@ NS_QUERYFRAME_TAIL_INHERITING(nsLeafFrame)
 NS_IMPL_FRAMEARENA_HELPERS(nsFormControlFrame)
 
 nscoord
-nsFormControlFrame::GetIntrinsicWidth()
+nsFormControlFrame::GetIntrinsicISize()
 {
   // Provide a reasonable default for sites that use an "auto" height.
   // Note that if you change this, you should change the values in forms.css
@@ -54,7 +56,7 @@ nsFormControlFrame::GetIntrinsicWidth()
 }
 
 nscoord
-nsFormControlFrame::GetIntrinsicHeight()
+nsFormControlFrame::GetIntrinsicBSize()
 {
   // Provide a reasonable default for sites that use an "auto" height.
   // Note that if you change this, you should change the values in forms.css
@@ -63,17 +65,18 @@ nsFormControlFrame::GetIntrinsicHeight()
 }
 
 nscoord
-nsFormControlFrame::GetBaseline() const
+nsFormControlFrame::GetLogicalBaseline(WritingMode aWritingMode) const
 {
   NS_ASSERTION(!NS_SUBTREE_DIRTY(this),
                "frame must not be dirty");
   // Treat radio buttons and checkboxes as having an intrinsic baseline
   // at the bottom of the control (use the bottom content edge rather
   // than the bottom margin edge).
-  return mRect.height - GetUsedBorderAndPadding().bottom;
+  return BSize(aWritingMode) -
+         GetLogicalUsedBorderAndPadding(aWritingMode).BEnd(aWritingMode);
 }
 
-NS_METHOD
+void
 nsFormControlFrame::Reflow(nsPresContext*          aPresContext,
                            nsHTMLReflowMetrics&     aDesiredSize,
                            const nsHTMLReflowState& aReflowState,
@@ -86,20 +89,15 @@ nsFormControlFrame::Reflow(nsPresContext*          aPresContext,
     RegUnRegAccessKey(static_cast<nsIFrame*>(this), true);
   }
 
-  nsresult rv = nsLeafFrame::Reflow(aPresContext, aDesiredSize, aReflowState,
-                                    aStatus);
-  if (NS_FAILED(rv)) {
-    return rv;
-  }
+  nsLeafFrame::Reflow(aPresContext, aDesiredSize, aReflowState, aStatus);
 
   if (nsLayoutUtils::FontSizeInflationEnabled(aPresContext)) {
     float inflation = nsLayoutUtils::FontSizeInflationFor(this);
-    aDesiredSize.width *= inflation;
-    aDesiredSize.height *= inflation;
+    aDesiredSize.Width() *= inflation;
+    aDesiredSize.Height() *= inflation;
     aDesiredSize.UnionOverflowAreasWithDesiredBounds();
     FinishAndStoreOverflow(&aDesiredSize);
   }
-  return NS_OK;
 }
 
 nsresult
@@ -116,7 +114,7 @@ nsFormControlFrame::RegUnRegAccessKey(nsIFrame * aFrame, bool aDoReg)
   nsIContent* content = aFrame->GetContent();
   content->GetAttr(kNameSpaceID_None, nsGkAtoms::accesskey, accessKey);
   if (!accessKey.IsEmpty()) {
-    nsEventStateManager *stateManager = presContext->EventStateManager();
+    EventStateManager* stateManager = presContext->EventStateManager();
     if (aDoReg) {
       stateManager->RegisterAccessKey(content, (uint32_t)accessKey.First());
     } else {
@@ -132,7 +130,7 @@ nsFormControlFrame::SetFocus(bool aOn, bool aRepaint)
 {
 }
 
-NS_METHOD
+nsresult
 nsFormControlFrame::HandleEvent(nsPresContext* aPresContext, 
                                 WidgetGUIEvent* aEvent,
                                 nsEventStatus* aEventStatus)

@@ -21,22 +21,55 @@ let Prefs = new ViewHelpers.Prefs("devtools.debugger", {
   chromeDebuggingPort: ["Int", "chrome-debugging-port"]
 });
 
-// Initiate the connection
-let transport = debuggerSocketConnect(
-  Prefs.chromeDebuggingHost,
-  Prefs.chromeDebuggingPort
-);
-let client = new DebuggerClient(transport);
-client.connect(() => {
-  client.listTabs(openToolbox);
+let gToolbox, gClient;
+
+function connect() {
+  window.removeEventListener("load", connect);
+  // Initiate the connection
+  let transport = debuggerSocketConnect(
+    Prefs.chromeDebuggingHost,
+    Prefs.chromeDebuggingPort
+  );
+  gClient = new DebuggerClient(transport);
+  gClient.connect(() => {
+    let addonID = getParameterByName("addonID");
+
+    if (addonID) {
+      gClient.listAddons(({addons}) => {
+        let addonActor = addons.filter(addon => addon.id === addonID).pop();
+        openToolbox({
+          addonActor: addonActor.actor,
+          consoleActor: addonActor.consoleActor,
+          title: addonActor.name
+        });
+      });
+    } else {
+      gClient.listTabs(openToolbox);
+    }
+  });
+}
+
+// Certain options should be toggled since we can assume chrome debugging here
+function setPrefDefaults() {
+  Services.prefs.setBoolPref("devtools.inspector.showUserAgentStyles", true);
+  Services.prefs.setBoolPref("devtools.profiler.ui.show-platform-data", true);
+}
+
+window.addEventListener("load", function() {
+  let cmdClose = document.getElementById("toolbox-cmd-close");
+  cmdClose.addEventListener("command", onCloseCommand);
+  setPrefDefaults();
+  connect();
 });
 
-let gToolbox;
+function onCloseCommand(event) {
+  window.close();
+}
 
 function openToolbox(form) {
   let options = {
     form: form,
-    client: client,
+    client: gClient,
     chrome: true
   };
   devtools.TargetFactory.forRemoteTab(options).then(target => {
@@ -64,6 +97,8 @@ function bindToolboxHandlers() {
 function onUnload() {
   window.removeEventListener("unload", onUnload);
   window.removeEventListener("message", onMessage);
+  let cmdClose = document.getElementById("toolbox-cmd-close");
+  cmdClose.removeEventListener("command", onCloseCommand);
   gToolbox.destroy();
 }
 
@@ -100,4 +135,11 @@ function quitApp() {
   if (shouldProceed) {
     Services.startup.quit(Ci.nsIAppStartup.eForceQuit);
   }
+}
+
+function getParameterByName (name) {
+  name = name.replace(/[\[]/, "\\\[").replace(/[\]]/, "\\\]");
+  let regex = new RegExp("[\\?&]" + name + "=([^&#]*)");
+  let results = regex.exec(window.location.search);
+  return results == null ? "" : decodeURIComponent(results[1].replace(/\+/g, " "));
 }

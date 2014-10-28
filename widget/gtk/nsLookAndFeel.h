@@ -27,7 +27,7 @@ public:
                              float aDevPixPerCSSPixel);
 
     virtual void RefreshImpl();
-    virtual PRUnichar GetPasswordCharacterImpl();
+    virtual char16_t GetPasswordCharacterImpl();
     virtual bool GetEchoPasswordImpl();
 
 protected:
@@ -62,10 +62,11 @@ protected:
     nscolor sMenuText;
     nscolor sMenuHover;
     nscolor sMenuHoverText;
-    nscolor sButtonBackground;
     nscolor sButtonText;
-    nscolor sButtonOuterLightBorder;
-    nscolor sButtonInnerDarkBorder;
+    nscolor sButtonHoverText;
+    nscolor sFrameBackground;
+    nscolor sFrameOuterLightBorder;
+    nscolor sFrameInnerDarkBorder;
     nscolor sOddCellBackground;
     nscolor sNativeHyperLinkText;
     nscolor sComboBoxText;
@@ -77,7 +78,7 @@ protected:
     nscolor sMozWindowSelectedText;
     nscolor sMozWindowSelectedBackground;
     nscolor sMozScrollbar;
-    PRUnichar sInvisibleCharacter;
+    char16_t sInvisibleCharacter;
     float   sCaretRatio;
     bool    sMenuSupportsDrag;
 

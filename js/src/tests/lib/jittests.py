@@ -52,6 +52,30 @@ def _relpath(path, start=None):
         return os.curdir
     return os.path.join(*rel_list)
 
+# Mapping of Python chars to their javascript string representation.
+QUOTE_MAP = {
+    '\\': '\\\\',
+    '\b': '\\b',
+    '\f': '\\f',
+    '\n': '\\n',
+    '\r': '\\r',
+    '\t': '\\t',
+    '\v': '\\v'
+}
+
+# Quote the string S, javascript style.
+def js_quote(quote, s):
+    result = quote
+    for c in s:
+        if c == quote:
+            result += '\\' + quote
+        elif c in QUOTE_MAP:
+            result += QUOTE_MAP[c]
+        else:
+            result += c
+    result += quote
+    return result
+
 os.path.relpath = _relpath
 
 class Test:
@@ -84,6 +108,9 @@ class Test:
         self.jitflags = []     # jit flags to enable
         self.slow = False      # True means the test is slow-running
         self.allow_oom = False # True means that OOM is not considered a failure
+        self.allow_unhandlable_oom = False # True means CrashAtUnhandlableOOM is not considered a failure
+        self.allow_overrecursed = False # True means that hitting recursion the
+                                        # limits is not considered a failure.
         self.valgrind = False  # True means run under valgrind
         self.tz_pacific = False # True means force Pacific time for the test
         self.expect_error = '' # Errors to expect and consider passing
@@ -94,6 +121,8 @@ class Test:
         t.jitflags = self.jitflags[:]
         t.slow = self.slow
         t.allow_oom = self.allow_oom
+        t.allow_unhandlable_oom = self.allow_unhandlable_oom
+        t.allow_overrecursed = self.allow_overrecursed
         t.valgrind = self.valgrind
         t.tz_pacific = self.tz_pacific
         t.expect_error = self.expect_error
@@ -132,18 +161,20 @@ class Test:
                         except ValueError:
                             print("warning: couldn't parse thread-count %s" % value)
                     else:
-                        print('warning: unrecognized |jit-test| attribute %s' % part)
+                        print('%s: warning: unrecognized |jit-test| attribute %s' % (path, part))
                 else:
                     if name == 'slow':
                         test.slow = True
                     elif name == 'allow-oom':
                         test.allow_oom = True
+                    elif name == 'allow-unhandlable-oom':
+                        test.allow_unhandlable_oom = True
+                    elif name == 'allow-overrecursed':
+                        test.allow_overrecursed = True
                     elif name == 'valgrind':
                         test.valgrind = options.valgrind
                     elif name == 'tz-pacific':
                         test.tz_pacific = True
-                    elif name == 'debug':
-                        test.jitflags.append('--debugjit')
                     elif name == 'ion-eager':
                         test.jitflags.append('--ion-eager')
                     elif name == 'no-ion':
@@ -151,7 +182,7 @@ class Test:
                     elif name == 'dump-bytecode':
                         test.jitflags.append('--dump-bytecode')
                     else:
-                        print('warning: unrecognized |jit-test| attribute %s' % part)
+                        print('%s: warning: unrecognized |jit-test| attribute %s' % (path, part))
 
         if options.valgrind_all:
             test.valgrind = True
@@ -171,12 +202,14 @@ class Test:
         # whether we use double or single quotes. On windows and when using
         # a remote device, however, we have to be careful to use the quote
         # style that is the opposite of what the exec wrapper uses.
-        # This uses %r to get single quotes on windows and special cases
-        # the remote device.
-        fmt = 'const platform=%r; const libdir=%r; const scriptdir=%r'
         if remote_prefix:
-            fmt = 'const platform="%s"; const libdir="%s"; const scriptdir="%s"'
-        expr = fmt % (sys.platform, libdir, scriptdir_var)
+            quotechar = '"'
+        else:
+            quotechar = "'"
+        expr = ("const platform=%s; const libdir=%s; const scriptdir=%s"
+                % (js_quote(quotechar, sys.platform),
+                   js_quote(quotechar, libdir),
+                   js_quote(quotechar, scriptdir_var)))
 
         # We may have specified '-a' or '-d' twice: once via --jitflags, once
         # via the "|jit-test|" line.  Remove dups because they are toggles.
@@ -340,7 +373,21 @@ def run_test_remote(test, device, prefix, options):
     # the same buffer to both.
     return TestOutput(test, cmd, out, out, returncode, None, False)
 
-def check_output(out, err, rc, test):
+def check_output(out, err, rc, timed_out, test, options):
+    if timed_out:
+        if test.relpath_tests in options.ignore_timeouts:
+            return True
+
+        # The shell sometimes hangs on shutdown on Windows 7 and Windows
+        # Server 2008. See bug 970063 comment 7 for a description of the
+        # problem. Until bug 956899 is fixed, ignore timeouts on these
+        # platforms (versions 6.0 and 6.1).
+        if sys.platform == 'win32':
+            ver = sys.getwindowsversion()
+            if ver.major == 6 and ver.minor <= 1:
+                return True
+        return False
+
     if test.expect_error:
         # The shell exits with code 3 on uncaught exceptions.
         # Sometimes 0 is returned on Windows for unknown reasons.
@@ -363,16 +410,38 @@ def check_output(out, err, rc, test):
             return False
 
     if rc != test.expect_status:
+        # Tests which expect a timeout check for exit code 6.
+        # Sometimes 0 is returned on Windows for unknown reasons.
+        # See bug 899697.
+        if sys.platform in ['win32', 'cygwin'] and rc == 0:
+            return True
+
         # Allow a non-zero exit code if we want to allow OOM, but only if we
         # actually got OOM.
-        return test.allow_oom and 'out of memory' in err and 'Assertion failure' not in err
+        if test.allow_oom and 'out of memory' in err and 'Assertion failure' not in err:
+            return True
+
+        # Allow a non-zero exit code if we want to allow unhandlable OOM, but
+        # only if we actually got unhandlable OOM.
+        if test.allow_unhandlable_oom and 'Assertion failure: [unhandlable oom]' in err:
+            return True
+
+        # Allow a non-zero exit code if we want to all too-much-recursion and
+        # the test actually over-recursed.
+        if test.allow_overrecursed and 'too much recursion' in err and 'Assertion failure' not in err:
+            return True
+
+        return False
 
     return True
 
 def print_tinderbox(ok, res):
     # Output test failures in a TBPL parsable format, eg:
-    # TEST-PASS | /foo/bar/baz.js | --ion-eager
-    # TEST-UNEXPECTED-FAIL | /foo/bar/baz.js | --no-ion: Assertion failure: ...
+    # TEST-RESULT | filename.js | Failure description (code N, args "--foobar")
+    #
+    # Example:
+    # TEST-PASS | foo/bar/baz.js | (code 0, args "--ion-eager")
+    # TEST-UNEXPECTED-FAIL | foo/bar/baz.js | TypeError: or something (code -9, args "--no-ion")
     # INFO exit-status     : 3
     # INFO timed-out       : False
     # INFO stdout          > foo
@@ -380,18 +449,20 @@ def print_tinderbox(ok, res):
     # INFO stdout          > baz
     # INFO stderr         2> TypeError: or something
     # TEST-UNEXPECTED-FAIL | jit_test.py: Test execution interrupted by user
-    label = "TEST-PASS" if ok else "TEST-UNEXPECTED-FAIL"
+    result = "TEST-PASS" if ok else "TEST-UNEXPECTED-FAIL"
+    message = "Success" if ok else res.describe_failure()
     jitflags = " ".join(res.test.jitflags)
-    print("%s | %s | %s" % (label, res.test.relpath_top, jitflags))
-    if ok:
-        return
+    print("{} | {} | {} (code {}, args \"{}\")".format(
+          result, res.test.relpath_top, message, res.rc, jitflags))
 
     # For failed tests, print as much information as we have, to aid debugging.
+    if ok:
+        return
     print("INFO exit-status     : {}".format(res.rc))
     print("INFO timed-out       : {}".format(res.timed_out))
-    for line in res.out.split('\n'):
+    for line in res.out.splitlines():
         print("INFO stdout          > " + line.strip())
-    for line in res.err.split('\n'):
+    for line in res.err.splitlines():
         print("INFO stderr         2> " + line.strip())
 
 def wrap_parallel_run_test(test, prefix, resultQueue, options):
@@ -416,10 +487,11 @@ def run_tests_parallel(tests, prefix, options):
 
     # This queue will contain the return value of the function
     # processing the test results.
+    total_tests = len(tests) * options.repeat
     result_process_return_queue = queue_manager.Queue()
     result_process = Process(target=process_test_results_parallel,
                              args=(async_test_result_queue, result_process_return_queue,
-                                   notify_queue, len(tests), options))
+                                   notify_queue, total_tests, options))
     result_process.start()
 
     # Ensure that a SIGTERM is handled the same way as SIGINT
@@ -441,15 +513,17 @@ def run_tests_parallel(tests, prefix, options):
     try:
         testcnt = 0
         # Initially start as many jobs as allowed to run parallel
-        for i in range(min(options.max_jobs,len(tests))):
+        # Always enqueue at least one to avoid a curious deadlock
+        for i in range(max(1, min(options.max_jobs, total_tests))):
             notify_queue.put(True)
 
         # For every item in the notify queue, start one new worker.
         # Every completed worker adds a new item to this queue.
         while notify_queue.get():
-            if (testcnt < len(tests)):
+            if (testcnt < total_tests):
                 # Start one new worker
-                worker_process = Process(target=wrap_parallel_run_test, args=(tests[testcnt], prefix, async_test_result_queue, options))
+                test = tests[testcnt % len(tests)]
+                worker_process = Process(target=wrap_parallel_run_test, args=(test, prefix, async_test_result_queue, options))
                 worker_processes.append(worker_process)
                 worker_process.start()
                 testcnt += 1
@@ -553,6 +627,16 @@ def print_test_summary(num_tests, failures, complete, doing, options):
 
 def process_test_results(results, num_tests, options):
     pb = NullProgressBar()
+    failures = []
+    timeouts = 0
+    complete = False
+    doing = 'before starting'
+
+    if num_tests == 0:
+        pb.finish(True)
+        complete = True
+        return print_test_summary(num_tests, failures, complete, doing, options)
+
     if not options.hide_progress and not options.show_cmd and ProgressBar.conservative_isatty():
         fmt = [
             {'value': 'PASS',    'color': 'green'},
@@ -562,10 +646,6 @@ def process_test_results(results, num_tests, options):
         ]
         pb = ProgressBar(num_tests, fmt)
 
-    failures = []
-    timeouts = 0
-    complete = False
-    doing = 'before starting'
     try:
         for i, res in enumerate(results):
             if options.show_output:
@@ -575,7 +655,7 @@ def process_test_results(results, num_tests, options):
             if res.test.valgrind:
                 sys.stdout.write(res.err)
 
-            ok = check_output(res.out, res.err, res.rc, res.test)
+            ok = check_output(res.out, res.err, res.rc, res.timed_out, res.test, options)
             doing = 'after %s' % res.test.relpath_tests
             if not ok:
                 failures.append(res)
@@ -604,22 +684,24 @@ def process_test_results(results, num_tests, options):
     return print_test_summary(num_tests, failures, complete, doing, options)
 
 def get_serial_results(tests, prefix, options):
-    for test in tests:
-        yield run_test(test, prefix, options)
+    for i in xrange(0, options.repeat):
+        for test in tests:
+            yield run_test(test, prefix, options)
 
 def run_tests(tests, prefix, options):
     gen = get_serial_results(tests, prefix, options)
-    ok = process_test_results(gen, len(tests), options)
+    ok = process_test_results(gen, len(tests) * options.repeat, options)
     return ok
 
 def get_remote_results(tests, device, prefix, options):
-    for test in tests:
-        yield run_test_remote(test, device, prefix, options)
+    for i in xrange(0, options.repeat):
+        for test in tests:
+            yield run_test_remote(test, device, prefix, options)
 
 def push_libs(options, device):
     # This saves considerable time in pushing unnecessary libraries
     # to the device but needs to be updated if the dependencies change.
-    required_libs = ['libnss3.so', 'libmozglue.so']
+    required_libs = ['libnss3.so', 'libmozglue.so', 'libnspr4.so', 'libplc4.so', 'libplds4.so']
 
     for file in os.listdir(options.local_lib):
         if file in required_libs:
@@ -668,7 +750,7 @@ def run_tests_remote(tests, prefix, options):
 
     # Run all tests.
     gen = get_remote_results(tests, dm, prefix, options)
-    ok = process_test_results(gen, len(tests), options)
+    ok = process_test_results(gen, len(tests) * options.repeat, options)
     return ok
 
 def parse_jitflags(options):

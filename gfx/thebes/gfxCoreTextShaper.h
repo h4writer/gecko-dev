@@ -14,15 +14,16 @@ class gfxMacFont;
 
 class gfxCoreTextShaper : public gfxFontShaper {
 public:
-    gfxCoreTextShaper(gfxMacFont *aFont);
+    explicit gfxCoreTextShaper(gfxMacFont *aFont);
 
     virtual ~gfxCoreTextShaper();
 
     virtual bool ShapeText(gfxContext      *aContext,
-                           const PRUnichar *aText,
+                           const char16_t *aText,
                            uint32_t         aOffset,
                            uint32_t         aLength,
                            int32_t          aScript,
+                           bool             aVertical,
                            gfxShapedText   *aShapedText);
 
     // clean up static objects that may have been cached

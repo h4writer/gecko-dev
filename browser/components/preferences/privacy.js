@@ -1,4 +1,4 @@
-/* -*- Mode: Java; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 4 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -125,42 +125,6 @@ var gPrivacyPane = {
   },
 
   /**
-   * Update the Tracking preferences based on controls.
-   */
-  setTrackingPrefs: function PPP_setTrackingPrefs()
-  {
-    let dntRadioGroup = document.getElementById("doNotTrackSelection"),
-        dntValuePref = document.getElementById("privacy.donottrackheader.value"),
-        dntEnabledPref = document.getElementById("privacy.donottrackheader.enabled");
-
-    // if the selected radio button says "no preference", set on/off pref to
-    // false and don't change the value pref.
-    if (dntRadioGroup.selectedItem.value == -1) {
-      dntEnabledPref.value = false;
-      return dntValuePref.value;
-    }
-
-    dntEnabledPref.value = true;
-    return dntRadioGroup.selectedItem.value;
-  },
-
-  /**
-   * Obtain the tracking preference value and reflect it in the UI.
-   */
-  getTrackingPrefs: function PPP_getTrackingPrefs()
-  {
-    let dntValuePref = document.getElementById("privacy.donottrackheader.value"),
-        dntEnabledPref = document.getElementById("privacy.donottrackheader.enabled");
-
-    // if DNT is enbaled, select the value from the selected radio
-    // button, otherwise choose the "no preference" radio button
-    if (dntEnabledPref.value)
-      return dntValuePref.value;
-
-    return document.getElementById("dntnopref").value;
-  },
-
-  /**
    * Update the private browsing auto-start pref and the history mode
    * micro-management prefs based on the history mode menulist
    */
@@ -249,7 +213,7 @@ var gPrivacyPane = {
   },
 
   _lastMode: null,
-  _lasCheckState: null,
+  _lastCheckState: null,
   updateAutostart: function PPP_updateAutostart() {
       let mode = document.getElementById("historyMode");
       let autoStart = document.getElementById("privateBrowsingAutoStart");
@@ -301,6 +265,7 @@ var gPrivacyPane = {
       } else {
         autoStart.removeAttribute('checked');
       }
+      pref.value = autoStart.hasAttribute('checked');
       mode.selectedIndex = this._lastMode;
       mode.doCommand();
 
@@ -473,7 +438,7 @@ var gPrivacyPane = {
                    introText      : bundlePreferences.getString("cookiepermissionstext") };
     document.documentElement.openWindow("Browser:Permissions",
                                         "chrome://browser/content/preferences/permissions.xul",
-                                        "", params);
+                                        "resizable", params);
   },
 
   /**
@@ -483,7 +448,7 @@ var gPrivacyPane = {
   {
     document.documentElement.openWindow("Browser:Cookies",
                                         "chrome://browser/content/preferences/cookies.xul",
-                                        "", null);
+                                        "resizable", null);
   },
 
   // CLEAR PRIVATE DATA

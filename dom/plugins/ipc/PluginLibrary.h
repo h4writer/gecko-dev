@@ -15,7 +15,6 @@
 #include "nsError.h"
 #include "mozilla/EventForwards.h"
 
-class gfxASurface;
 class gfxContext;
 class nsCString;
 struct nsIntRect;
@@ -54,7 +53,7 @@ public:
   virtual nsresult NP_GetMIMEDescription(const char** mimeDesc) = 0;
   virtual nsresult NP_GetValue(void *future, NPPVariable aVariable,
                                void *aValue, NPError* error) = 0;
-#if defined(XP_WIN) || defined(XP_MACOSX) || defined(XP_OS2)
+#if defined(XP_WIN) || defined(XP_MACOSX)
   virtual nsresult NP_GetEntryPoints(NPPluginFuncs* pFuncs, NPError* error) = 0;
 #endif
   virtual nsresult NPP_New(NPMIMEType pluginType, NPP instance,

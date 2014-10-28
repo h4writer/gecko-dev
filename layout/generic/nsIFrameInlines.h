@@ -7,8 +7,28 @@
 #ifndef nsIFrameInlines_h___
 #define nsIFrameInlines_h___
 
-#include "nsIFrame.h"
+#include "nsContainerFrame.h"
 #include "nsStyleStructInlines.h"
+
+bool
+nsIFrame::IsFlexItem() const
+{
+  return GetParent() &&
+    GetParent()->GetType() == nsGkAtoms::flexContainerFrame &&
+    !(GetStateBits() & NS_FRAME_OUT_OF_FLOW);
+}
+
+bool
+nsIFrame::IsFlexOrGridItem() const
+{
+  if (GetParent()) {
+    nsIAtom* t = GetParent()->GetType();
+    return (t == nsGkAtoms::flexContainerFrame ||
+            t == nsGkAtoms::gridContainerFrame) &&
+      !(GetStateBits() & NS_FRAME_OUT_OF_FLOW);
+  }
+  return false;
+}
 
 bool
 nsIFrame::IsFloating() const

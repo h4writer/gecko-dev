@@ -6,8 +6,8 @@
 
 toolkit = CONFIG['MOZ_WIDGET_TOOLKIT']
 
-if toolkit in ('qt', 'gtk2', 'gtk3'):
-    DIRS += ['unix']
+if toolkit == 'qt':
+    DIRS += ['qt']
 elif toolkit == 'windows':
     DIRS += ['windows']
 elif toolkit == 'cocoa':
@@ -16,8 +16,6 @@ elif toolkit == 'android':
     DIRS += ['android']
 elif toolkit == 'gonk':
     DIRS += ['gonk']
-
-TEST_DIRS += ['tests']
 
 XPIDL_SOURCES += [
     'nsIOSFileConstantsService.idl',
@@ -38,22 +36,18 @@ UNIFIED_SOURCES += [
     'OSFileConstants.cpp',
 ]
 
-# On Systems that have build in geolocation providers,
-# we really do not need these.
-if CONFIG['OS_TARGET'] != 'Android' or CONFIG['MOZ_WIDGET_TOOLKIT'] == 'gonk':
-    EXTRA_COMPONENTS += [
-        'NetworkGeolocationProvider.js',
-        'NetworkGeolocationProvider.manifest',
-    ]
+EXTRA_COMPONENTS += [
+    'NetworkGeolocationProvider.js',
+    'NetworkGeolocationProvider.manifest',
+]
 
 FAIL_ON_WARNINGS = True
 
 include('/ipc/chromium/chromium-config.mozbuild')
 
-FINAL_LIBRARY = 'gklayout'
+FINAL_LIBRARY = 'xul'
 # We fire the nsDOMDeviceAcceleration
 LOCAL_INCLUDES += [
-    '/content/events/src',
     '/dom/base',
     '/dom/bindings',
     '/js/xpconnect/loader',
@@ -61,3 +55,5 @@ LOCAL_INCLUDES += [
 
 DEFINES['DLL_PREFIX'] = '"%s"' % CONFIG['DLL_PREFIX']
 DEFINES['DLL_SUFFIX'] = '"%s"' % CONFIG['DLL_SUFFIX']
+
+MOCHITEST_CHROME_MANIFESTS += ['tests/chrome.ini']

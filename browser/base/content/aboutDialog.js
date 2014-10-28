@@ -52,11 +52,12 @@ function init(aEvent)
 #ifdef MOZ_UPDATER
   gAppUpdater = new appUpdater();
 
-#if MOZ_UPDATE_CHANNEL != release
   let defaults = Services.prefs.getDefaultBranch("");
   let channelLabel = document.getElementById("currentChannel");
-  channelLabel.value = defaults.getCharPref("app.update.channel");
-#endif
+  let currentChannelText = document.getElementById("currentChannelText");
+  channelLabel.value = UpdateChannel.get();
+  if (/^release($|\-)/.test(channelLabel.value))
+      currentChannelText.hidden = true;
 #endif
 
 #ifdef XP_MACOSX
@@ -70,6 +71,9 @@ function init(aEvent)
 Components.utils.import("resource://gre/modules/XPCOMUtils.jsm");
 Components.utils.import("resource://gre/modules/DownloadUtils.jsm");
 Components.utils.import("resource://gre/modules/AddonManager.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "UpdateChannel",
+                                  "resource://gre/modules/UpdateChannel.jsm");
 
 var gAppUpdater;
 
@@ -133,15 +137,21 @@ function appUpdater()
     return;
   }
 
-  // If app.update.enabled is false, we don't pop up an update dialog
-  // automatically, but opening the About dialog is considered manually
-  // checking for updates, so we always check.
-  // If app.update.auto is false, we ask before downloading though,
-  // in onCheckComplete.
-  this.selectPanel("checkingForUpdates");
-  this.isChecking = true;
-  this.checker.checkForUpdates(this.updateCheckListener, true);
-  // after checking, onCheckComplete() is called
+  // Honor the "Never check for updates" option by not only disabling background
+  // update checks, but also in the About dialog, by presenting a
+  // "Check for updates" button.
+  // If updates are found, the user is then asked if he wants to "Update to <version>".
+  if (!this.updateEnabled) {
+    this.selectPanel("checkForUpdates");
+    return;
+  }
+
+  // That leaves the options
+  // "Check for updates, but let me choose whether to install them", and
+  // "Automatically install updates".
+  // In both cases, we check for updates without asking.
+  // In the "let me choose" case, we ask before downloading though, in onCheckComplete.
+  this.checkForUpdates();
 }
 
 appUpdater.prototype =
@@ -232,6 +242,16 @@ appUpdater.prototype =
     } else {
       this.updateDeck.selectedPanel = panel;
     }
+  },
+
+  /**
+   * Check for updates
+   */
+  checkForUpdates: function() {
+    this.selectPanel("checkingForUpdates");
+    this.isChecking = true;
+    this.checker.checkForUpdates(this.updateCheckListener, true);
+    // after checking, onCheckComplete() is called
   },
 
   /**
@@ -447,7 +467,7 @@ appUpdater.prototype =
    * See XPIProvider.jsm
    */
   onUpdateAvailable: function(aAddon, aInstall) {
-    if (!Services.blocklist.isAddonBlocklisted(aAddon.id, aInstall.version,
+    if (!Services.blocklist.isAddonBlocklisted(aAddon,
                                                this.update.appVersion,
                                                this.update.platformVersion)) {
       // Compatibility or new version updates mean the same thing here.

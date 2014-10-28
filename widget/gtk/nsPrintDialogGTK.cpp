@@ -4,11 +4,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include <gtk/gtk.h>
-#if (MOZ_WIDGET_GTK == 2)
-#include <gtk/gtkprintunixdialog.h>
-#else
 #include <gtk/gtkunixprint.h>
-#endif
 #include <stdlib.h>
 
 #include "mozilla/ArrayUtils.h"
@@ -60,7 +56,7 @@ ShowCustomDialog(GtkComboBox *changed_box, gpointer user_data)
   bundleSvc->CreateBundle("chrome://global/locale/printdialog.properties", getter_AddRefs(printBundle));
   nsXPIDLString intlString;
 
-  printBundle->GetStringFromName(NS_LITERAL_STRING("headerFooterCustom").get(), getter_Copies(intlString));
+  printBundle->GetStringFromName(MOZ_UTF16("headerFooterCustom"), getter_Copies(intlString));
   GtkWidget* prompt_dialog = gtk_dialog_new_with_buttons(NS_ConvertUTF16toUTF8(intlString).get(), printDialog,
 #if (MOZ_WIDGET_GTK == 2)
                                                          (GtkDialogFlags)(GTK_DIALOG_MODAL | GTK_DIALOG_NO_SEPARATOR),
@@ -76,7 +72,7 @@ ShowCustomDialog(GtkComboBox *changed_box, gpointer user_data)
                                           GTK_RESPONSE_REJECT,
                                           -1);
 
-  printBundle->GetStringFromName(NS_LITERAL_STRING("customHeaderFooterPrompt").get(), getter_Copies(intlString));
+  printBundle->GetStringFromName(MOZ_UTF16("customHeaderFooterPrompt"), getter_Copies(intlString));
   GtkWidget* custom_label = gtk_label_new(NS_ConvertUTF16toUTF8(intlString).get());
   GtkWidget* custom_entry = gtk_entry_new();
   GtkWidget* question_icon = gtk_image_new_from_stock(GTK_STOCK_DIALOG_QUESTION, GTK_ICON_SIZE_DIALOG);
@@ -142,7 +138,7 @@ class nsPrintDialogWidgetGTK {
 
     bool useNativeSelection;
 
-    GtkWidget* ConstructHeaderFooterDropdown(const PRUnichar *currentString);
+    GtkWidget* ConstructHeaderFooterDropdown(const char16_t *currentString);
     const char* OptionWidgetToString(GtkWidget *dropdown);
 
     /* Code to copy between GTK and NS print settings structures.
@@ -469,7 +465,7 @@ nsPrintDialogWidgetGTK::ExportSettings(nsIPrintSettings *aNSSettings)
 }
 
 GtkWidget*
-nsPrintDialogWidgetGTK::ConstructHeaderFooterDropdown(const PRUnichar *currentString)
+nsPrintDialogWidgetGTK::ConstructHeaderFooterDropdown(const char16_t *currentString)
 {
 #if (MOZ_WIDGET_GTK == 2)
   GtkWidget* dropdown = gtk_combo_box_new_text();
@@ -513,7 +509,7 @@ nsPrintDialogWidgetGTK::ConstructHeaderFooterDropdown(const PRUnichar *currentSt
   return dropdown;
 }
 
-NS_IMPL_ISUPPORTS1(nsPrintDialogServiceGTK, nsIPrintDialogService)
+NS_IMPL_ISUPPORTS(nsPrintDialogServiceGTK, nsIPrintDialogService)
 
 nsPrintDialogServiceGTK::nsPrintDialogServiceGTK()
 {

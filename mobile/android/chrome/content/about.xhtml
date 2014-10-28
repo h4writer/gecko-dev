@@ -65,9 +65,11 @@
       <div class="bottom-border"></div>
     </ul>
 
+#ifdef RELEASE_BUILD
     <div id="aboutDetails">
-      <p>&logoTrademark;</p>
+      <p>&aboutPage.logoTrademark;</p>
     </div>
+#endif
 
     <script type="application/javascript;version=1.8"><![CDATA[
       let Ci = Components.interfaces, Cc = Components.classes, Cu = Components.utils, Cr = Components.results;
@@ -145,17 +147,17 @@
       function checkForUpdates() {
         showCheckingMessage();
 
-        Services.androidBridge.handleGeckoMessage(JSON.stringify({ type: "Update:Check" }));
+        Services.androidBridge.handleGeckoMessage({ type: "Update:Check" });
       }
 
       function downloadUpdate() {
-        Services.androidBridge.handleGeckoMessage(JSON.stringify({ type: "Update:Download" }));
+        Services.androidBridge.handleGeckoMessage({ type: "Update:Download" });
       }
 
       function installUpdate() {
         showCheckAction();
 
-        Services.androidBridge.handleGeckoMessage(JSON.stringify({ type: "Update:Install" }));
+        Services.androidBridge.handleGeckoMessage({ type: "Update:Install" });
       }
 
       let updateLink = document.getElementById("updateLink");

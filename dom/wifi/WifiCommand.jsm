@@ -1,4 +1,4 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -14,9 +14,23 @@ Cu.import("resource://gre/modules/systemlibs.js");
 
 const SUPP_PROP = "init.svc.wpa_supplicant";
 const WPA_SUPPLICANT = "wpa_supplicant";
+const DEBUG = false;
 
-this.WifiCommand = function(aControlMessage, aInterface) {
+this.WifiCommand = function(aControlMessage, aInterface, aSdkVersion) {
+  function debug(msg) {
+    if (DEBUG) {
+      dump('-------------- WifiCommand: ' + msg);
+    }
+  }
+
   var command = {};
+
+  //-------------------------------------------------
+  // Utilities.
+  //-------------------------------------------------
+  command.getSdkVersion = function() {
+    return aSdkVersion;
+  };
 
   //-------------------------------------------------
   // General commands.
@@ -135,15 +149,36 @@ this.WifiCommand = function(aControlMessage, aInterface) {
     doStringCommand("LOG_LEVEL", callback);
   };
 
-  command.wpsPbc = function (callback) {
-    doBooleanCommand("WPS_PBC", "OK", callback);
+  command.wpsPbc = function (callback, iface) {
+    let cmd = 'WPS_PBC';
+
+    // If the network interface is specified and we are based on JB,
+    // append the argument 'interface=[iface]' to the supplicant command.
+    //
+    // Note: The argument "interface" is only required for wifi p2p on JB.
+    //       For other cases, the argument is useless and even leads error.
+    //       Check the evil work here:
+    //       http://androidxref.com/4.2.2_r1/xref/external/wpa_supplicant_8/wpa_supplicant/ctrl_iface_unix.c#172
+    //
+    if (iface && isJellybean()) {
+      cmd += (' inferface=' + iface);
+    }
+
+    doBooleanCommand(cmd, "OK", callback);
   };
 
   command.wpsPin = function (detail, callback) {
-    doStringCommand("WPS_PIN " +
-                    (detail.bssid === undefined ? "any" : detail.bssid) +
-                    (detail.pin === undefined ? "" : (" " + detail.pin)),
-                    callback);
+    let cmd = 'WPS_PIN ';
+
+    // See the comment above in wpsPbc().
+    if (detail.iface && isJellybean()) {
+      cmd += ('inferface=' + iface + ' ');
+    }
+
+    cmd += (detail.bssid === undefined ? "any" : detail.bssid);
+    cmd += (detail.pin === undefined ? "" : (" " + detail.pin));
+
+    doStringCommand(cmd, callback);
   };
 
   command.wpsCancel = function (callback) {
@@ -212,6 +247,9 @@ this.WifiCommand = function(aControlMessage, aInterface) {
     });
   };
 
+  let infoKeys = [{regexp: /RSSI=/i,      prop: 'rssi'},
+                  {regexp: /LINKSPEED=/i, prop: 'linkspeed'}];
+
   command.getConnectionInfoICS = function (callback) {
     doStringCommand("SIGNAL_POLL", function(reply) {
       if (!reply) {
@@ -219,19 +257,21 @@ this.WifiCommand = function(aControlMessage, aInterface) {
         return;
       }
 
+      // Find any values matching |infoKeys|. This gets executed frequently
+      // enough that we want to avoid creating intermediate strings as much as
+      // possible.
       let rval = {};
-      var lines = reply.split("\n");
-      for (let i = 0; i < lines.length; ++i) {
-        let [key, value] = lines[i].split("=");
-        switch (key.toUpperCase()) {
-          case "RSSI":
-            rval.rssi = value | 0;
-            break;
-          case "LINKSPEED":
-            rval.linkspeed = value | 0;
-            break;
-          default:
-            // Ignore.
+      for (let i = 0; i < infoKeys.length; i++) {
+        let re = infoKeys[i].regexp;
+        let iKeyStart = reply.search(re);
+        if (iKeyStart !== -1) {
+          let prop = infoKeys[i].prop;
+          let iValueStart = reply.indexOf('=', iKeyStart) + 1;
+          let iNewlineAfterValue = reply.indexOf('\n', iValueStart);
+          let iValueEnd = iNewlineAfterValue !== -1
+                        ? iNewlineAfterValue
+                        : reply.length;
+          rval[prop] = reply.substring(iValueStart, iValueEnd) | 0;
         }
       }
 
@@ -245,6 +285,33 @@ this.WifiCommand = function(aControlMessage, aInterface) {
         reply = reply.split(" ")[2]; // Format: Macaddr = XX.XX.XX.XX.XX.XX
       }
       callback(reply);
+    });
+  };
+
+  command.connectToHostapd = function(callback) {
+    voidControlMessage("connect_to_hostapd", callback);
+  };
+
+  command.closeHostapdConnection = function(callback) {
+    voidControlMessage("close_hostapd_connection", callback);
+  };
+
+  command.hostapdCommand = function (callback, request) {
+    var msg = { cmd:     "hostapd_command",
+                request: request,
+                iface:   aInterface };
+
+    aControlMessage(msg, function(data) {
+      callback(data.status ? null : data.reply);
+    });
+  };
+
+  command.hostapdGetStations = function (callback) {
+    var msg = { cmd:     "hostapd_get_stations",
+                iface:   aInterface };
+
+    aControlMessage(msg, function(data) {
+      callback(data.status);
     });
   };
 
@@ -310,8 +377,13 @@ this.WifiCommand = function(aControlMessage, aInterface) {
     doBooleanCommand("BLACKLIST clear", "OK", callback);
   };
 
-  command.setSuspendOptimizations = function (enabled, callback) {
+  command.setSuspendOptimizationsICS = function (enabled, callback) {
     doBooleanCommand("DRIVER SETSUSPENDOPT " + (enabled ? 0 : 1),
+                     "OK", callback);
+  };
+
+  command.setSuspendOptimizationsJB = function (enabled, callback) {
+    doBooleanCommand("DRIVER SETSUSPENDMODE " + (enabled ? 1 : 0),
                      "OK", callback);
   };
 
@@ -332,9 +404,89 @@ this.WifiCommand = function(aControlMessage, aInterface) {
     });
   };
 
-  //--------------------------------------------------
-  // Helper functions.
-  //--------------------------------------------------
+  command.setDeviceName = function(deviceName, callback) {
+    doBooleanCommand("SET device_name " + deviceName, "OK", callback);
+  };
+
+  //-------------------------------------------------
+  // P2P commands.
+  //-------------------------------------------------
+
+  command.p2pProvDiscovery = function(address, wpsMethod, callback) {
+    var command = "P2P_PROV_DISC " + address + " " + wpsMethod;
+    doBooleanCommand(command, "OK", callback);
+  };
+
+  command.p2pConnect = function(config, callback) {
+    var command = "P2P_CONNECT " + config.address + " " + config.wpsMethodWithPin + " ";
+    if (config.joinExistingGroup) {
+      command += "join";
+    } else {
+      command += "go_intent=" + config.goIntent;
+    }
+
+    debug('P2P connect command: ' + command);
+    doBooleanCommand(command, "OK", callback);
+  };
+
+  command.p2pGroupRemove = function(iface, callback) {
+    debug("groupRemove()");
+    doBooleanCommand("P2P_GROUP_REMOVE " + iface, "OK", callback);
+  };
+
+  command.p2pEnable = function(detail, callback) {
+    var commandChain = ["SET device_name "    + detail.deviceName,
+                        "SET device_type "    + detail.deviceType,
+                        "SET config_methods " + detail.wpsMethods,
+                        "P2P_SET conc_pref sta",
+                        "P2P_FLUSH"];
+
+    doBooleanCommandChain(commandChain, callback);
+  };
+
+  command.p2pDisable = function(callback) {
+    doBooleanCommand("P2P_SET disabled 1", "OK", callback);
+  };
+
+  command.p2pEnableScan = function(timeout, callback) {
+    doBooleanCommand("P2P_FIND " + timeout, "OK", callback);
+  };
+
+  command.p2pDisableScan = function(callback) {
+    doBooleanCommand("P2P_STOP_FIND", "OK", callback);
+  };
+
+  command.p2pGetGroupCapab = function(address, callback) {
+    command.p2pPeer(address, function(reply) {
+      debug('p2p_peer reply: ' + reply);
+      if (!reply) {
+        callback(0);
+        return;
+      }
+      var capab = /group_capab=0x([0-9a-fA-F]+)/.exec(reply)[1];
+      if (!capab) {
+        callback(0);
+      } else {
+        callback(parseInt(capab, 16));
+      }
+    });
+  };
+
+  command.p2pPeer = function(address, callback) {
+    doStringCommand("P2P_PEER " + address, callback);
+  };
+
+  command.p2pGroupAdd = function(netId, callback) {
+    doBooleanCommand("P2P_GROUP_ADD persistent=" + netId, callback);
+  };
+
+  command.p2pReinvoke = function(netId, address, callback) {
+    doBooleanCommand("P2P_INVITE persistent=" + netId + " peer=" + address, "OK", callback);
+  };
+
+  //----------------------------------------------------------
+  // Private stuff.
+  //----------------------------------------------------------
 
   function voidControlMessage(cmd, callback) {
     aControlMessage({ cmd: cmd, iface: aInterface }, function (data) {
@@ -386,6 +538,10 @@ this.WifiCommand = function(aControlMessage, aInterface) {
     });
   }
 
+  //--------------------------------------------------
+  // Helper functions.
+  //--------------------------------------------------
+
   function stopProcess(service, process, callback) {
     var count = 0;
     var timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
@@ -420,6 +576,18 @@ this.WifiCommand = function(aControlMessage, aInterface) {
       ok = false;
     }
     callback(ok);
+  }
+
+  function isJellybean() {
+    // According to http://developer.android.com/guide/topics/manifest/uses-sdk-element.html
+    // ----------------------------------------------------
+    // | Platform Version   | API Level |   VERSION_CODE  |
+    // ----------------------------------------------------
+    // | Android 4.1, 4.1.1 |    16     |  JELLY_BEAN_MR2 |
+    // | Android 4.2, 4.2.2 |    17     |  JELLY_BEAN_MR1 |
+    // | Android 4.3        |    18     |    JELLY_BEAN   |
+    // ----------------------------------------------------
+    return aSdkVersion === 16 || aSdkVersion === 17 || aSdkVersion === 18;
   }
 
   return command;

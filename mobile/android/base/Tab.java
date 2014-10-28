@@ -5,31 +5,30 @@
 
 package org.mozilla.gecko;
 
-import org.mozilla.gecko.SiteIdentity.SecurityMode;
-import org.mozilla.gecko.db.BrowserDB;
-import org.mozilla.gecko.gfx.Layer;
-import org.mozilla.gecko.home.HomePager;
-import org.mozilla.gecko.util.ThreadUtils;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.mozilla.gecko.db.BrowserContract.Bookmarks;
+import org.mozilla.gecko.db.BrowserDB;
+import org.mozilla.gecko.db.URLMetadata;
+import org.mozilla.gecko.gfx.Layer;
+import org.mozilla.gecko.util.ThreadUtils;
 
 import android.content.ContentResolver;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.drawable.BitmapDrawable;
-import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.View;
-
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class Tab {
     private static final String LOGTAG = "GeckoTab";
@@ -39,43 +38,50 @@ public class Tab {
     private long mLastUsed;
     private String mUrl;
     private String mBaseDomain;
-    private String mUserSearch;
+    private String mUserRequested; // The original url requested. May be typed by the user or sent by an extneral app for example.
     private String mTitle;
     private Bitmap mFavicon;
     private String mFaviconUrl;
     private int mFaviconSize;
     private boolean mHasFeeds;
     private boolean mHasOpenSearch;
-    private SiteIdentity mSiteIdentity;
+    private final SiteIdentity mSiteIdentity;
     private boolean mReaderEnabled;
     private BitmapDrawable mThumbnail;
     private int mHistoryIndex;
     private int mHistorySize;
-    private int mParentId;
-    private HomePager.Page mAboutHomePage;
-    private boolean mExternal;
+    private final int mParentId;
+    private final boolean mExternal;
     private boolean mBookmark;
-    private boolean mReadingListItem;
     private int mFaviconLoadId;
     private String mContentType;
     private boolean mHasTouchListeners;
     private ZoomConstraints mZoomConstraints;
     private boolean mIsRTL;
-    private ArrayList<View> mPluginViews;
-    private HashMap<Object, Layer> mPluginLayers;
+    private final ArrayList<View> mPluginViews;
+    private final HashMap<Object, Layer> mPluginLayers;
     private int mBackgroundColor;
     private int mState;
     private Bitmap mThumbnailBitmap;
     private boolean mDesktopMode;
     private boolean mEnteringReaderMode;
-    private Context mAppContext;
+    private final Context mAppContext;
     private ErrorType mErrorType = ErrorType.NONE;
     private static final int MAX_HISTORY_LIST_SIZE = 50;
+    private volatile int mLoadProgress;
+    private volatile int mRecordingCount;
+    private String mMostRecentHomePanel;
 
     public static final int STATE_DELAYED = 0;
     public static final int STATE_LOADING = 1;
     public static final int STATE_SUCCESS = 2;
     public static final int STATE_ERROR = 3;
+
+    public static final int LOAD_PROGRESS_INIT = 10;
+    public static final int LOAD_PROGRESS_START = 20;
+    public static final int LOAD_PROGRESS_LOCATION_CHANGE = 60;
+    public static final int LOAD_PROGRESS_LOADED = 80;
+    public static final int LOAD_PROGRESS_STOP = 100;
 
     private static final int DEFAULT_BACKGROUND_COLOR = Color.WHITE;
 
@@ -89,38 +95,27 @@ public class Tab {
     public Tab(Context context, int id, String url, boolean external, int parentId, String title) {
         mAppContext = context.getApplicationContext();
         mId = id;
-        mLastUsed = 0;
         mUrl = url;
         mBaseDomain = "";
-        mUserSearch = "";
+        mUserRequested = "";
         mExternal = external;
         mParentId = parentId;
-        mAboutHomePage = null;
         mTitle = title == null ? "" : title;
-        mFavicon = null;
-        mFaviconUrl = null;
-        mFaviconSize = 0;
-        mHasFeeds = false;
-        mHasOpenSearch = false;
         mSiteIdentity = new SiteIdentity();
-        mReaderEnabled = false;
-        mEnteringReaderMode = false;
-        mThumbnail = null;
         mHistoryIndex = -1;
-        mHistorySize = 0;
-        mBookmark = false;
-        mReadingListItem = false;
-        mFaviconLoadId = 0;
         mContentType = "";
         mZoomConstraints = new ZoomConstraints(false);
         mPluginViews = new ArrayList<View>();
         mPluginLayers = new HashMap<Object, Layer>();
-        mState = shouldShowProgress(url) ? STATE_SUCCESS : STATE_LOADING;
+        mState = shouldShowProgress(url) ? STATE_LOADING : STATE_SUCCESS;
+        mLoadProgress = LOAD_PROGRESS_INIT;
 
         // At startup, the background is set to a color specified by LayerView
         // when the LayerView is created. Shortly after, this background color
         // will be used before the tab's content is shown.
         mBackgroundColor = DEFAULT_BACKGROUND_COLOR;
+
+        updateBookmark();
     }
 
     private ContentResolver getContentResolver() {
@@ -147,22 +142,14 @@ public class Tab {
         return mParentId;
     }
 
-    public HomePager.Page getAboutHomePage() {
-        return mAboutHomePage;
-    }
-
-    private void setAboutHomePage(HomePager.Page page) {
-        mAboutHomePage = page;
-    }
-
     // may be null if user-entered query hasn't yet been resolved to a URI
     public synchronized String getURL() {
         return mUrl;
     }
 
-    // mUserSearch should never be null, but it may be an empty string
-    public synchronized String getUserSearch() {
-        return mUserSearch;
+    // mUserRequested should never be null, but it may be an empty string
+    public synchronized String getUserRequested() {
+        return mUserRequested;
     }
 
     // mTitle should never be null, but it may be an empty string
@@ -190,6 +177,14 @@ public class Tab {
         return mThumbnail;
     }
 
+    public String getMostRecentHomePanel() {
+        return mMostRecentHomePanel;
+    }
+
+    public void setMostRecentHomePanel(String panelId) {
+        mMostRecentHomePanel = panelId;
+    }
+
     public Bitmap getThumbnailBitmap(int width, int height) {
         if (mThumbnailBitmap != null) {
             // Bug 787318 - Honeycomb has a bug with bitmap caching, we can't
@@ -212,15 +207,20 @@ public class Tab {
         return mThumbnailBitmap;
     }
 
-    public void updateThumbnail(final Bitmap b) {
+    public void updateThumbnail(final Bitmap b, final ThumbnailHelper.CachePolicy cachePolicy) {
         ThreadUtils.postToBackgroundThread(new Runnable() {
             @Override
             public void run() {
                 if (b != null) {
                     try {
-                        mThumbnail = new BitmapDrawable(b);
-                        if (mState == Tab.STATE_SUCCESS)
+                        mThumbnail = new BitmapDrawable(mAppContext.getResources(), b);
+                        if (mState == Tab.STATE_SUCCESS && cachePolicy == ThumbnailHelper.CachePolicy.STORE) {
                             saveThumbnailToDB();
+                        } else {
+                            // If the page failed to load, or requested that we not cache info about it, clear any previous
+                            // thumbnails we've stored.
+                            clearThumbnailFromDB();
+                        }
                     } catch (OutOfMemoryError oom) {
                         Log.w(LOGTAG, "Unable to create/scale bitmap.", oom);
                         mThumbnail = null;
@@ -246,10 +246,6 @@ public class Tab {
         return mHasOpenSearch;
     }
 
-    public SecurityMode getSecurityMode() {
-        return mSiteIdentity.getSecurityMode();
-    }
-
     public SiteIdentity getSiteIdentity() {
         return mSiteIdentity;
     }
@@ -262,10 +258,6 @@ public class Tab {
         return mBookmark;
     }
 
-    public boolean isReadingListItem() {
-        return mReadingListItem;
-    }
-
     public boolean isExternal() {
         return mExternal;
     }
@@ -273,12 +265,11 @@ public class Tab {
     public synchronized void updateURL(String url) {
         if (url != null && url.length() > 0) {
             mUrl = url;
-            updateBookmark();
         }
     }
 
-    private synchronized void updateUserSearch(String userSearch) {
-        mUserSearch = userSearch;
+    public synchronized void updateUserRequested(String userRequested) {
+        mUserRequested = userRequested;
     }
 
     public void setErrorType(String type) {
@@ -294,6 +285,21 @@ public class Tab {
 
     public void setErrorType(ErrorType type) {
         mErrorType = type;
+    }
+
+    public void setMetadata(JSONObject metadata) {
+        if (metadata == null) {
+            return;
+        }
+
+        final ContentResolver cr = mAppContext.getContentResolver();
+        final Map<String, Object> data = URLMetadata.fromJSON(metadata);
+        ThreadUtils.postToBackgroundThread(new Runnable() {
+            @Override
+            public void run() {
+                URLMetadata.save(cr, mUrl, data);
+            }
+        });
     }
 
     public ErrorType getErrorType() {
@@ -419,18 +425,19 @@ public class Tab {
     }
 
     void updateBookmark() {
+        if (getURL() == null) {
+            return;
+        }
+
         ThreadUtils.postToBackgroundThread(new Runnable() {
             @Override
             public void run() {
                 final String url = getURL();
-                if (url == null)
+                if (url == null) {
                     return;
-
-                if (url.equals(getURL())) {
-                    mBookmark = BrowserDB.isBookmark(getContentResolver(), url);
-                    mReadingListItem = BrowserDB.isReadingListItem(getContentResolver(), url);
                 }
 
+                mBookmark = BrowserDB.isBookmark(getContentResolver(), url);
                 Tabs.getInstance().notifyListeners(Tab.this, Tabs.TabEvents.MENU_UPDATED);
             }
         });
@@ -445,6 +452,7 @@ public class Tab {
                     return;
 
                 BrowserDB.addBookmark(getContentResolver(), mTitle, url);
+                Tabs.getInstance().notifyListeners(Tab.this, Tabs.TabEvents.BOOKMARK_ADDED);
             }
         });
     }
@@ -458,24 +466,9 @@ public class Tab {
                     return;
 
                 BrowserDB.removeBookmarksWithURL(getContentResolver(), url);
+                Tabs.getInstance().notifyListeners(Tab.this, Tabs.TabEvents.BOOKMARK_REMOVED);
             }
         });
-    }
-
-    public void addToReadingList() {
-        if (!mReaderEnabled)
-            return;
-
-        JSONObject json = new JSONObject();
-        try {
-            json.put("tabID", String.valueOf(getId()));
-        } catch (JSONException e) {
-            Log.e(LOGTAG, "JSON error - failing to add to reading list", e);
-            return;
-        }
-
-        GeckoEvent e = GeckoEvent.createBroadcastEvent("Reader:Add", json.toString());
-        GeckoAppShell.sendEventToGecko(e);
     }
 
     public void toggleReaderMode() {
@@ -621,18 +614,23 @@ public class Tab {
     void handleLocationChange(JSONObject message) throws JSONException {
         final String uri = message.getString("uri");
         final String oldUrl = getURL();
+        final boolean sameDocument = message.getBoolean("sameDocument");
         mEnteringReaderMode = ReaderModeUtils.isEnteringReaderMode(oldUrl, uri);
 
-        if (TextUtils.equals(oldUrl, uri)) {
-            Log.d(LOGTAG, "Ignoring location change event: URIs are the same.");
-            return;
+        if (!TextUtils.equals(oldUrl, uri)) {
+            updateURL(uri);
+            updateBookmark();
+            if (!sameDocument) {
+                // We can unconditionally clear the favicon and title here: we
+                // already filtered both cases in which this was a (pseudo-)
+                // spurious location change, so we're definitely loading a new
+                // page.
+                clearFavicon();
+                updateTitle(null);
+            }
         }
 
-        updateURL(uri);
-        updateUserSearch(message.getString("userSearch"));
-
-        mBaseDomain = message.optString("baseDomain");
-        if (message.getBoolean("sameDocument")) {
+        if (sameDocument) {
             // We can get a location change event for the same document with an anchor tag
             // Notify listeners so that buttons like back or forward will update themselves
             Tabs.getInstance().notifyListeners(this, Tabs.TabEvents.LOCATION_CHANGE, oldUrl);
@@ -640,39 +638,29 @@ public class Tab {
         }
 
         setContentType(message.getString("contentType"));
-
-        // We can unconditionally clear the favicon here: we already
-        // short-circuited for both cases in which this was a (pseudo-)
-        // spurious location change, so we're definitely loading a new page.
-        // The same applies to all of the other fields we're wiping out.
-        clearFavicon();
+        updateUserRequested(message.getString("userRequested"));
+        mBaseDomain = message.optString("baseDomain");
 
         setHasFeeds(false);
-        updateTitle(null);
+        setHasOpenSearch(false);
         updateIdentityData(null);
         setReaderEnabled(false);
         setZoomConstraints(new ZoomConstraints(true));
         setHasTouchListeners(false);
         setBackgroundColor(DEFAULT_BACKGROUND_COLOR);
         setErrorType(ErrorType.NONE);
-
-        final String homePage = message.getString("aboutHomePage");
-        if (!TextUtils.isEmpty(homePage)) {
-            setAboutHomePage(HomePager.Page.valueOf(homePage));
-        } else {
-            setAboutHomePage(null);
-        }
+        setLoadProgressIfLoading(LOAD_PROGRESS_LOCATION_CHANGE);
 
         Tabs.getInstance().notifyListeners(this, Tabs.TabEvents.LOCATION_CHANGE, oldUrl);
     }
 
     private static boolean shouldShowProgress(final String url) {
-        return AboutPages.isAboutHome(url) ||
-               AboutPages.isAboutReader(url);
+        return !AboutPages.isAboutPage(url);
     }
 
-    void handleDocumentStart(boolean showProgress, String url) {
-        setState(showProgress ? STATE_LOADING : STATE_SUCCESS);
+    void handleDocumentStart(boolean restoring, String url) {
+        setLoadProgress(LOAD_PROGRESS_START);
+        setState((!restoring && shouldShowProgress(url)) ? STATE_LOADING : STATE_SUCCESS);
         updateIdentityData(null);
         setReaderEnabled(false);
     }
@@ -682,6 +670,7 @@ public class Tab {
 
         final String oldURL = getURL();
         final Tab tab = this;
+        tab.setLoadProgress(LOAD_PROGRESS_STOP);
         ThreadUtils.getBackgroundHandler().postDelayed(new Runnable() {
             @Override
             public void run() {
@@ -692,15 +681,38 @@ public class Tab {
                 ThumbnailHelper.getInstance().getAndProcessThumbnailFor(tab);
             }
         }, 500);
-     }
+    }
+
+    void handleContentLoaded() {
+        setLoadProgressIfLoading(LOAD_PROGRESS_LOADED);
+    }
 
     protected void saveThumbnailToDB() {
+        final BitmapDrawable thumbnail = mThumbnail;
+        if (thumbnail == null) {
+            return;
+        }
+
+        try {
+            String url = getURL();
+            if (url == null) {
+                return;
+            }
+
+            BrowserDB.updateThumbnailForUrl(getContentResolver(), url, thumbnail);
+        } catch (Exception e) {
+            // ignore
+        }
+    }
+
+    private void clearThumbnailFromDB() {
         try {
             String url = getURL();
             if (url == null)
                 return;
 
-            BrowserDB.updateThumbnailForUrl(getContentResolver(), url, mThumbnail);
+            // Passing in a null thumbnail will delete the stored thumbnail for this url
+            BrowserDB.updateThumbnailForUrl(getContentResolver(), url, null);
         } catch (Exception e) {
             // ignore
         }
@@ -784,5 +796,51 @@ public class Tab {
 
     public boolean isPrivate() {
         return false;
+    }
+
+    /**
+     * Sets the tab load progress to the given percentage.
+     *
+     * @param progressPercentage Percentage to set progress to (0-100)
+     */
+    void setLoadProgress(int progressPercentage) {
+        mLoadProgress = progressPercentage;
+    }
+
+    /**
+     * Sets the tab load progress to the given percentage only if the tab is
+     * currently loading.
+     *
+     * about:neterror can trigger a STOP before other page load events (bug
+     * 976426), so any post-START events should make sure the page is loading
+     * before updating progress.
+     *
+     * @param progressPercentage Percentage to set progress to (0-100)
+     */
+    void setLoadProgressIfLoading(int progressPercentage) {
+        if (getState() == STATE_LOADING) {
+            setLoadProgress(progressPercentage);
+        }
+    }
+
+    /**
+     * Gets the tab load progress percentage.
+     *
+     * @return Current progress percentage
+     */
+    public int getLoadProgress() {
+        return mLoadProgress;
+    }
+
+    public void setRecording(boolean isRecording) {
+        if (isRecording) {
+            mRecordingCount++;
+        } else {
+            mRecordingCount--;
+        }
+    }
+
+    public boolean isRecording() {
+        return mRecordingCount > 0;
     }
 }

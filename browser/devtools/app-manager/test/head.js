@@ -5,7 +5,7 @@
 const {utils: Cu, classes: Cc, interfaces: Ci} = Components;
 
 const {Promise: promise} =
-  Cu.import("resource://gre/modules/commonjs/sdk/core/promise.js", {});
+  Cu.import("resource://gre/modules/devtools/deprecated-sync-thenables.js", {});
 const {devtools} =
   Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
 const {require} = devtools;
@@ -18,6 +18,11 @@ const TEST_BASE =
 const HOSTED_APP_MANIFEST = TEST_BASE + "hosted_app.manifest";
 
 const PACKAGED_APP_DIR_PATH = getTestFilePath(".");
+
+gDevTools.testing = true;
+SimpleTest.registerCleanupFunction(() => {
+  gDevTools.testing = false;
+});
 
 function addTab(url, targetWindow = window) {
   info("Adding tab: " + url);

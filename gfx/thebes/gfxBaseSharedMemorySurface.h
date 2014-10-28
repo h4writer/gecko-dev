@@ -19,7 +19,7 @@ typedef struct _cairo_user_data_key cairo_user_data_key_t;
 struct SharedImageInfo {
     int32_t width;
     int32_t height;
-    int32_t format;
+    gfxImageFormat format;
     int32_t readCount;
 };
 
@@ -38,12 +38,13 @@ class gfxBaseSharedMemorySurface : public Base {
     typedef mozilla::ipc::Shmem Shmem;
     friend class gfxReusableSharedImageSurfaceWrapper;
 
-public:
+protected:
     virtual ~gfxBaseSharedMemorySurface()
     {
         MOZ_COUNT_DTOR(gfxBaseSharedMemorySurface);
     }
 
+public:
     /**
      * Return a new gfxSharedImageSurface around a shmem segment newly
      * allocated by this function.  |aAllocator| is the object used to
@@ -104,7 +105,7 @@ public:
     static bool IsSharedImage(gfxASurface *aSurface)
     {
         return (aSurface
-                && aSurface->GetType() == gfxSurfaceTypeImage
+                && aSurface->GetType() == gfxSurfaceType::Image
                 && aSurface->GetData(&SHM_KEY));
     }
 

@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <gdk/gdkkeysyms.h>
 
 #include <algorithm>
 #include <string>
@@ -26,6 +27,10 @@
 #include "common/linux/http_upload.h"
 #include "crashreporter.h"
 #include "crashreporter_gtk_common.h"
+
+#ifndef GDK_KEY_Escape
+#define GDK_KEY_Escape GDK_Escape
+#endif
 
 using std::string;
 using std::vector;
@@ -42,7 +47,7 @@ GtkWidget* gRestartButton = 0;
 
 bool gInitialized = false;
 bool gDidTrySend = false;
-string gDumpFile;
+StringTable gFiles;
 StringTable gQueryParameters;
 string gHttpProxy;
 string gAuth;
@@ -94,7 +99,7 @@ static gboolean CloseApp(gpointer data)
 
 static gboolean ReportCompleted(gpointer success)
 {
-  gtk_widget_hide_all(gThrobber);
+  gtk_widget_hide(gThrobber);
   string str = success ? gStrings[ST_REPORTSUBMITSUCCESS]
                        : gStrings[ST_SUBMITFAILED];
   gtk_label_set_text(GTK_LABEL(gProgressLabel), str.c_str());
@@ -191,8 +196,7 @@ gpointer SendThread(gpointer args)
   bool success = google_breakpad::HTTPUpload::SendRequest
     (gSendURL,
      gQueryParameters,
-     gDumpFile,
-     "upload_file_minidump",
+     gFiles,
      gHttpProxy, gAuth,
      gCACertificateFile,
      &response,
@@ -215,12 +219,23 @@ gpointer SendThread(gpointer args)
 }
 
 gboolean WindowDeleted(GtkWidget* window,
-                              GdkEvent* event,
-                              gpointer userData)
+                       GdkEvent* event,
+                       gpointer userData)
 {
   SaveSettings();
   gtk_main_quit();
   return TRUE;
+}
+
+gboolean check_escape(GtkWidget* window,
+                      GdkEventKey* event,
+                      gpointer userData)
+{
+  if (event->keyval == GDK_KEY_Escape) {
+    gtk_main_quit();
+    return TRUE;
+  }
+  return FALSE;
 }
 
 static void MaybeSubmitReport()
@@ -423,9 +438,19 @@ std::ifstream* UIOpenRead(const string& filename)
   return new std::ifstream(filename.c_str(), std::ios::in);
 }
 
-std::ofstream* UIOpenWrite(const string& filename, bool append) // append=false
+std::ofstream* UIOpenWrite(const string& filename,
+                           bool append, // append=false
+                           bool binary) // binary=false
 {
-  return new std::ofstream(filename.c_str(),
-                           append ? std::ios::out | std::ios::app
-                                  : std::ios::out);
+  std::ios_base::openmode mode = std::ios::out;
+
+  if (append) {
+    mode = mode | std::ios::app;
+  }
+
+  if (binary) {
+    mode = mode | std::ios::binary;
+  }
+
+  return new std::ofstream(filename.c_str(), mode);
 }

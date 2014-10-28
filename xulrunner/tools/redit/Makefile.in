@@ -8,12 +8,4 @@ SDK_BINARY =  \
 	$(PROGRAM) \
 	$(NULL)
 
-LIBS = \
-  $(XPCOM_STANDALONE_GLUE_LDOPTS) \
-  $(NULL)
-
-ifdef GNU_CC
-WIN32_EXE_LDFLAGS = -municode
-endif
-
 endif

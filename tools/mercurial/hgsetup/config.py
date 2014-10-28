@@ -5,15 +5,20 @@
 from __future__ import unicode_literals
 
 from configobj import ConfigObj
+import codecs
 import re
 import os
 
 
 HOST_FINGERPRINTS = {
-    'bitbucket.org': '24:9c:45:8b:9c:aa:ba:55:4e:01:6d:58:ff:e4:28:7d:2a:14:ae:3b',
+    'bitbucket.org': '45:ad:ae:1a:cf:0e:73:47:06:07:e0:88:f5:cc:10:e5:fa:1c:f7:99',
     'bugzilla.mozilla.org': '47:13:a2:14:0c:46:45:53:12:0d:e5:36:16:a5:60:26:3e:da:3a:60',
     'hg.mozilla.org': 'af:27:b9:34:47:4e:e5:98:01:f6:83:2b:51:c9:aa:d8:df:fb:1a:27',
 }
+
+
+class HgIncludeException(Exception):
+    pass
 
 
 class MercurialConfig(object):
@@ -34,6 +39,16 @@ class MercurialConfig(object):
             self.config_path = infile
         else:
             infile = None
+
+        # Mercurial configuration files allow an %include directive to include
+        # other files, this is not supported by ConfigObj, so throw a useful
+        # error saying this.
+        if os.path.exists(infile):
+            with codecs.open(infile, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('%include'):
+                        raise HgIncludeException(
+                            '%include directive is not supported by MercurialConfig')
 
         # write_empty_values is necessary to prevent built-in extensions (which
         # have no value) from being dropped on write.
@@ -121,18 +136,18 @@ class MercurialConfig(object):
         d['showfunc'] = 1
         d['unified'] = 8
 
-    def autocommit_mq(self, value=True):
+    def have_mqext_autocommit_mq(self):
+        if 'mqext' not in self._c:
+            return False
+        v = self._c['mqext'].get('mqcommit')
+        return v == 'auto' or v == 'yes'
+
+    def ensure_mqext_autocommit_mq(self):
+        if self.have_mqext_autocommit_mq():
+            return
         if 'mqext' not in self._c:
             self._c['mqext'] = {}
-
-        if value:
-            self._c['mqext']['mqcommit'] = 'auto'
-        else:
-            try:
-                del self._c['mqext']['mqcommit']
-            except KeyError:
-                pass
-
+        self._c['mqext']['mqcommit'] = 'auto'
 
     def have_qnew_currentuser_default(self):
         if 'defaults' not in self._c:
@@ -154,8 +169,20 @@ class MercurialConfig(object):
 
         d = self._c['defaults']
         if 'qnew' not in d:
-          d['qnew'] = '-U'
+            d['qnew'] = '-U'
         else:
-          d['qnew'] = '-U ' + d['qnew']
+            d['qnew'] = '-U ' + d['qnew']
 
+    def get_bugzilla_credentials(self):
+        if 'bugzilla' not in self._c:
+            return None, None
 
+        b = self._c['bugzilla']
+        return b.get('username', None), b.get('password', None)
+
+    def set_bugzilla_credentials(self, username, password):
+        b = self._c.setdefault('bugzilla', {})
+        if username:
+            b['username'] = username
+        if password:
+            b['password'] = password

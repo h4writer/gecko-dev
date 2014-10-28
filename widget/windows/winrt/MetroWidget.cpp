@@ -4,6 +4,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "ContentHelper.h"
 #include "LayerManagerD3D10.h"
 #include "MetroWidget.h"
 #include "MetroApp.h"
@@ -25,6 +26,7 @@
 #include "ClientLayerManager.h"
 #include "BasicLayers.h"
 #include "FrameMetrics.h"
+#include <windows.devices.input.h>
 #include "Windows.Graphics.Display.h"
 #include "DisplayInfo_sdk81.h"
 #include "nsNativeDragTarget.h"
@@ -37,6 +39,7 @@
 #include "mozilla/TextEvents.h"
 #include "mozilla/TouchEvents.h"
 #include "mozilla/MiscEvents.h"
+#include "gfxPrefs.h"
 
 using namespace Microsoft::WRL;
 using namespace Microsoft::WRL::Wrappers;
@@ -54,6 +57,7 @@ using namespace ABI::Windows::Devices::Input;
 using namespace ABI::Windows::UI::Core;
 using namespace ABI::Windows::System;
 using namespace ABI::Windows::Foundation;
+using namespace ABI::Windows::Foundation::Collections;
 using namespace ABI::Windows::Graphics::Display;
 
 #ifdef PR_LOGGING
@@ -65,7 +69,7 @@ extern PRLogModuleInfo* gWindowsLog;
 #endif
 
 static uint32_t gInstanceCount = 0;
-const PRUnichar* kMetroSubclassThisProp = L"MetroSubclassThisProp";
+const char16_t* kMetroSubclassThisProp = L"MetroSubclassThisProp";
 HWND MetroWidget::sICoreHwnd = nullptr;
 
 namespace mozilla {
@@ -74,11 +78,12 @@ UINT sDefaultBrowserMsgId = RegisterWindowMessageW(L"DefaultBrowserClosing");
 } }
 
 // WM_GETOBJECT id pulled from uia headers
-#define UiaRootObjectId -25
+#define MOZOBJID_UIAROOT -25
 
 namespace mozilla {
 namespace widget {
 namespace winrt {
+extern ComPtr<MetroApp> sMetroApp;
 extern ComPtr<IUIABridge> gProviderRoot;
 } } }
 
@@ -250,7 +255,7 @@ MetroWidget::Create(nsIWidget *aParent,
 
   // the main widget gets created first
   gTopLevelAssigned = true;
-  MetroApp::SetBaseWidget(this);
+  sMetroApp->SetWidget(this);
   WinUtils::SetNSWindowBasePtr(mWnd, this);
 
   if (mWidgetListener) {
@@ -323,6 +328,52 @@ NS_IMETHODIMP
 MetroWidget::Show(bool bState)
 {
   return NS_OK;
+}
+
+uint32_t
+MetroWidget::GetMaxTouchPoints() const
+{
+  ComPtr<IPointerDeviceStatics> deviceStatics;
+
+  HRESULT hr = GetActivationFactory(
+    HStringReference(RuntimeClass_Windows_Devices_Input_PointerDevice).Get(),
+    deviceStatics.GetAddressOf());
+
+  if (FAILED(hr)) {
+    return 0;
+  }
+
+  ComPtr< IVectorView<PointerDevice*> > deviceList;
+  hr = deviceStatics->GetPointerDevices(&deviceList);
+
+  if (FAILED(hr)) {
+    return 0;
+  }
+
+  uint32_t deviceNum = 0;
+  deviceList->get_Size(&deviceNum);
+
+  uint32_t maxTouchPoints = 0;
+  for (uint32_t index = 0; index < deviceNum; ++index) {
+    ComPtr<IPointerDevice> device;
+    PointerDeviceType deviceType;
+
+    if (FAILED(deviceList->GetAt(index, device.GetAddressOf()))) {
+      continue;
+    }
+
+    if (FAILED(device->get_PointerDeviceType(&deviceType)))  {
+      continue;
+    }
+
+    if (deviceType == PointerDeviceType_Touch) {
+      uint32_t deviceMaxTouchPoints = 0;
+      device->get_MaxContacts(&deviceMaxTouchPoints);
+      maxTouchPoints = std::max(maxTouchPoints, deviceMaxTouchPoints);
+    }
+  }
+
+  return maxTouchPoints;
 }
 
 NS_IMETHODIMP
@@ -600,8 +651,8 @@ bool
 MetroWidget::DispatchScrollEvent(mozilla::WidgetGUIEvent* aEvent)
 {
   WidgetGUIEvent* newEvent = nullptr;
-  switch(aEvent->eventStructType) {
-    case NS_WHEEL_EVENT:
+  switch(aEvent->mClass) {
+    case eWheelEventClass:
     {
       WidgetWheelEvent* oldEvent = aEvent->AsWheelEvent();
       WidgetWheelEvent* wheelEvent =
@@ -610,7 +661,7 @@ MetroWidget::DispatchScrollEvent(mozilla::WidgetGUIEvent* aEvent)
       newEvent = static_cast<WidgetGUIEvent*>(wheelEvent);
     }
     break;
-    case NS_CONTENT_COMMAND_EVENT:
+    case eContentCommandEventClass:
     {
       WidgetContentCommandEvent* oldEvent = aEvent->AsContentCommandEvent();
       WidgetContentCommandEvent* cmdEvent =
@@ -686,7 +737,7 @@ MetroWidget::DeliverNextKeyboardEvent()
     delete event;
     return;
   }
-  
+
   if (DispatchWindowEvent(event) && event->message == NS_KEY_DOWN) {
     // keydown events may be followed by multiple keypress events which
     // shouldn't be sent if preventDefault is called on keydown.
@@ -742,19 +793,12 @@ MetroWidget::WindowProcedure(HWND aWnd, UINT aMsg, WPARAM aWParam, LPARAM aLPara
     return processResult;
   }
 
-  switch (aMsg) {
-    case WM_PAINT:
-    {
-      HRGN rgn = CreateRectRgn(0, 0, 0, 0);
-      GetUpdateRgn(mWnd, rgn, false);
-      nsIntRegion region = WinUtils::ConvertHRGNToRegion(rgn);
-      DeleteObject(rgn);
-      if (region.IsEmpty())
-        break;
-      Paint(region);
-      break;
-    }
+  nsTextStore::ProcessMessage(this, aMsg, aWParam, aLParam, msgResult);
+  if (msgResult.mConsumed) {
+    return processResult;
+  }
 
+  switch (aMsg) {
     case WM_POWERBROADCAST:
     {
       switch (aWParam)
@@ -835,6 +879,10 @@ MetroWidget::WindowProcedure(HWND aWnd, UINT aMsg, WPARAM aWParam, LPARAM aLPara
       break;
     }
 
+    case WM_APPCOMMAND:
+      processDefault = HandleAppCommandMsg(aWParam, aLParam, &processResult);
+      break;
+
     case WM_GETOBJECT:
     {
       DWORD dwObjId = (LPARAM)(DWORD) aLParam;
@@ -845,7 +893,7 @@ MetroWidget::WindowProcedure(HWND aWnd, UINT aMsg, WPARAM aWParam, LPARAM aLPara
       // UiaReturnRawElementProvider passing the return result from FrameworkView
       // OnAutomationProviderRequested as the hwnd (me scratches head) which results in
       // GetLastError always being set to invalid handle (6) after CallWindowProc returns.
-      if (dwObjId == UiaRootObjectId && gProviderRoot) {
+      if (dwObjId == MOZOBJID_UIAROOT && gProviderRoot) {
         ComPtr<IRawElementProviderSimple> simple;
         gProviderRoot.As(&simple);
         if (simple) {
@@ -862,9 +910,6 @@ MetroWidget::WindowProcedure(HWND aWnd, UINT aMsg, WPARAM aWParam, LPARAM aLPara
 
     default:
     {
-      if (aWParam == WM_USER_TSF_TEXTCHANGE) {
-        nsTextStore::OnTextChangeMsg();
-      }
       break;
     }
   }
@@ -953,7 +998,8 @@ MetroWidget::ShouldUseOffMainThreadCompositing()
     return false;
   }
   // toolkit or test widgets can't use omtc, they don't have ICoreWindow.
-  return (CompositorParent::CompositorLoop() && mWindowType == eWindowType_toplevel);
+  return gfxPlatform::UsesOffMainThreadCompositing() &&
+         mWindowType == eWindowType_toplevel;
 }
 
 bool
@@ -963,7 +1009,8 @@ MetroWidget::ShouldUseMainThreadD3D10Manager()
   if (!mView) {
     return false;
   }
-  return (!CompositorParent::CompositorLoop() && mWindowType == eWindowType_toplevel);
+  return !gfxPlatform::UsesOffMainThreadCompositing() &&
+         mWindowType == eWindowType_toplevel;
 }
 
 bool
@@ -976,18 +1023,13 @@ MetroWidget::ShouldUseBasicManager()
 bool
 MetroWidget::ShouldUseAPZC()
 {
-  const char* kPrefName = "layers.async-pan-zoom.enabled";
-  return ShouldUseOffMainThreadCompositing() &&
-         Preferences::GetBool(kPrefName, false);
+  return gfxPrefs::AsyncPanZoomEnabled();
 }
 
 void
 MetroWidget::SetWidgetListener(nsIWidgetListener* aWidgetListener)
 {
   mWidgetListener = aWidgetListener;
-  if (mController) {
-    mController->SetWidgetListener(aWidgetListener);
-  }
 }
 
 CompositorParent* MetroWidget::NewCompositorParent(int aSurfaceWidth, int aSurfaceHeight)
@@ -998,7 +1040,6 @@ CompositorParent* MetroWidget::NewCompositorParent(int aSurfaceWidth, int aSurfa
     mRootLayerTreeId = compositor->RootLayerTreeId();
 
     mController = new APZController();
-    mController->SetWidgetListener(mWidgetListener);
 
     CompositorParent::SetControllerForLayerTree(mRootLayerTreeId, mController);
 
@@ -1017,24 +1058,49 @@ CompositorParent* MetroWidget::NewCompositorParent(int aSurfaceWidth, int aSurfa
   return compositor;
 }
 
-void
-MetroWidget::ApzContentConsumingTouch(const ScrollableLayerGuid& aGuid)
+MetroWidget::TouchBehaviorFlags
+MetroWidget::ContentGetAllowedTouchBehavior(const nsIntPoint& aPoint)
 {
-  LogFunction();
-  if (!mController) {
-    return;
-  }
-  mController->ContentReceivedTouch(aGuid, true);
+  return ContentHelper::GetAllowedTouchBehavior(this, aPoint);
 }
 
 void
-MetroWidget::ApzContentIgnoringTouch(const ScrollableLayerGuid& aGuid)
+MetroWidget::ApzcGetAllowedTouchBehavior(WidgetInputEvent* aTransformedEvent,
+                                         nsTArray<TouchBehaviorFlags>& aOutBehaviors)
+{
+  LogFunction();
+  return APZController::sAPZC->GetAllowedTouchBehavior(aTransformedEvent, aOutBehaviors);
+}
+
+void
+MetroWidget::ApzcSetAllowedTouchBehavior(uint64_t aInputBlockId,
+                                         nsTArray<TouchBehaviorFlags>& aBehaviors)
+{
+  LogFunction();
+  if (!APZController::sAPZC) {
+    return;
+  }
+  APZController::sAPZC->SetAllowedTouchBehavior(aInputBlockId, aBehaviors);
+}
+
+void
+MetroWidget::ApzContentConsumingTouch(uint64_t aInputBlockId)
 {
   LogFunction();
   if (!mController) {
     return;
   }
-  mController->ContentReceivedTouch(aGuid, false);
+  mController->ContentReceivedTouch(aInputBlockId, true);
+}
+
+void
+MetroWidget::ApzContentIgnoringTouch(uint64_t aInputBlockId)
+{
+  LogFunction();
+  if (!mController) {
+    return;
+  }
+  mController->ContentReceivedTouch(aInputBlockId, false);
 }
 
 bool
@@ -1058,30 +1124,21 @@ MetroWidget::ApzTransformGeckoCoordinate(const ScreenIntPoint& aPoint,
 
 nsEventStatus
 MetroWidget::ApzReceiveInputEvent(WidgetInputEvent* aEvent,
-                                  ScrollableLayerGuid* aOutTargetGuid)
+                                  ScrollableLayerGuid* aOutTargetGuid,
+                                  uint64_t* aOutInputBlockId)
 {
   MOZ_ASSERT(aEvent);
 
   if (!mController) {
     return nsEventStatus_eIgnore;
   }
-  return mController->ReceiveInputEvent(aEvent, aOutTargetGuid);
+  return mController->ReceiveInputEvent(aEvent, aOutTargetGuid, aOutInputBlockId);
 }
 
-nsEventStatus
-MetroWidget::ApzReceiveInputEvent(WidgetInputEvent* aInEvent,
-                                  ScrollableLayerGuid* aOutTargetGuid,
-                                  WidgetInputEvent* aOutEvent)
+void
+MetroWidget::SetApzPendingResponseFlusher(APZPendingResponseFlusher* aFlusher)
 {
-  MOZ_ASSERT(aInEvent);
-  MOZ_ASSERT(aOutEvent);
-
-  if (!mController) {
-    return nsEventStatus_eIgnore;
-  }
-  return mController->ReceiveInputEvent(aInEvent,
-                                        aOutTargetGuid,
-                                        aOutEvent);
+  mController->SetPendingResponseFlusher(aFlusher);
 }
 
 LayerManager*
@@ -1103,7 +1160,7 @@ MetroWidget::GetLayerManager(PLayerTransactionChild* aShadowManager,
 
   // If the backend device has changed, create a new manager (pulled from nswindow)
   if (mLayerManager) {
-    if (mLayerManager->GetBackendType() == LAYERS_D3D10) {
+    if (mLayerManager->GetBackendType() == LayersBackend::LAYERS_D3D10) {
       LayerManagerD3D10 *layerManagerD3D10 =
         static_cast<LayerManagerD3D10*>(mLayerManager.get());
       if (layerManagerD3D10->device() !=
@@ -1331,33 +1388,10 @@ MetroWidget::GetAccessible()
 }
 #endif
 
-double MetroWidget::GetDefaultScaleInternal()
+double
+MetroWidget::GetDefaultScaleInternal()
 {
-  // Return the resolution scale factor reported by the metro environment.
-  // XXX TODO: also consider the desktop resolution setting, as IE appears to do?
-
-  ComPtr<IDisplayInformationStatics> dispInfoStatics;
-  if (SUCCEEDED(GetActivationFactory(HStringReference(RuntimeClass_Windows_Graphics_Display_DisplayInformation).Get(),
-                                      dispInfoStatics.GetAddressOf()))) {
-    ComPtr<IDisplayInformation> dispInfo;
-    if (SUCCEEDED(dispInfoStatics->GetForCurrentView(&dispInfo))) {
-      ResolutionScale scale;
-      if (SUCCEEDED(dispInfo->get_ResolutionScale(&scale))) {
-        return (double)scale / 100.0;
-      }
-    }
-  }
-
-  ComPtr<IDisplayPropertiesStatics> dispProps;
-  if (SUCCEEDED(GetActivationFactory(HStringReference(RuntimeClass_Windows_Graphics_Display_DisplayProperties).Get(),
-                                     dispProps.GetAddressOf()))) {
-    ResolutionScale scale;
-    if (SUCCEEDED(dispProps->get_ResolutionScale(&scale))) {
-      return (double)scale / 100.0;
-    }
-  }
-
-  return 1.0;
+  return MetroUtils::ScaleFactor();
 }
 
 LayoutDeviceIntPoint
@@ -1369,7 +1403,8 @@ MetroWidget::CSSIntPointToLayoutDeviceIntPoint(const CSSIntPoint &aCSSPoint)
   return devPx;
 }
 
-float MetroWidget::GetDPI()
+float
+MetroWidget::GetDPI()
 {
   if (!mView) {
     return 96.0;
@@ -1377,7 +1412,8 @@ float MetroWidget::GetDPI()
   return mView->GetDPI();
 }
 
-void MetroWidget::ChangedDPI()
+void
+MetroWidget::ChangedDPI()
 {
   if (mWidgetListener) {
     nsIPresShell* presShell = mWidgetListener->GetPresShell();
@@ -1385,6 +1421,16 @@ void MetroWidget::ChangedDPI()
       presShell->BackingScaleFactorChanged();
     }
   }
+}
+
+already_AddRefed<nsIPresShell>
+MetroWidget::GetPresShell()
+{
+  if (mWidgetListener) {
+    nsCOMPtr<nsIPresShell> ps = mWidgetListener->GetPresShell();
+    return ps.forget();
+  }
+  return nullptr;
 }
 
 NS_IMETHODIMP
@@ -1414,9 +1460,7 @@ MetroWidget::Activated(bool aActiveated)
 NS_IMETHODIMP
 MetroWidget::Move(double aX, double aY)
 {
-  if (mWidgetListener) {
-    mWidgetListener->WindowMoved(this, aX, aY);
-  }
+  NotifyWindowMoved(aX, aY);
   return NS_OK;
 }
 
@@ -1499,6 +1543,7 @@ NS_IMETHODIMP_(void)
 MetroWidget::SetInputContext(const InputContext& aContext,
                              const InputContextAction& aAction)
 {
+  // XXX This should set mInputContext.mNativeIMEContext properly
   mInputContext = aContext;
   nsTextStore::SetInputContext(this, mInputContext, aAction);
   bool enable = (mInputContext.mIMEState.mEnabled == IMEState::ENABLED ||
@@ -1517,9 +1562,9 @@ MetroWidget::GetInputContext()
 }
 
 NS_IMETHODIMP
-MetroWidget::NotifyIME(NotificationToIME aNotification)
+MetroWidget::NotifyIME(const IMENotification& aIMENotification)
 {
-  switch (aNotification) {
+  switch (aIMENotification.mMessage) {
     case REQUEST_TO_COMMIT_COMPOSITION:
       nsTextStore::CommitComposition(false);
       return NS_OK;
@@ -1527,13 +1572,17 @@ MetroWidget::NotifyIME(NotificationToIME aNotification)
       nsTextStore::CommitComposition(true);
       return NS_OK;
     case NOTIFY_IME_OF_FOCUS:
-      return nsTextStore::OnFocusChange(true, this,
-                                        mInputContext.mIMEState.mEnabled);
+      return nsTextStore::OnFocusChange(true, this, mInputContext);
     case NOTIFY_IME_OF_BLUR:
-      return nsTextStore::OnFocusChange(false, this,
-                                        mInputContext.mIMEState.mEnabled);
+      return nsTextStore::OnFocusChange(false, this, mInputContext);
     case NOTIFY_IME_OF_SELECTION_CHANGE:
       return nsTextStore::OnSelectionChange();
+    case NOTIFY_IME_OF_TEXT_CHANGE:
+      return nsTextStore::OnTextChange(aIMENotification);
+    case NOTIFY_IME_OF_POSITION_CHANGE:
+      return nsTextStore::OnLayoutChange();
+    case NOTIFY_IME_OF_MOUSE_BUTTON_EVENT:
+      return nsTextStore::OnMouseButtonEvent(aIMENotification);
     default:
       return NS_ERROR_NOT_IMPLEMENTED;
   }
@@ -1545,14 +1594,6 @@ MetroWidget::GetToggledKeyState(uint32_t aKeyCode, bool* aLEDState)
   NS_ENSURE_ARG_POINTER(aLEDState);
   *aLEDState = (::GetKeyState(aKeyCode) & 1) != 0;
   return NS_OK;
-}
-
-NS_IMETHODIMP
-MetroWidget::NotifyIMEOfTextChange(uint32_t aStart,
-                                   uint32_t aOldEnd,
-                                   uint32_t aNewEnd)
-{
-  return nsTextStore::OnTextChange(aStart, aOldEnd, aNewEnd);
 }
 
 nsIMEUpdatePreference
@@ -1597,30 +1638,10 @@ MetroWidget::HasPendingInputEvent()
 }
 
 NS_IMETHODIMP
-MetroWidget::Observe(nsISupports *subject, const char *topic, const PRUnichar *data)
+MetroWidget::Observe(nsISupports *subject, const char *topic, const char16_t *data)
 {
   NS_ENSURE_ARG_POINTER(topic);
-  if (!strcmp(topic, "apzc-scroll-offset-changed")) {
-    uint64_t scrollId;
-    int32_t presShellId;
-    CSSIntPoint scrollOffset;
-    int matched = sscanf(NS_LossyConvertUTF16toASCII(data).get(),
-                         "%llu %d (%d, %d)",
-                         &scrollId,
-                         &presShellId,
-                         &scrollOffset.x,
-                         &scrollOffset.y);
-    if (matched != 4) {
-      NS_WARNING("Malformed scroll-offset-changed message");
-      return NS_ERROR_UNEXPECTED;
-    }
-    if (!mController) {
-      return NS_ERROR_UNEXPECTED;
-    }
-    mController->UpdateScrollOffset(ScrollableLayerGuid(mRootLayerTreeId, presShellId, scrollId),
-                                    scrollOffset);
-  }
-  else if (!strcmp(topic, "apzc-zoom-to-rect")) {
+  if (!strcmp(topic, "apzc-zoom-to-rect")) {
     CSSRect rect = CSSRect();
     uint64_t viewId = 0;
     int32_t presShellId = 0;
@@ -1646,7 +1667,8 @@ MetroWidget::Observe(nsISupports *subject, const char *topic, const PRUnichar *d
     }
 
     ScrollableLayerGuid guid = ScrollableLayerGuid(mRootLayerTreeId, presShellId, viewId);
-    APZController::sAPZC->UpdateZoomConstraints(guid, false, CSSToScreenScale(1.0f), CSSToScreenScale(1.0f));
+    APZController::sAPZC->UpdateZoomConstraints(guid,
+      ZoomConstraints(false, false, CSSToScreenScale(1.0f), CSSToScreenScale(1.0f)));
   }
   return NS_OK;
 }

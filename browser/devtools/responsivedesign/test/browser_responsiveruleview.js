@@ -16,7 +16,7 @@ function test() {
     waitForFocus(startTest, content);
   }, true);
 
-  content.location = "data:text/html,<html><style>" +
+  content.location = "data:text/html;charset=utf-8,<html><style>" +
     "div {" +
     "  width: 500px;" +
     "  height: 10px;" +
@@ -49,12 +49,12 @@ function test() {
 
     instance.setSize(500, 500);
 
-    openRuleView(onInspectorUIOpen);
+    openRuleView().then(onInspectorUIOpen);
   }
 
-  function onInspectorUIOpen(aInspector, aRuleView) {
-    inspector = aInspector;
-    ruleView = aRuleView;
+  function onInspectorUIOpen(args) {
+    inspector = args.inspector;
+    ruleView = args.view;
     ok(inspector, "Got inspector instance");
 
     let div = content.document.getElementsByTagName("div")[0];
@@ -79,26 +79,30 @@ function test() {
     ruleView.element.addEventListener("CssRuleViewRefreshed", function refresh() {
       ruleView.element.removeEventListener("CssRuleViewRefreshed", refresh, false);
       is(numberOfRules(), 2, "Should have two rules after growing.");
-      testEscapeCloses();
+      testEscapeOpensSplitConsole();
     }, false);
 
     instance.setSize(500, 500);
   }
 
-  function testEscapeCloses() {
+  function testEscapeOpensSplitConsole() {
     is(document.getElementById("Tools:ResponsiveUI").getAttribute("checked"), "true", "menu checked");
     ok(!inspector._toolbox._splitConsole, "Console is not split.");
 
-    mgr.once("off", function() {executeSoon(finishUp)});
+    inspector._toolbox.once("split-console", function() {
+      mgr.once("off", function() {executeSoon(finishUp)});
+      mgr.toggle(window, gBrowser.selectedTab);
+    });
     EventUtils.synthesizeKey("VK_ESCAPE", {});
   }
 
   function finishUp() {
-    ok(!inspector._toolbox._splitConsole, "Console is still not split after pressing escape.");
+    ok(inspector._toolbox._splitConsole, "Console is split after pressing escape.");
 
     // Menus are correctly updated?
     is(document.getElementById("Tools:ResponsiveUI").getAttribute("checked"), "false", "menu unchecked");
 
+    Services.prefs.clearUserPref("devtools.toolbox.splitconsoleEnabled");
     gBrowser.removeCurrentTab();
     finish();
   }

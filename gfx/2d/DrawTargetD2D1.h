@@ -35,10 +35,12 @@ const int32_t kLayerCacheSize1 = 5;
 class DrawTargetD2D1 : public DrawTarget
 {
 public:
+  MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(DrawTargetD2D1)
   DrawTargetD2D1();
   virtual ~DrawTargetD2D1();
 
-  virtual BackendType GetType() const { return BACKEND_DIRECT2D1_1; }
+  virtual DrawTargetType GetType() const MOZ_OVERRIDE { return DrawTargetType::HARDWARE_RASTER; }
+  virtual BackendType GetBackendType() const { return BackendType::DIRECT2D1_1; }
   virtual TemporaryRef<SourceSurface> Snapshot();
   virtual IntSize GetSize() { return mSize; }
 
@@ -103,7 +105,7 @@ public:
                                                                   const IntSize &aSize,
                                                                   int32_t aStride,
                                                                   SurfaceFormat aFormat) const;
-  virtual TemporaryRef<SourceSurface> OptimizeSourceSurface(SourceSurface *aSurface) const { return nullptr; }
+  virtual TemporaryRef<SourceSurface> OptimizeSourceSurface(SourceSurface *aSurface) const;
 
   virtual TemporaryRef<SourceSurface>
     CreateSourceSurfaceFromNativeSurface(const NativeSurface &aSurface) const { return nullptr; }
@@ -111,22 +113,28 @@ public:
   virtual TemporaryRef<DrawTarget>
     CreateSimilarDrawTarget(const IntSize &aSize, SurfaceFormat aFormat) const;
 
-  virtual TemporaryRef<PathBuilder> CreatePathBuilder(FillRule aFillRule = FILL_WINDING) const;
+  virtual TemporaryRef<PathBuilder> CreatePathBuilder(FillRule aFillRule = FillRule::FILL_WINDING) const;
 
   virtual TemporaryRef<GradientStops>
     CreateGradientStops(GradientStop *aStops,
                         uint32_t aNumStops,
-                        ExtendMode aExtendMode = EXTEND_CLAMP) const;
+                        ExtendMode aExtendMode = ExtendMode::CLAMP) const;
 
   virtual TemporaryRef<FilterNode> CreateFilter(FilterType aType);
 
   virtual void *GetNativeSurface(NativeSurfaceType aType) { return nullptr; }
 
   bool Init(const IntSize &aSize, SurfaceFormat aFormat);
+  bool Init(ID3D11Texture2D* aTexture, SurfaceFormat aFormat);
   uint32_t GetByteSize() const;
 
   TemporaryRef<ID2D1Image> GetImageForSurface(SourceSurface *aSurface, Matrix &aSourceTransform,
                                               ExtendMode aExtendMode);
+
+  TemporaryRef<ID2D1Image> GetImageForSurface(SourceSurface *aSurface, ExtendMode aExtendMode) {
+    Matrix mat;
+    return GetImageForSurface(aSurface, mat, aExtendMode);
+  }
 
   static ID2D1Factory1 *factory();
   static void CleanupD2D();
@@ -163,10 +171,19 @@ private:
   }
   void AddDependencyOnSource(SourceSurfaceD2D1* aSource);
 
+  // This returns the clipped geometry, in addition it returns aClipBounds which
+  // represents the intersection of all pixel-aligned rectangular clips that
+  // are currently set. The returned clipped geometry must be clipped by these
+  // bounds to correctly reflect the total clip. This is in device space.
+  TemporaryRef<ID2D1Geometry> GetClippedGeometry(IntRect *aClipBounds);
+
+  bool GetDeviceSpaceClipRect(D2D1_RECT_F& aClipRect, bool& aIsPixelAligned);
+
   void PopAllClips();
   void PushClipsToDC(ID2D1DeviceContext *aDC);
   void PopClipsFromDC(ID2D1DeviceContext *aDC);
 
+  TemporaryRef<ID2D1Brush> CreateTransparentBlackBrush();
   TemporaryRef<ID2D1Brush> CreateBrushForPattern(const Pattern &aPattern, Float aAlpha = 1.0f);
 
   void PushD2DLayer(ID2D1DeviceContext *aDC, ID2D1Geometry *aGeometry, const D2D1_MATRIX_3X2_F &aTransform);
@@ -175,6 +192,7 @@ private:
 
   RefPtr<ID3D11Device> mDevice;
   RefPtr<ID3D11Texture2D> mTexture;
+  RefPtr<ID2D1Geometry> mCurrentClippedGeometry;
   // This is only valid if mCurrentClippedGeometry is non-null. And will
   // only be the intersection of all pixel-aligned retangular clips. This is in
   // device space.
@@ -182,6 +200,7 @@ private:
   mutable RefPtr<ID2D1DeviceContext> mDC;
   RefPtr<ID2D1Bitmap1> mBitmap;
   RefPtr<ID2D1Bitmap1> mTempBitmap;
+  RefPtr<ID2D1Effect> mBlendEffect;
 
   // We store this to prevent excessive SetTextRenderingParams calls.
   RefPtr<IDWriteRenderingParams> mTextRenderingParams;

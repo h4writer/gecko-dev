@@ -18,38 +18,38 @@ namespace gl {
   */
 class RectTriangles {
 public:
-    RectTriangles() { }
+    typedef struct { GLfloat x,y; } coord;
 
     // Always pass texture coordinates upright. If you want to flip the
     // texture coordinates emitted to the tex_coords array, set flip_y to
     // true.
     void addRect(GLfloat x0, GLfloat y0, GLfloat x1, GLfloat y1,
-                  GLfloat tx0, GLfloat ty0, GLfloat tx1, GLfloat ty1,
-                  bool flip_y = false);
+                 GLfloat tx0, GLfloat ty0, GLfloat tx1, GLfloat ty1,
+                 bool flip_y = false);
 
     /**
       * these return a float pointer to the start of each array respectively.
       * Use it for glVertexAttribPointer calls.
       * We can return nullptr if we choose to use Vertex Buffer Objects here.
       */
-    float* vertexPointer() {
-        return &vertexCoords[0].x;
+    InfallibleTArray<coord>& vertCoords() {
+        return mVertexCoords;
     }
 
-    float* texCoordPointer() {
-        return &texCoords[0].u;
+    InfallibleTArray<coord>& texCoords() {
+        return mTexCoords;
     }
 
     unsigned int elements() {
-        return vertexCoords.Length();
+        return mVertexCoords.Length();
     }
-
-    typedef struct { GLfloat x,y; } vert_coord;
-    typedef struct { GLfloat u,v; } tex_coord;
 private:
-    // default is 4 rectangles, each made up of 2 triangles (3 coord vertices each)
-    nsAutoTArray<vert_coord, 6> vertexCoords;
-    nsAutoTArray<tex_coord, 6>  texCoords;
+    // Reserve inline storage for one quad (2 triangles, 3 coords).
+    nsAutoTArray<coord, 6> mVertexCoords;
+    nsAutoTArray<coord, 6> mTexCoords;
+
+    static void
+    AppendRectToCoordArray(InfallibleTArray<coord>& array, GLfloat x0, GLfloat y0, GLfloat x1, GLfloat y1);
 };
 
 /**

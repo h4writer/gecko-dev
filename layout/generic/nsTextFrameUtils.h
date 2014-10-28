@@ -7,6 +7,8 @@
 #define NSTEXTFRAMEUTILS_H_
 
 #include "gfxSkipChars.h"
+#include "nsBidiUtils.h"
+#include "nsUnicodeProperties.h"
 
 class nsIContent;
 struct nsStyleText;
@@ -45,7 +47,7 @@ public:
     TEXT_HAS_TRAILING_BREAK  = 0x4000000,
 
     // This is set if the textrun was created for a textframe whose
-    // TEXT_IS_IN_SINGLE_CHAR_MI flag is set.  This occurs if the textframe
+    // NS_FRAME_IS_IN_SINGLE_CHAR_MI flag is set.  This occurs if the textframe
     // belongs to a MathML <mi> element whose embedded text consists of a
     // single character.
     TEXT_IS_SINGLE_CHAR_MI   = 0x8000000
@@ -54,6 +56,9 @@ public:
     // so that it also has access to the _INCOMING flag
     // TEXT_TRAILING_ARABICCHAR
     // TEXT_INCOMING_ARABICCHAR
+
+    // This is defined in gfxTextRunFactory to allow access in gfxFont.
+    // TEXT_USE_MATH_SCRIPT
   };
 
   // These constants are used in TransformText to represent context information
@@ -66,20 +71,25 @@ public:
 
   /**
    * Returns true if aChars/aLength are something that make a space
-   * character not be whitespace when they follow the space character.
-   * For now, this is true if and only if aChars starts with a ZWJ. (This
-   * is what Uniscribe assumes.)
+   * character not be whitespace when they follow the space character
+   * (combining mark or join control, ignoring intervening direction
+   * controls).
    */
   static bool
-  IsSpaceCombiningSequenceTail(const PRUnichar* aChars, int32_t aLength) {
-    return aLength > 0 && aChars[0] == 0x200D; // ZWJ
+  IsSpaceCombiningSequenceTail(const char16_t* aChars, int32_t aLength) {
+    return aLength > 0 &&
+      (mozilla::unicode::IsClusterExtender(aChars[0]) ||
+       (IsBidiControl(aChars[0]) &&
+        IsSpaceCombiningSequenceTail(aChars + 1, aLength - 1)
+       )
+      );
   }
 
   enum CompressionMode {
     COMPRESS_NONE,
     COMPRESS_WHITESPACE,
     COMPRESS_WHITESPACE_NEWLINE,
-    DISCARD_NEWLINE
+    COMPRESS_NONE_TRANSFORM_TO_SPACE
   };
 
   /**
@@ -96,18 +106,18 @@ public:
    * or an Arabic character preceding this text. We set it to indicate if
    * there's an Arabic character or whitespace preceding the end of this text.
    */
-  static PRUnichar* TransformText(const PRUnichar* aText, uint32_t aLength,
-                                  PRUnichar* aOutput,
+  static char16_t* TransformText(const char16_t* aText, uint32_t aLength,
+                                  char16_t* aOutput,
                                   CompressionMode aCompression,
                                   uint8_t * aIncomingFlags,
-                                  gfxSkipCharsBuilder* aSkipChars,
+                                  gfxSkipChars* aSkipChars,
                                   uint32_t* aAnalysisFlags);
 
   static uint8_t* TransformText(const uint8_t* aText, uint32_t aLength,
                                 uint8_t* aOutput,
                                 CompressionMode aCompression,
                                 uint8_t * aIncomingFlags,
-                                gfxSkipCharsBuilder* aSkipChars,
+                                gfxSkipChars* aSkipChars,
                                 uint32_t* aAnalysisFlags);
 
   static void

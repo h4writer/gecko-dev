@@ -8,6 +8,7 @@
 #include "nsIIOService.h"
 #include "nsMimeTypes.h"
 #include "nsNetUtil.h"
+#include "nsContentUtils.h"
 #include "nsIHttpHeaderVisitor.h"
 
 NS_IMPL_ADDREF(nsViewSourceChannel)
@@ -71,7 +72,8 @@ nsViewSourceChannel::Init(nsIURI* uri)
 }
 
 nsresult
-nsViewSourceChannel::InitSrcdoc(nsIURI* aURI, const nsAString &aSrcdoc)
+nsViewSourceChannel::InitSrcdoc(nsIURI* aURI, const nsAString &aSrcdoc,
+                                nsIURI* aBaseURI)
 {
 
     nsresult rv;
@@ -84,14 +86,22 @@ nsViewSourceChannel::InitSrcdoc(nsIURI* aURI, const nsAString &aSrcdoc)
                    NS_LITERAL_STRING("about:srcdoc"));
     NS_ENSURE_SUCCESS(rv, rv);
 
-    rv = NS_NewInputStreamChannel(getter_AddRefs(mChannel), inStreamURI,
-                                  aSrcdoc, NS_LITERAL_CSTRING("text/html"),
+    rv = NS_NewInputStreamChannel(getter_AddRefs(mChannel),
+                                  inStreamURI,
+                                  aSrcdoc,
+                                  NS_LITERAL_CSTRING("text/html"),
+                                  nsContentUtils::GetSystemPrincipal(),
+                                  nsILoadInfo::SEC_NORMAL,
+                                  nsIContentPolicy::TYPE_OTHER,
                                   true);
 
     NS_ENSURE_SUCCESS(rv, rv);
     mOriginalURI = aURI;
     mIsSrcdocChannel = true;
-    
+    nsCOMPtr<nsIInputStreamChannel> isc = do_QueryInterface(mChannel);
+    MOZ_ASSERT(isc);
+    isc->SetBaseURI(aBaseURI);
+
     mChannel->SetOriginalURI(mOriginalURI);
     mHttpChannel = do_QueryInterface(mChannel);
     mHttpChannelInternal = do_QueryInterface(mChannel);
@@ -448,6 +458,22 @@ nsViewSourceChannel::SetOwner(nsISupports* aOwner)
 }
 
 NS_IMETHODIMP
+nsViewSourceChannel::GetLoadInfo(nsILoadInfo* *aLoadInfo)
+{
+    NS_ENSURE_TRUE(mChannel, NS_ERROR_FAILURE);
+
+    return mChannel->GetLoadInfo(aLoadInfo);
+}
+
+NS_IMETHODIMP
+nsViewSourceChannel::SetLoadInfo(nsILoadInfo* aLoadInfo)
+{
+    NS_ENSURE_TRUE(mChannel, NS_ERROR_FAILURE);
+
+    return mChannel->SetLoadInfo(aLoadInfo);
+}
+
+NS_IMETHODIMP
 nsViewSourceChannel::GetNotificationCallbacks(nsIInterfaceRequestor* *aNotificationCallbacks)
 {
     NS_ENSURE_TRUE(mChannel, NS_ERROR_FAILURE);
@@ -496,6 +522,27 @@ nsViewSourceChannel::GetIsSrcdocChannel(bool* aIsSrcdocChannel)
 {
     *aIsSrcdocChannel = mIsSrcdocChannel;
     return NS_OK;
+}
+
+NS_IMETHODIMP
+nsViewSourceChannel::GetBaseURI(nsIURI** aBaseURI)
+{
+  if (mIsSrcdocChannel) {
+    nsCOMPtr<nsIInputStreamChannel> isc = do_QueryInterface(mChannel);
+    if (isc) {
+      return isc->GetBaseURI(aBaseURI);
+    }
+  }
+  *aBaseURI = mBaseURI;
+  NS_IF_ADDREF(*aBaseURI);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsViewSourceChannel::SetBaseURI(nsIURI* aBaseURI)
+{
+  mBaseURI = aBaseURI;
+  return NS_OK;
 }
 
 // nsIRequestObserver methods
@@ -624,6 +671,20 @@ nsViewSourceChannel::SetAllowPipelining(bool aAllowPipelining)
 }
 
 NS_IMETHODIMP
+nsViewSourceChannel::GetAllowSTS(bool *aAllowSTS)
+{
+    return !mHttpChannel ? NS_ERROR_NULL_POINTER :
+        mHttpChannel->GetAllowSTS(aAllowSTS);
+}
+
+NS_IMETHODIMP
+nsViewSourceChannel::SetAllowSTS(bool aAllowSTS)
+{
+    return !mHttpChannel ? NS_ERROR_NULL_POINTER :
+        mHttpChannel->SetAllowSTS(aAllowSTS);
+}
+
+NS_IMETHODIMP
 nsViewSourceChannel::GetRedirectionLimit(uint32_t *aRedirectionLimit)
 {
     return !mHttpChannel ? NS_ERROR_NULL_POINTER :
@@ -666,10 +727,6 @@ nsViewSourceChannel::GetResponseHeader(const nsACString & aHeader,
         return NS_ERROR_NULL_POINTER;
 
     if (!aHeader.Equals(NS_LITERAL_CSTRING("Content-Type"),
-                        nsCaseInsensitiveCStringComparator()) &&
-        !aHeader.Equals(NS_LITERAL_CSTRING("X-Content-Security-Policy"),
-                        nsCaseInsensitiveCStringComparator()) &&
-        !aHeader.Equals(NS_LITERAL_CSTRING("X-Content-Security-Policy-Report-Only"),
                         nsCaseInsensitiveCStringComparator()) &&
         !aHeader.Equals(NS_LITERAL_CSTRING("Content-Security-Policy"),
                         nsCaseInsensitiveCStringComparator()) &&

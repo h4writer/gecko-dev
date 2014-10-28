@@ -5,10 +5,14 @@
 
 package org.mozilla.gecko.home;
 
-import org.mozilla.gecko.R;
-import org.mozilla.gecko.db.BrowserDB.URLColumns;
+import java.util.EnumSet;
 
-import android.app.Activity;
+import org.mozilla.gecko.R;
+import org.mozilla.gecko.db.BrowserContract.History;
+import org.mozilla.gecko.db.BrowserContract.URLColumns;
+import org.mozilla.gecko.db.BrowserDB.FilterFlags;
+import org.mozilla.gecko.util.StringUtils;
+
 import android.content.Context;
 import android.database.Cursor;
 import android.os.Bundle;
@@ -110,11 +114,13 @@ class PinSiteDialog extends DialogFragment {
 
                 // If the user manually entered a search term or URL, wrap the value in
                 // a special URI until we can get a valid URL for this bookmark.
-                final String text = mSearch.getText().toString();
-                final String url = TopSitesPage.encodeUserEnteredUrl(text);
-                mOnSiteSelectedListener.onSiteSelected(url, text);
+                final String text = mSearch.getText().toString().trim();
+                if (!TextUtils.isEmpty(text)) {
+                    final String url = StringUtils.encodeUserEnteredUrl(text);
+                    mOnSiteSelectedListener.onSiteSelected(url, text);
+                    dismiss();
+                }
 
-                dismiss();
                 return true;
             }
         });
@@ -175,13 +181,24 @@ class PinSiteDialog extends DialogFragment {
         filter("");
     }
 
+    @Override
+    public void onDestroyView() {
+        super.onDestroyView();
+
+        // Discard any additional site selection as the dialog
+        // is getting destroyed (see bug 935542).
+        setOnSiteSelectedListener(null);
+    }
+
     public void setSearchTerm(String searchTerm) {
         mSearchTerm = searchTerm;
     }
 
     private void filter(String searchTerm) {
         // Restart loaders with the new search term
-        SearchLoader.restart(getLoaderManager(), LOADER_ID_SEARCH, mLoaderCallbacks, searchTerm);
+        SearchLoader.restart(getLoaderManager(), LOADER_ID_SEARCH,
+                             mLoaderCallbacks, searchTerm,
+                             EnumSet.of(FilterFlags.EXCLUDE_PINNED_SITES));
     }
 
     public void setOnSiteSelectedListener(OnSiteSelectedListener listener) {
@@ -189,7 +206,7 @@ class PinSiteDialog extends DialogFragment {
     }
 
     private static class SearchAdapter extends CursorAdapter {
-        private LayoutInflater mInflater;
+        private final LayoutInflater mInflater;
 
         public SearchAdapter(Context context) {
             super(context, null, 0);

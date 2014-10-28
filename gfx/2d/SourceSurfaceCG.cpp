@@ -6,6 +6,8 @@
 #include "SourceSurfaceCG.h"
 #include "DrawTargetCG.h"
 #include "DataSourceSurfaceWrapper.h"
+#include "DataSurfaceHelpers.h"
+#include "mozilla/Types.h" // for decltype
 
 #include "MacIOSurface.h"
 #include "Tools.h"
@@ -42,10 +44,8 @@ SourceSurfaceCG::GetDataSurface()
   RefPtr<DataSourceSurface> dataSurf = new DataSourceSurfaceCG(mImage);
 
   // We also need to make sure that the returned surface has
-  // surface->GetType() == SURFACE_DATA.
-  dataSurf = new DataSourceSurfaceWrapper(dataSurf);
-
-  return dataSurf;
+  // surface->GetType() == SurfaceType::DATA.
+  return new DataSourceSurfaceWrapper(dataSurf);
 }
 
 static void releaseCallback(void *info, const void *data, size_t size) {
@@ -59,6 +59,22 @@ CreateCGImage(void *aInfo,
               int32_t aStride,
               SurfaceFormat aFormat)
 {
+  return CreateCGImage(releaseCallback,
+                       aInfo,
+                       aData,
+                       aSize,
+                       aStride,
+                       aFormat);
+}
+
+CGImageRef
+CreateCGImage(CGDataProviderReleaseDataCallback aCallback,
+              void *aInfo,
+              const void *aData,
+              const IntSize &aSize,
+              int32_t aStride,
+              SurfaceFormat aFormat)
+{
   //XXX: we should avoid creating this colorspace everytime
   CGColorSpaceRef colorSpace = nullptr;
   CGBitmapInfo bitinfo = 0;
@@ -66,21 +82,21 @@ CreateCGImage(void *aInfo,
   int bitsPerPixel = 0;
 
   switch (aFormat) {
-    case FORMAT_B8G8R8A8:
+    case SurfaceFormat::B8G8R8A8:
       colorSpace = CGColorSpaceCreateDeviceRGB();
       bitinfo = kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host;
       bitsPerComponent = 8;
       bitsPerPixel = 32;
       break;
 
-    case FORMAT_B8G8R8X8:
+    case SurfaceFormat::B8G8R8X8:
       colorSpace = CGColorSpaceCreateDeviceRGB();
       bitinfo = kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Host;
       bitsPerComponent = 8;
       bitsPerPixel = 32;
       break;
 
-    case FORMAT_A8:
+    case SurfaceFormat::A8:
       // XXX: why don't we set a colorspace here?
       bitsPerComponent = 8;
       bitsPerPixel = 8;
@@ -90,13 +106,17 @@ CreateCGImage(void *aInfo,
       MOZ_CRASH();
   }
 
+  size_t bufLen = BufferSizeFromStrideAndHeight(aStride, aSize.height);
+  if (bufLen == 0) {
+    return nullptr;
+  }
   CGDataProviderRef dataProvider = CGDataProviderCreateWithData(aInfo,
                                                                 aData,
-                                                                aSize.height * aStride,
-                                                                releaseCallback);
+                                                                bufLen,
+                                                                aCallback);
 
   CGImageRef image;
-  if (aFormat == FORMAT_A8) {
+  if (aFormat == SurfaceFormat::A8) {
     CGFloat decode[] = {1.0, 0.0};
     image = CGImageMaskCreate (aSize.width, aSize.height,
                                bitsPerComponent,
@@ -132,10 +152,16 @@ SourceSurfaceCG::InitFromData(unsigned char *aData,
 {
   assert(aSize.width >= 0 && aSize.height >= 0);
 
-  void *data = malloc(aStride * aSize.height);
+  size_t bufLen = BufferSizeFromStrideAndHeight(aStride, aSize.height);
+  if (bufLen == 0) {
+    mImage = nullptr;
+    return false;
+  }
+
+  void *data = malloc(bufLen);
   // Copy all the data except the stride padding on the very last
   // row since we can't guarantee that is readable.
-  memcpy(data, aData, aStride * (aSize.height - 1) + (aSize.width * BytesPerPixel(aFormat)));
+  memcpy(data, aData, bufLen - aStride + (aSize.width * BytesPerPixel(aFormat)));
 
   mFormat = aFormat;
   mImage = CreateCGImage(data, data, aSize, aStride, aFormat);
@@ -169,8 +195,14 @@ DataSourceSurfaceCG::InitFromData(unsigned char *aData,
     return false;
   }
 
-  void *data = malloc(aStride * aSize.height);
-  memcpy(data, aData, aStride * (aSize.height - 1) + (aSize.width * BytesPerPixel(aFormat)));
+  size_t bufLen = BufferSizeFromStrideAndHeight(aStride, aSize.height);
+  if (bufLen == 0) {
+    mImage = nullptr;
+    return false;
+  }
+
+  void *data = malloc(bufLen);
+  memcpy(data, aData, bufLen - aStride + (aSize.width * BytesPerPixel(aFormat)));
 
   mFormat = aFormat;
   mImage = CreateCGImage(data, data, aSize, aStride, aFormat);
@@ -219,7 +251,7 @@ CGContextRef CreateBitmapContextForImage(CGImageRef image)
 
 DataSourceSurfaceCG::DataSourceSurfaceCG(CGImageRef aImage)
 {
-  mFormat = FORMAT_B8G8R8A8;
+  mFormat = SurfaceFormat::B8G8R8A8;
   mImage = aImage;
   mCg = CreateBitmapContextForImage(aImage);
   if (mCg == nullptr) {
@@ -261,7 +293,7 @@ SourceSurfaceCGBitmapContext::SourceSurfaceCGBitmapContext(DrawTargetCG *aDrawTa
 {
   mDrawTarget = aDrawTarget;
   mFormat = aDrawTarget->GetFormat();
-  mCg = (CGContextRef)aDrawTarget->GetNativeSurface(NATIVE_SURFACE_CGCONTEXT);
+  mCg = (CGContextRef)aDrawTarget->GetNativeSurface(NativeSurfaceType::CGCONTEXT);
   if (!mCg)
     abort();
 
@@ -302,13 +334,21 @@ SourceSurfaceCGBitmapContext::DrawTargetWillChange()
     size_t stride = CGBitmapContextGetBytesPerRow(mCg);
     size_t height = CGBitmapContextGetHeight(mCg);
 
-    mDataHolder.Realloc(stride * height);
-    mData = mDataHolder;
+    size_t bufLen = BufferSizeFromStrideAndHeight(stride, height);
+    if (bufLen == 0) {
+      mDataHolder.Dealloc();
+      mData = nullptr;
+    } else {
+      static_assert(sizeof(decltype(mDataHolder[0])) == 1,
+                    "mDataHolder.Realloc() takes an object count, so its objects must be 1-byte sized if we use bufLen");
+      mDataHolder.Realloc(/* actually an object count */ bufLen);
+      mData = mDataHolder;
 
-    // copy out the data from the CGBitmapContext
-    // we'll maintain ownership of mData until
-    // we transfer it to mImage
-    memcpy(mData, CGBitmapContextGetData(mCg), stride*height);
+      // copy out the data from the CGBitmapContext
+      // we'll maintain ownership of mData until
+      // we transfer it to mImage
+      memcpy(mData, CGBitmapContextGetData(mCg), bufLen);
+    }
 
     // drop the current image for the data associated with the CGBitmapContext
     if (mImage)
@@ -320,6 +360,24 @@ SourceSurfaceCGBitmapContext::DrawTargetWillChange()
   }
 }
 
+void
+SourceSurfaceCGBitmapContext::DrawTargetWillGoAway()
+{
+  if (mDrawTarget) {
+    if (mDrawTarget->mData != CGBitmapContextGetData(mCg)) {
+      DrawTargetWillChange();
+      return;
+    }
+
+    // Instead of copying the data over, we can just swap it.
+    mDataHolder.Swap(mDrawTarget->mData);
+    mData = mDataHolder;
+    mCg = nullptr;
+    mDrawTarget = nullptr;
+    // mImage is still valid because it still points to the same data.
+  }
+}
+
 SourceSurfaceCGBitmapContext::~SourceSurfaceCGBitmapContext()
 {
   if (mImage)
@@ -328,7 +386,7 @@ SourceSurfaceCGBitmapContext::~SourceSurfaceCGBitmapContext()
 
 SourceSurfaceCGIOSurfaceContext::SourceSurfaceCGIOSurfaceContext(DrawTargetCG *aDrawTarget)
 {
-  CGContextRef cg = (CGContextRef)aDrawTarget->GetNativeSurface(NATIVE_SURFACE_CGCONTEXT_ACCELERATED);
+  CGContextRef cg = (CGContextRef)aDrawTarget->GetNativeSurface(NativeSurfaceType::CGCONTEXT_ACCELERATED);
 
   RefPtr<MacIOSurface> surf = MacIOSurface::IOSurfaceContextGetSurface(cg);
 
@@ -365,7 +423,7 @@ void SourceSurfaceCGIOSurfaceContext::EnsureImage() const
   // memcpy when the bitmap context is modified gives us more predictable
   // performance characteristics.
   if (!mImage) {
-    mImage = CreateCGImage(mData, mData, mSize, mStride, FORMAT_B8G8R8A8);
+    mImage = CreateCGImage(mData, mData, mSize, mStride, SurfaceFormat::B8G8R8A8);
   }
 
 }

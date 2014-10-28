@@ -13,6 +13,7 @@
 #include "nsIObserver.h"
 #include "nsUrlClassifierPrefixSet.h"
 #include "nsIUrlClassifierHashCompleter.h"
+#include "nsIUrlListManager.h"
 #include "nsIUrlClassifierDBService.h"
 #include "nsIURIClassifier.h"
 #include "nsToolkitCompsCID.h"
@@ -71,6 +72,7 @@ private:
   nsUrlClassifierDBService(nsUrlClassifierDBService&);
 
   nsresult LookupURI(nsIPrincipal* aPrincipal,
+                     const nsACString& tables,
                      nsIUrlClassifierCallback* c,
                      bool forceCheck, bool *didCheck);
 
@@ -81,7 +83,10 @@ private:
   nsresult CheckClean(const nsACString &lookupKey,
                       bool *clean);
 
-  nsCOMPtr<nsUrlClassifierDBServiceWorker> mWorker;
+  // Read everything into mGethashTables and mDisallowCompletionTables
+  nsresult ReadTablesFromPrefs();
+
+  nsRefPtr<nsUrlClassifierDBServiceWorker> mWorker;
   nsCOMPtr<nsIUrlClassifierDBServiceWorker> mWorkerProxy;
 
   nsInterfaceHashtable<nsCStringHashKey, nsIUrlClassifierHashCompleter> mCompleters;
@@ -94,6 +99,10 @@ private:
   // uris on document loads.
   bool mCheckPhishing;
 
+  // TRUE if the nsURIClassifier implementation should check for tracking
+  // uris on document loads.
+  bool mCheckTracking;
+
   // TRUE if a BeginUpdate() has been called without an accompanying
   // CancelUpdate()/FinishUpdate().  This is used to prevent competing
   // updates, not to determine whether an update is still being
@@ -102,6 +111,9 @@ private:
 
   // The list of tables that can use the default hash completer object.
   nsTArray<nsCString> mGethashTables;
+
+  // The list of tables that should never be hash completed.
+  nsTArray<nsCString> mDisallowCompletionsTables;
 
   // Thread that we do the updates on.
   static nsIThread* gDbBackgroundThread;

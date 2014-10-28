@@ -53,16 +53,21 @@ nsMIMEInfoUnix::GetHasDefaultHandler(bool *_retval)
     return nsMIMEInfoImpl::GetHasDefaultHandler(_retval);
 
   *_retval = false;
-  nsRefPtr<nsMIMEInfoBase> mimeInfo = nsGNOMERegistry::GetFromType(mSchemeOrType);
-  if (!mimeInfo) {
-    nsAutoCString ext;
-    nsresult rv = GetPrimaryExtension(ext);
-    if (NS_SUCCEEDED(rv)) {
-      mimeInfo = nsGNOMERegistry::GetFromExtension(ext);
+
+  if (mClass ==  eProtocolInfo) {
+    *_retval = nsGNOMERegistry::HandlerExists(mSchemeOrType.get());
+  } else {
+    nsRefPtr<nsMIMEInfoBase> mimeInfo = nsGNOMERegistry::GetFromType(mSchemeOrType);
+    if (!mimeInfo) {
+      nsAutoCString ext;
+      nsresult rv = GetPrimaryExtension(ext);
+      if (NS_SUCCEEDED(rv)) {
+        mimeInfo = nsGNOMERegistry::GetFromExtension(ext);
+      }
     }
+    if (mimeInfo)
+      *_retval = true;
   }
-  if (mimeInfo)
-    *_retval = true;
 
   if (*_retval)
     return NS_OK;
@@ -165,7 +170,7 @@ nsMIMEInfoUnix::GetPossibleApplicationHandlers(nsIMutableArray ** aPossibleAppHa
 
     for (int i = 0; i < actions.size(); ++i) {
       nsContentHandlerApp* app =
-        new nsContentHandlerApp(nsString((PRUnichar*)actions[i].name().data()), 
+        new nsContentHandlerApp(nsString((char16_t*)actions[i].name().data()), 
                                 mSchemeOrType, actions[i]);
       mPossibleApplications->AppendElement(app, false);
     }

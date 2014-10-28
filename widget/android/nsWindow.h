@@ -16,8 +16,6 @@
 #include "mozilla/StaticPtr.h"
 #include "mozilla/TextRange.h"
 
-class gfxASurface;
-
 struct ANPEvent;
 
 namespace mozilla {
@@ -34,11 +32,13 @@ namespace mozilla {
 class nsWindow :
     public nsBaseWidget
 {
+private:
+    virtual ~nsWindow();
+
 public:
     using nsBaseWidget::GetLayerManager;
 
     nsWindow();
-    virtual ~nsWindow();
 
     NS_DECL_ISUPPORTS_INHERITED
 
@@ -48,8 +48,7 @@ public:
 
     nsWindow* FindWindowForPoint(const nsIntPoint& pt);
 
-    void OnAndroidEvent(mozilla::AndroidGeckoEvent *ae);
-    void OnDraw(mozilla::AndroidGeckoEvent *ae);
+    void OnContextmenuEvent(mozilla::AndroidGeckoEvent *ae);
     bool OnMultitouchEvent(mozilla::AndroidGeckoEvent *ae);
     void OnNativeGestureEvent(mozilla::AndroidGeckoEvent *ae);
     void OnMouseEvent(mozilla::AndroidGeckoEvent *ae);
@@ -91,7 +90,7 @@ public:
                       double aWidth,
                       double aHeight,
                       bool aRepaint);
-    NS_IMETHOD SetZIndex(int32_t aZIndex);
+    void SetZIndex(int32_t aZIndex);
     NS_IMETHOD PlaceBehind(nsTopLevelWidgetZPlacement aPlacement,
                            nsIWidget *aWidget,
                            bool aActivate);
@@ -110,8 +109,6 @@ public:
 
 
 
-    NS_IMETHOD SetForegroundColor(const nscolor &aColor) { return NS_ERROR_NOT_IMPLEMENTED; }
-    NS_IMETHOD SetBackgroundColor(const nscolor &aColor) { return NS_ERROR_NOT_IMPLEMENTED; }
     NS_IMETHOD SetCursor(nsCursor aCursor) { return NS_ERROR_NOT_IMPLEMENTED; }
     NS_IMETHOD SetCursor(imgIContainer* aCursor,
                          uint32_t aHotspotX,
@@ -135,18 +132,16 @@ public:
         return NS_ERROR_NOT_IMPLEMENTED;
     }
 
-    NS_IMETHOD NotifyIME(NotificationToIME aNotification) MOZ_OVERRIDE;
+    NS_IMETHOD NotifyIME(const IMENotification& aIMENotification) MOZ_OVERRIDE;
     NS_IMETHOD_(void) SetInputContext(const InputContext& aContext,
                                       const InputContextAction& aAction);
     NS_IMETHOD_(InputContext) GetInputContext();
 
-    NS_IMETHOD NotifyIMEOfTextChange(uint32_t aStart,
-                                     uint32_t aOldEnd,
-                                     uint32_t aNewEnd) MOZ_OVERRIDE;
+    nsresult NotifyIMEOfTextChange(const IMENotification& aIMENotification);
     virtual nsIMEUpdatePreference GetIMEUpdatePreference();
 
     LayerManager* GetLayerManager (PLayerTransactionChild* aShadowManager = nullptr,
-                                   LayersBackend aBackendHint = mozilla::layers::LAYERS_NONE,
+                                   LayersBackend aBackendHint = mozilla::layers::LayersBackend::LAYERS_NONE,
                                    LayerManagerPersistence aPersistence = LAYER_MANAGER_CURRENT,
                                    bool* aAllowRetaining = nullptr);
 
@@ -174,8 +169,6 @@ public:
 protected:
     void BringToFront();
     nsWindow *FindTopLevel();
-    bool DrawTo(gfxASurface *targetSurface);
-    bool DrawTo(gfxASurface *targetSurface, const nsIntRect &aRect);
     bool IsTopLevel();
     void RemoveIMEComposition();
     void PostFlushIMEChanges();
@@ -196,10 +189,11 @@ protected:
     nsCOMPtr<nsIIdleServiceInternal> mIdleService;
 
     bool mIMEComposing;
+    int32_t mIMEComposingStart;
+    nsString mIMEComposingText;
     bool mIMEMaskSelectionUpdate, mIMEMaskTextUpdate;
     int32_t mIMEMaskEventsCount; // Mask events when > 0
-    nsString mIMEComposingText;
-    nsAutoTArray<mozilla::TextRange, 4> mIMERanges;
+    nsRefPtr<mozilla::TextRangeArray> mIMERanges;
     bool mIMEUpdatingContext;
     nsAutoTArray<mozilla::AndroidGeckoEvent, 8> mIMEKeyEvents;
 
@@ -210,9 +204,16 @@ protected:
             mStart(-1), mOldEnd(-1), mNewEnd(-1)
         {
         }
-        IMEChange(int32_t start, int32_t oldEnd, int32_t newEnd) :
-            mStart(start), mOldEnd(oldEnd), mNewEnd(newEnd)
+        IMEChange(const IMENotification& aIMENotification)
+            : mStart(aIMENotification.mTextChangeData.mStartOffset)
+            , mOldEnd(aIMENotification.mTextChangeData.mOldEndOffset)
+            , mNewEnd(aIMENotification.mTextChangeData.mNewEndOffset)
         {
+            MOZ_ASSERT(aIMENotification.mMessage ==
+                           mozilla::widget::NOTIFY_IME_OF_TEXT_CHANGE,
+                       "IMEChange initialized with wrong notification");
+            MOZ_ASSERT(aIMENotification.mTextChangeData.IsInInt32Range(),
+                       "The text change notification is out of range");
         }
         bool IsEmpty()
         {
@@ -232,9 +233,6 @@ private:
     void InitKeyEvent(mozilla::WidgetKeyboardEvent& event,
                       mozilla::AndroidGeckoEvent& key,
                       ANPEvent* pluginEvent);
-    void DispatchMotionEvent(mozilla::WidgetInputEvent &event,
-                             mozilla::AndroidGeckoEvent *ae,
-                             const nsIntPoint &refPoint);
     void DispatchGestureEvent(uint32_t msg, uint32_t direction, double delta,
                               const nsIntPoint &refPoint, uint64_t time);
     void HandleSpecialKey(mozilla::AndroidGeckoEvent *ae);

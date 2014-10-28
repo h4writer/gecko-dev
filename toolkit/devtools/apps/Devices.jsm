@@ -4,7 +4,7 @@
 
 "use strict";
 
-Components.utils.import("resource:///modules/devtools/shared/event-emitter.js");
+Components.utils.import("resource://gre/modules/devtools/event-emitter.js");
 
 const EXPORTED_SYMBOLS = ["Devices"];
 
@@ -18,6 +18,11 @@ const Devices = {
   },
   set helperAddonInstalled(v) {
     addonInstalled = v;
+    if (!addonInstalled) {
+      for (let name in this._devices) {
+        this.unregister(name);
+      }
+    }
     this.emit("addon-status-updated", v);
   },
 

@@ -13,29 +13,12 @@
 #include "nsString.h"
 #include "nsAutoPtr.h"
 #include "mozilla/dom/WifiOptionsBinding.h"
-#include "NetUtils.h"
-#include "nsCxPusher.h"
+#include "WifiHotspotUtils.h"
 
 // Needed to add a copy constructor to WifiCommandOptions.
 struct CommandOptions
 {
 public:
-  CommandOptions(const CommandOptions& aOther) {
-    mId = aOther.mId;
-    mCmd = aOther.mCmd;
-    mRequest = aOther.mRequest;
-    mIfname = aOther.mIfname;
-    mRoute = aOther.mRoute;
-    mIpaddr = aOther.mIpaddr;
-    mMask = aOther.mMask;
-    mGateway = aOther.mGateway;
-    mDns1 = aOther.mDns1;
-    mDns2 = aOther.mDns2;
-    mKey = aOther.mKey;
-    mValue = aOther.mValue;
-    mDefaultValue = aOther.mDefaultValue;
-  }
-
   CommandOptions(const mozilla::dom::WifiCommandOptions& aOther) {
 
 #define COPY_OPT_FIELD(prop, defaultValue)            \
@@ -49,16 +32,6 @@ public:
     COPY_FIELD(mId)
     COPY_FIELD(mCmd)
     COPY_OPT_FIELD(mRequest, EmptyString())
-    COPY_OPT_FIELD(mIfname, EmptyString())
-    COPY_OPT_FIELD(mIpaddr, 0)
-    COPY_OPT_FIELD(mRoute, 0)
-    COPY_OPT_FIELD(mMask, 0)
-    COPY_OPT_FIELD(mGateway, 0)
-    COPY_OPT_FIELD(mDns1, 0)
-    COPY_OPT_FIELD(mDns2, 0)
-    COPY_OPT_FIELD(mKey, EmptyString())
-    COPY_OPT_FIELD(mValue, EmptyString())
-    COPY_OPT_FIELD(mDefaultValue, EmptyString())
 
 #undef COPY_OPT_FIELD
 #undef COPY_FIELD
@@ -66,18 +39,8 @@ public:
 
   // All the fields, not Optional<> anymore to get copy constructors.
   nsString mCmd;
-  nsString mDefaultValue;
-  int32_t mDns1;
-  int32_t mDns2;
-  int32_t mGateway;
   int32_t mId;
-  nsString mIfname;
-  int32_t mIpaddr;
-  nsString mKey;
-  int32_t mMask;
   nsString mRequest;
-  int32_t mRoute;
-  nsString mValue;
 };
 
 // Abstract class that exposes libhardware_legacy functions we need for
@@ -90,10 +53,10 @@ public:
   virtual ~WpaSupplicantImpl() {}
 
   virtual int32_t
-  do_wifi_wait_for_event(const char *iface, char *buf, size_t len) = 0; // ICS != JB
+  do_wifi_wait_for_event(const char *iface, char *buf, size_t len) = 0; // KK == ICS != JB
 
   virtual int32_t
-  do_wifi_command(const char* iface, const char* cmd, char* buff, size_t* len) = 0; // ICS != JB
+  do_wifi_command(const char* iface, const char* cmd, char* buff, size_t* len) = 0; // KK == ICS != JB
 
   virtual int32_t
   do_wifi_load_driver() = 0;
@@ -102,16 +65,16 @@ public:
   do_wifi_unload_driver() = 0;
 
   virtual int32_t
-  do_wifi_start_supplicant(int32_t) = 0; // ICS != JB
+  do_wifi_start_supplicant(int32_t) = 0; // ICS != JB == KK
 
   virtual int32_t
-  do_wifi_stop_supplicant() = 0;
+  do_wifi_stop_supplicant(int32_t) = 0; //ICS != JB == KK
 
   virtual int32_t
-  do_wifi_connect_to_supplicant(const char* iface) = 0; // ICS != JB
+  do_wifi_connect_to_supplicant(const char* iface) = 0; // KK == ICS != JB
 
   virtual void
-  do_wifi_close_supplicant_connection(const char* iface) = 0; // ICS != JB
+  do_wifi_close_supplicant_connection(const char* iface) = 0; // KK == ICS != JB
 };
 
 // Concrete class to use to access the wpa supplicant.
@@ -130,7 +93,9 @@ public:
 
 private:
   nsAutoPtr<WpaSupplicantImpl> mImpl;
-  nsAutoPtr<NetUtils> mNetUtils;
+  nsAutoPtr<WifiHotspotUtils> mWifiHotspotUtils;
+
+  uint32_t mSdkVersion;
 
 protected:
   void CheckBuffer(char* buffer, int32_t length, nsAString& aEvent);

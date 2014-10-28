@@ -23,7 +23,7 @@ FakeDirProvider.prototype = {
 };
 
 function run_test() {
-  setupTestCommon(true);
+  setupTestCommon();
 
   setUpdateURLOverride();
   overrideXHR(xhr_pt1);
@@ -33,13 +33,22 @@ function run_test() {
               "up to AUS.downloadUpdate() correctly (Bug 794211).");
 
   gDirProvider = new FakeDirProvider();
-  gOldProvider = AUS_Cc["@mozilla.org/browser/directory-provider;1"]
-                       .createInstance(AUS_Ci.nsIDirectoryServiceProvider);
+
+  let cm = AUS_Cc["@mozilla.org/categorymanager;1"].getService(AUS_Ci.nsICategoryManager);
+  gOldProviders = [];
+  let enumerator = cm.enumerateCategory("xpcom-directory-providers");
+  while (enumerator.hasMoreElements()) {
+    let entry = enumerator.getNext().QueryInterface(AUS_Ci.nsISupportsCString).data;
+    let contractID = cm.getCategoryEntry("xpcom-directory-providers", entry);
+    gOldProviders.push(AUS_Cc[contractID].createInstance(AUS_Ci.nsIDirectoryServiceProvider));
+  }
 
   gDirService = AUS_Cc["@mozilla.org/file/directory_service;1"]
                        .getService(AUS_Ci.nsIProperties);
 
-  gDirService.unregisterProvider(gOldProvider);
+  gOldProviders.forEach(function (p) {
+    gDirService.unregisterProvider(p);
+  });
   gDirService.registerProvider(gDirProvider);
 
   Services.prefs.setBoolPref(PREF_APP_UPDATE_SILENT, true);
@@ -53,8 +62,7 @@ function xhr_pt1() {
     var parser = AUS_Cc["@mozilla.org/xmlextras/domparser;1"].
                  createInstance(AUS_Ci.nsIDOMParser);
     gXHR.responseXML = parser.parseFromString(gResponseBody, "application/xml");
-  }
-  catch(e) {
+  } catch (e) {
     gXHR.responseXML = null;
   }
   var e = { target: gXHR };
@@ -82,15 +90,16 @@ function check_test_pt1() {
   let state = gAUS.downloadUpdate(gActiveUpdate, true);
   do_check_eq(state, "null");
   do_check_eq(gActiveUpdate.errorCode >>> 0 , AUS_Cr.NS_ERROR_FILE_TOO_BIG);
-  do_test_finished();
+
+  doTestFinish();
 }
 
 function end_test() {
   gDirService.unregisterProvider(gDirProvider);
-  gDirService.registerProvider(gOldProvider);
+  gOldProviders.forEach(function (p) {
+    gDirService.registerProvider(p);
+  });
   gActiveUpdate = null;
   gDirService = null;
   gDirProvider = null;
-
-  cleanupTestCommon();
 }

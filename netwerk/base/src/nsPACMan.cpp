@@ -97,7 +97,7 @@ private:
 class ShutdownThread MOZ_FINAL : public nsRunnable
 {
 public:
-  ShutdownThread(nsIThread *thread)
+  explicit ShutdownThread(nsIThread *thread)
     : mThread(thread)
   {
   }
@@ -113,6 +113,30 @@ private:
   nsCOMPtr<nsIThread> mThread;
 };
 
+// Dispatch this to wait until the PAC thread shuts down.
+
+class WaitForThreadShutdown MOZ_FINAL : public nsRunnable
+{
+public:
+  explicit WaitForThreadShutdown(nsPACMan *aPACMan)
+    : mPACMan(aPACMan)
+  {
+  }
+
+  NS_IMETHODIMP Run()
+  {
+    NS_ABORT_IF_FALSE(NS_IsMainThread(), "wrong thread");
+    if (mPACMan->mPACThread) {
+      mPACMan->mPACThread->Shutdown();
+      mPACMan->mPACThread = nullptr;
+    }
+    return NS_OK;
+  }
+
+private:
+  nsRefPtr<nsPACMan> mPACMan;
+};
+
 //-----------------------------------------------------------------------------
 
 // PACLoadComplete allows the PAC thread to tell the main thread that
@@ -122,7 +146,7 @@ private:
 class PACLoadComplete MOZ_FINAL : public nsRunnable
 {
 public:
-  PACLoadComplete(nsPACMan *aPACMan)
+  explicit PACLoadComplete(nsPACMan *aPACMan)
     : mPACMan(aPACMan)
   {
   }
@@ -149,7 +173,7 @@ class ExecutePACThreadAction MOZ_FINAL : public nsRunnable
 {
 public:
   // by default we just process the queue
-  ExecutePACThreadAction(nsPACMan *aPACMan)
+  explicit ExecutePACThreadAction(nsPACMan *aPACMan)
     : mPACMan(aPACMan)
     , mCancel(false)
     , mSetupPAC(false)
@@ -184,7 +208,7 @@ public:
                          mSetupPACData);
 
       nsRefPtr<PACLoadComplete> runnable = new PACLoadComplete(mPACMan);
-      NS_DispatchToMainThread(runnable, NS_DISPATCH_NORMAL);
+      NS_DispatchToMainThread(runnable);
       return NS_OK;
     }
 
@@ -226,7 +250,7 @@ PendingPACQuery::Complete(nsresult status, const nsCString &pacString)
   nsRefPtr<ExecuteCallback> runnable = new ExecuteCallback(mCallback, status);
   runnable->SetPACString(pacString);
   if (mOnMainThreadOnly)
-    NS_DispatchToMainThread(runnable, NS_DISPATCH_NORMAL);
+    NS_DispatchToMainThread(runnable);
   else
     runnable->Run();
 }
@@ -240,7 +264,7 @@ PendingPACQuery::UseAlternatePACFile(const nsCString &pacURL)
   nsRefPtr<ExecuteCallback> runnable = new ExecuteCallback(mCallback, NS_OK);
   runnable->SetPACURL(pacURL);
   if (mOnMainThreadOnly)
-    NS_DispatchToMainThread(runnable, NS_DISPATCH_NORMAL);
+    NS_DispatchToMainThread(runnable);
   else
     runnable->Run();
 }
@@ -255,6 +279,9 @@ PendingPACQuery::Run()
 
 //-----------------------------------------------------------------------------
 
+static bool sThreadLocalSetup = false;
+static uint32_t sThreadLocalIndex = 0xdeadbeef; // out of range
+
 nsPACMan::nsPACMan()
   : mLoadPending(false)
   , mShutdown(false)
@@ -262,6 +289,11 @@ nsPACMan::nsPACMan()
   , mInProgress(false)
 {
   NS_ABORT_IF_FALSE(NS_IsMainThread(), "pacman must be created on main thread");
+  if (!sThreadLocalSetup){
+    sThreadLocalSetup = true;
+    PR_NewThreadPrivateIndex(&sThreadLocalIndex, nullptr);
+  }
+  mPAC.SetThreadLocalIndex(sThreadLocalIndex);
 }
 
 nsPACMan::~nsPACMan()
@@ -272,7 +304,7 @@ nsPACMan::~nsPACMan()
     }
     else {
       nsRefPtr<ShutdownThread> runnable = new ShutdownThread(mPACThread);
-      NS_DispatchToMainThread(runnable, NS_DISPATCH_NORMAL);
+      NS_DispatchToMainThread(runnable);
     }
   }
 
@@ -284,9 +316,15 @@ void
 nsPACMan::Shutdown()
 {
   NS_ABORT_IF_FALSE(NS_IsMainThread(), "pacman must be shutdown on main thread");
-  CancelExistingLoad();
+  if (mShutdown) {
+    return;
+  }
   mShutdown = true;
+  CancelExistingLoad();
   PostCancelPendingQ(NS_ERROR_ABORT);
+
+  nsRefPtr<WaitForThreadShutdown> runnable = new WaitForThreadShutdown(this);
+  NS_DispatchToMainThread(runnable);
 }
 
 nsresult
@@ -326,7 +364,7 @@ nsPACMan::PostQuery(PendingPACQuery *query)
 
   // add a reference to the query while it is in the pending list
   nsRefPtr<PendingPACQuery> addref(query);
-  mPendingQ.insertBack(addref.forget().get());
+  mPendingQ.insertBack(addref.forget().take());
   ProcessPendingQ();
   return NS_OK;
 }
@@ -494,11 +532,12 @@ nsPACMan::ProcessPendingQ()
   NS_ABORT_IF_FALSE(!NS_IsMainThread(), "wrong thread");
   while (ProcessPending());
 
-  // do GC while the thread has nothing pending
-  mPAC.GC();
-
-  if (mShutdown)
+  if (mShutdown) {
     mPAC.Shutdown();
+  } else {
+    // do GC while the thread has nothing pending
+    mPAC.GC();
+  }
 }
 
 // returns true if progress was made by shortening the queue
@@ -555,8 +594,8 @@ nsPACMan::ProcessPending()
   return true;
 }
 
-NS_IMPL_ISUPPORTS3(nsPACMan, nsIStreamLoaderObserver,
-                   nsIInterfaceRequestor, nsIChannelEventSink)
+NS_IMPL_ISUPPORTS(nsPACMan, nsIStreamLoaderObserver,
+                  nsIInterfaceRequestor, nsIChannelEventSink)
 
 NS_IMETHODIMP
 nsPACMan::OnStreamComplete(nsIStreamLoader *loader,

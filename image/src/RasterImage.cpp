@@ -3,22 +3,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "base/histogram.h"
+// Must #include ImageLogging.h before any IPDL-generated files or other files that #include prlog.h
 #include "ImageLogging.h"
+
+#include "RasterImage.h"
+
+#include "base/histogram.h"
+#include "gfxPlatform.h"
 #include "nsComponentManagerUtils.h"
 #include "imgDecoderObserver.h"
 #include "nsError.h"
 #include "Decoder.h"
-#include "RasterImage.h"
 #include "nsAutoPtr.h"
 #include "prenv.h"
 #include "prsystem.h"
 #include "ImageContainer.h"
+#include "ImageRegion.h"
 #include "Layers.h"
 #include "nsPresContext.h"
 #include "nsIThreadPool.h"
 #include "nsXPCOMCIDInternal.h"
 #include "nsIObserverService.h"
+#include "SurfaceCache.h"
 #include "FrameAnimator.h"
 
 #include "nsPNGDecoder.h"
@@ -30,9 +36,11 @@
 
 #include "gfxContext.h"
 
+#include "mozilla/gfx/2D.h"
+#include "mozilla/RefPtr.h"
+#include "mozilla/Move.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/Services.h"
-#include "mozilla/Preferences.h"
 #include <stdint.h>
 #include "mozilla/Telemetry.h"
 #include "mozilla/TimeStamp.h"
@@ -41,19 +49,32 @@
 
 #include "GeckoProfiler.h"
 #include "gfx2DGlue.h"
+#include "gfxPrefs.h"
 #include <algorithm>
 
 #ifdef MOZ_NUWA_PROCESS
 #include "ipc/Nuwa.h"
 #endif
 
-using namespace mozilla;
-using namespace mozilla::image;
-using namespace mozilla::layers;
+namespace mozilla {
+
+using namespace gfx;
+using namespace layers;
+
+namespace image {
+
+using std::ceil;
+using std::min;
 
 // a mask for flags that will affect the decoding
 #define DECODE_FLAGS_MASK (imgIContainer::FLAG_DECODE_NO_PREMULTIPLY_ALPHA | imgIContainer::FLAG_DECODE_NO_COLORSPACE_CONVERSION)
 #define DECODE_FLAGS_DEFAULT 0
+
+static uint32_t
+DecodeFlags(uint32_t aFlags)
+{
+  return aFlags & DECODE_FLAGS_MASK;
+}
 
 /* Accounting for compressed data */
 #if defined(PR_LOGGING)
@@ -69,42 +90,9 @@ GetCompressedImageAccountingLog()
 #define GetCompressedImageAccountingLog()
 #endif
 
-// Tweakable progressive decoding parameters.  These are initialized to 0 here
-// because otherwise, we have to initialize them in a static initializer, which
-// makes us slower to start up.
-static uint32_t gDecodeBytesAtATime = 0;
-static uint32_t gMaxMSBeforeYield = 0;
-static bool gHQDownscaling = false;
-// This is interpreted as a floating-point value / 1000
-static uint32_t gHQDownscalingMinFactor = 1000;
-static bool gMultithreadedDecoding = true;
-static int32_t gDecodingThreadLimit = -1;
-// The number of pixels in a 5 megapixel decoded image.
-// Equivalent to an example 3125x1600 resolution.
-static uint32_t gHQUpscalingMaxSize = 20971520;
-
 // The maximum number of times any one RasterImage was decoded.  This is only
 // used for statistics.
 static int32_t sMaxDecodeCount = 0;
-
-static void
-InitPrefCaches()
-{
-  Preferences::AddUintVarCache(&gDecodeBytesAtATime,
-                               "image.mem.decode_bytes_at_a_time", 200000);
-  Preferences::AddUintVarCache(&gMaxMSBeforeYield,
-                               "image.mem.max_ms_before_yield", 400);
-  Preferences::AddBoolVarCache(&gHQDownscaling,
-                               "image.high_quality_downscaling.enabled", false);
-  Preferences::AddUintVarCache(&gHQDownscalingMinFactor,
-                               "image.high_quality_downscaling.min_factor", 1000);
-  Preferences::AddBoolVarCache(&gMultithreadedDecoding,
-                               "image.multithreaded_decoding.enabled", true);
-  Preferences::AddIntVarCache(&gDecodingThreadLimit,
-                              "image.multithreaded_decoding.limit", -1);
-  Preferences::AddUintVarCache(&gHQUpscalingMaxSize,
-                               "image.high_quality_upscaling.max_size", 20971520);
-}
 
 /* We define our own error checking macros here for 2 reasons:
  *
@@ -172,209 +160,151 @@ DiscardingEnabled()
   return enabled;
 }
 
-class ScaleRequest
-{
-public:
-  ScaleRequest(RasterImage* aImage, const gfxSize& aScale, imgFrame* aSrcFrame)
-    : scale(aScale)
-    , dstLocked(false)
-    , done(false)
-    , stopped(false)
-  {
-    MOZ_ASSERT(!aSrcFrame->GetIsPaletted());
-    MOZ_ASSERT(aScale.width > 0 && aScale.height > 0);
-
-    weakImage = aImage->asWeakPtr();
-    srcRect = aSrcFrame->GetRect();
-
-    nsIntRect dstRect = srcRect;
-    dstRect.ScaleRoundOut(scale.width, scale.height);
-    dstSize = dstRect.Size();
-  }
-
-  // This can only be called on the main thread.
-  bool GetSurfaces(imgFrame* srcFrame)
-  {
-    MOZ_ASSERT(NS_IsMainThread());
-
-    nsRefPtr<RasterImage> image = weakImage.get();
-    if (!image) {
-      return false;
-    }
-
-    bool success = false;
-    if (!dstLocked) {
-      bool srcLocked = NS_SUCCEEDED(srcFrame->LockImageData());
-      dstLocked = NS_SUCCEEDED(dstFrame->LockImageData());
-
-      nsRefPtr<gfxASurface> dstASurf;
-      nsRefPtr<gfxASurface> srcASurf;
-      success = srcLocked && NS_SUCCEEDED(srcFrame->GetSurface(getter_AddRefs(srcASurf)));
-      success = success && dstLocked && NS_SUCCEEDED(dstFrame->GetSurface(getter_AddRefs(dstASurf)));
-
-      success = success && srcLocked && dstLocked && srcASurf && dstASurf;
-
-      if (success) {
-        srcSurface = srcASurf->GetAsImageSurface();
-        dstSurface = dstASurf->GetAsImageSurface();
-        srcData = srcSurface->Data();
-        dstData = dstSurface->Data();
-        srcStride = srcSurface->Stride();
-        dstStride = dstSurface->Stride();
-        srcFormat = mozilla::gfx::ImageFormatToSurfaceFormat(srcFrame->GetFormat());
-      }
-
-      // We have references to the Thebes surfaces, so we don't need to leave
-      // the source frame (that we don't own) locked. We'll unlock the
-      // destination frame in ReleaseSurfaces(), below.
-      if (srcLocked) {
-        success = NS_SUCCEEDED(srcFrame->UnlockImageData()) && success;
-      }
-
-      success = success && srcSurface && dstSurface;
-    }
-
-    return success;
-  }
-
-  // This can only be called on the main thread.
-  bool ReleaseSurfaces()
-  {
-    MOZ_ASSERT(NS_IsMainThread());
-
-    nsRefPtr<RasterImage> image = weakImage.get();
-    if (!image) {
-      return false;
-    }
-
-    bool success = false;
-    if (dstLocked) {
-      success = NS_SUCCEEDED(dstFrame->UnlockImageData());
-
-      dstLocked = false;
-      srcData = nullptr;
-      dstData = nullptr;
-      srcSurface = nullptr;
-      dstSurface = nullptr;
-    }
-    return success;
-  }
-
-  // These values may only be touched on the main thread.
-  WeakPtr<RasterImage> weakImage;
-  nsAutoPtr<imgFrame> dstFrame;
-  nsRefPtr<gfxImageSurface> srcSurface;
-  nsRefPtr<gfxImageSurface> dstSurface;
-
-  // Below are the values that may be touched on the scaling thread.
-  gfxSize scale;
-  uint8_t* srcData;
-  uint8_t* dstData;
-  nsIntRect srcRect;
-  gfxIntSize dstSize;
-  uint32_t srcStride;
-  uint32_t dstStride;
-  mozilla::gfx::SurfaceFormat srcFormat;
-  bool dstLocked;
-  bool done;
-  // This boolean is accessed from both threads simultaneously without locking.
-  // That's safe because stopping a ScaleRequest is strictly an optimization;
-  // if we're not cache-coherent, at worst we'll do extra work.
-  bool stopped;
-};
-
-class DrawRunner : public nsRunnable
-{
-public:
-  DrawRunner(ScaleRequest* request)
-   : mScaleRequest(request)
-  {}
-
-  NS_IMETHOD Run()
-  {
-    // ScaleWorker is finished with this request, so we can unlock the data now.
-    mScaleRequest->ReleaseSurfaces();
-
-    nsRefPtr<RasterImage> image = mScaleRequest->weakImage.get();
-
-    if (image) {
-      RasterImage::ScaleStatus status;
-      if (mScaleRequest->done) {
-        status = RasterImage::SCALE_DONE;
-      } else {
-        status = RasterImage::SCALE_INVALID;
-      }
-
-      image->ScalingDone(mScaleRequest, status);
-    }
-
-    return NS_OK;
-  }
-
-private: /* members */
-  nsAutoPtr<ScaleRequest> mScaleRequest;
-};
-
 class ScaleRunner : public nsRunnable
 {
-public:
-  ScaleRunner(RasterImage* aImage, const gfxSize& aScale, imgFrame* aSrcFrame)
+  enum ScaleState
   {
-    nsAutoPtr<ScaleRequest> request(new ScaleRequest(aImage, aScale, aSrcFrame));
+    eNew,
+    eReady,
+    eFinish,
+    eFinishWithError
+  };
 
-    // Destination is unconditionally ARGB32 because that's what the scaler
-    // outputs.
-    request->dstFrame = new imgFrame();
-    nsresult rv = request->dstFrame->Init(0, 0, request->dstSize.width, request->dstSize.height,
-                                          gfxImageFormatARGB32);
-
-    if (NS_FAILED(rv) || !request->GetSurfaces(aSrcFrame)) {
-      return;
-    }
-
-    aImage->ScalingStart(request);
-
-    mScaleRequest = request;
+public:
+  ScaleRunner(RasterImage* aImage,
+              uint32_t aImageFlags,
+              const nsIntSize& aSize,
+              RawAccessFrameRef&& aSrcRef)
+    : mImage(aImage)
+    , mSrcRef(Move(aSrcRef))
+    , mDstSize(aSize)
+    , mImageFlags(aImageFlags)
+    , mState(eNew)
+  {
+    MOZ_ASSERT(!mSrcRef->GetIsPaletted());
+    MOZ_ASSERT(aSize.width > 0 && aSize.height > 0);
   }
 
-  NS_IMETHOD Run()
+  bool Init()
   {
-    // An alias just for ease of typing
-    ScaleRequest* request = mScaleRequest;
+    MOZ_ASSERT(NS_IsMainThread());
+    MOZ_ASSERT(mState == eNew, "Calling Init() twice?");
 
-    if (!request->stopped) {
-      request->done = mozilla::gfx::Scale(request->srcData, request->srcRect.width, request->srcRect.height, request->srcStride,
-                                          request->dstData, request->dstSize.width, request->dstSize.height, request->dstStride,
-                                          request->srcFormat);
-    } else {
-      request->done = false;
+    // We'll need a destination frame. It's unconditionally ARGB32 because
+    // that's what the scaler outputs.
+    nsRefPtr<imgFrame> tentativeDstFrame = new imgFrame();
+    nsresult rv =
+      tentativeDstFrame->InitForDecoder(mDstSize, SurfaceFormat::B8G8R8A8);
+    if (NS_FAILED(rv)) {
+      return false;
     }
 
-    // OK, we've got a new scaled image. Let's get the main thread to unlock and
-    // redraw it.
-    nsRefPtr<DrawRunner> runner = new DrawRunner(mScaleRequest.forget());
-    NS_DispatchToMainThread(runner, NS_DISPATCH_NORMAL);
+    // We need a strong reference to the raw data for the destination frame.
+    // (We already got one for the source frame in the constructor.)
+    RawAccessFrameRef tentativeDstRef = tentativeDstFrame->RawAccessRef();
+    if (!tentativeDstRef) {
+      return false;
+    }
+
+    // Everything worked, so commit to these objects and mark ourselves ready.
+    mDstRef = Move(tentativeDstRef);
+    mState = eReady;
+
+    // Insert the new surface into the cache immediately. We need to do this so
+    // that we won't start multiple scaling jobs for the same size.
+    SurfaceCache::Insert(mDstRef.get(), ImageKey(mImage.get()),
+                         RasterSurfaceKey(mDstSize.ToIntSize(), mImageFlags));
+
+    return true;
+  }
+
+  NS_IMETHOD Run() MOZ_OVERRIDE
+  {
+    if (mState == eReady) {
+      // Collect information from the frames that we need to scale.
+      uint8_t* srcData = mSrcRef->GetImageData();
+      IntSize srcSize = mSrcRef->GetSize();
+      uint32_t srcStride = mSrcRef->GetImageBytesPerRow();
+      uint8_t* dstData = mDstRef->GetImageData();
+      uint32_t dstStride = mDstRef->GetImageBytesPerRow();
+      SurfaceFormat srcFormat = mSrcRef->GetFormat();
+
+      // Actually do the scaling.
+      bool succeeded =
+        gfx::Scale(srcData, srcSize.width, srcSize.height, srcStride,
+                   dstData, mDstSize.width, mDstSize.height, dstStride,
+                   srcFormat);
+
+      if (succeeded) {
+        // Mark the frame as complete and discardable.
+        mDstRef->ImageUpdated(mDstRef->GetRect());
+        MOZ_ASSERT(mDstRef->ImageComplete(),
+                   "Incomplete, but just updated the entire frame");
+        if (DiscardingEnabled()) {
+          mDstRef->SetDiscardable();
+        }
+      }
+
+      // We need to send notifications and release our references on the main
+      // thread, so finish up there.
+      mState = succeeded ? eFinish : eFinishWithError;
+      NS_DispatchToMainThread(this);
+    } else if (mState == eFinish) {
+      MOZ_ASSERT(NS_IsMainThread());
+      MOZ_ASSERT(mDstRef, "Should have a valid scaled frame");
+
+      // Notify, so observers can redraw.
+      nsRefPtr<RasterImage> image = mImage.get();
+      if (image) {
+        image->NotifyNewScaledFrame();
+      }
+
+      // We're done, so release everything.
+      mSrcRef.reset();
+      mDstRef.reset();
+    } else if (mState == eFinishWithError) {
+      MOZ_ASSERT(NS_IsMainThread());
+      NS_WARNING("HQ scaling failed");
+
+      // Remove the frame from the cache since we know we don't need it.
+      SurfaceCache::RemoveIfPresent(ImageKey(mImage.get()),
+                                    RasterSurfaceKey(mDstSize.ToIntSize(),
+                                                     mImageFlags));
+
+      // Release everything we're holding, too.
+      mSrcRef.reset();
+      mDstRef.reset();
+    } else {
+      // mState must be eNew, which is invalid in Run().
+      MOZ_ASSERT(false, "Need to call Init() before dispatching");
+    }
 
     return NS_OK;
   }
 
-  bool IsOK() const { return !!mScaleRequest; }
-
 private:
-  nsAutoPtr<ScaleRequest> mScaleRequest;
-};
+  virtual ~ScaleRunner()
+  {
+    MOZ_ASSERT(!mSrcRef && !mDstRef,
+               "Should have released strong refs in Run()");
+  }
 
-namespace mozilla {
-namespace image {
+  WeakPtr<RasterImage> mImage;
+  RawAccessFrameRef    mSrcRef;
+  RawAccessFrameRef    mDstRef;
+  const nsIntSize      mDstSize;
+  uint32_t             mImageFlags;
+  ScaleState           mState;
+};
 
 /* static */ StaticRefPtr<RasterImage::DecodePool> RasterImage::DecodePool::sSingleton;
 static nsCOMPtr<nsIThread> sScaleWorkerThread = nullptr;
 
 #ifndef DEBUG
-NS_IMPL_ISUPPORTS2(RasterImage, imgIContainer, nsIProperties)
+NS_IMPL_ISUPPORTS(RasterImage, imgIContainer, nsIProperties)
 #else
-NS_IMPL_ISUPPORTS3(RasterImage, imgIContainer, nsIProperties,
-                              imgIContainerDebug)
+NS_IMPL_ISUPPORTS(RasterImage, imgIContainer, nsIProperties,
+                  imgIContainerDebug)
 #endif
 
 //******************************************************************************
@@ -383,16 +313,14 @@ RasterImage::RasterImage(imgStatusTracker* aStatusTracker,
   ImageResource(aURI), // invoke superclass's constructor
   mSize(0,0),
   mFrameDecodeFlags(DECODE_FLAGS_DEFAULT),
-  mMultipartDecodedFrame(nullptr),
-  mAnim(nullptr),
   mLockCount(0),
   mDecodeCount(0),
+  mRequestedSampleSize(0),
 #ifdef DEBUG
   mFramesNotified(0),
 #endif
-  mDecodingMutex("RasterImage"),
+  mDecodingMonitor("RasterImage Decoding Monitor"),
   mDecoder(nullptr),
-  mBytesDecoded(0),
   mInDecoder(false),
   mStatusDiff(ImageStatusDiff::NoChange()),
   mNotifying(false),
@@ -407,8 +335,7 @@ RasterImage::RasterImage(imgStatusTracker* aStatusTracker,
   mFinishing(false),
   mInUpdateImageContainer(false),
   mWantFullDecode(false),
-  mPendingError(false),
-  mScaleRequest(nullptr)
+  mPendingError(false)
 {
   mStatusTrackerInit = new imgStatusTrackerInit(this, aStatusTracker);
 
@@ -442,7 +369,7 @@ RasterImage::~RasterImage()
   if (mDecoder) {
     // Kill off our decode request, if it's pending.  (If not, this call is
     // harmless.)
-    MutexAutoLock lock(mDecodingMutex);
+    ReentrantMonitorAutoEnter lock(mDecodingMonitor);
     DecodePool::StopDecoding(this);
     mDecoder = nullptr;
 
@@ -451,14 +378,15 @@ RasterImage::~RasterImage()
     // This would be done in ShutdownDecoder, but since mDecoder is non-null,
     // we didn't call ShutdownDecoder and we need to do it manually.
     if (GetNumFrames() > 0) {
-      imgFrame *curframe = mFrameBlender.RawGetFrame(GetNumFrames() - 1);
+      nsRefPtr<imgFrame> curframe = mFrameBlender.RawGetFrame(GetNumFrames() - 1);
       curframe->UnlockImageData();
     }
   }
 
-  delete mAnim;
+  // Release any HQ scaled frames from the surface cache.
+  SurfaceCache::Discard(this);
+
   mAnim = nullptr;
-  delete mMultipartDecodedFrame;
 
   // Total statistics
   num_containers--;
@@ -472,8 +400,6 @@ RasterImage::~RasterImage()
 /* static */ void
 RasterImage::Initialize()
 {
-  InitPrefCaches();
-
   // Create our singletons now, so we don't have to worry about what thread
   // they're created on.
   DecodePool::Singleton();
@@ -531,8 +457,12 @@ RasterImage::Init(const char* aMimeType,
 //******************************************************************************
 // [notxpcom] void requestRefresh ([const] in TimeStamp aTime);
 NS_IMETHODIMP_(void)
-RasterImage::RequestRefresh(const mozilla::TimeStamp& aTime)
+RasterImage::RequestRefresh(const TimeStamp& aTime)
 {
+  if (HadRecentRefresh(aTime)) {
+    return;
+  }
+
   EvaluateAnimation();
 
   if (!mAnimating) {
@@ -648,65 +578,81 @@ RasterImage::GetType()
   return imgIContainer::TYPE_RASTER;
 }
 
-imgFrame*
-RasterImage::GetImgFrameNoDecode(uint32_t framenum)
+already_AddRefed<imgFrame>
+RasterImage::LookupFrameNoDecode(uint32_t aFrameNum)
 {
   if (!mAnim) {
-    NS_ASSERTION(framenum == 0, "Don't ask for a frame > 0 if we're not animated!");
+    NS_ASSERTION(aFrameNum == 0, "Don't ask for a frame > 0 if we're not animated!");
     return mFrameBlender.GetFrame(0);
   }
-  return mFrameBlender.GetFrame(framenum);
+  return mFrameBlender.GetFrame(aFrameNum);
 }
 
-imgFrame*
-RasterImage::GetImgFrame(uint32_t framenum)
+DrawableFrameRef
+RasterImage::LookupFrame(uint32_t aFrameNum,
+                         uint32_t aFlags,
+                         bool aShouldSyncNotify /* = true */)
 {
-  nsresult rv = WantDecodedFrames();
-  CONTAINER_ENSURE_TRUE(NS_SUCCEEDED(rv), nullptr);
-  return GetImgFrameNoDecode(framenum);
-}
-
-imgFrame*
-RasterImage::GetDrawableImgFrame(uint32_t framenum)
-{
-  imgFrame* frame = nullptr;
-
-  if (mMultipart && framenum == GetCurrentImgFrameIndex()) {
+  if (mMultipart &&
+      aFrameNum == GetCurrentFrameIndex() &&
+      mMultipartDecodedFrame) {
     // In the multipart case we prefer to use mMultipartDecodedFrame, which is
     // the most recent one we completely decoded, rather than display the real
     // current frame and risk severe tearing.
-    frame = mMultipartDecodedFrame;
+    return mMultipartDecodedFrame->DrawableRef();
   }
 
+  // Try our best to start decoding if it's necessary.
+  nsresult rv = WantDecodedFrames(aFlags, aShouldSyncNotify);
+  CONTAINER_ENSURE_TRUE(NS_SUCCEEDED(rv), DrawableFrameRef());
+
+  nsRefPtr<imgFrame> frame = LookupFrameNoDecode(aFrameNum);
   if (!frame) {
-    frame = GetImgFrame(framenum);
+    return DrawableFrameRef();
+  }
+
+  DrawableFrameRef ref = frame->DrawableRef();
+  if (!ref) {
+    // The OS threw this frame away. We need to discard and redecode.
+    MOZ_ASSERT(!mAnim, "Animated frames should be locked");
+    if (CanForciblyDiscardAndRedecode()) {
+      ForceDiscard();
+      WantDecodedFrames(aFlags, aShouldSyncNotify);
+
+      // See if we managed to entirely redecode the frame.
+      frame = LookupFrameNoDecode(aFrameNum);
+      ref = frame->DrawableRef();
+    }
+
+    if (!ref) {
+      // We didn't successfully redecode, so just fail.
+      return DrawableFrameRef();
+    }
   }
 
   // We will return a paletted frame if it's not marked as compositing failed
   // so we can catch crashes for reasons we haven't investigated.
-  if (frame && frame->GetCompositingFailed())
-    return nullptr;
-
-  if (frame) {
-    frame->ApplyDirtToSurfaces();
+  if (ref->GetCompositingFailed()) {
+    return DrawableFrameRef();
   }
 
-  return frame;
+  return ref;
 }
 
 uint32_t
-RasterImage::GetCurrentImgFrameIndex() const
+RasterImage::GetCurrentFrameIndex() const
 {
-  if (mAnim)
+  if (mAnim) {
     return mAnim->GetCurrentAnimationFrameIndex();
+  }
 
   return 0;
 }
 
-imgFrame*
-RasterImage::GetCurrentImgFrame()
+uint32_t
+RasterImage::GetRequestedFrameIndex(uint32_t aWhichFrame) const
 {
-  return GetImgFrame(GetCurrentImgFrameIndex());
+  return aWhichFrame == FRAME_FIRST ? 0 : GetCurrentFrameIndex();
 }
 
 //******************************************************************************
@@ -723,8 +669,8 @@ RasterImage::FrameIsOpaque(uint32_t aWhichFrame)
     return false;
 
   // See if we can get an image frame.
-  imgFrame* frame = aWhichFrame == FRAME_FIRST ? GetImgFrameNoDecode(0)
-                                               : GetImgFrameNoDecode(GetCurrentImgFrameIndex());
+  nsRefPtr<imgFrame> frame =
+    LookupFrameNoDecode(GetRequestedFrameIndex(aWhichFrame));
 
   // If we don't get a frame, the safe answer is "not opaque".
   if (!frame)
@@ -747,8 +693,8 @@ RasterImage::FrameRect(uint32_t aWhichFrame)
   }
 
   // Get the requested frame.
-  imgFrame* frame = aWhichFrame == FRAME_FIRST ? GetImgFrameNoDecode(0)
-                                               : GetImgFrameNoDecode(GetCurrentImgFrameIndex());
+  nsRefPtr<imgFrame> frame =
+    LookupFrameNoDecode(GetRequestedFrameIndex(aWhichFrame));
 
   // If we have the frame, use that rectangle.
   if (frame) {
@@ -761,12 +707,6 @@ RasterImage::FrameRect(uint32_t aWhichFrame)
   // dirty rectangles to send out batched observer updates). This should
   // probably be revisited when we fix bug 503973.
   return nsIntRect();
-}
-
-uint32_t
-RasterImage::GetCurrentFrameIndex()
-{
-  return GetCurrentImgFrameIndex();
 }
 
 uint32_t
@@ -817,143 +757,142 @@ RasterImage::GetFirstFrameDelay()
   return mFrameBlender.GetTimeoutForFrame(0);
 }
 
-nsresult
+TemporaryRef<SourceSurface>
 RasterImage::CopyFrame(uint32_t aWhichFrame,
                        uint32_t aFlags,
-                       gfxImageSurface **_retval)
+                       bool aShouldSyncNotify /* = true */)
 {
   if (aWhichFrame > FRAME_MAX_VALUE)
-    return NS_ERROR_INVALID_ARG;
+    return nullptr;
 
   if (mError)
-    return NS_ERROR_FAILURE;
+    return nullptr;
 
   // Disallowed in the API
   if (mInDecoder && (aFlags & imgIContainer::FLAG_SYNC_DECODE))
-    return NS_ERROR_FAILURE;
+    return nullptr;
 
-  nsresult rv;
-
-  if (!ApplyDecodeFlags(aFlags))
-    return NS_ERROR_NOT_AVAILABLE;
-
-  // If requested, synchronously flush any data we have lying around to the decoder
-  if (aFlags & FLAG_SYNC_DECODE) {
-    rv = SyncDecode();
-    CONTAINER_ENSURE_SUCCESS(rv);
-  }
-
-  NS_ENSURE_ARG_POINTER(_retval);
+  if (!ApplyDecodeFlags(aFlags, aWhichFrame))
+    return nullptr;
 
   // Get the frame. If it's not there, it's probably the caller's fault for
   // not waiting for the data to be loaded from the network or not passing
   // FLAG_SYNC_DECODE
-  uint32_t frameIndex = (aWhichFrame == FRAME_FIRST) ?
-                        0 : GetCurrentImgFrameIndex();
-  imgFrame *frame = GetDrawableImgFrame(frameIndex);
-  if (!frame) {
-    *_retval = nullptr;
-    return NS_ERROR_FAILURE;
+  DrawableFrameRef frameRef = LookupFrame(GetRequestedFrameIndex(aWhichFrame),
+                                          aFlags, aShouldSyncNotify);
+  if (!frameRef) {
+    // The OS threw this frame away and we couldn't redecode it right now.
+    return nullptr;
   }
-
-  nsRefPtr<gfxPattern> pattern;
-  frame->GetPattern(getter_AddRefs(pattern));
-  nsIntRect intframerect = frame->GetRect();
-  gfxRect framerect(intframerect.x, intframerect.y, intframerect.width, intframerect.height);
 
   // Create a 32-bit image surface of our size, but draw using the frame's
   // rect, implicitly padding the frame out to the image's size.
-  nsRefPtr<gfxImageSurface> imgsurface = new gfxImageSurface(gfxIntSize(mSize.width, mSize.height),
-                                                             gfxImageFormatARGB32);
-  gfxContext ctx(imgsurface);
-  ctx.SetOperator(gfxContext::OPERATOR_SOURCE);
-  ctx.Rectangle(framerect);
-  ctx.Translate(framerect.TopLeft());
-  ctx.SetPattern(pattern);
-  ctx.Fill();
 
-  *_retval = imgsurface.forget().get();
-  return NS_OK;
+  IntSize size(mSize.width, mSize.height);
+  RefPtr<DataSourceSurface> surf =
+    Factory::CreateDataSourceSurface(size,
+                                     SurfaceFormat::B8G8R8A8,
+                                     /* aZero = */ true);
+  if (NS_WARN_IF(!surf)) {
+    return nullptr;
+  }
+
+  DataSourceSurface::MappedSurface mapping;
+  DebugOnly<bool> success =
+    surf->Map(DataSourceSurface::MapType::WRITE, &mapping);
+  NS_ASSERTION(success, "Failed to map surface");
+  RefPtr<DrawTarget> target =
+    Factory::CreateDrawTargetForData(BackendType::CAIRO,
+                                     mapping.mData,
+                                     size,
+                                     mapping.mStride,
+                                     SurfaceFormat::B8G8R8A8);
+
+  nsIntRect intFrameRect = frameRef->GetRect();
+  Rect rect(intFrameRect.x, intFrameRect.y,
+            intFrameRect.width, intFrameRect.height);
+  if (frameRef->IsSinglePixel()) {
+    target->FillRect(rect, ColorPattern(frameRef->SinglePixelColor()),
+                     DrawOptions(1.0f, CompositionOp::OP_SOURCE));
+  } else {
+    RefPtr<SourceSurface> srcSurf = frameRef->GetSurface();
+    Rect srcRect(0, 0, intFrameRect.width, intFrameRect.height);
+    target->DrawSurface(srcSurf, srcRect, rect);
+  }
+
+  target->Flush();
+  surf->Unmap();
+
+  return surf;
 }
 
 //******************************************************************************
-/* [noscript] gfxASurface getFrame(in uint32_t aWhichFrame,
- *                                 in uint32_t aFlags); */
-NS_IMETHODIMP
+/* [noscript] SourceSurface getFrame(in uint32_t aWhichFrame,
+ *                                   in uint32_t aFlags); */
+NS_IMETHODIMP_(TemporaryRef<SourceSurface>)
 RasterImage::GetFrame(uint32_t aWhichFrame,
-                      uint32_t aFlags,
-                      gfxASurface **_retval)
+                      uint32_t aFlags)
 {
+  return GetFrameInternal(aWhichFrame, aFlags);
+}
+
+TemporaryRef<SourceSurface>
+RasterImage::GetFrameInternal(uint32_t aWhichFrame,
+                              uint32_t aFlags,
+                              bool aShouldSyncNotify /* = true */)
+{
+  MOZ_ASSERT(aWhichFrame <= FRAME_MAX_VALUE);
+
   if (aWhichFrame > FRAME_MAX_VALUE)
-    return NS_ERROR_INVALID_ARG;
+    return nullptr;
 
   if (mError)
-    return NS_ERROR_FAILURE;
+    return nullptr;
 
   // Disallowed in the API
   if (mInDecoder && (aFlags & imgIContainer::FLAG_SYNC_DECODE))
-    return NS_ERROR_FAILURE;
+    return nullptr;
 
-  nsresult rv = NS_OK;
-
-  if (!ApplyDecodeFlags(aFlags))
-    return NS_ERROR_NOT_AVAILABLE;
-
-  // If the caller requested a synchronous decode, do it
-  if (aFlags & FLAG_SYNC_DECODE) {
-    rv = SyncDecode();
-    CONTAINER_ENSURE_SUCCESS(rv);
-  }
+  if (!ApplyDecodeFlags(aFlags, aWhichFrame))
+    return nullptr;
 
   // Get the frame. If it's not there, it's probably the caller's fault for
   // not waiting for the data to be loaded from the network or not passing
   // FLAG_SYNC_DECODE
-  uint32_t frameIndex = (aWhichFrame == FRAME_FIRST) ?
-                          0 : GetCurrentImgFrameIndex();
-  imgFrame *frame = GetDrawableImgFrame(frameIndex);
-  if (!frame) {
-    *_retval = nullptr;
-    return NS_ERROR_FAILURE;
+  DrawableFrameRef frameRef = LookupFrame(GetRequestedFrameIndex(aWhichFrame),
+                                          aFlags, aShouldSyncNotify);
+  if (!frameRef) {
+    // The OS threw this frame away and we couldn't redecode it.
+    return nullptr;
   }
-
-  nsRefPtr<gfxASurface> framesurf;
 
   // If this frame covers the entire image, we can just reuse its existing
   // surface.
-  nsIntRect framerect = frame->GetRect();
-  if (framerect.x == 0 && framerect.y == 0 &&
-      framerect.width == mSize.width &&
-      framerect.height == mSize.height)
-    rv = frame->GetSurface(getter_AddRefs(framesurf));
-
-  // The image doesn't have a surface because it's been optimized away. Create
-  // one.
-  if (!framesurf) {
-    nsRefPtr<gfxImageSurface> imgsurf;
-    rv = CopyFrame(aWhichFrame, aFlags, getter_AddRefs(imgsurf));
-    framesurf = imgsurf;
+  RefPtr<SourceSurface> frameSurf;
+  nsIntRect frameRect = frameRef->GetRect();
+  if (frameRect.x == 0 && frameRect.y == 0 &&
+      frameRect.width == mSize.width &&
+      frameRect.height == mSize.height) {
+    frameSurf = frameRef->GetSurface();
   }
 
-  *_retval = framesurf.forget().get();
+  // The image doesn't have a usable surface because it's been optimized away or
+  // because it's a partial update frame from an animation. Create one.
+  if (!frameSurf) {
+    frameSurf = CopyFrame(aWhichFrame, aFlags, aShouldSyncNotify);
+  }
 
-  return rv;
+  return frameSurf;
 }
 
 already_AddRefed<layers::Image>
 RasterImage::GetCurrentImage()
 {
-  if (!mDecoded) {
-    // We can't call StartDecoding because that can synchronously notify
-    // which can cause DOM modification
-    RequestDecodeCore(ASYNCHRONOUS);
-    return nullptr;
-  }
-
-  nsRefPtr<gfxASurface> imageSurface;
-  nsresult rv = GetFrame(FRAME_CURRENT, FLAG_NONE, getter_AddRefs(imageSurface));
-  NS_ENSURE_SUCCESS(rv, nullptr);
-
-  if (!imageSurface) {
+  RefPtr<SourceSurface> surface =
+    GetFrameInternal(FRAME_CURRENT, FLAG_NONE, /* aShouldSyncNotify = */ false);
+  if (!surface) {
+    // The OS threw out some or all of our buffer. We'll need to wait for the
+    // redecode (which was automatically triggered by GetFrame) to complete.
     return nullptr;
   }
 
@@ -962,15 +901,13 @@ RasterImage::GetCurrentImage()
   }
 
   CairoImage::Data cairoData;
-  cairoData.mSurface = imageSurface;
   GetWidth(&cairoData.mSize.width);
   GetHeight(&cairoData.mSize.height);
+  cairoData.mSourceSurface = surface;
 
-  ImageFormat cairoFormat = CAIRO_SURFACE;
-  nsRefPtr<layers::Image> image = mImageContainer->CreateImage(&cairoFormat, 1);
+  nsRefPtr<layers::Image> image = mImageContainer->CreateImage(ImageFormat::CAIRO_SURFACE);
   NS_ASSERTION(image, "Failed to create Image");
 
-  NS_ASSERTION(image->GetFormat() == cairoFormat, "Wrong format");
   static_cast<CairoImage*>(image.get())->SetData(cairoData);
 
   return image.forget();
@@ -990,6 +927,10 @@ RasterImage::GetImageContainer(LayerManager* aManager, ImageContainer **_retval)
     mStatusTracker->OnUnlockedDraw();
   }
 
+  if (!mImageContainer) {
+    mImageContainer = mImageContainerCache;
+  }
+
   if (mImageContainer) {
     *_retval = mImageContainer;
     NS_ADDREF(*_retval);
@@ -1004,6 +945,13 @@ RasterImage::GetImageContainer(LayerManager* aManager, ImageContainer **_retval)
 
   *_retval = mImageContainer;
   NS_ADDREF(*_retval);
+  // We only need to be careful about holding on to the image when it is
+  // discardable by the OS.
+  if (CanForciblyDiscardAndRedecode()) {
+    mImageContainerCache = mImageContainer;
+    mImageContainer = nullptr;
+  }
+
   return NS_OK;
 }
 
@@ -1042,33 +990,27 @@ size_t
 RasterImage::SizeOfDecodedWithComputedFallbackIfHeap(gfxMemoryLocation aLocation,
                                                      MallocSizeOf aMallocSizeOf) const
 {
-  size_t n = mFrameBlender.SizeOfDecodedWithComputedFallbackIfHeap(aLocation, aMallocSizeOf);
-
-  if (mScaleResult.status == SCALE_DONE) {
-    n += mScaleResult.frame->SizeOfExcludingThisWithComputedFallbackIfHeap(aLocation, aMallocSizeOf);
-  }
-
-  return n;
+  return mFrameBlender.SizeOfDecodedWithComputedFallbackIfHeap(aLocation, aMallocSizeOf);
 }
 
 size_t
 RasterImage::HeapSizeOfDecodedWithComputedFallback(MallocSizeOf aMallocSizeOf) const
 {
-  return SizeOfDecodedWithComputedFallbackIfHeap(GFX_MEMORY_IN_PROCESS_HEAP,
+  return SizeOfDecodedWithComputedFallbackIfHeap(gfxMemoryLocation::IN_PROCESS_HEAP,
                                                  aMallocSizeOf);
 }
 
 size_t
 RasterImage::NonHeapSizeOfDecoded() const
 {
-  return SizeOfDecodedWithComputedFallbackIfHeap(GFX_MEMORY_IN_PROCESS_NONHEAP,
+  return SizeOfDecodedWithComputedFallbackIfHeap(gfxMemoryLocation::IN_PROCESS_NONHEAP,
                                                  nullptr);
 }
 
 size_t
 RasterImage::OutOfProcessSizeOfDecoded() const
 {
-  return SizeOfDecodedWithComputedFallbackIfHeap(GFX_MEMORY_OUT_OF_PROCESS,
+  return SizeOfDecodedWithComputedFallbackIfHeap(gfxMemoryLocation::OUT_OF_PROCESS,
                                                  nullptr);
 }
 
@@ -1078,7 +1020,7 @@ RasterImage::EnsureAnimExists()
   if (!mAnim) {
 
     // Create the animation context
-    mAnim = new FrameAnimator(mFrameBlender);
+    mAnim = MakeUnique<FrameAnimator>(mFrameBlender, mAnimationMode);
 
     // We don't support discarding animated images (See bug 414259).
     // Lock the image and throw away the key.
@@ -1107,7 +1049,7 @@ RasterImage::InternalAddFrameHelper(uint32_t framenum, imgFrame *aFrame,
   if (framenum > GetNumFrames())
     return NS_ERROR_INVALID_ARG;
 
-  nsAutoPtr<imgFrame> frame(aFrame);
+  nsRefPtr<imgFrame> frame(aFrame);
 
   // We are in the middle of decoding. This will be unlocked when we finish
   // decoding or switch to another frame.
@@ -1118,10 +1060,9 @@ RasterImage::InternalAddFrameHelper(uint32_t framenum, imgFrame *aFrame,
 
   frame->GetImageData(imageData, imageLength);
 
-  *aRetFrame = frame;
+  mFrameBlender.InsertFrame(framenum, frame);
 
-  mFrameBlender.InsertFrame(framenum, frame.forget());
-
+  frame.forget(aRetFrame);
   return NS_OK;
 }
 
@@ -1129,7 +1070,7 @@ nsresult
 RasterImage::InternalAddFrame(uint32_t framenum,
                               int32_t aX, int32_t aY,
                               int32_t aWidth, int32_t aHeight,
-                              gfxImageFormat aFormat,
+                              SurfaceFormat aFormat,
                               uint8_t aPaletteDepth,
                               uint8_t **imageData,
                               uint32_t *imageLength,
@@ -1146,9 +1087,10 @@ RasterImage::InternalAddFrame(uint32_t framenum,
   if (framenum > GetNumFrames())
     return NS_ERROR_INVALID_ARG;
 
-  nsAutoPtr<imgFrame> frame(new imgFrame());
+  nsRefPtr<imgFrame> frame(new imgFrame());
 
-  nsresult rv = frame->Init(aX, aY, aWidth, aHeight, aFormat, aPaletteDepth);
+  nsIntRect frameRect(aX, aY, aWidth, aHeight);
+  nsresult rv = frame->InitForDecoder(frameRect, aFormat, aPaletteDepth);
   if (!(mSize.width > 0 && mSize.height > 0))
     NS_WARNING("Shouldn't call InternalAddFrame with zero size");
   if (!NS_SUCCEEDED(rv))
@@ -1158,12 +1100,12 @@ RasterImage::InternalAddFrame(uint32_t framenum,
   // We know we are in a decoder. Therefore, we must unlock the previous frame
   // when we move on to decoding into the next frame.
   if (GetNumFrames() > 0) {
-    imgFrame *prevframe = mFrameBlender.RawGetFrame(GetNumFrames() - 1);
+    nsRefPtr<imgFrame> prevframe = mFrameBlender.RawGetFrame(GetNumFrames() - 1);
     prevframe->UnlockImageData();
   }
 
   if (GetNumFrames() == 0) {
-    return InternalAddFrameHelper(framenum, frame.forget(), imageData, imageLength,
+    return InternalAddFrameHelper(framenum, frame, imageData, imageLength,
                                   paletteData, paletteLength, aRetFrame);
   }
 
@@ -1174,10 +1116,11 @@ RasterImage::InternalAddFrame(uint32_t framenum,
     // If we dispose of the first frame by clearing it, then the
     // First Frame's refresh area is all of itself.
     // RESTORE_PREVIOUS is invalid (assumed to be DISPOSE_CLEAR)
-    int32_t frameDisposalMethod = mFrameBlender.RawGetFrame(0)->GetFrameDisposalMethod();
+    nsRefPtr<imgFrame> firstFrame = mFrameBlender.RawGetFrame(0);
+    int32_t frameDisposalMethod = firstFrame->GetFrameDisposalMethod();
     if (frameDisposalMethod == FrameBlender::kDisposeClear ||
         frameDisposalMethod == FrameBlender::kDisposeRestorePrevious)
-      mAnim->SetFirstFrameRefreshArea(mFrameBlender.RawGetFrame(0)->GetRect());
+      mAnim->SetFirstFrameRefreshArea(firstFrame->GetRect());
   }
 
   // Calculate firstFrameRefreshArea
@@ -1185,25 +1128,36 @@ RasterImage::InternalAddFrame(uint32_t framenum,
   // We only need to refresh that small area when Frame 0 comes around again
   mAnim->UnionFirstFrameRefreshArea(frame->GetRect());
 
-  rv = InternalAddFrameHelper(framenum, frame.forget(), imageData, imageLength,
+  rv = InternalAddFrameHelper(framenum, frame, imageData, imageLength,
                               paletteData, paletteLength, aRetFrame);
 
   return rv;
 }
 
 bool
-RasterImage::ApplyDecodeFlags(uint32_t aNewFlags)
+RasterImage::ApplyDecodeFlags(uint32_t aNewFlags, uint32_t aWhichFrame)
 {
   if (mFrameDecodeFlags == (aNewFlags & DECODE_FLAGS_MASK))
     return true; // Not asking very much of us here.
 
   if (mDecoded) {
+    // If the requested frame is opaque and the current and new decode flags
+    // only differ in the premultiply alpha bit then we can use the existing
+    // frame, we don't need to discard and re-decode.
+    uint32_t currentNonAlphaFlags =
+      (mFrameDecodeFlags & DECODE_FLAGS_MASK) & ~FLAG_DECODE_NO_PREMULTIPLY_ALPHA;
+    uint32_t newNonAlphaFlags =
+      (aNewFlags & DECODE_FLAGS_MASK) & ~FLAG_DECODE_NO_PREMULTIPLY_ALPHA;
+    if (currentNonAlphaFlags == newNonAlphaFlags && FrameIsOpaque(aWhichFrame)) {
+      return true;
+    }
+
     // if we can't discard, then we're screwed; we have no way
     // to re-decode.  Similarly if we aren't allowed to do a sync
     // decode.
     if (!(aNewFlags & FLAG_SYNC_DECODE))
       return false;
-    if (!CanForciblyDiscard() || mDecoder || mAnim)
+    if (!CanForciblyDiscardAndRedecode())
       return false;
     ForceDiscard();
   }
@@ -1216,6 +1170,7 @@ nsresult
 RasterImage::SetSize(int32_t aWidth, int32_t aHeight, Orientation aOrientation)
 {
   MOZ_ASSERT(NS_IsMainThread());
+  mDecodingMonitor.AssertCurrentThreadIn();
 
   if (mError)
     return NS_ERROR_FAILURE;
@@ -1254,7 +1209,7 @@ RasterImage::SetSize(int32_t aWidth, int32_t aHeight, Orientation aOrientation)
 nsresult
 RasterImage::EnsureFrame(uint32_t aFrameNum, int32_t aX, int32_t aY,
                          int32_t aWidth, int32_t aHeight,
-                         gfxImageFormat aFormat,
+                         SurfaceFormat aFormat,
                          uint8_t aPaletteDepth,
                          uint8_t **imageData, uint32_t *imageLength,
                          uint32_t **paletteData, uint32_t *paletteLength,
@@ -1283,7 +1238,7 @@ RasterImage::EnsureFrame(uint32_t aFrameNum, int32_t aX, int32_t aY,
                             paletteData, paletteLength, aRetFrame);
   }
 
-  imgFrame *frame = mFrameBlender.RawGetFrame(aFrameNum);
+  nsRefPtr<imgFrame> frame = mFrameBlender.RawGetFrame(aFrameNum);
   if (!frame) {
     return InternalAddFrame(aFrameNum, aX, aY, aWidth, aHeight, aFormat,
                             aPaletteDepth, imageData, imageLength,
@@ -1300,13 +1255,13 @@ RasterImage::EnsureFrame(uint32_t aFrameNum, int32_t aX, int32_t aY,
       frame->GetPaletteData(paletteData, paletteLength);
     }
 
-    *aRetFrame = frame;
-
     // We can re-use the frame if it has image data.
     if (*imageData && paletteData && *paletteData) {
+      frame.forget(aRetFrame);
       return NS_OK;
     }
     if (*imageData && !paletteData) {
+      frame.forget(aRetFrame);
       return NS_OK;
     }
   }
@@ -1318,18 +1273,18 @@ RasterImage::EnsureFrame(uint32_t aFrameNum, int32_t aX, int32_t aY,
   frame->UnlockImageData();
 
   mFrameBlender.RemoveFrame(aFrameNum);
-  nsAutoPtr<imgFrame> newFrame(new imgFrame());
-  nsresult rv = newFrame->Init(aX, aY, aWidth, aHeight, aFormat, aPaletteDepth);
+  nsRefPtr<imgFrame> newFrame(new imgFrame());
+  nsIntRect frameRect(aX, aY, aWidth, aHeight);
+  nsresult rv = newFrame->InitForDecoder(frameRect, aFormat, aPaletteDepth);
   NS_ENSURE_SUCCESS(rv, rv);
-  return InternalAddFrameHelper(aFrameNum, newFrame.forget(), imageData,
-                                imageLength, paletteData, paletteLength,
-                                aRetFrame);
+  return InternalAddFrameHelper(aFrameNum, newFrame, imageData, imageLength,
+                                paletteData, paletteLength, aRetFrame);
 }
 
 nsresult
 RasterImage::EnsureFrame(uint32_t aFramenum, int32_t aX, int32_t aY,
                          int32_t aWidth, int32_t aHeight,
-                         gfxImageFormat aFormat,
+                         SurfaceFormat aFormat,
                          uint8_t** imageData, uint32_t* imageLength,
                          imgFrame** aFrame)
 {
@@ -1350,7 +1305,7 @@ RasterImage::SetFrameAsNonPremult(uint32_t aFrameNum, bool aIsNonPremult)
   if (aFrameNum >= GetNumFrames())
     return NS_ERROR_INVALID_ARG;
 
-  imgFrame* frame = mFrameBlender.RawGetFrame(aFrameNum);
+  nsRefPtr<imgFrame> frame = mFrameBlender.RawGetFrame(aFrameNum);
   NS_ABORT_IF_FALSE(frame, "Calling SetFrameAsNonPremult on frame that doesn't exist!");
   NS_ENSURE_TRUE(frame, NS_ERROR_FAILURE);
 
@@ -1383,14 +1338,17 @@ RasterImage::DecodingComplete()
     CONTAINER_ENSURE_SUCCESS(rv);
   }
 
-  // If there's only 1 frame, optimize it. Optimizing animated images
+  // If there's only 1 frame, mark it as optimizable. Optimizing animated images
   // is not supported.
   //
   // We don't optimize the frame for multipart images because we reuse
   // the frame.
   if ((GetNumFrames() == 1) && !mMultipart) {
-    rv = mFrameBlender.RawGetFrame(0)->Optimize();
-    NS_ENSURE_SUCCESS(rv, rv);
+    nsRefPtr<imgFrame> firstFrame = mFrameBlender.RawGetFrame(0);
+    firstFrame->SetOptimizable();
+    if (DiscardingEnabled() && CanForciblyDiscard()) {
+      firstFrame->SetDiscardable();
+    }
   }
 
   // Double-buffer our frame in the multipart case, since we'll start decoding
@@ -1404,7 +1362,6 @@ RasterImage::DecodingComplete()
       // complexity and it's not really needed since we already are smart about
       // not displaying the still-decoding frame of an animated image. We may
       // have already stored an extra frame, though, so we'll release it here.
-      delete mMultipartDecodedFrame;
       mMultipartDecodedFrame = nullptr;
     }
   }
@@ -1437,9 +1394,10 @@ RasterImage::StartAnimation()
 
   EnsureAnimExists();
 
-  imgFrame* currentFrame = GetCurrentImgFrame();
+  nsRefPtr<imgFrame> currentFrame = LookupFrameNoDecode(GetCurrentFrameIndex());
   // A timeout of -1 means we should display this frame forever.
-  if (currentFrame && mFrameBlender.GetTimeoutForFrame(GetCurrentImgFrameIndex()) < 0) {
+  if (currentFrame &&
+      mFrameBlender.GetTimeoutForFrame(GetCurrentFrameIndex()) < 0) {
     mAnimationFinished = true;
     return NS_ERROR_ABORT;
   }
@@ -1512,7 +1470,7 @@ RasterImage::ResetAnimation()
 //******************************************************************************
 // [notxpcom] void setAnimationStartTime ([const] in TimeStamp aTime);
 NS_IMETHODIMP_(void)
-RasterImage::SetAnimationStartTime(const mozilla::TimeStamp& aTime)
+RasterImage::SetAnimationStartTime(const TimeStamp& aTime)
 {
   if (mError || mAnimationMode == kDontAnimMode || mAnimating || !mAnim)
     return;
@@ -1541,10 +1499,16 @@ RasterImage::SetLoopCount(int32_t aLoopCount)
   }
 }
 
+NS_IMETHODIMP_(nsIntRect)
+RasterImage::GetImageSpaceInvalidationRect(const nsIntRect& aRect)
+{
+  return aRect;
+}
+
 nsresult
 RasterImage::AddSourceData(const char *aBuffer, uint32_t aCount)
 {
-  MutexAutoLock lock(mDecodingMutex);
+  ReentrantMonitorAutoEnter lock(mDecodingMonitor);
 
   if (mError)
     return NS_ERROR_FAILURE;
@@ -1572,13 +1536,12 @@ RasterImage::AddSourceData(const char *aBuffer, uint32_t aCount)
   // Starting a new part's frames, let's clean up before we add any
   // This needs to happen just before we start getting EnsureFrame() call(s),
   // so that there's no gap for anything to miss us.
-  if (mMultipart && mBytesDecoded == 0) {
+  if (mMultipart && (!mDecoder || mDecoder->BytesDecoded() == 0)) {
     // Our previous state may have been animated, so let's clean up
     if (mAnimating)
       StopAnimation();
     mAnimationFinished = false;
     if (mAnim) {
-      delete mAnim;
       mAnim = nullptr;
     }
     // If there's only one frame, this could cause flickering
@@ -1592,11 +1555,8 @@ RasterImage::AddSourceData(const char *aBuffer, uint32_t aCount)
   // write the data directly to the decoder. (If we haven't gotten the size,
   // we'll queue up the data and write it out when we do.)
   if (!StoringSourceData() && mHasSize) {
-    {
-      AutoSetSyncDecode syncDecode(mDecoder);
-      rv = WriteToDecoder(aBuffer, aCount);
-      CONTAINER_ENSURE_SUCCESS(rv);
-    }
+    rv = WriteToDecoder(aBuffer, aCount, DECODE_SYNC);
+    CONTAINER_ENSURE_SUCCESS(rv);
 
     // We're not storing source data, so this data is probably coming straight
     // from the network. In this case, we want to display data as soon as we
@@ -1683,7 +1643,7 @@ RasterImage::DoImageDataComplete()
   }
 
   {
-    MutexAutoLock lock(mDecodingMutex);
+    ReentrantMonitorAutoEnter lock(mDecodingMonitor);
 
     // If we're not storing any source data, then there's nothing more we can do
     // once we've tried decoding for size.
@@ -1733,12 +1693,13 @@ RasterImage::OnImageDataComplete(nsIRequest*, nsISupports*, nsresult aStatus, bo
   if (NS_FAILED(aStatus))
     finalStatus = aStatus;
 
-  nsRefPtr<imgStatusTracker> statusTracker = CurrentStatusTracker();
-  statusTracker->GetDecoderObserver()->OnStopRequest(aLastPart, finalStatus);
-
   // We just recorded OnStopRequest; we need to inform our listeners.
   {
-    MutexAutoLock lock(mDecodingMutex);
+    ReentrantMonitorAutoEnter lock(mDecodingMonitor);
+
+    nsRefPtr<imgStatusTracker> statusTracker = CurrentStatusTracker();
+    statusTracker->GetDecoderObserver()->OnStopRequest(aLastPart, finalStatus);
+
     FinishedSomeDecoding();
   }
 
@@ -1759,8 +1720,9 @@ RasterImage::OnImageDataAvailable(nsIRequest*,
   uint32_t bytesRead;
   rv = aInStr->ReadSegments(WriteToRasterImage, this, aCount, &bytesRead);
 
-  NS_ABORT_IF_FALSE(bytesRead == aCount || HasError(),
-    "WriteToRasterImage should consume everything or the image must be in error!");
+  NS_ABORT_IF_FALSE(bytesRead == aCount || HasError() || NS_FAILED(rv),
+    "WriteToRasterImage should consume everything if ReadSegments succeeds or "
+    "the image must be in error!");
 
   return rv;
 }
@@ -1895,12 +1857,7 @@ RasterImage::Discard(bool force)
   // Delete all the decoded frames
   mFrameBlender.Discard();
 
-  // Clear our downscaled frame.
-  mScaleResult.status = SCALE_INVALID;
-  mScaleResult.frame = nullptr;
-
   // Clear the last decoded multipart frame.
-  delete mMultipartDecodedFrame;
   mMultipartDecodedFrame = nullptr;
 
   // Flag that we no longer have decoded frames for this image
@@ -1945,6 +1902,14 @@ bool
 RasterImage::CanForciblyDiscard() {
   return mDiscardable &&         // ...Enabled at creation time...
          mHasSourceData;         // ...have the source data...
+}
+
+bool
+RasterImage::CanForciblyDiscardAndRedecode() {
+  return mDiscardable &&         // ...Enabled at creation time...
+         mHasSourceData &&       // ...have the source data...
+         !mDecoder &&            // Can't discard with an open decoder
+         !mAnim;                 // Can never discard animated images
 }
 
 // Helper method to tell us whether the clock is currently running for
@@ -2017,7 +1982,7 @@ RasterImage::InitDecoder(bool aDoSizeDecode)
   // case. Regardless, we need to lock the last frame. Our invariant is that,
   // while we have a decoder open, the last frame is always locked.
   if (GetNumFrames() > 0) {
-    imgFrame *curframe = mFrameBlender.RawGetFrame(GetNumFrames() - 1);
+    nsRefPtr<imgFrame> curframe = mFrameBlender.RawGetFrame(GetNumFrames() - 1);
     curframe->LockImageData();
   }
 
@@ -2035,7 +2000,7 @@ RasterImage::InitDecoder(bool aDoSizeDecode)
     // frame.  By default, we create an ARGB frame with no offset. If decoders
     // need a different type, they need to ask for it themselves.
     mDecoder->NeedNewFrame(0, 0, 0, mSize.width, mSize.height,
-                           gfxImageFormatARGB32);
+                           SurfaceFormat::B8G8R8A8);
     mDecoder->AllocateFrame();
   }
   mDecoder->Init();
@@ -2072,7 +2037,7 @@ nsresult
 RasterImage::ShutdownDecoder(eShutdownIntent aIntent)
 {
   MOZ_ASSERT(NS_IsMainThread());
-  mDecodingMutex.AssertCurrentThreadOwns();
+  mDecodingMonitor.AssertCurrentThreadIn();
 
   // Ensure that our intent is valid
   NS_ABORT_IF_FALSE((aIntent >= 0) && (aIntent < eShutdownIntent_AllCount),
@@ -2083,13 +2048,6 @@ RasterImage::ShutdownDecoder(eShutdownIntent aIntent)
 
   // Figure out what kind of decode we were doing before we get rid of our decoder
   bool wasSizeDecode = mDecoder->IsSizeDecode();
-
-  // Unlock the last frame (if we have any). Our invariant is that, while we
-  // have a decoder open, the last frame is always locked.
-  if (GetNumFrames() > 0) {
-    imgFrame *curframe = mFrameBlender.RawGetFrame(GetNumFrames() - 1);
-    curframe->UnlockImageData();
-  }
 
   // Finalize the decoder
   // null out mDecoder, _then_ check for errors on the close (otherwise the
@@ -2102,6 +2060,13 @@ RasterImage::ShutdownDecoder(eShutdownIntent aIntent)
   decoder->Finish(aIntent);
   mInDecoder = false;
   mFinishing = false;
+
+  // Unlock the last frame (if we have any). Our invariant is that, while we
+  // have a decoder open, the last frame is always locked.
+  if (GetNumFrames() > 0) {
+    nsRefPtr<imgFrame> curframe = mFrameBlender.RawGetFrame(GetNumFrames() - 1);
+    curframe->UnlockImageData();
+  }
 
   // Kill off our decode request, if it's pending.  (If not, this call is
   // harmless.)
@@ -2131,16 +2096,14 @@ RasterImage::ShutdownDecoder(eShutdownIntent aIntent)
     mSourceData.Clear();
   }
 
-  mBytesDecoded = 0;
-
   return NS_OK;
 }
 
 // Writes the data to the decoder, updating the total number of bytes written.
 nsresult
-RasterImage::WriteToDecoder(const char *aBuffer, uint32_t aCount)
+RasterImage::WriteToDecoder(const char *aBuffer, uint32_t aCount, DecodeStrategy aStrategy)
 {
-  mDecodingMutex.AssertCurrentThreadOwns();
+  mDecodingMonitor.AssertCurrentThreadIn();
 
   // We should have a decoder
   NS_ABORT_IF_FALSE(mDecoder, "Trying to write to null decoder!");
@@ -2148,25 +2111,21 @@ RasterImage::WriteToDecoder(const char *aBuffer, uint32_t aCount)
   // Write
   nsRefPtr<Decoder> kungFuDeathGrip = mDecoder;
   mInDecoder = true;
-  mDecoder->Write(aBuffer, aCount);
+  mDecoder->Write(aBuffer, aCount, aStrategy);
   mInDecoder = false;
 
   CONTAINER_ENSURE_SUCCESS(mDecoder->GetDecoderError());
-
-  // Keep track of the total number of bytes written over the lifetime of the
-  // decoder
-  mBytesDecoded += aCount;
 
   return NS_OK;
 }
 
 // This function is called in situations where it's clear that we want the
-// frames in decoded form (Draw, GetFrame, etc).  If we're completely decoded,
+// frames in decoded form (Draw, LookupFrame, etc).  If we're completely decoded,
 // this method resets the discard timer (if we're discardable), since wanting
 // the frames now is a good indicator of wanting them again soon. If we're not
 // decoded, this method kicks off asynchronous decoding to generate the frames.
 nsresult
-RasterImage::WantDecodedFrames()
+RasterImage::WantDecodedFrames(uint32_t aFlags, bool aShouldSyncNotify)
 {
   nsresult rv;
 
@@ -2178,8 +2137,17 @@ RasterImage::WantDecodedFrames()
     CONTAINER_ENSURE_SUCCESS(rv);
   }
 
-  // Request a decode (no-op if we're decoded)
-  return StartDecoding();
+  // Request a decode, which does nothing if we're already decoded.
+  if (aShouldSyncNotify) {
+    // We can sync notify, which means we can also sync decode.
+    if (aFlags & FLAG_SYNC_DECODE) {
+      return SyncDecode();
+    }
+    return StartDecoding();
+  }
+
+  // We can't sync notify, so do an async decode.
+  return RequestDecodeCore(ASYNCHRONOUS);
 }
 
 //******************************************************************************
@@ -2259,13 +2227,42 @@ RasterImage::RequestDecodeCore(RequestDecodeType aDecodeType)
     }
   }
 
-  MutexAutoLock lock(mDecodingMutex);
+  // If the image is waiting for decode work to be notified, go ahead and do that.
+  if (mDecodeRequest &&
+      mDecodeRequest->mRequestStatus == DecodeRequest::REQUEST_WORK_DONE &&
+      aDecodeType == SYNCHRONOUS_NOTIFY) {
+    ReentrantMonitorAutoEnter lock(mDecodingMonitor);
+    nsresult rv = FinishedSomeDecoding();
+    CONTAINER_ENSURE_SUCCESS(rv);
+  }
+
+  // If we're fully decoded, we have nothing to do. We need this check after
+  // DecodeUntilSizeAvailable and FinishedSomeDecoding because they can result
+  // in us finishing an in-progress decode (or kicking off and finishing a
+  // synchronous decode if we're already waiting on a full decode).
+  if (mDecoded) {
+    return NS_OK;
+  }
+
+  // If we've already got a full decoder running, and have already decoded
+  // some bytes, we have nothing to do if we haven't been asked to do some
+  // sync decoding
+  if (mDecoder && !mDecoder->IsSizeDecode() && mDecoder->BytesDecoded() > 0 &&
+      aDecodeType != SYNCHRONOUS_NOTIFY_AND_SOME_DECODE) {
+    return NS_OK;
+  }
+
+  ReentrantMonitorAutoEnter lock(mDecodingMonitor);
 
   // If we don't have any bytes to flush to the decoder, we can't do anything.
-  // mBytesDecoded can be bigger than mSourceData.Length() if we're not storing
-  // the source data.
-  if (mBytesDecoded > mSourceData.Length())
+  // mDecoder->BytesDecoded() can be bigger than mSourceData.Length() if we're
+  // not storing the source data.
+  if (mDecoder && mDecoder->BytesDecoded() > mSourceData.Length()) {
     return NS_OK;
+  }
+
+  // After acquiring the lock we may have finished some more decoding, so
+  // we need to repeat the following three checks after getting the lock.
 
   // If the image is waiting for decode work to be notified, go ahead and do that.
   if (mDecodeRequest &&
@@ -2284,8 +2281,8 @@ RasterImage::RequestDecodeCore(RequestDecodeType aDecodeType)
   }
 
   // If we've already got a full decoder running, and have already
-  // decoded some bytes, we have nothing to do
-  if (mDecoder && !mDecoder->IsSizeDecode() && mBytesDecoded) {
+  // decoded some bytes, we have nothing to do.
+  if (mDecoder && !mDecoder->IsSizeDecode() && mDecoder->BytesDecoded() > 0) {
     return NS_OK;
   }
 
@@ -2303,21 +2300,23 @@ RasterImage::RequestDecodeCore(RequestDecodeType aDecodeType)
 
     rv = FinishedSomeDecoding();
     CONTAINER_ENSURE_SUCCESS(rv);
-
-    MOZ_ASSERT(mDecoder);
   }
 
+  MOZ_ASSERT(mDecoder);
+
   // If we've read all the data we have, we're done
-  if (mHasSourceData && mBytesDecoded == mSourceData.Length())
+  if (mHasSourceData && mDecoder->BytesDecoded() == mSourceData.Length()) {
     return NS_OK;
+  }
 
   // If we can do decoding now, do so.  Small images will decode completely,
   // large images will decode a bit and post themselves to the event loop
   // to finish decoding.
   if (!mDecoded && !mInDecoder && mHasSourceData && aDecodeType == SYNCHRONOUS_NOTIFY_AND_SOME_DECODE) {
-    PROFILER_LABEL_PRINTF("RasterImage", "DecodeABitOf", "%s", GetURIString().get());
-    AutoSetSyncDecode syncDecode(mDecoder);
-    DecodePool::Singleton()->DecodeABitOf(this);
+    PROFILER_LABEL_PRINTF("RasterImage", "DecodeABitOf",
+      js::ProfileEntry::Category::GRAPHICS, "%s", GetURIString().get());
+
+    DecodePool::Singleton()->DecodeABitOf(this, DECODE_SYNC);
     return NS_OK;
   }
 
@@ -2335,7 +2334,8 @@ RasterImage::RequestDecodeCore(RequestDecodeType aDecodeType)
 nsresult
 RasterImage::SyncDecode()
 {
-  PROFILER_LABEL_PRINTF("RasterImage", "SyncDecode", "%s", GetURIString().get());;
+  PROFILER_LABEL_PRINTF("RasterImage", "SyncDecode",
+    js::ProfileEntry::Category::GRAPHICS, "%s", GetURIString().get());
 
   // If we have a size decoder open, make sure we get the size
   if (mDecoder && mDecoder->IsSizeDecode()) {
@@ -2350,7 +2350,7 @@ RasterImage::SyncDecode()
     }
   }
 
-  MutexAutoLock imgLock(mDecodingMutex);
+  ReentrantMonitorAutoEnter lock(mDecodingMonitor);
 
   // We really have no good way of forcing a synchronous decode if we're being
   // called in a re-entrant manner (ie, from an event listener fired by a
@@ -2374,16 +2374,26 @@ RasterImage::SyncDecode()
     return NS_OK;
 
   // If we don't have any bytes to flush to the decoder, we can't do anything.
-  // mBytesDecoded can be bigger than mSourceData.Length() if we're not storing
-  // the source data.
-  if (mBytesDecoded > mSourceData.Length())
+  // mDecoder->BytesDecoded() can be bigger than mSourceData.Length() if we're
+  // not storing the source data.
+  if (mDecoder && mDecoder->BytesDecoded() > mSourceData.Length()) {
     return NS_OK;
+  }
 
   // If we have a decoder open with different flags than what we need, shut it
   // down
   if (mDecoder && mDecoder->GetDecodeFlags() != mFrameDecodeFlags) {
     nsresult rv = FinishedSomeDecoding(eShutdownIntent_NotNeeded);
     CONTAINER_ENSURE_SUCCESS(rv);
+
+    if (mDecoded) {
+      // If we've finished decoding we need to discard so we can re-decode
+      // with the new flags. If we can't discard then there isn't
+      // anything we can do.
+      if (!CanForciblyDiscardAndRedecode())
+        return NS_ERROR_NOT_AVAILABLE;
+      ForceDiscard();
+    }
   }
 
   // If we're currently waiting on a new frame for this image, we have to create
@@ -2399,13 +2409,12 @@ RasterImage::SyncDecode()
     CONTAINER_ENSURE_SUCCESS(rv);
   }
 
-  {
-    AutoSetSyncDecode syncDecode(mDecoder);
+  MOZ_ASSERT(mDecoder);
 
-    // Write everything we have
-    rv = DecodeSomeData(mSourceData.Length() - mBytesDecoded);
-    CONTAINER_ENSURE_SUCCESS(rv);
-  }
+  // Write everything we have
+  rv = DecodeSomeData(mSourceData.Length() - mDecoder->BytesDecoded(),
+                      DECODE_SYNC);
+  CONTAINER_ENSURE_SUCCESS(rv);
 
   // When we're doing a sync decode, we want to get as much information from the
   // image as possible. We've send the decoder all of our data, so now's a good
@@ -2429,150 +2438,159 @@ RasterImage::SyncDecode()
 }
 
 bool
-RasterImage::CanQualityScale(const gfxSize& scale)
+RasterImage::CanScale(GraphicsFilter aFilter,
+                      const nsIntSize& aSize,
+                      uint32_t aFlags)
 {
-  // If target size is 1:1 with original, don't scale.
-  if (scale.width == 1.0 && scale.height == 1.0)
+#ifndef MOZ_ENABLE_SKIA
+  // The high-quality scaler requires Skia.
+  return false;
+#else
+  // Check basic requirements: HQ downscaling is enabled, we're decoded, the
+  // flags allow us to do it, and a 'good' filter is being used. The flags may
+  // ask us not to scale because the caller isn't drawing to the window. If
+  // we're drawing to something else (e.g. a canvas) we usually have no way of
+  // updating what we've drawn, so HQ scaling is useless.
+  if (!gfxPrefs::ImageHQDownscalingEnabled() || !mDecoded ||
+      !(aFlags & imgIContainer::FLAG_HIGH_QUALITY_SCALING) ||
+      aFilter != GraphicsFilter::FILTER_GOOD) {
     return false;
-
-  // To save memory don't quality upscale images bigger than the limit.
-  if (scale.width > 1.0 || scale.height > 1.0) {
-    uint32_t scaled_size = static_cast<uint32_t>(mSize.width * mSize.height * scale.width * scale.height);
-    if (scaled_size > gHQUpscalingMaxSize)
-      return false;
   }
 
-  return true;
-}
-
-bool
-RasterImage::CanScale(GraphicsFilter aFilter,
-                      gfxSize aScale, uint32_t aFlags)
-{
-// The high-quality scaler requires Skia.
-#ifdef MOZ_ENABLE_SKIA
   // We don't use the scaler for animated or multipart images to avoid doing a
   // bunch of work on an image that just gets thrown away.
-  // We only use the scaler when drawing to the window because, if we're not
-  // drawing to a window (eg a canvas), updates to that image will be ignored.
-  if (gHQDownscaling && aFilter == GraphicsFilter::FILTER_GOOD &&
-      !mAnim && mDecoded && !mMultipart && CanQualityScale(aScale) &&
-      (aFlags & imgIContainer::FLAG_HIGH_QUALITY_SCALING)) {
-    gfxFloat factor = gHQDownscalingMinFactor / 1000.0;
-
-    return (aScale.width < factor || aScale.height < factor);
+  if (mAnim || mMultipart) {
+    return false;
   }
+
+  // If target size is 1:1 with original, don't scale.
+  if (aSize == mSize) {
+    return false;
+  }
+
+  // To save memory, don't quality upscale images bigger than the limit.
+  if (aSize.width > mSize.width || aSize.height > mSize.height) {
+    uint32_t scaledSize = static_cast<uint32_t>(aSize.width * aSize.height);
+    if (scaledSize > gfxPrefs::ImageHQUpscalingMaxSize()) {
+      return false;
+    }
+  }
+
+  // There's no point in scaling if we can't store the result.
+  if (!SurfaceCache::CanHold(aSize.ToIntSize())) {
+    return false;
+  }
+
+  // XXX(seth): It's not clear what this check buys us over
+  // gfxPrefs::ImageHQUpscalingMaxSize().
+  // The default value of this pref is 1000, which means that we never upscale.
+  // If that's all it's getting us, I'd rather we just forbid that explicitly.
+  gfx::Size scale(double(aSize.width) / mSize.width,
+                  double(aSize.height) / mSize.height);
+  gfxFloat minFactor = gfxPrefs::ImageHQDownscalingMinFactor() / 1000.0;
+  return (scale.width < minFactor || scale.height < minFactor);
 #endif
-
-  return false;
 }
 
 void
-RasterImage::ScalingStart(ScaleRequest* request)
+RasterImage::NotifyNewScaledFrame()
 {
-  MOZ_ASSERT(request);
-  mScaleResult.scale = request->scale;
-  mScaleResult.status = SCALE_PENDING;
-  mScaleRequest = request;
+  if (mStatusTracker) {
+    // Send an invalidation so observers will repaint and can take advantage of
+    // the new scaled frame if possible.
+    // XXX(seth): Why does FrameChanged take a pointer and not a reference?
+    nsIntRect invalidationRect(0, 0, mSize.width, mSize.height);
+    mStatusTracker->FrameChanged(&invalidationRect);
+  }
 }
 
 void
-RasterImage::ScalingDone(ScaleRequest* request, ScaleStatus status)
+RasterImage::RequestScale(imgFrame* aFrame,
+                          uint32_t aFlags,
+                          const nsIntSize& aSize)
 {
-  MOZ_ASSERT(status == SCALE_DONE || status == SCALE_INVALID);
-  MOZ_ASSERT(request);
+  // We don't scale frames which aren't fully decoded.
+  if (!aFrame->ImageComplete()) {
+    return;
+  }
 
-  if (status == SCALE_DONE) {
-    MOZ_ASSERT(request->done);
+  // We can't scale frames that need padding or are single pixel.
+  if (aFrame->NeedsPadding() || aFrame->IsSinglePixel()) {
+    return;
+  }
 
-    imgFrame *scaledFrame = request->dstFrame.forget();
-    scaledFrame->ImageUpdated(scaledFrame->GetRect());
-    scaledFrame->ApplyDirtToSurfaces();
+  // We also can't scale if we can't lock the image data for this frame.
+  RawAccessFrameRef frameRef = aFrame->RawAccessRef();
+  if (!frameRef) {
+    return;
+  }
 
-    if (mStatusTracker) {
-      mStatusTracker->FrameChanged(&request->srcRect);
+  nsRefPtr<ScaleRunner> runner =
+    new ScaleRunner(this, DecodeFlags(aFlags), aSize, Move(frameRef));
+  if (runner->Init()) {
+    if (!sScaleWorkerThread) {
+      NS_NewNamedThread("Image Scaler", getter_AddRefs(sScaleWorkerThread));
+      ClearOnShutdown(&sScaleWorkerThread);
     }
 
-    mScaleResult.status = SCALE_DONE;
-    mScaleResult.frame = scaledFrame;
-    mScaleResult.scale = request->scale;
-  } else {
-    mScaleResult.status = SCALE_INVALID;
-    mScaleResult.frame = nullptr;
-  }
-
-  // If we were waiting for this scale to come through, forget the scale
-  // request. Otherwise, we still have a scale outstanding that it's possible
-  // for us to (want to) stop.
-  if (mScaleRequest == request) {
-    mScaleRequest = nullptr;
+    sScaleWorkerThread->Dispatch(runner, NS_DISPATCH_NORMAL);
   }
 }
 
 void
-RasterImage::DrawWithPreDownscaleIfNeeded(imgFrame *aFrame,
-                                          gfxContext *aContext,
+RasterImage::DrawWithPreDownscaleIfNeeded(DrawableFrameRef&& aFrameRef,
+                                          gfxContext* aContext,
+                                          const nsIntSize& aSize,
+                                          const ImageRegion& aRegion,
                                           GraphicsFilter aFilter,
-                                          const gfxMatrix &aUserSpaceToImageSpace,
-                                          const gfxRect &aFill,
-                                          const nsIntRect &aSubimage,
                                           uint32_t aFlags)
 {
-  imgFrame *frame = aFrame;
-  nsIntRect framerect = frame->GetRect();
-  gfxMatrix userSpaceToImageSpace = aUserSpaceToImageSpace;
-  gfxMatrix imageSpaceToUserSpace = aUserSpaceToImageSpace;
-  imageSpaceToUserSpace.Invert();
-  gfxSize scale = imageSpaceToUserSpace.ScaleFactors(true);
-  nsIntRect subimage = aSubimage;
+  DrawableFrameRef frameRef;
 
-  if (CanScale(aFilter, scale, aFlags)) {
-    // If scale factor is still the same that we scaled for and
-    // ScaleWorker isn't still working, then we can use pre-downscaled frame.
-    // If scale factor has changed, order new request.
-    // FIXME: Current implementation doesn't support pre-downscale
-    // mechanism for multiple sizes from same src, since we cache
-    // pre-downscaled frame only for the latest requested scale.
-    // The solution is to cache more than one scaled image frame
-    // for each RasterImage.
-    if (mScaleResult.status == SCALE_DONE && mScaleResult.scale == scale) {
-      frame = mScaleResult.frame;
-      userSpaceToImageSpace.Multiply(gfxMatrix().Scale(scale.width, scale.height));
-
-      // Since we're switching to a scaled image, we need to transform the
-      // area of the subimage to draw accordingly, since imgFrame::Draw()
-      // doesn't know about scaled frames.
-      subimage.ScaleRoundOut(scale.width, scale.height);
+  if (CanScale(aFilter, aSize, aFlags)) {
+    frameRef =
+      SurfaceCache::Lookup(ImageKey(this),
+                           RasterSurfaceKey(aSize.ToIntSize(),
+                                            DecodeFlags(aFlags)));
+    if (!frameRef) {
+      // We either didn't have a matching scaled frame or the OS threw it away.
+      // Request a new one so we'll be ready next time. For now, we'll fall back
+      // to aFrameRef below.
+      RequestScale(aFrameRef.get(), aFlags, aSize);
     }
-
-    // If we're not waiting for exactly this result, and there's only one
-    // instance of this image on this page, ask for a scale.
-    else if (!(mScaleResult.status == SCALE_PENDING && mScaleResult.scale == scale) &&
-             mLockCount == 1) {
-      // If we have an oustanding request, signal it to stop (if it can).
-      if (mScaleRequest) {
-        mScaleRequest->stopped = true;
-      }
-
-      nsRefPtr<ScaleRunner> runner = new ScaleRunner(this, scale, frame);
-      if (runner->IsOK()) {
-        if (!sScaleWorkerThread) {
-          NS_NewNamedThread("Image Scaler", getter_AddRefs(sScaleWorkerThread));
-          ClearOnShutdown(&sScaleWorkerThread);
-        }
-
-        sScaleWorkerThread->Dispatch(runner, NS_DISPATCH_NORMAL);
-      }
+    if (frameRef && !frameRef->ImageComplete()) {
+      frameRef.reset();  // We're still scaling, so we can't use this yet.
     }
   }
 
-  nsIntMargin padding(framerect.y,
-                      mSize.width - framerect.XMost(),
-                      mSize.height - framerect.YMost(),
-                      framerect.x);
+  gfxContextMatrixAutoSaveRestore saveMatrix(aContext);
+  ImageRegion region(aRegion);
+  if (!frameRef) {
+    frameRef = Move(aFrameRef);
+  }
 
-  frame->Draw(aContext, aFilter, userSpaceToImageSpace, aFill, padding, subimage,
-              aFlags);
+  // By now we may have a frame with the requested size. If not, we need to
+  // adjust the drawing parameters accordingly.
+  nsIntRect finalFrameRect = frameRef->GetRect();
+  if (finalFrameRect.Size() != aSize) {
+    gfx::Size scale(double(aSize.width) / mSize.width,
+                    double(aSize.height) / mSize.height);
+    aContext->Multiply(gfxMatrix::Scaling(scale.width, scale.height));
+    region.Scale(1.0 / scale.width, 1.0 / scale.height);
+  }
+
+  // We can only use padding if we're using the original |aFrameRef|, unscaled.
+  // (If so, we moved it into |frameRef|, so |aFrameRef| is empty.) Because of
+  // this restriction, we don't scale frames that require padding.
+  nsIntMargin padding(0, 0, 0, 0);
+  if (!aFrameRef) {
+    padding = nsIntMargin(finalFrameRect.y,
+                          mSize.width - finalFrameRect.XMost(),
+                          mSize.height - finalFrameRect.YMost(),
+                          finalFrameRect.x);
+  }
+
+  frameRef->Draw(aContext, region, padding, aFilter, aFlags);
 }
 
 //******************************************************************************
@@ -2586,14 +2604,12 @@ RasterImage::DrawWithPreDownscaleIfNeeded(imgFrame *aFrame,
  *                      in uint32_t aWhichFrame,
  *                      in uint32_t aFlags); */
 NS_IMETHODIMP
-RasterImage::Draw(gfxContext *aContext,
-                  GraphicsFilter aFilter,
-                  const gfxMatrix &aUserSpaceToImageSpace,
-                  const gfxRect &aFill,
-                  const nsIntRect &aSubimage,
-                  const nsIntSize& /*aViewportSize - ignored*/,
-                  const SVGImageContext* /*aSVGContext - ignored*/,
+RasterImage::Draw(gfxContext* aContext,
+                  const nsIntSize& aSize,
+                  const ImageRegion& aRegion,
                   uint32_t aWhichFrame,
+                  GraphicsFilter aFilter,
+                  const Maybe<SVGImageContext>& /*aSVGContext - ignored*/,
                   uint32_t aFlags)
 {
   if (aWhichFrame > FRAME_MAX_VALUE)
@@ -2614,9 +2630,17 @@ RasterImage::Draw(gfxContext *aContext,
 
   NS_ENSURE_ARG_POINTER(aContext);
 
-  // We can only draw with the default decode flags
-  if (mFrameDecodeFlags != DECODE_FLAGS_DEFAULT) {
-    if (!CanForciblyDiscard())
+  // We can only draw without discarding and redecoding in these cases:
+  //  * We have the default decode flags.
+  //  * We have exactly FLAG_DECODE_NO_PREMULTIPLY_ALPHA and the current frame
+  //    is opaque.
+  bool haveDefaultFlags = (mFrameDecodeFlags == DECODE_FLAGS_DEFAULT);
+  bool haveSafeAlphaFlags =
+    (mFrameDecodeFlags == FLAG_DECODE_NO_PREMULTIPLY_ALPHA) &&
+    FrameIsOpaque(FRAME_CURRENT);
+
+  if (!(haveDefaultFlags || haveSafeAlphaFlags)) {
+    if (!CanForciblyDiscardAndRedecode())
       return NS_ERROR_NOT_AVAILABLE;
     ForceDiscard();
 
@@ -2649,14 +2673,13 @@ RasterImage::Draw(gfxContext *aContext,
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
-  uint32_t frameIndex = aWhichFrame == FRAME_FIRST ? 0
-                                                   : GetCurrentImgFrameIndex();
-  imgFrame* frame = GetDrawableImgFrame(frameIndex);
-  if (!frame) {
+  DrawableFrameRef ref = LookupFrame(GetRequestedFrameIndex(aWhichFrame),
+                                     aFlags);
+  if (!ref) {
     return NS_OK; // Getting the frame (above) touches the image and kicks off decoding
   }
 
-  DrawWithPreDownscaleIfNeeded(frame, aContext, aFilter, aUserSpaceToImageSpace, aFill, aSubimage, aFlags);
+  DrawWithPreDownscaleIfNeeded(Move(ref), aContext, aSize, aRegion, aFilter, aFlags);
 
   if (mDecoded && !mDrawStartTime.IsNull()) {
       TimeDuration drawLatency = TimeStamp::Now() - mDrawStartTime;
@@ -2718,7 +2741,7 @@ RasterImage::UnlockImage()
     PR_LOG(GetCompressedImageAccountingLog(), PR_LOG_DEBUG,
            ("RasterImage[0x%p] canceling decode because image "
             "is now unlocked.", this));
-    MutexAutoLock lock(mDecodingMutex);
+    ReentrantMonitorAutoEnter lock(mDecodingMonitor);
     FinishedSomeDecoding(eShutdownIntent_NotNeeded);
     ForceDiscard();
     return NS_OK;
@@ -2739,7 +2762,7 @@ RasterImage::UnlockImage()
 NS_IMETHODIMP
 RasterImage::RequestDiscard()
 {
-  if (CanDiscard()) {
+  if (CanDiscard() && CanForciblyDiscardAndRedecode()) {
     ForceDiscard();
   }
 
@@ -2748,37 +2771,37 @@ RasterImage::RequestDiscard()
 
 // Flushes up to aMaxBytes to the decoder.
 nsresult
-RasterImage::DecodeSomeData(uint32_t aMaxBytes)
+RasterImage::DecodeSomeData(size_t aMaxBytes, DecodeStrategy aStrategy)
 {
-  // We should have a decoder if we get here
-  NS_ABORT_IF_FALSE(mDecoder, "trying to decode without decoder!");
+  MOZ_ASSERT(mDecoder, "Should have a decoder");
 
-  mDecodingMutex.AssertCurrentThreadOwns();
+  mDecodingMonitor.AssertCurrentThreadIn();
 
   // First, if we've just been called because we allocated a frame on the main
   // thread, let the decoder deal with the data it set aside at that time by
   // passing it a null buffer.
   if (mDecodeRequest->mAllocatedNewFrame) {
     mDecodeRequest->mAllocatedNewFrame = false;
-    nsresult rv = WriteToDecoder(nullptr, 0);
+    nsresult rv = WriteToDecoder(nullptr, 0, aStrategy);
     if (NS_FAILED(rv) || mDecoder->NeedsNewFrame()) {
       return rv;
     }
   }
 
-  // If we have nothing else to decode, return
-  if (mBytesDecoded == mSourceData.Length())
+  // If we have nothing else to decode, return.
+  if (mDecoder->BytesDecoded() == mSourceData.Length()) {
     return NS_OK;
+  }
 
-  MOZ_ASSERT(mBytesDecoded < mSourceData.Length());
+  MOZ_ASSERT(mDecoder->BytesDecoded() < mSourceData.Length());
 
   // write the proper amount of data
-  uint32_t bytesToDecode = std::min(aMaxBytes,
-                                    mSourceData.Length() - mBytesDecoded);
-  nsresult rv = WriteToDecoder(mSourceData.Elements() + mBytesDecoded,
-                               bytesToDecode);
+  size_t bytesToDecode = min(aMaxBytes,
+                             mSourceData.Length() - mDecoder->BytesDecoded());
+  return WriteToDecoder(mSourceData.Elements() + mDecoder->BytesDecoded(),
+                        bytesToDecode,
+                        aStrategy);
 
-  return rv;
 }
 
 // There are various indicators that tell us we're finished with the decode
@@ -2789,8 +2812,8 @@ bool
 RasterImage::IsDecodeFinished()
 {
   // Precondition
-  mDecodingMutex.AssertCurrentThreadOwns();
-  NS_ABORT_IF_FALSE(mDecoder, "Can't call IsDecodeFinished() without decoder!");
+  mDecodingMonitor.AssertCurrentThreadIn();
+  MOZ_ASSERT(mDecoder, "Should have a decoder");
 
   // The decode is complete if we got what we wanted.
   if (mDecoder->IsSizeDecode()) {
@@ -2815,7 +2838,7 @@ RasterImage::IsDecodeFinished()
   // (NB - This can be the case even for non-erroneous images because
   // Decoder::GetDecodeDone() might not return true until after we call
   // Decoder::Finish() in ShutdownDecoder())
-  if (mHasSourceData && (mBytesDecoded == mSourceData.Length())) {
+  if (mHasSourceData && (mDecoder->BytesDecoded() == mSourceData.Length())) {
     return true;
   }
 
@@ -2837,9 +2860,12 @@ RasterImage::DoError()
     return;
   }
 
+  // Calling FinishedSomeDecoding and CurrentStatusTracker requires us to be in
+  // the decoding monitor.
+  ReentrantMonitorAutoEnter lock(mDecodingMonitor);
+
   // If we're mid-decode, shut down the decoder.
   if (mDecoder) {
-    MutexAutoLock lock(mDecodingMutex);
     FinishedSomeDecoding(eShutdownIntent_Error);
   }
 
@@ -2937,7 +2963,7 @@ RasterImage::RequestDecodeIfNeeded(nsresult aStatus,
 
   // If we were a size decode and a full decode was requested, now's the time.
   if (NS_SUCCEEDED(aStatus) &&
-      aIntent != eShutdownIntent_Error &&
+      aIntent == eShutdownIntent_Done &&
       aDone &&
       aWasSize &&
       mWantFullDecode) {
@@ -2960,7 +2986,7 @@ RasterImage::FinishedSomeDecoding(eShutdownIntent aIntent /* = eShutdownIntent_D
 {
   MOZ_ASSERT(NS_IsMainThread());
 
-  mDecodingMutex.AssertCurrentThreadOwns();
+  mDecodingMonitor.AssertCurrentThreadIn();
 
   nsRefPtr<DecodeRequest> request;
   if (aRequest) {
@@ -2978,8 +3004,6 @@ RasterImage::FinishedSomeDecoding(eShutdownIntent aIntent /* = eShutdownIntent_D
   nsresult rv = NS_OK;
 
   if (image->mDecoder) {
-    image->mDecoder->MarkFrameDirty();
-
     if (request && request->mChunkCount && !image->mDecoder->IsSizeDecode()) {
       Telemetry::Accumulate(Telemetry::IMAGE_DECODE_CHUNKS, request->mChunkCount);
     }
@@ -3007,7 +3031,7 @@ RasterImage::FinishedSomeDecoding(eShutdownIntent aIntent /* = eShutdownIntent_D
         // SpeedHistogram return HistogramCount.
         Telemetry::ID id = decoder->SpeedHistogram();
         if (id < Telemetry::HistogramCount) {
-          int32_t KBps = int32_t(request->mImage->mBytesDecoded /
+          int32_t KBps = int32_t(decoder->BytesDecoded() /
                                  (1024 * request->mDecodeTime.ToSeconds()));
           Telemetry::Accumulate(id, KBps);
         }
@@ -3026,10 +3050,6 @@ RasterImage::FinishedSomeDecoding(eShutdownIntent aIntent /* = eShutdownIntent_D
     request ? image->mStatusTracker->Difference(request->mStatusTracker)
             : image->mStatusTracker->DecodeStateAsDifference();
   image->mStatusTracker->ApplyDifference(diff);
-
-  // Notifications can't go out with the decoding lock held, nor can we call
-  // RequestDecodeIfNeeded, so unlock for the rest of the function.
-  MutexAutoUnlock unlock(mDecodingMutex);
 
   if (mNotifying) {
     // Accumulate the status changes. We don't permit recursive notifications
@@ -3058,8 +3078,15 @@ RasterImage::FinishedSomeDecoding(eShutdownIntent aIntent /* = eShutdownIntent_D
   return RequestDecodeIfNeeded(rv, aIntent, done, wasSize);
 }
 
-NS_IMPL_ISUPPORTS1(RasterImage::DecodePool,
-                              nsIObserver)
+already_AddRefed<imgIContainer>
+RasterImage::Unwrap()
+{
+  nsCOMPtr<imgIContainer> self(this);
+  return self.forget();
+}
+
+NS_IMPL_ISUPPORTS(RasterImage::DecodePool,
+                  nsIObserver)
 
 /* static */ RasterImage::DecodePool*
 RasterImage::DecodePool::Singleton()
@@ -3082,7 +3109,7 @@ RasterImage::DecodePool::GetEventTarget()
 
 #ifdef MOZ_NUWA_PROCESS
 
-class RIDThreadPoolListener : public nsIThreadPoolListener
+class RIDThreadPoolListener MOZ_FINAL : public nsIThreadPoolListener
 {
 public:
     NS_DECL_THREADSAFE_ISUPPORTS
@@ -3092,7 +3119,7 @@ public:
     ~RIDThreadPoolListener() {}
 };
 
-NS_IMPL_ISUPPORTS1(RIDThreadPoolListener, nsIThreadPoolListener)
+NS_IMPL_ISUPPORTS(RIDThreadPoolListener, nsIThreadPoolListener)
 
 NS_IMETHODIMP
 RIDThreadPoolListener::OnThreadCreated()
@@ -3114,15 +3141,16 @@ RIDThreadPoolListener::OnThreadShuttingDown()
 RasterImage::DecodePool::DecodePool()
  : mThreadPoolMutex("Thread Pool")
 {
-  if (gMultithreadedDecoding) {
+  if (gfxPrefs::ImageMTDecodingEnabled()) {
     mThreadPool = do_CreateInstance(NS_THREADPOOL_CONTRACTID);
     if (mThreadPool) {
       mThreadPool->SetName(NS_LITERAL_CSTRING("ImageDecoder"));
+      int32_t prefLimit = gfxPrefs::ImageMTDecodingLimit();
       uint32_t limit;
-      if (gDecodingThreadLimit <= 0) {
+      if (prefLimit <= 0) {
         limit = std::max(PR_GetNumberOfProcessors(), 2) - 1;
       } else {
-        limit = static_cast<uint32_t>(gDecodingThreadLimit);
+        limit = static_cast<uint32_t>(prefLimit);
       }
 
       mThreadPool->SetThreadLimit(limit);
@@ -3134,7 +3162,7 @@ RasterImage::DecodePool::DecodePool()
       }
 #endif
 
-      nsCOMPtr<nsIObserverService> obsSvc = mozilla::services::GetObserverService();
+      nsCOMPtr<nsIObserverService> obsSvc = services::GetObserverService();
       if (obsSvc) {
         obsSvc->AddObserver(this, "xpcom-shutdown-threads", false);
       }
@@ -3149,7 +3177,7 @@ RasterImage::DecodePool::~DecodePool()
 
 NS_IMETHODIMP
 RasterImage::DecodePool::Observe(nsISupports *subject, const char *topic,
-                                 const PRUnichar *data)
+                                 const char16_t *data)
 {
   NS_ASSERTION(strcmp(topic, "xpcom-shutdown-threads") == 0, "oops");
 
@@ -3172,14 +3200,15 @@ void
 RasterImage::DecodePool::RequestDecode(RasterImage* aImg)
 {
   MOZ_ASSERT(aImg->mDecoder);
-  aImg->mDecodingMutex.AssertCurrentThreadOwns();
+  aImg->mDecodingMonitor.AssertCurrentThreadIn();
 
   // If we're currently waiting on a new frame for this image, we can't do any
   // decoding.
   if (!aImg->mDecoder->NeedsNewFrame()) {
     // No matter whether this is currently being decoded, we need to update the
     // number of bytes we want it to decode.
-    aImg->mDecodeRequest->mBytesToDecode = aImg->mSourceData.Length() - aImg->mBytesDecoded;
+    aImg->mDecodeRequest->mBytesToDecode =
+      aImg->mSourceData.Length() - aImg->mDecoder->BytesDecoded();
 
     if (aImg->mDecodeRequest->mRequestStatus == DecodeRequest::REQUEST_PENDING ||
         aImg->mDecodeRequest->mRequestStatus == DecodeRequest::REQUEST_ACTIVE) {
@@ -3192,7 +3221,7 @@ RasterImage::DecodePool::RequestDecode(RasterImage* aImg)
     nsRefPtr<DecodeJob> job = new DecodeJob(aImg->mDecodeRequest, aImg);
 
     MutexAutoLock threadPoolLock(mThreadPoolMutex);
-    if (!gMultithreadedDecoding || !mThreadPool) {
+    if (!gfxPrefs::ImageMTDecodingEnabled() || !mThreadPool) {
       NS_DispatchToMainThread(job);
     } else {
       mThreadPool->Dispatch(job, nsIEventTarget::DISPATCH_NORMAL);
@@ -3201,10 +3230,10 @@ RasterImage::DecodePool::RequestDecode(RasterImage* aImg)
 }
 
 void
-RasterImage::DecodePool::DecodeABitOf(RasterImage* aImg)
+RasterImage::DecodePool::DecodeABitOf(RasterImage* aImg, DecodeStrategy aStrategy)
 {
   MOZ_ASSERT(NS_IsMainThread());
-  aImg->mDecodingMutex.AssertCurrentThreadOwns();
+  aImg->mDecodingMonitor.AssertCurrentThreadIn();
 
   if (aImg->mDecodeRequest) {
     // If the image is waiting for decode work to be notified, go ahead and do that.
@@ -3213,7 +3242,7 @@ RasterImage::DecodePool::DecodeABitOf(RasterImage* aImg)
     }
   }
 
-  DecodeSomeOfImage(aImg);
+  DecodeSomeOfImage(aImg, aStrategy);
 
   aImg->FinishedSomeDecoding();
 
@@ -3227,7 +3256,7 @@ RasterImage::DecodePool::DecodeABitOf(RasterImage* aImg)
     if (aImg->mDecoder &&
         !aImg->mError &&
         !aImg->IsDecodeFinished() &&
-        aImg->mSourceData.Length() > aImg->mBytesDecoded) {
+        aImg->mSourceData.Length() > aImg->mDecoder->BytesDecoded()) {
       RequestDecode(aImg);
     }
   }
@@ -3236,7 +3265,7 @@ RasterImage::DecodePool::DecodeABitOf(RasterImage* aImg)
 /* static */ void
 RasterImage::DecodePool::StopDecoding(RasterImage* aImg)
 {
-  aImg->mDecodingMutex.AssertCurrentThreadOwns();
+  aImg->mDecodingMonitor.AssertCurrentThreadIn();
 
   // If we haven't got a decode request, we're not currently decoding. (Having
   // a decode request doesn't imply we *are* decoding, though.)
@@ -3248,7 +3277,7 @@ RasterImage::DecodePool::StopDecoding(RasterImage* aImg)
 NS_IMETHODIMP
 RasterImage::DecodePool::DecodeJob::Run()
 {
-  MutexAutoLock imglock(mImage->mDecodingMutex);
+  ReentrantMonitorAutoEnter lock(mImage->mDecodingMonitor);
 
   // If we were interrupted, we shouldn't do any work.
   if (mRequest->mRequestStatus == DecodeRequest::REQUEST_STOPPED) {
@@ -3271,7 +3300,7 @@ RasterImage::DecodePool::DecodeJob::Run()
 
   mRequest->mRequestStatus = DecodeRequest::REQUEST_ACTIVE;
 
-  uint32_t oldByteCount = mImage->mBytesDecoded;
+  size_t oldByteCount = mImage->mDecoder->BytesDecoded();
 
   DecodeType type = DECODE_TYPE_UNTIL_DONE_BYTES;
 
@@ -3281,9 +3310,9 @@ RasterImage::DecodePool::DecodeJob::Run()
     type = DECODE_TYPE_UNTIL_TIME;
   }
 
-  DecodePool::Singleton()->DecodeSomeOfImage(mImage, type, mRequest->mBytesToDecode);
+  DecodePool::Singleton()->DecodeSomeOfImage(mImage, DECODE_ASYNC, type, mRequest->mBytesToDecode);
 
-  uint32_t bytesDecoded = mImage->mBytesDecoded - oldByteCount;
+  size_t bytesDecoded = mImage->mDecoder->BytesDecoded() - oldByteCount;
 
   mRequest->mRequestStatus = DecodeRequest::REQUEST_WORK_DONE;
 
@@ -3309,12 +3338,27 @@ RasterImage::DecodePool::DecodeJob::Run()
   return NS_OK;
 }
 
+RasterImage::DecodePool::DecodeJob::~DecodeJob()
+{
+  if (gfxPrefs::ImageMTDecodingEnabled()) {
+    // Dispatch mImage to main thread to prevent mImage from being destructed by decode thread.
+    nsCOMPtr<nsIThread> mainThread = do_GetMainThread();
+    NS_WARN_IF_FALSE(mainThread, "Couldn't get the main thread!");
+    if (mainThread) {
+      // Handle ambiguous nsISupports inheritance
+      RasterImage* rawImg = nullptr;
+      mImage.swap(rawImg);
+      DebugOnly<nsresult> rv = NS_ProxyRelease(mainThread, NS_ISUPPORTS_CAST(ImageResource*, rawImg));
+      MOZ_ASSERT(NS_SUCCEEDED(rv), "Failed to proxy release to main thread");
+    }
+  }
+}
+
 nsresult
 RasterImage::DecodePool::DecodeUntilSizeAvailable(RasterImage* aImg)
 {
   MOZ_ASSERT(NS_IsMainThread());
-
-  MutexAutoLock imgLock(aImg->mDecodingMutex);
+  ReentrantMonitorAutoEnter lock(aImg->mDecodingMonitor);
 
   if (aImg->mDecodeRequest) {
     // If the image is waiting for decode work to be notified, go ahead and do that.
@@ -3327,7 +3371,9 @@ RasterImage::DecodePool::DecodeUntilSizeAvailable(RasterImage* aImg)
     }
   }
 
-  nsresult rv = DecodeSomeOfImage(aImg, DECODE_TYPE_UNTIL_SIZE);
+  // We use DECODE_ASYNC here because we just want to get the size information
+  // here and defer the rest of the work.
+  nsresult rv = DecodeSomeOfImage(aImg, DECODE_ASYNC, DECODE_TYPE_UNTIL_SIZE);
   if (NS_FAILED(rv)) {
     return rv;
   }
@@ -3345,16 +3391,22 @@ RasterImage::DecodePool::DecodeUntilSizeAvailable(RasterImage* aImg)
 
 nsresult
 RasterImage::DecodePool::DecodeSomeOfImage(RasterImage* aImg,
+                                           DecodeStrategy aStrategy,
                                            DecodeType aDecodeType /* = DECODE_TYPE_UNTIL_TIME */,
                                            uint32_t bytesToDecode /* = 0 */)
 {
   NS_ABORT_IF_FALSE(aImg->mInitialized,
                     "Worker active for uninitialized container!");
-  aImg->mDecodingMutex.AssertCurrentThreadOwns();
+  aImg->mDecodingMonitor.AssertCurrentThreadIn();
 
   // If an error is flagged, it probably happened while we were waiting
   // in the event queue.
   if (aImg->mError)
+    return NS_OK;
+
+  // If there is an error worker pending (say because the main thread has enqueued
+  // another decode request for us before processing the error worker) then bail out.
+  if (aImg->mPendingError)
     return NS_OK;
 
   // If mDecoded or we don't have a decoder, we must have finished already (for
@@ -3364,7 +3416,7 @@ RasterImage::DecodePool::DecodeSomeOfImage(RasterImage* aImg,
 
   // If we're doing synchronous decodes, and we're waiting on a new frame for
   // this image, get it now.
-  if (aImg->mDecoder->IsSynchronous() && aImg->mDecoder->NeedsNewFrame()) {
+  if (aStrategy == DECODE_SYNC && aImg->mDecoder->NeedsNewFrame()) {
     MOZ_ASSERT(NS_IsMainThread());
 
     aImg->mDecoder->AllocateFrame();
@@ -3385,18 +3437,18 @@ RasterImage::DecodePool::DecodeSomeOfImage(RasterImage* aImg,
     maxBytes = aImg->mSourceData.Length();
   } else {
     // We're only guaranteed to decode this many bytes, so in particular,
-    // gDecodeBytesAtATime should be set high enough for us to read the size
-    // from most images.
-    maxBytes = gDecodeBytesAtATime;
+    // gfxPrefs::ImageMemDecodeBytesAtATime should be set high enough for us
+    // to read the size from most images.
+    maxBytes = gfxPrefs::ImageMemDecodeBytesAtATime();
   }
 
   if (bytesToDecode == 0) {
-    bytesToDecode = aImg->mSourceData.Length() - aImg->mBytesDecoded;
+    bytesToDecode = aImg->mSourceData.Length() - aImg->mDecoder->BytesDecoded();
   }
 
   int32_t chunkCount = 0;
   TimeStamp start = TimeStamp::Now();
-  TimeStamp deadline = start + TimeDuration::FromMilliseconds(gMaxMSBeforeYield);
+  TimeStamp deadline = start + TimeDuration::FromMilliseconds(gfxPrefs::ImageMemMaxMSBeforeYield());
 
   // We keep decoding chunks until:
   //  * we don't have any data left to decode,
@@ -3405,7 +3457,7 @@ RasterImage::DecodePool::DecodeSomeOfImage(RasterImage* aImg,
   //  * we run out of time.
   // We also try to decode at least one "chunk" if we've allocated a new frame,
   // even if we have no more data to send to the decoder.
-  while ((aImg->mSourceData.Length() > aImg->mBytesDecoded &&
+  while ((aImg->mSourceData.Length() > aImg->mDecoder->BytesDecoded() &&
           bytesToDecode > 0 &&
           !aImg->IsDecodeFinished() &&
           !(aDecodeType == DECODE_TYPE_UNTIL_SIZE && aImg->mHasSize) &&
@@ -3413,7 +3465,7 @@ RasterImage::DecodePool::DecodeSomeOfImage(RasterImage* aImg,
          (aImg->mDecodeRequest && aImg->mDecodeRequest->mAllocatedNewFrame)) {
     chunkCount++;
     uint32_t chunkSize = std::min(bytesToDecode, maxBytes);
-    nsresult rv = aImg->DecodeSomeData(chunkSize);
+    nsresult rv = aImg->DecodeSomeData(chunkSize, aStrategy);
     if (NS_FAILED(rv)) {
       aImg->DoError();
       return rv;
@@ -3468,9 +3520,9 @@ RasterImage::DecodeDoneWorker::DecodeDoneWorker(RasterImage* image, DecodeReques
 void
 RasterImage::DecodeDoneWorker::NotifyFinishedSomeDecoding(RasterImage* image, DecodeRequest* request)
 {
-  image->mDecodingMutex.AssertCurrentThreadOwns();
+  image->mDecodingMonitor.AssertCurrentThreadIn();
 
-  nsCOMPtr<DecodeDoneWorker> worker = new DecodeDoneWorker(image, request);
+  nsCOMPtr<nsIRunnable> worker = new DecodeDoneWorker(image, request);
   NS_DispatchToMainThread(worker);
 }
 
@@ -3478,7 +3530,7 @@ NS_IMETHODIMP
 RasterImage::DecodeDoneWorker::Run()
 {
   MOZ_ASSERT(NS_IsMainThread());
-  MutexAutoLock lock(mImage->mDecodingMutex);
+  ReentrantMonitorAutoEnter lock(mImage->mDecodingMonitor);
 
   mImage->FinishedSomeDecoding(eShutdownIntent_Done, mRequest);
 
@@ -3493,14 +3545,14 @@ RasterImage::FrameNeededWorker::FrameNeededWorker(RasterImage* image)
 void
 RasterImage::FrameNeededWorker::GetNewFrame(RasterImage* image)
 {
-  nsCOMPtr<FrameNeededWorker> worker = new FrameNeededWorker(image);
+  nsCOMPtr<nsIRunnable> worker = new FrameNeededWorker(image);
   NS_DispatchToMainThread(worker);
 }
 
 NS_IMETHODIMP
 RasterImage::FrameNeededWorker::Run()
 {
-  MutexAutoLock lock(mImage->mDecodingMutex);
+  ReentrantMonitorAutoEnter lock(mImage->mDecodingMonitor);
   nsresult rv = NS_OK;
 
   // If we got a synchronous decode in the mean time, we don't need to do
@@ -3516,6 +3568,43 @@ RasterImage::FrameNeededWorker::Run()
   }
 
   return NS_OK;
+}
+
+nsIntSize
+RasterImage::OptimalImageSizeForDest(const gfxSize& aDest, uint32_t aWhichFrame,
+                                     GraphicsFilter aFilter, uint32_t aFlags)
+{
+  MOZ_ASSERT(aDest.width >= 0 || ceil(aDest.width) <= INT32_MAX ||
+             aDest.height >= 0 || ceil(aDest.height) <= INT32_MAX,
+             "Unexpected destination size");
+
+  if (mSize.IsEmpty() || aDest.IsEmpty()) {
+    return nsIntSize(0, 0);
+  }
+
+  nsIntSize destSize(ceil(aDest.width), ceil(aDest.height));
+
+  if (CanScale(aFilter, destSize, aFlags)) {
+    DrawableFrameRef frameRef =
+      SurfaceCache::Lookup(ImageKey(this),
+                           RasterSurfaceKey(destSize.ToIntSize(),
+                                            DecodeFlags(aFlags)));
+
+    if (frameRef && frameRef->ImageComplete()) {
+        return destSize;  // We have an existing HQ scale for this size.
+    }
+    if (!frameRef) {
+      // We could HQ scale to this size, but we haven't. Request a scale now.
+      frameRef = LookupFrame(GetRequestedFrameIndex(aWhichFrame), aFlags);
+      if (frameRef) {
+        RequestScale(frameRef.get(), aFlags, destSize);
+      }
+    }
+  }
+
+  // We either can't HQ scale to this size or the scaled version isn't ready
+  // yet. Use our intrinsic size for now.
+  return mSize;
 }
 
 } // namespace image

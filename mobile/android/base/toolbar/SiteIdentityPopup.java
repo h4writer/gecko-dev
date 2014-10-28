@@ -4,7 +4,6 @@
 
 package org.mozilla.gecko.toolbar;
 
-import org.mozilla.gecko.BrowserApp;
 import org.mozilla.gecko.R;
 import org.mozilla.gecko.GeckoAppShell;
 import org.mozilla.gecko.GeckoEvent;
@@ -17,12 +16,11 @@ import org.mozilla.gecko.widget.DoorHanger.OnButtonClickListener;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import android.content.res.Resources;
+import android.content.Context;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -33,11 +31,10 @@ import android.widget.TextView;
 public class SiteIdentityPopup extends ArrowPopup {
     private static final String LOGTAG = "GeckoSiteIdentityPopup";
 
-    // FIXME: Update this URL for mobile. See bug 885923.
     private static final String MIXED_CONTENT_SUPPORT_URL =
-        "https://support.mozilla.org/kb/how-does-content-isnt-secure-affect-my-safety";
+        "https://support.mozilla.org/kb/how-does-insecure-content-affect-safety-android";
 
-    private Resources mResources;
+    private SiteIdentity mSiteIdentity;
 
     private LinearLayout mIdentity;
     private TextView mHost;
@@ -48,10 +45,9 @@ public class SiteIdentityPopup extends ArrowPopup {
 
     private final OnButtonClickListener mButtonClickListener;
 
-    SiteIdentityPopup(BrowserApp activity) {
-        super(activity);
+    public SiteIdentityPopup(Context context) {
+        super(context);
 
-        mResources = activity.getResources();
         mButtonClickListener = new PopupButtonListener();
     }
 
@@ -63,7 +59,7 @@ public class SiteIdentityPopup extends ArrowPopup {
         // which may reshow the popup (see bug 785156)
         setFocusable(true);
 
-        LayoutInflater inflater = LayoutInflater.from(mActivity);
+        LayoutInflater inflater = LayoutInflater.from(mContext);
         mIdentity = (LinearLayout) inflater.inflate(R.layout.site_identity, null);
         mContent.addView(mIdentity);
 
@@ -72,27 +68,32 @@ public class SiteIdentityPopup extends ArrowPopup {
         mVerifier = (TextView) mIdentity.findViewById(R.id.verifier);
     }
 
-    private void setIdentity(SiteIdentity siteIdentity) {
-        if (siteIdentity.getSecurityMode() == SecurityMode.MIXED_CONTENT_LOADED) {
+    private void updateUi() {
+        if (!mInflated) {
+            init();
+        }
+
+        if (mSiteIdentity.getSecurityMode() == SecurityMode.MIXED_CONTENT_LOADED ||
+            mSiteIdentity.getSecurityMode() == SecurityMode.MIXED_CONTENT_BLOCKED) {
             // Hide the identity data if there isn't valid site identity data.
             // Set some top padding on the popup content to create a of light blue
             // between the popup arrow and the mixed content notification.
-            mContent.setPadding(0, (int) mResources.getDimension(R.dimen.identity_padding_top), 0, 0);
+            mContent.setPadding(0, (int) mContext.getResources().getDimension(R.dimen.identity_padding_top), 0, 0);
             mIdentity.setVisibility(View.GONE);
         } else {
-            mHost.setText(siteIdentity.getHost());
+            mHost.setText(mSiteIdentity.getHost());
 
-            String owner = siteIdentity.getOwner();
+            String owner = mSiteIdentity.getOwner();
 
             // Supplemental data is optional.
-            final String supplemental = siteIdentity.getSupplemental();
+            final String supplemental = mSiteIdentity.getSupplemental();
             if (!TextUtils.isEmpty(supplemental)) {
                 owner += "\n" + supplemental;
             }
             mOwner.setText(owner);
 
-            final String verifier = siteIdentity.getVerifier();
-            final String encrypted = siteIdentity.getEncrypted();
+            final String verifier = mSiteIdentity.getVerifier();
+            final String encrypted = mSiteIdentity.getEncrypted();
             mVerifier.setText(verifier + "\n" + encrypted);
 
             mContent.setPadding(0, 0, 0, 0);
@@ -101,29 +102,29 @@ public class SiteIdentityPopup extends ArrowPopup {
     }
 
     private void addMixedContentNotification(boolean blocked) {
-        // Remove any exixting mixed content notification.
+        // Remove any existing mixed content notification.
         removeMixedContentNotification();
-        mMixedContentNotification = new DoorHanger(mActivity, DoorHanger.Theme.DARK);
+        mMixedContentNotification = new DoorHanger(mContext, DoorHanger.Theme.DARK);
 
         String message;
         if (blocked) {
-            message = mActivity.getString(R.string.blocked_mixed_content_message_top) + "\n\n" +
-                      mActivity.getString(R.string.blocked_mixed_content_message_bottom);
+            message = mContext.getString(R.string.blocked_mixed_content_message_top) + "\n\n" +
+                      mContext.getString(R.string.blocked_mixed_content_message_bottom);
         } else {
-            message = mActivity.getString(R.string.loaded_mixed_content_message);
+            message = mContext.getString(R.string.loaded_mixed_content_message);
         }
         mMixedContentNotification.setMessage(message);
-        mMixedContentNotification.addLink(mActivity.getString(R.string.learn_more), MIXED_CONTENT_SUPPORT_URL, "\n\n");
+        mMixedContentNotification.addLink(mContext.getString(R.string.learn_more), MIXED_CONTENT_SUPPORT_URL, "\n\n");
 
         if (blocked) {
             mMixedContentNotification.setIcon(R.drawable.shield_doorhanger);
-            mMixedContentNotification.addButton(mActivity.getString(R.string.disable_protection),
+            mMixedContentNotification.addButton(mContext.getString(R.string.disable_protection),
                                                 "disable", mButtonClickListener);
-            mMixedContentNotification.addButton(mActivity.getString(R.string.keep_blocking),
+            mMixedContentNotification.addButton(mContext.getString(R.string.keep_blocking),
                                                 "keepBlocking", mButtonClickListener);
         } else {
             mMixedContentNotification.setIcon(R.drawable.warning_doorhanger);
-            mMixedContentNotification.addButton(mActivity.getString(R.string.enable_protection),
+            mMixedContentNotification.addButton(mContext.getString(R.string.enable_protection),
                                                 "enable", mButtonClickListener);
         }
 
@@ -140,22 +141,31 @@ public class SiteIdentityPopup extends ArrowPopup {
     /*
      * @param identityData A JSONObject that holds the current tab's identity data.
      */
-    void updateIdentity(SiteIdentity siteIdentity) {
-        final SecurityMode mode = siteIdentity.getSecurityMode();
+    void setSiteIdentity(SiteIdentity siteIdentity) {
+        mSiteIdentity = siteIdentity;
+    }
+
+    @Override
+    public void show() {
+        if (mSiteIdentity == null) {
+            Log.e(LOGTAG, "Can't show site identity popup for undefined state");
+            return;
+        }
+
+        final SecurityMode mode = mSiteIdentity.getSecurityMode();
         if (mode == SecurityMode.UNKNOWN) {
             Log.e(LOGTAG, "Can't show site identity popup in non-identified state");
             return;
         }
 
-        if (!mInflated)
-            init();
-
-        setIdentity(siteIdentity);
+        updateUi();
 
         if (mode == SecurityMode.MIXED_CONTENT_LOADED ||
             mode == SecurityMode.MIXED_CONTENT_BLOCKED) {
             addMixedContentNotification(mode == SecurityMode.MIXED_CONTENT_BLOCKED);
         }
+
+        super.show();
     }
 
     @Override

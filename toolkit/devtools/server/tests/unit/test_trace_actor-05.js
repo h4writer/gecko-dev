@@ -6,8 +6,6 @@
  * "arguments", and "return" trace types.
  */
 
-let { defer } = devtools.require("sdk/core/promise");
-
 var gDebuggee;
 var gClient;
 var gTraceClient;
@@ -50,7 +48,7 @@ function check_location(actual, expected)
 function test_enter_exit_frame()
 {
   let traces = [];
-  let traceStopped = defer();
+  let traceStopped = promise.defer();
 
   gClient.addListener("traces", function(aEvent, aPacket) {
     for (let t of aPacket.traces) {
@@ -89,11 +87,11 @@ function test_enter_exit_frame()
 
       do_check_eq(traces[1].name, "foo");
 
-      // foo's definition is at tracerlocations.js:3:0, but
-      // Debugger.Script does not provide complete definition
-      // locations (bug 901138). tracerlocations.js:4:2 is the first
-      // statement in the function (used as an approximation).
-      check_location(traces[1].location, { url: url, line: 4, column: 2 });
+      // XXX: foo's definition is at tracerlocations.js:3:0, but Debugger.Script
+      // does not provide complete definition locations (bug 901138). Therefore,
+      // we use the first statement in the function (tracerlocations.js:4:2) for
+      // a column approximation.
+      check_location(traces[1].location, { url: url, line: 3, column: 2 });
       check_location(traces[1].callsite, { url: url, line: 8, column: 0 });
 
       do_check_eq(typeof traces[1].parameterNames, "object");
@@ -117,7 +115,7 @@ function test_enter_exit_frame()
 
 function start_trace()
 {
-  let deferred = defer();
+  let deferred = promise.defer();
   gTraceClient.startTrace(
     ["name", "location", "callsite", "time", "parameterNames", "arguments", "return"],
     null,
@@ -134,7 +132,7 @@ function eval_code()
 
 function stop_trace()
 {
-  let deferred = defer();
+  let deferred = promise.defer();
   gTraceClient.stopTrace(null, function() { deferred.resolve(); });
   return deferred.promise;
 }

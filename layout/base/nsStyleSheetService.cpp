@@ -8,12 +8,12 @@
 
 #include "nsStyleSheetService.h"
 #include "nsIStyleSheet.h"
+#include "mozilla/CSSStyleSheet.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/unused.h"
 #include "mozilla/css/Loader.h"
 #include "mozilla/dom/ContentParent.h"
 #include "mozilla/ipc/URIUtils.h"
-#include "nsCSSStyleSheet.h"
 #include "nsIURI.h"
 #include "nsCOMPtr.h"
 #include "nsICategoryManager.h"
@@ -27,9 +27,6 @@ using namespace mozilla;
 nsStyleSheetService *nsStyleSheetService::gInstance = nullptr;
 
 nsStyleSheetService::nsStyleSheetService()
-  : MemoryUniReporter("explicit/layout/style-sheet-service",
-                       KIND_HEAP, UNITS_BYTES,
-"Memory used for style sheets held by the style sheet service.")
 {
   PR_STATIC_ASSERT(0 == AGENT_SHEET && 1 == USER_SHEET && 2 == AUTHOR_SHEET);
   NS_ASSERTION(!gInstance, "Someone is using CreateInstance instead of GetService");
@@ -45,8 +42,8 @@ nsStyleSheetService::~nsStyleSheetService()
   nsLayoutStatics::Release();
 }
 
-NS_IMPL_ISUPPORTS_INHERITED1(
-  nsStyleSheetService, MemoryUniReporter, nsIStyleSheetService)
+NS_IMPL_ISUPPORTS(
+  nsStyleSheetService, nsIStyleSheetService, nsIMemoryReporter)
 
 void
 nsStyleSheetService::RegisterFromEnumerator(nsICategoryManager  *aManager,
@@ -100,6 +97,9 @@ nsStyleSheetService::FindSheetByURI(const nsCOMArray<nsIStyleSheet> &sheets,
 nsresult
 nsStyleSheetService::Init()
 {
+  // If you make changes here, consider whether
+  // SVGDocument::EnsureNonSVGUserAgentStyleSheetsLoaded should be updated too.
+
   // Child processes get their style sheets from the ContentParent.
   if (XRE_GetProcessType() == GeckoProcessType_Content) {
     return NS_OK;
@@ -186,7 +186,7 @@ nsStyleSheetService::LoadAndRegisterSheetInternal(nsIURI *aSheetURI,
 
   nsRefPtr<css::Loader> loader = new css::Loader();
 
-  nsRefPtr<nsCSSStyleSheet> sheet;
+  nsRefPtr<CSSStyleSheet> sheet;
   // Allow UA sheets, but not user sheets, to use unsafe rules
   nsresult rv = loader->LoadSheetSync(aSheetURI, aSheetType == AGENT_SHEET,
                                       true, getter_AddRefs(sheet));
@@ -211,6 +211,27 @@ nsStyleSheetService::SheetRegistered(nsIURI *sheetURI,
 
   *_retval = (FindSheetByURI(mSheets[aSheetType], sheetURI) >= 0);
 
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsStyleSheetService::PreloadSheet(nsIURI *aSheetURI, uint32_t aSheetType,
+                                  nsIDOMStyleSheet **aSheet)
+{
+  NS_ENSURE_ARG(aSheetType == AGENT_SHEET ||
+                aSheetType == USER_SHEET ||
+                aSheetType == AUTHOR_SHEET);
+  NS_ENSURE_ARG_POINTER(aSheetURI);
+  NS_PRECONDITION(aSheet, "Null out param");
+
+  nsRefPtr<css::Loader> loader = new css::Loader();
+
+  // Allow UA sheets, but not user sheets, to use unsafe rules
+  nsRefPtr<CSSStyleSheet> sheet;
+  nsresult rv = loader->LoadSheetSync(aSheetURI, aSheetType == AGENT_SHEET,
+                                      true, getter_AddRefs(sheet));
+  NS_ENSURE_SUCCESS(rv, rv);
+  sheet.forget(aSheet);
   return NS_OK;
 }
 
@@ -282,13 +303,19 @@ static size_t
 SizeOfElementIncludingThis(nsIStyleSheet* aElement,
                            MallocSizeOf aMallocSizeOf, void *aData)
 {
-    return aElement->SizeOfIncludingThis(aMallocSizeOf);
+  return aElement->SizeOfIncludingThis(aMallocSizeOf);
 }
 
-int64_t
-nsStyleSheetService::Amount()
+MOZ_DEFINE_MALLOC_SIZE_OF(StyleSheetServiceMallocSizeOf)
+
+NS_IMETHODIMP
+nsStyleSheetService::CollectReports(nsIHandleReportCallback* aHandleReport,
+                                    nsISupports* aData, bool aAnonymize)
 {
-  return SizeOfIncludingThis(MallocSizeOf);
+  return MOZ_COLLECT_REPORT(
+    "explicit/layout/style-sheet-service", KIND_HEAP, UNITS_BYTES,
+    SizeOfIncludingThis(StyleSheetServiceMallocSizeOf),
+    "Memory used for style sheets held by the style sheet service.");
 }
 
 size_t

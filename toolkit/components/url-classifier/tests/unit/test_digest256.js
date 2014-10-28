@@ -102,7 +102,6 @@ function handleError(aEvent) {
 add_test(function test_update() {
   let streamUpdater = Cc["@mozilla.org/url-classifier/streamupdater;1"]
     .getService(Ci.nsIUrlClassifierStreamUpdater);
-  streamUpdater.updateUrl = "http://localhost:4444/downloads";
 
   // Load up some update chunks for the safebrowsing server to serve.
   registerTableUpdate("goog-downloadwhite-digest256", "data/digest1.chunk");
@@ -118,18 +117,20 @@ add_test(function test_update() {
   }
   streamUpdater.downloadUpdates(
     "goog-downloadwhite-digest256",
-    "goog-downloadwhite-digest256;\n", "",
+    "goog-downloadwhite-digest256;\n",
+    "http://localhost:4444/downloads",
     updateSuccess, handleError, handleError);
 });
 
 add_test(function test_url_not_whitelisted() {
   let uri = createURI("http://example.com");
   let principal = gSecMan.getNoAppCodebasePrincipal(uri);
-  gDbService.lookup(principal, function handleEvent(aEvent) {
-    // This URI is not on any lists.
-    do_check_eq("", aEvent);
-    run_next_test();
-  });
+  gDbService.lookup(principal, "goog-downloadwhite-digest256",
+    function handleEvent(aEvent) {
+      // This URI is not on any lists.
+      do_check_eq("", aEvent);
+      run_next_test();
+    });
 });
 
 add_test(function test_url_whitelisted() {
@@ -137,8 +138,9 @@ add_test(function test_url_whitelisted() {
   // 93CA5F48E15E9861CD37C2D95DB43D23CC6E6DE5C3F8FA6E8BE66F97CC518907
   let uri = createURI("http://whitelisted.com");
   let principal = gSecMan.getNoAppCodebasePrincipal(uri);
-  gDbService.lookup(principal, function handleEvent(aEvent) {
-    do_check_eq("goog-downloadwhite-digest256", aEvent);
-    run_next_test();
-  });
+  gDbService.lookup(principal, "goog-downloadwhite-digest256",
+    function handleEvent(aEvent) {
+      do_check_eq("goog-downloadwhite-digest256", aEvent);
+      run_next_test();
+    });
 });

@@ -41,22 +41,6 @@ const DOWNLOAD_VIEW_SUPPORTED_COMMANDS =
 const NOT_AVAILABLE = Number.MAX_VALUE;
 
 /**
- * Download a URL.
- *
- * @param aURL
- *        the url to download (nsIURI object)
- * @param [optional] aFileName
- *        the destination file name
- */
-function DownloadURL(aURL, aFileName) {
-  // For private browsing, try to get document out of the most recent browser
-  // window, or provide our own if there's no browser window.
-  let browserWin = RecentWindow.getMostRecentBrowserWindow();
-  let initiatingDoc = browserWin ? browserWin.document : document;
-  saveURL(aURL, aFileName, null, true, true, undefined, initiatingDoc);
-}
-
-/**
  * A download element shell is responsible for handling the commands and the
  * displayed data for a single download view element. The download element
  * could represent either a past download (for which we get data from places)  or
@@ -307,7 +291,7 @@ DownloadElementShell.prototype = {
    *   set.  If available, it's set to the downloaded file name.  If not,
    *   the places title for the download uri is used it's set.  As a last
    *   resort, we fallback to the download uri.
-   * - fileSize (only set for downloads which completed succesfully):
+   * - fileSize (only set for downloads which completed successfully):
    *   the downloaded file size.  For downloads done after the landing of
    *   bug 826991, this value is "static" - that is, it does not necessarily
    *   mean that the file is in place and has this size.
@@ -533,7 +517,7 @@ DownloadElementShell.prototype = {
       if (aAnnoName == DOWNLOAD_META_DATA_ANNO) {
         let metaData = this.getDownloadMetaData();
         let annotatedMetaData = this._getAnnotatedMetaData();
-        metaData.endTme = annotatedMetaData.endTime;
+        metaData.endTime = annotatedMetaData.endTime;
         if ("fileSize" in annotatedMetaData)
           metaData.fileSize = annotatedMetaData.fileSize;
         else
@@ -597,7 +581,7 @@ DownloadElementShell.prototype = {
       return false;
     switch (aCommand) {
       case "downloadsCmd_open": {
-        // We cannot open a session dowload file unless it's done ("openable").
+        // We cannot open a session download file unless it's done ("openable").
         // If it's finished, we need to make sure the file was not removed,
         // as we do for past downloads.
         if (this._dataItem && !this._dataItem.openable)
@@ -645,7 +629,10 @@ DownloadElementShell.prototype = {
     // In future we may try to download into the same original target uri, when
     // we have it.  Though that requires verifying the path is still valid and
     // may surprise the user if he wants to be requested every time.
-    DownloadURL(this.downloadURI, this.getDownloadMetaData().fileName);
+    let browserWin = RecentWindow.getMostRecentBrowserWindow();
+    let initiatingDoc = browserWin ? browserWin.document : document;
+    DownloadURL(this.downloadURI, this.getDownloadMetaData().fileName,
+                initiatingDoc);
   },
 
   /* nsIController */
@@ -709,7 +696,7 @@ DownloadElementShell.prototype = {
            this.downloadURI.toLowerCase().contains(aTerm);
   },
 
-  // Handles return kepress on the element (the keypress listener is
+  // Handles return keypress on the element (the keypress listener is
   // set in the DownloadsPlacesView object).
   doDefaultCommand: function DES_doDefaultCommand() {
     function getDefaultCommandForState(aState) {
@@ -756,7 +743,7 @@ DownloadElementShell.prototype = {
 
 /**
  * A Downloads Places View is a places view designed to show a places query
- * for history donwloads alongside the current "session"-downloads.
+ * for history downloads alongside the current "session"-downloads.
  *
  * As we don't use the places controller, some methods implemented by other
  * places views are not implemented by this view.
@@ -877,7 +864,7 @@ DownloadsPlacesView.prototype = {
    *        The places node for a history download. Required if there's no data
    *        item.
    * @param [optional] aNewest
-   *        @see onDataItemAdded. Ignored for history downlods.
+   *        @see onDataItemAdded. Ignored for history downloads.
    * @param [optional] aDocumentFragment
    *        To speed up the appending of multiple elements to the end of the
    *        list which are coming in a single batch (i.e. invalidateContainer),
@@ -906,9 +893,9 @@ DownloadsPlacesView.prototype = {
     // 1) There's only one shell and it's for a history download (it has
     //    no data item). In this case, we update this shell and move it
     //    if necessary
-    // 2) There are multiple shells, indicicating multiple downloads for
+    // 2) There are multiple shells, indicating multiple downloads for
     //    the same download uri are running. In this case we create
-    //    anoter shell for the download (so we have one shell for each data
+    //    another shell for the download (so we have one shell for each data
     //    item).
     //
     // Note: If a cancelled session download is already in the list, and the
@@ -935,7 +922,7 @@ DownloadsPlacesView.prototype = {
     if (shouldCreateShell) {
       // Bug 836271: The annotations for a url should be cached only when the
       // places node is available, i.e. when we know we we'd be notified for
-      // annoation changes. 
+      // annotation changes. 
       // Otherwise we may cache NOT_AVILABLE values first for a given session
       // download, and later use these NOT_AVILABLE values when a history
       // download for the same URL is added.
@@ -1382,7 +1369,7 @@ DownloadsPlacesView.prototype = {
   },
 
   _canClearDownloads: function DPV__canClearDownloads() {
-    // Downloads can be cleared if there's at least one removeable download in
+    // Downloads can be cleared if there's at least one removable download in
     // the list (either a history download or a completed session download).
     // Because history downloads are always removable and are listed after the
     // session downloads, check from bottom to top.
@@ -1433,7 +1420,9 @@ DownloadsPlacesView.prototype = {
 
   _downloadURLFromClipboard: function DPV__downloadURLFromClipboard() {
     let [url, name] = this._getURLFromClipboardData();
-    DownloadURL(url, name);
+    let browserWin = RecentWindow.getMostRecentBrowserWindow();
+    let initiatingDoc = browserWin ? browserWin.document : document;
+    DownloadURL(url, name, initiatingDoc);
   },
 
   doCommand: function DPV_doCommand(aCommand) {
@@ -1487,6 +1476,11 @@ DownloadsPlacesView.prototype = {
     else
       contextMenu.removeAttribute("state");
 
+    if (state == nsIDM.DOWNLOAD_DOWNLOADING) {
+      // The resumable property of a download may change at any time, so
+      // ensure we update the related command now.
+      goUpdateCommand("downloadsCmd_pauseResume");
+    }
     return true;
   },
 
@@ -1503,7 +1497,7 @@ DownloadsPlacesView.prototype = {
       }
     }
     else if (aEvent.charCode == " ".charCodeAt(0)) {
-      // Pausue/Resume every selected download
+      // Pause/Resume every selected download
       for (let element of selectedElements) {
         if (element._shell.isCommandEnabled("downloadsCmd_pauseResume"))
           element._shell.doCommand("downloadsCmd_pauseResume");
@@ -1579,8 +1573,11 @@ DownloadsPlacesView.prototype = {
 
     let name = { };
     let url = Services.droppedLinkHandler.dropLink(aEvent, name);
-    if (url)
-      DownloadURL(url, name.value);
+    if (url) {
+      let browserWin = RecentWindow.getMostRecentBrowserWindow();
+      let initiatingDoc = browserWin ? browserWin.document : document;
+      DownloadURL(url, name.value, initiatingDoc);
+    }
   }
 };
 

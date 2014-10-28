@@ -29,10 +29,21 @@ public:
 
   WidgetContentCommandEvent(bool aIsTrusted, uint32_t aMessage,
                             nsIWidget* aWidget,
-                            bool aOnlyEnabledCheck = false) :
-    WidgetGUIEvent(aIsTrusted, aMessage, aWidget, NS_CONTENT_COMMAND_EVENT),
-    mOnlyEnabledCheck(aOnlyEnabledCheck), mSucceeded(false), mIsEnabled(false)
+                            bool aOnlyEnabledCheck = false)
+    : WidgetGUIEvent(aIsTrusted, aMessage, aWidget, eContentCommandEventClass)
+    , mOnlyEnabledCheck(aOnlyEnabledCheck)
+    , mSucceeded(false)
+    , mIsEnabled(false)
   {
+  }
+
+  virtual WidgetEvent* Duplicate() const MOZ_OVERRIDE
+  {
+    // This event isn't an internal event of any DOM event.
+    NS_ASSERTION(!IsAllowedToDispatchDOMEvent(),
+      "WidgetQueryContentEvent needs to support Duplicate()");
+    MOZ_CRASH("WidgetQueryContentEvent doesn't support Duplicate()");
+    return nullptr;
   }
 
   // NS_CONTENT_COMMAND_PASTE_TRANSFERABLE
@@ -91,12 +102,24 @@ public:
   virtual WidgetCommandEvent* AsCommandEvent() MOZ_OVERRIDE { return this; }
 
   WidgetCommandEvent(bool aIsTrusted, nsIAtom* aEventType,
-                     nsIAtom* aCommand, nsIWidget* aWidget) :
-    WidgetGUIEvent(aIsTrusted, NS_USER_DEFINED_EVENT, aWidget,
-                   NS_COMMAND_EVENT),
-    command(aCommand)
+                     nsIAtom* aCommand, nsIWidget* aWidget)
+    : WidgetGUIEvent(aIsTrusted, NS_USER_DEFINED_EVENT, aWidget,
+                     eCommandEventClass)
+    , command(aCommand)
   {
     userType = aEventType;
+  }
+
+  virtual WidgetEvent* Duplicate() const MOZ_OVERRIDE
+  {
+    MOZ_ASSERT(mClass == eCommandEventClass,
+               "Duplicate() must be overridden by sub class");
+    // Not copying widget, it is a weak reference.
+    WidgetCommandEvent* result =
+      new WidgetCommandEvent(false, userType, command, nullptr);
+    result->AssignCommandEventData(*this, true);
+    result->mFlags = mFlags;
+    return result;
   }
 
   nsCOMPtr<nsIAtom> command;
@@ -122,15 +145,36 @@ class WidgetPluginEvent : public WidgetGUIEvent
 public:
   virtual WidgetPluginEvent* AsPluginEvent() MOZ_OVERRIDE { return this; }
 
-  WidgetPluginEvent(bool aIsTrusted, uint32_t aMessage, nsIWidget* aWidget) :
-    WidgetGUIEvent(aIsTrusted, aMessage, aWidget, NS_PLUGIN_EVENT),
-    retargetToFocusedDocument(false)
+  WidgetPluginEvent(bool aIsTrusted, uint32_t aMessage, nsIWidget* aWidget)
+    : WidgetGUIEvent(aIsTrusted, aMessage, aWidget, ePluginEventClass)
+    , retargetToFocusedDocument(false)
   {
+  }
+
+  virtual WidgetEvent* Duplicate() const MOZ_OVERRIDE
+  {
+    // NOTE: PluginEvent has to be dispatched to nsIFrame::HandleEvent().
+    //       So, this event needs to support Duplicate().
+    MOZ_ASSERT(mClass == ePluginEventClass,
+               "Duplicate() must be overridden by sub class");
+    // Not copying widget, it is a weak reference.
+    WidgetPluginEvent* result = new WidgetPluginEvent(false, message, nullptr);
+    result->AssignPluginEventData(*this, true);
+    result->mFlags = mFlags;
+    return result;
   }
 
   // If true, this event needs to be retargeted to focused document.
   // Otherwise, never retargeted. Defaults to false.
   bool retargetToFocusedDocument;
+
+  void AssignPluginEventData(const WidgetPluginEvent& aEvent,
+                             bool aCopyTargets)
+  {
+    AssignGUIEventData(aEvent, aCopyTargets);
+
+    retargetToFocusedDocument = aEvent.retargetToFocusedDocument;
+  }
 };
 
 } // namespace mozilla

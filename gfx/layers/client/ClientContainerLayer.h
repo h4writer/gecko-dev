@@ -9,14 +9,14 @@
 #include <stdint.h>                     // for uint32_t
 #include "ClientLayerManager.h"         // for ClientLayerManager, etc
 #include "Layers.h"                     // for Layer, ContainerLayer, etc
-#include "gfx3DMatrix.h"                // for gfx3DMatrix
-#include "gfxMatrix.h"                  // for gfxMatrix
-#include "gfxPlatform.h"                // for gfxPlatform
+#include "gfxPrefs.h"                   // for gfxPrefs
 #include "nsDebug.h"                    // for NS_ASSERTION
+#include "nsISupportsImpl.h"            // for MOZ_COUNT_CTOR, etc
 #include "nsISupportsUtils.h"           // for NS_ADDREF, NS_RELEASE
 #include "nsRegion.h"                   // for nsIntRegion
 #include "nsTArray.h"                   // for nsAutoTArray
-#include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+#include "ReadbackProcessor.h"
+#include "ClientPaintedLayer.h"
 
 namespace mozilla {
 namespace layers {
@@ -27,13 +27,15 @@ class ClientContainerLayer : public ContainerLayer,
                              public ClientLayer
 {
 public:
-  ClientContainerLayer(ClientLayerManager* aManager) :
+  explicit ClientContainerLayer(ClientLayerManager* aManager) :
     ContainerLayer(aManager,
                    static_cast<ClientLayer*>(MOZ_THIS_IN_INITIALIZER_LIST()))
   {
     MOZ_COUNT_CTOR(ClientContainerLayer);
     mSupportsComponentAlphaChildren = true;
   }
+
+protected:
   virtual ~ClientContainerLayer()
   {
     while (mFirstChild) {
@@ -43,42 +45,33 @@ public:
     MOZ_COUNT_DTOR(ClientContainerLayer);
   }
 
+public:
   virtual void RenderLayer()
   {
     if (GetMaskLayer()) {
       ToClientLayer(GetMaskLayer())->RenderLayer();
     }
     
-    // Setup mSupportsComponentAlphaChildren in the same way 
-    // that ContainerLayerComposite will do.
-    if (UseIntermediateSurface()) {
-      if (GetEffectiveVisibleRegion().GetNumRects() != 1 ||
-          !(GetContentFlags() & Layer::CONTENT_OPAQUE))
-      {
-        const gfx3DMatrix& transform3D = GetEffectiveTransform();
-        gfxMatrix transform;
-        if (HasOpaqueAncestorLayer(this) &&
-            transform3D.Is2D(&transform) && 
-            !transform.HasNonIntegerTranslation()) {
-          SetSupportsComponentAlphaChildren(
-            gfxPlatform::ComponentAlphaEnabled());
-        }
-      }
-    } else {
-      SetSupportsComponentAlphaChildren(
-        (GetContentFlags() & Layer::CONTENT_OPAQUE) ||
-        (GetParent() && GetParent()->SupportsComponentAlphaChildren()));
-    }
+    DefaultComputeSupportsComponentAlphaChildren();
 
     nsAutoTArray<Layer*, 12> children;
     SortChildrenBy3DZOrder(children);
 
+    ReadbackProcessor readback;
+    readback.BuildUpdates(this);
+
     for (uint32_t i = 0; i < children.Length(); i++) {
-      if (children.ElementAt(i)->GetEffectiveVisibleRegion().IsEmpty()) {
+      Layer* child = children.ElementAt(i);
+      if (child->GetEffectiveVisibleRegion().IsEmpty()) {
         continue;
       }
 
-      ToClientLayer(children.ElementAt(i))->RenderLayer();
+      ToClientLayer(child)->RenderLayerWithReadback(&readback);
+
+      if (!ClientManager()->GetRepeatTransaction() &&
+          !child->GetInvalidRegion().IsEmpty()) {
+        child->Mutated();
+      }
     }
   }
 
@@ -88,39 +81,57 @@ public:
                  "Can only set properties in construction phase");
     ContainerLayer::SetVisibleRegion(aRegion);
   }
-  virtual void InsertAfter(Layer* aChild, Layer* aAfter) MOZ_OVERRIDE
+  virtual bool InsertAfter(Layer* aChild, Layer* aAfter) MOZ_OVERRIDE
   {
-    NS_ASSERTION(ClientManager()->InConstruction(),
-                 "Can only set properties in construction phase");
+    if(!ClientManager()->InConstruction()) {
+      NS_ERROR("Can only set properties in construction phase");
+      return false;
+    }
+
+    if (!ContainerLayer::InsertAfter(aChild, aAfter)) {
+      return false;
+    }
+
     ClientManager()->AsShadowForwarder()->InsertAfter(ClientManager()->Hold(this),
                                                       ClientManager()->Hold(aChild),
                                                       aAfter ? ClientManager()->Hold(aAfter) : nullptr);
-    ContainerLayer::InsertAfter(aChild, aAfter);
+    return true;
   }
 
-  virtual void RemoveChild(Layer* aChild) MOZ_OVERRIDE
-  { 
-    NS_ASSERTION(ClientManager()->InConstruction(),
-                 "Can only set properties in construction phase");
-    ClientManager()->AsShadowForwarder()->RemoveChild(ClientManager()->Hold(this),
-                                                      ClientManager()->Hold(aChild));
-    ContainerLayer::RemoveChild(aChild);
-  }
-
-  virtual void RepositionChild(Layer* aChild, Layer* aAfter) MOZ_OVERRIDE
+  virtual bool RemoveChild(Layer* aChild) MOZ_OVERRIDE
   {
-    NS_ASSERTION(ClientManager()->InConstruction(),
-                 "Can only set properties in construction phase");
+    if (!ClientManager()->InConstruction()) {
+      NS_ERROR("Can only set properties in construction phase");
+      return false;
+    }
+    // hold on to aChild before we remove it!
+    ShadowableLayer *heldChild = ClientManager()->Hold(aChild);
+    if (!ContainerLayer::RemoveChild(aChild)) {
+      return false;
+    }
+    ClientManager()->AsShadowForwarder()->RemoveChild(ClientManager()->Hold(this), heldChild);
+    return true;
+  }
+
+  virtual bool RepositionChild(Layer* aChild, Layer* aAfter) MOZ_OVERRIDE
+  {
+    if (!ClientManager()->InConstruction()) {
+      NS_ERROR("Can only set properties in construction phase");
+      return false;
+    }
+    if (!ContainerLayer::RepositionChild(aChild, aAfter)) {
+      return false;
+    }
     ClientManager()->AsShadowForwarder()->RepositionChild(ClientManager()->Hold(this),
                                                           ClientManager()->Hold(aChild),
                                                           aAfter ? ClientManager()->Hold(aAfter) : nullptr);
-    ContainerLayer::RepositionChild(aChild, aAfter);
+    return true;
   }
-  
+
   virtual Layer* AsLayer() { return this; }
   virtual ShadowableLayer* AsShadowableLayer() { return this; }
 
-  virtual void ComputeEffectiveTransforms(const gfx3DMatrix& aTransformToSurface)
+  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface)
   {
     DefaultComputeEffectiveTransforms(aTransformToSurface);
   }
@@ -139,17 +150,20 @@ protected:
 class ClientRefLayer : public RefLayer,
                        public ClientLayer {
 public:
-  ClientRefLayer(ClientLayerManager* aManager) :
+  explicit ClientRefLayer(ClientLayerManager* aManager) :
     RefLayer(aManager,
              static_cast<ClientLayer*>(MOZ_THIS_IN_INITIALIZER_LIST()))
   {
     MOZ_COUNT_CTOR(ClientRefLayer);
   }
+
+protected:
   virtual ~ClientRefLayer()
   {
     MOZ_COUNT_DTOR(ClientRefLayer);
   }
 
+public:
   virtual Layer* AsLayer() { return this; }
   virtual ShadowableLayer* AsShadowableLayer() { return this; }
 
@@ -160,7 +174,7 @@ public:
 
   virtual void RenderLayer() { }
 
-  virtual void ComputeEffectiveTransforms(const gfx3DMatrix& aTransformToSurface)
+  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface)
   {
     DefaultComputeEffectiveTransforms(aTransformToSurface);
   }

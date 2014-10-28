@@ -5,17 +5,6 @@ MARIONETTE_TIMEOUT = 60000;
 MARIONETTE_HEAD_JS = 'head.js';
 
 let connection;
-let outgoing;
-
-function receivedPending(received, pending, nextAction) {
-  let index = pending.indexOf(received);
-  if (index != -1) {
-    pending.splice(index, 1);
-  }
-  if (pending.length === 0) {
-    nextAction();
-  }
-}
 
 function setRadioEnabled(enabled, callback) {
   let request  = connection.setRadioEnabled(enabled);
@@ -29,12 +18,12 @@ function setRadioEnabled(enabled, callback) {
     log("Received 'radiostatechange' event, radioState: " + state);
 
     if (state == desiredRadioState) {
-      receivedPending('onradiostatechange', pending, done);
+      gReceivedPending('onradiostatechange', pending, done);
     }
   };
 
   request.onsuccess = function onsuccess() {
-    receivedPending('onsuccess', pending, done);
+    gReceivedPending('onsuccess', pending, done);
   };
 
   request.onerror = function onerror() {
@@ -50,29 +39,20 @@ function dial(number) {
   is(telephony.calls.length, 0);
 
   log("Make an outgoing call.");
-  outgoing = telephony.dial(number);
 
-  ok(outgoing);
-  is(outgoing.number, number);
-  is(outgoing.state, "dialing");
+  telephony.dial(number).then(null, cause => {
+    log("Received promise 'reject'");
 
-  is(telephony.active, outgoing);
-  is(telephony.calls.length, 1);
-  is(telephony.calls[0], outgoing);
+    is(telephony.active, null);
+    is(telephony.calls.length, 0);
+    is(cause, "RadioNotAvailable");
 
-  outgoing.onerror = function onerror(event) {
-    log("Received 'error' event.");
-    is(event.call, outgoing);
-    ok(event.call.error);
-    is(event.call.error.name, "RadioNotAvailable");
-
-    emulator.run("gsm list", function(result) {
+    emulator.runCmdWithCallback("gsm list", function(result) {
       log("Initial call list: " + result);
-      is(result[0], "OK");
 
       setRadioEnabled(true, cleanUp);
     });
-  };
+  });
 }
 
 function cleanUp() {

@@ -6,8 +6,10 @@
 #ifndef nsNumberControlFrame_h__
 #define nsNumberControlFrame_h__
 
+#include "mozilla/Attributes.h"
 #include "nsContainerFrame.h"
 #include "nsIFormControlFrame.h"
+#include "nsITextControlFrame.h"
 #include "nsIAnonymousContentCreator.h"
 #include "nsCOMPtr.h"
 
@@ -26,6 +28,7 @@ class HTMLInputElement;
  */
 class nsNumberControlFrame MOZ_FINAL : public nsContainerFrame
                                      , public nsIAnonymousContentCreator
+                                     , public nsITextControlFrame
 {
   friend nsIFrame*
   NS_NewNumberControlFrame(nsIPresShell* aPresShell, nsStyleContext* aContext);
@@ -35,7 +38,7 @@ class nsNumberControlFrame MOZ_FINAL : public nsContainerFrame
   typedef mozilla::WidgetEvent WidgetEvent;
   typedef mozilla::WidgetGUIEvent WidgetGUIEvent;
 
-  nsNumberControlFrame(nsStyleContext* aContext);
+  explicit nsNumberControlFrame(nsStyleContext* aContext);
 
 public:
   NS_DECL_QUERYFRAME_TARGET(nsNumberControlFrame)
@@ -43,29 +46,33 @@ public:
   NS_DECL_FRAMEARENA_HELPERS
 
   virtual void DestroyFrom(nsIFrame* aDestructRoot) MOZ_OVERRIDE;
-  virtual void ContentStatesChanged(nsEventStates aStates);
-  virtual bool IsLeaf() const MOZ_OVERRIDE { return false; }
+  virtual void ContentStatesChanged(mozilla::EventStates aStates) MOZ_OVERRIDE;
+  virtual bool IsLeaf() const MOZ_OVERRIDE { return true; }
 
 #ifdef ACCESSIBILITY
   virtual mozilla::a11y::AccType AccessibleType() MOZ_OVERRIDE;
 #endif
 
-  NS_IMETHOD Reflow(nsPresContext*           aPresContext,
-                    nsHTMLReflowMetrics&     aDesiredSize,
-                    const nsHTMLReflowState& aReflowState,
-                    nsReflowStatus&          aStatus) MOZ_OVERRIDE;
+  virtual nscoord GetMinISize(nsRenderingContext* aRenderingContext) MOZ_OVERRIDE;
 
-  NS_IMETHOD AttributeChanged(int32_t  aNameSpaceID,
-                              nsIAtom* aAttribute,
-                              int32_t  aModType) MOZ_OVERRIDE;
+  virtual nscoord GetPrefISize(nsRenderingContext* aRenderingContext) MOZ_OVERRIDE;
+
+  virtual void Reflow(nsPresContext*           aPresContext,
+                      nsHTMLReflowMetrics&     aDesiredSize,
+                      const nsHTMLReflowState& aReflowState,
+                      nsReflowStatus&          aStatus) MOZ_OVERRIDE;
+
+  virtual nsresult AttributeChanged(int32_t  aNameSpaceID,
+                                    nsIAtom* aAttribute,
+                                    int32_t  aModType) MOZ_OVERRIDE;
 
   // nsIAnonymousContentCreator
   virtual nsresult CreateAnonymousContent(nsTArray<ContentInfo>& aElements) MOZ_OVERRIDE;
-  virtual void AppendAnonymousContentTo(nsBaseContentList& aElements,
+  virtual void AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
                                         uint32_t aFilter) MOZ_OVERRIDE;
 
-#ifdef NS_DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE {
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE {
     return MakeFrameName(NS_LITERAL_STRING("NumberControl"), aResult);
   }
 #endif
@@ -78,11 +85,56 @@ public:
       ~(nsIFrame::eReplaced | nsIFrame::eReplacedContainsBlock));
   }
 
+  // nsITextControlFrame
+  NS_IMETHOD    GetEditor(nsIEditor **aEditor) MOZ_OVERRIDE;
+
+  NS_IMETHOD    SetSelectionStart(int32_t aSelectionStart) MOZ_OVERRIDE;
+  NS_IMETHOD    SetSelectionEnd(int32_t aSelectionEnd) MOZ_OVERRIDE;
+
+  NS_IMETHOD    SetSelectionRange(int32_t aSelectionStart,
+                                  int32_t aSelectionEnd,
+                                  SelectionDirection aDirection = eNone) MOZ_OVERRIDE;
+
+  NS_IMETHOD    GetSelectionRange(int32_t* aSelectionStart,
+                                  int32_t* aSelectionEnd,
+                                  SelectionDirection* aDirection = nullptr) MOZ_OVERRIDE;
+
+  NS_IMETHOD    GetOwnedSelectionController(nsISelectionController** aSelCon) MOZ_OVERRIDE;
+  virtual nsFrameSelection* GetOwnedFrameSelection() MOZ_OVERRIDE;
+
+  virtual nsresult GetPhonetic(nsAString& aPhonetic) MOZ_OVERRIDE;
+
   /**
-   * When our HTMLInputElement's value changes, it calls this method to tell
-   * us to sync up our anonymous text input field child.
+   * Ensure mEditor is initialized with the proper flags and the default value.
+   * @throws NS_ERROR_NOT_INITIALIZED if mEditor has not been created
+   * @throws various and sundry other things
    */
-  void UpdateForValueChange(const nsAString& aValue);
+  virtual nsresult EnsureEditorInitialized() MOZ_OVERRIDE;
+
+  virtual nsresult ScrollSelectionIntoView() MOZ_OVERRIDE;
+
+  // nsIFormControlFrame
+  virtual void SetFocus(bool aOn, bool aRepaint) MOZ_OVERRIDE;
+  virtual nsresult SetFormProperty(nsIAtom* aName, const nsAString& aValue) MOZ_OVERRIDE;
+
+  /**
+   * This method attempts to localizes aValue and then sets the result as the
+   * value of our anonymous text control. It's called when our
+   * HTMLInputElement's value changes, when we need to sync up the value
+   * displayed in our anonymous text control.
+   */
+  void SetValueOfAnonTextControl(const nsAString& aValue);
+
+  /**
+   * This method gets the string value of our anonymous text control,
+   * attempts to normalizes (de-localizes) it, then sets the outparam aValue to
+   * the result. It's called when user input changes the text value of our
+   * anonymous text control so that we can sync up the internal value of our
+   * HTMLInputElement.
+   */
+  void GetValueOfAnonTextControl(nsAString& aValue);
+
+  bool AnonTextControlIsEmpty();
 
   /**
    * Called to notify this frame that its HTMLInputElement is currently
@@ -140,23 +192,19 @@ public:
 
 private:
 
+  nsITextControlFrame* GetTextFieldFrame();
   nsresult MakeAnonymousElement(Element** aResult,
                                 nsTArray<ContentInfo>& aElements,
                                 nsIAtom* aTagName,
                                 nsCSSPseudoElements::Type aPseudoType,
                                 nsStyleContext* aParentContext);
 
-  nsresult ReflowAnonymousContent(nsPresContext* aPresContext,
-                                  nsHTMLReflowMetrics& aWrappersDesiredSize,
-                                  const nsHTMLReflowState& aReflowState,
-                                  nsIFrame* aOuterWrapperFrame);
-
   class SyncDisabledStateEvent;
   friend class SyncDisabledStateEvent;
   class SyncDisabledStateEvent : public nsRunnable
   {
   public:
-    SyncDisabledStateEvent(nsNumberControlFrame* aFrame)
+    explicit SyncDisabledStateEvent(nsNumberControlFrame* aFrame)
     : mFrame(aFrame)
     {}
 

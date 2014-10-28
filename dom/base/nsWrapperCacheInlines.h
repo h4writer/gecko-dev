@@ -8,7 +8,7 @@
 
 #include "nsWrapperCache.h"
 #include "js/GCAPI.h"
-#include "js/Tracer.h"
+#include "js/TracingAPI.h"
 
 inline JSObject*
 nsWrapperCache::GetWrapper() const
@@ -55,7 +55,7 @@ nsWrapperCache::IsBlackAndDoesNotNeedTracing(nsISupports* aThis)
 inline void
 nsWrapperCache::TraceWrapperJSObject(JSTracer* aTrc, const char* aName)
 {
-  JS_CallHeapObjectTracer(aTrc, &mWrapper, aName);
+  JS_CallObjectTracer(aTrc, &mWrapper, aName);
 }
 
 #endif /* nsWrapperCache_h___ */

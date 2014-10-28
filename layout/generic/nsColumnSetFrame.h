@@ -3,35 +3,40 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#ifndef nsColumnSetFrame_h___
+#define nsColumnSetFrame_h___
+
 /* rendering object for css3 multi-column layout */
 
 #include "mozilla/Attributes.h"
 #include "nsContainerFrame.h"
+#include "nsIFrameInlines.h" // for methods used by IS_TRUE_OVERFLOW_CONTAINER
 
-class nsColumnSetFrame : public nsContainerFrame {
+class nsColumnSetFrame MOZ_FINAL : public nsContainerFrame {
 public:
   NS_DECL_FRAMEARENA_HELPERS
 
-  nsColumnSetFrame(nsStyleContext* aContext);
+  explicit nsColumnSetFrame(nsStyleContext* aContext);
 
-  NS_IMETHOD SetInitialChildList(ChildListID     aListID,
-                                 nsFrameList&    aChildList) MOZ_OVERRIDE;
+  virtual void Reflow(nsPresContext* aPresContext,
+                      nsHTMLReflowMetrics& aDesiredSize,
+                      const nsHTMLReflowState& aReflowState,
+                      nsReflowStatus& aStatus) MOZ_OVERRIDE;
 
-  NS_IMETHOD Reflow(nsPresContext* aPresContext,
-                    nsHTMLReflowMetrics& aDesiredSize,
-                    const nsHTMLReflowState& aReflowState,
-                    nsReflowStatus& aStatus) MOZ_OVERRIDE;
+#ifdef DEBUG
+  virtual void SetInitialChildList(ChildListID     aListID,
+                                   nsFrameList&    aChildList) MOZ_OVERRIDE;
+  virtual void AppendFrames(ChildListID     aListID,
+                            nsFrameList&    aFrameList) MOZ_OVERRIDE;
+  virtual void InsertFrames(ChildListID     aListID,
+                            nsIFrame*       aPrevFrame,
+                            nsFrameList&    aFrameList) MOZ_OVERRIDE;
+  virtual void RemoveFrame(ChildListID     aListID,
+                           nsIFrame*       aOldFrame) MOZ_OVERRIDE;
+#endif
 
-  NS_IMETHOD  AppendFrames(ChildListID     aListID,
-                           nsFrameList&    aFrameList) MOZ_OVERRIDE;
-  NS_IMETHOD  InsertFrames(ChildListID     aListID,
-                           nsIFrame*       aPrevFrame,
-                           nsFrameList&    aFrameList) MOZ_OVERRIDE;
-  NS_IMETHOD  RemoveFrame(ChildListID     aListID,
-                          nsIFrame*       aOldFrame) MOZ_OVERRIDE;
-
-  virtual nscoord GetMinWidth(nsRenderingContext *aRenderingContext) MOZ_OVERRIDE;
-  virtual nscoord GetPrefWidth(nsRenderingContext *aRenderingContext) MOZ_OVERRIDE;
+  virtual nscoord GetMinISize(nsRenderingContext *aRenderingContext) MOZ_OVERRIDE;
+  virtual nscoord GetPrefISize(nsRenderingContext *aRenderingContext) MOZ_OVERRIDE;
 
   /**
    * Retrieve the available height for content of this frame. The available content
@@ -39,7 +44,7 @@ public:
    */
   virtual nscoord GetAvailableContentHeight(const nsHTMLReflowState& aReflowState);
 
-  virtual nsIFrame* GetContentInsertionFrame() MOZ_OVERRIDE {
+  virtual nsContainerFrame* GetContentInsertionFrame() MOZ_OVERRIDE {
     nsIFrame* frame = GetFirstPrincipalChild();
 
     // if no children return nullptr
@@ -49,11 +54,12 @@ public:
     return frame->GetContentInsertionFrame();
   }
 
-  virtual nsresult StealFrame(nsPresContext* aPresContext,
-                              nsIFrame*      aChild,
-                              bool           aForceNormal) MOZ_OVERRIDE
-  { // nsColumnSetFrame keeps overflow containers in main child list
-    return nsContainerFrame::StealFrame(aPresContext, aChild, true);
+  virtual nsresult StealFrame(nsIFrame* aChild, bool aForceNormal) MOZ_OVERRIDE
+  {
+    // nsColumnSetFrame keeps true overflow containers in the normal flow
+    // child lists (i.e. the principal and overflow lists).
+    return nsContainerFrame::StealFrame(aChild,
+                                        IS_TRUE_OVERFLOW_CONTAINER(aChild));
   }
 
   virtual bool IsFrameOfType(uint32_t aFlags) const MOZ_OVERRIDE
@@ -72,8 +78,15 @@ public:
                                const nsRect&        aDirtyRect,
                                const nsPoint&       aPt);
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE {
+  /**
+   * Similar to nsBlockFrame::DrainOverflowLines. Locate any columns not
+   * handled by our prev-in-flow, and any columns sitting on our own
+   * overflow list, and put them in our primary child list for reflowing.
+   */
+  void DrainOverflowColumns();
+
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE {
     return MakeFrameName(NS_LITERAL_STRING("ColumnSet"), aResult);
   }
 #endif
@@ -150,13 +163,6 @@ protected:
     }
   };
 
-  /**
-   * Similar to nsBlockFrame::DrainOverflowLines. Locate any columns not
-   * handled by our prev-in-flow, and any columns sitting on our own
-   * overflow list, and put them in our primary child list for reflowing.
-   */
-  void DrainOverflowColumns();
-
   bool ReflowColumns(nsHTMLReflowMetrics& aDesiredSize,
                      const nsHTMLReflowState& aReflowState,
                      nsReflowStatus& aReflowStatus,
@@ -221,3 +227,5 @@ protected:
                         nsCollapsingMargin* aCarriedOutBottomMargin,
                         ColumnBalanceData& aColData);
 };
+
+#endif // nsColumnSetFrame_h___

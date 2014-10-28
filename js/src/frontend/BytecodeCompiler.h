@@ -16,6 +16,7 @@ namespace js {
 class AutoNameVector;
 class LazyScript;
 class LifoAlloc;
+class ScriptSourceObject;
 struct SourceCompressionTask;
 
 namespace frontend {
@@ -23,29 +24,29 @@ namespace frontend {
 JSScript *
 CompileScript(ExclusiveContext *cx, LifoAlloc *alloc,
               HandleObject scopeChain, HandleScript evalCaller,
-              const ReadOnlyCompileOptions &options, const jschar *chars, size_t length,
+              const ReadOnlyCompileOptions &options, SourceBufferHolder &srcBuf,
               JSString *source_ = nullptr, unsigned staticLevel = 0,
               SourceCompressionTask *extraSct = nullptr);
 
 bool
-CompileLazyFunction(JSContext *cx, LazyScript *lazy, const jschar *chars, size_t length);
+CompileLazyFunction(JSContext *cx, Handle<LazyScript*> lazy, const char16_t *chars, size_t length);
 
+/*
+ * enclosingStaticScope is a static enclosing scope (e.g. a StaticWithObject).
+ * Must be null if the enclosing scope is a global.
+ */
 bool
 CompileFunctionBody(JSContext *cx, MutableHandleFunction fun,
                     const ReadOnlyCompileOptions &options,
-                    const AutoNameVector &formals, const jschar *chars, size_t length);
+                    const AutoNameVector &formals, JS::SourceBufferHolder &srcBuf,
+                    HandleObject enclosingStaticScope);
 bool
 CompileStarGeneratorBody(JSContext *cx, MutableHandleFunction fun,
                          const ReadOnlyCompileOptions &options,
-                         const AutoNameVector &formals, const jschar *chars, size_t length);
+                         const AutoNameVector &formals, JS::SourceBufferHolder &srcBuf);
 
-/*
- * This should be called while still on the main thread if compilation will
- * occur on a worker thread.
- */
-void
-MaybeCallSourceHandler(JSContext *cx, const ReadOnlyCompileOptions &options,
-                       const jschar *chars, size_t length);
+ScriptSourceObject *
+CreateScriptSourceObject(ExclusiveContext *cx, const ReadOnlyCompileOptions &options);
 
 /*
  * True if str consists of an IdentifierStart character, followed by one or
@@ -65,7 +66,7 @@ IsKeyword(JSLinearString *str);
 
 /* GC marking. Defined in Parser.cpp. */
 void
-MarkParser(JSTracer *trc, AutoGCRooter *parser);
+MarkParser(JSTracer *trc, JS::AutoGCRooter *parser);
 
 } /* namespace frontend */
 } /* namespace js */

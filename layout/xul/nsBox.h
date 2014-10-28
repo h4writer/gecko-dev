@@ -11,10 +11,6 @@
 
 class nsITheme;
 
-#define NS_STATE_IS_ROOT        NS_FRAME_STATE_BIT(24)
-#define NS_STATE_SET_TO_DEBUG   NS_FRAME_STATE_BIT(26)
-#define NS_STATE_DEBUG_WAS_SET  NS_FRAME_STATE_BIT(27)
-
 class nsBox : public nsIFrame {
 
 public:
@@ -36,22 +32,22 @@ public:
   virtual void SetBounds(nsBoxLayoutState& aBoxLayoutState, const nsRect& aRect,
                          bool aRemoveOverflowAreas = false) MOZ_OVERRIDE;
 
-  NS_IMETHOD GetBorder(nsMargin& aBorderAndPadding) MOZ_OVERRIDE;
-  NS_IMETHOD GetPadding(nsMargin& aBorderAndPadding) MOZ_OVERRIDE;
-  NS_IMETHOD GetMargin(nsMargin& aMargin) MOZ_OVERRIDE;
+  virtual nsresult GetBorder(nsMargin& aBorderAndPadding) MOZ_OVERRIDE;
+  virtual nsresult GetPadding(nsMargin& aBorderAndPadding) MOZ_OVERRIDE;
+  virtual nsresult GetMargin(nsMargin& aMargin) MOZ_OVERRIDE;
 
   virtual Valignment GetVAlign() const MOZ_OVERRIDE { return vAlign_Top; }
   virtual Halignment GetHAlign() const MOZ_OVERRIDE { return hAlign_Left; }
 
-  NS_IMETHOD RelayoutChildAtOrdinal(nsBoxLayoutState& aState, nsIFrame* aChild) MOZ_OVERRIDE;
+  virtual nsresult RelayoutChildAtOrdinal(nsBoxLayoutState& aState, nsIFrame* aChild) MOZ_OVERRIDE;
 
 #ifdef DEBUG_LAYOUT
   NS_IMETHOD GetDebugBoxAt(const nsPoint& aPoint, nsIFrame** aBox);
-  NS_IMETHOD GetDebug(bool& aDebug) MOZ_OVERRIDE;
-  NS_IMETHOD SetDebug(nsBoxLayoutState& aState, bool aDebug) MOZ_OVERRIDE;
+  virtual nsresult GetDebug(bool& aDebug) MOZ_OVERRIDE;
+  virtual nsresult SetDebug(nsBoxLayoutState& aState, bool aDebug) MOZ_OVERRIDE;
 
-  NS_IMETHOD DumpBox(FILE* out) MOZ_OVERRIDE;
-  NS_HIDDEN_(void) PropagateDebug(nsBoxLayoutState& aState);
+  virtual nsresult DumpBox(FILE* out) MOZ_OVERRIDE;
+  void PropagateDebug(nsBoxLayoutState& aState);
 #endif
 
   nsBox();
@@ -64,7 +60,7 @@ rollbox.
   virtual bool DoesClipChildren();
   virtual bool ComputesOwnOverflowArea() = 0;
 
-  NS_HIDDEN_(nsresult) SyncLayout(nsBoxLayoutState& aBoxLayoutState);
+  nsresult SyncLayout(nsBoxLayoutState& aBoxLayoutState);
 
   bool DoesNeedRecalc(const nsSize& aSize);
   bool DoesNeedRecalc(nscoord aCoord);
@@ -81,6 +77,10 @@ rollbox.
   static nsSize BoundsCheck(const nsSize& aMinSize, const nsSize& aPrefSize, const nsSize& aMaxSize);
   static nscoord BoundsCheck(nscoord aMinSize, nscoord aPrefSize, nscoord aMaxSize);
 
+  static nsIFrame* GetChildBox(const nsIFrame* aFrame);
+  static nsIFrame* GetNextBox(const nsIFrame* aFrame);
+  static nsIFrame* GetParentBox(const nsIFrame* aFrame);
+
 protected:
 
 #ifdef DEBUG_LAYOUT
@@ -91,13 +91,13 @@ protected:
   
   virtual void GetLayoutFlags(uint32_t& aFlags);
 
-  NS_HIDDEN_(nsresult) BeginLayout(nsBoxLayoutState& aState);
+  nsresult BeginLayout(nsBoxLayoutState& aState);
   NS_IMETHOD DoLayout(nsBoxLayoutState& aBoxLayoutState);
-  NS_HIDDEN_(nsresult) EndLayout(nsBoxLayoutState& aState);
+  nsresult EndLayout(nsBoxLayoutState& aState);
 
 #ifdef DEBUG_LAYOUT
   virtual void GetBoxName(nsAutoString& aName);
-  NS_HIDDEN_(void) PropagateDebug(nsBoxLayoutState& aState);
+  void PropagateDebug(nsBoxLayoutState& aState);
 #endif
 
   static bool gGotTheme;

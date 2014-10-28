@@ -1,4 +1,4 @@
-// -*- Mode: js2; tab-width: 2; indent-tabs-mode: nil; js2-basic-offset: 2; js2-skip-preprocessor-directives: t; -*-
+// -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -63,11 +63,21 @@ var Browser = {
       messageManager.loadFrameScript("chrome://browser/content/library/SelectionPrototype.js", true);
       messageManager.loadFrameScript("chrome://browser/content/contenthandlers/SelectionHandler.js", true);
       messageManager.loadFrameScript("chrome://browser/content/contenthandlers/ContextMenuHandler.js", true);
-      messageManager.loadFrameScript("chrome://browser/content/contenthandlers/FindHandler.js", true);
       messageManager.loadFrameScript("chrome://browser/content/contenthandlers/ConsoleAPIObserver.js", true);
+      messageManager.loadFrameScript("chrome://browser/content/contenthandlers/PluginHelper.js", true);
     } catch (e) {
       // XXX whatever is calling startup needs to dump errors!
       dump("###########" + e + "\n");
+    }
+
+    if (!Services.metro) {
+      // Services.metro is only available on Windows Metro. We want to be able
+      // to test metro on other platforms, too, so we provide a minimal shim.
+      Services.metro = {
+        activationURI: "",
+        pinTileAsync: function () {},
+        unpinTileAsync: function () {}
+      };
     }
 
     /* handles dispatching clicks on browser into clicks in content or zooms */
@@ -154,7 +164,6 @@ var Browser = {
     messageManager.addMessageListener("scroll", this);
     messageManager.addMessageListener("Browser:CertException", this);
     messageManager.addMessageListener("Browser:BlockedSite", this);
-    messageManager.addMessageListener("Browser:TapOnSelection", this);
 
     Task.spawn(function() {
       // Activation URIs come from protocol activations, secondary tiles, and file activations
@@ -163,7 +172,10 @@ var Browser = {
       let self = this;
       function loadStartupURI() {
         if (activationURI) {
-          self.addTab(activationURI, true, null, { flags: Ci.nsIWebNavigation.LOAD_FLAGS_ALLOW_THIRD_PARTY_FIXUP });
+          let webNav = Ci.nsIWebNavigation;
+          let flags = webNav.LOAD_FLAGS_ALLOW_THIRD_PARTY_FIXUP |
+                      webNav.LOAD_FLAGS_FIXUP_SCHEME_TYPOS;
+          self.addTab(activationURI, true, null, { flags: flags });
         } else {
           let uri = commandURL || Browser.getHomePage();
           self.addTab(uri, true);
@@ -171,8 +183,10 @@ var Browser = {
       }
 
       // Should we restore the previous session (crash or some other event)
-      let ss = Cc["@mozilla.org/browser/sessionstore;1"].getService(Ci.nsISessionStore);
-      if (ss.shouldRestore() || Services.prefs.getBoolPref("browser.startup.sessionRestore")) {
+      let ss = Cc["@mozilla.org/browser/sessionstore;1"]
+               .getService(Ci.nsISessionStore);
+      let shouldRestore = ss.shouldRestore();
+      if (shouldRestore) {
         let bringFront = false;
         // First open any commandline URLs, except the homepage
         if (activationURI && activationURI != kStartURI) {
@@ -222,7 +236,6 @@ var Browser = {
     messageManager.removeMessageListener("scroll", this);
     messageManager.removeMessageListener("Browser:CertException", this);
     messageManager.removeMessageListener("Browser:BlockedSite", this);
-    messageManager.removeMessageListener("Browser:TapOnSelection", this);
 
     Services.obs.removeObserver(SessionHistoryObserver, "browser:purge-session-history");
 
@@ -462,6 +475,7 @@ var Browser = {
    *   is closed, we will return to a parent or "sibling" tab if possible.
    * @param aParams Object (optional) with optional properties:
    *   index: Number specifying where in the tab list to insert the new tab.
+   *   private: If true, the new tab should be have Private Browsing active.
    *   flags, postData, charset, referrerURI: See loadURIWithFlags.
    */
   addTab: function browser_addTab(aURI, aBringFront, aOwner, aParams) {
@@ -732,7 +746,7 @@ var Browser = {
     Services.metro.pinTileAsync(this._currentPageTileID,
                                 Browser.selectedBrowser.contentTitle, // short name
                                 Browser.selectedBrowser.contentTitle, // display name
-                                "metrobrowser -url " + Browser.selectedBrowser.currentURI.spec,
+                                "-url " + Browser.selectedBrowser.currentURI.spec,
                             uriSpec, uriSpec);
   },
 
@@ -850,16 +864,6 @@ var Browser = {
         break;
       case "Browser:BlockedSite":
         this._handleBlockedSite(aMessage);
-        break;
-      case "Browser:TapOnSelection":
-        if (!InputSourceHelper.isPrecise) {
-          if (SelectionHelperUI.isActive) {
-            SelectionHelperUI.shutdown();
-          }
-          if (SelectionHelperUI.canHandle(aMessage)) {
-            SelectionHelperUI.openEditSession(aMessage);
-          }
-        }
         break;
     }
   },
@@ -1007,7 +1011,7 @@ nsBrowserAccess.prototype = {
   _getOpenAction: function _getOpenAction(aURI, aOpener, aWhere, aContext) {
     let where = aWhere;
     /*
-     * aWhere: 
+     * aWhere:
      * OPEN_DEFAULTWINDOW: default action
      * OPEN_CURRENTWINDOW: current window/tab
      * OPEN_NEWWINDOW: not allowed, converted to newtab below
@@ -1083,10 +1087,6 @@ nsBrowserAccess.prototype = {
   isTabContentWindow: function(aWindow) {
     return Browser.browsers.some(function (browser) browser.contentWindow == aWindow);
   },
-
-  get contentWindow() {
-    return Browser.selectedBrowser.contentWindow;
-  }
 };
 
 /**
@@ -1208,16 +1208,17 @@ var SessionHistoryObserver = {
     if (aTopic != "browser:purge-session-history")
       return;
 
-    let back = document.getElementById("cmd_back");
-    back.setAttribute("disabled", "true");
-    let forward = document.getElementById("cmd_forward");
-    forward.setAttribute("disabled", "true");
-
-    let urlbar = document.getElementById("urlbar-edit");
-    if (urlbar) {
-      // Clear undo history of the URL bar
-      urlbar.editor.transactionManager.clear();
+    let newTab = Browser.addTab("about:start", true);
+    let tab = Browser._tabs[0];
+    while(tab != newTab) {
+      Browser.closeTab(tab, { forceClose: true } );
+      tab = Browser._tabs[0];
     }
+
+    PlacesUtils.history.removeAllPages();
+
+    // Clear undo history of the URL bar
+    BrowserUI._edit.editor.transactionManager.clear();
   }
 };
 
@@ -1239,6 +1240,13 @@ function Tab(aURI, aParams, aOwner) {
   this._chromeTab = null;
   this._eventDeferred = null;
   this._updateThumbnailTimeout = null;
+
+  this._private = false;
+  if ("private" in aParams) {
+    this._private = aParams.private;
+  } else if (aOwner) {
+    this._private = aOwner._private;
+  }
 
   this.owner = aOwner || null;
 
@@ -1267,6 +1275,10 @@ Tab.prototype = {
     return this._chromeTab;
   },
 
+  get isPrivate() {
+    return this._private;
+  },
+
   get pageShowPromise() {
     return this._eventDeferred ? this._eventDeferred.promise : null;
   },
@@ -1292,6 +1304,10 @@ Tab.prototype = {
     this._eventDeferred = Promise.defer();
 
     this._chromeTab = Elements.tabList.addTab(aParams.index);
+    if (this.isPrivate) {
+      this._chromeTab.setAttribute("private", "true");
+    }
+
     this._id = Browser.createTabId();
     let browser = this._createBrowser(aURI, null);
 
@@ -1336,6 +1352,12 @@ Tab.prototype = {
         this.updateViewport();
         this._delayUpdateThumbnail();
         break;
+      case "AlertClose": {
+        if (this == Browser.selectedTab) {
+          this.updateViewport();
+        }
+        break;
+      }
     }
   },
 
@@ -1427,9 +1449,9 @@ Tab.prototype = {
     browser.id = "browser-" + this._id;
     this._chromeTab.linkedBrowser = browser;
 
-    browser.setAttribute("type", "content");
+    browser.setAttribute("type", "content-targetable");
 
-    let useRemote = Services.appinfo.browserTabsRemote;
+    let useRemote = Services.appinfo.browserTabsRemoteAutostart;
     let useLocal = Util.isLocalScheme(aURI);
     browser.setAttribute("remote", (!useLocal && useRemote) ? "true" : "false");
 
@@ -1442,15 +1464,18 @@ Tab.prototype = {
     Elements.browsers.insertBefore(notification, aInsertBefore);
 
     notification.dir = "reverse";
+    notification.addEventListener("AlertClose", this);
 
      // let the content area manager know about this browser.
     ContentAreaObserver.onBrowserCreated(browser);
 
+    if (this.isPrivate) {
+      let ctx = browser.docShell.QueryInterface(Ci.nsILoadContext);
+      ctx.usePrivateBrowsing = true;
+    }
+
     // stop about:blank from loading
     browser.stop();
-
-    let fl = browser.QueryInterface(Ci.nsIFrameLoaderOwner).frameLoader;
-    fl.renderMode = Ci.nsIFrameLoader.RENDER_MODE_ASYNC_SCROLL;
 
     return browser;
   },
@@ -1458,6 +1483,7 @@ Tab.prototype = {
   _destroyBrowser: function _destroyBrowser() {
     if (this._browser) {
       let notification = this._notification;
+      notification.removeEventListener("AlertClose", this);
       let browser = this._browser;
       browser.active = false;
 
@@ -1470,7 +1496,9 @@ Tab.prototype = {
   },
 
   updateThumbnail: function updateThumbnail() {
-    PageThumbs.captureToCanvas(this.browser.contentWindow, this._chromeTab.thumbnailCanvas);
+    if (!this.isPrivate) {
+      PageThumbs.captureToCanvas(this.browser.contentWindow, this._chromeTab.thumbnailCanvas);
+    }
   },
 
   updateFavicon: function updateFavicon() {
@@ -1485,14 +1513,16 @@ Tab.prototype = {
     let browser = this._browser;
 
     if (aActive) {
+      notification.classList.add("active-tab-notificationbox");
       browser.setAttribute("type", "content-primary");
       Elements.browsers.selectedPanel = notification;
       browser.active = true;
       Elements.tabList.selectedTab = this._chromeTab;
       browser.focus();
     } else {
+      notification.classList.remove("active-tab-notificationbox");
       browser.messageManager.sendAsyncMessage("Browser:Blur", { });
-      browser.setAttribute("type", "content");
+      browser.setAttribute("type", "content-targetable");
       browser.active = false;
     }
   },

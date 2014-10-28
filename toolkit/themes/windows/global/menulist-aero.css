@@ -5,7 +5,7 @@
 % include all of the Luna styles
 %include menulist.css
 
-menulist:-moz-focusring:not([open="true"]):not(.menulist-compact) > .menulist-label-box {
+menulist:-moz-focusring:not([open="true"]) > .menulist-label-box {
   border: 1px dotted ThreeDDarkShadow;
 }
 
@@ -19,6 +19,10 @@ menulist:-moz-focusring:not([open="true"]):not(.menulist-compact) > .menulist-la
     margin-top: -1px !important;
     margin-bottom: -1px !important;
     -moz-margin-start: 0 !important;
+  }
+
+  .menulist-description {
+    -moz-margin-start: 1ex !important;
   }
 
   menulist:not([editable="true"]) > .menulist-dropmarker {

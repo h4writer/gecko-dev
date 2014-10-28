@@ -4,58 +4,86 @@
  * You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-[Pref="dom.datastore.enabled",
- JSImplementation="@mozilla.org/dom/datastore;1"]
+typedef (DOMString or unsigned long) DataStoreKey;
+
+// TODO Bug 957086 - The constructor and the setDataStoreImpl(...) will be
+//                   removed once the DataStore API is fully rewritten in C++,
+//                   which currently plays a role of C++ proxy directing to the
+//                   JS codes implemented by the DataStoreImpl WebIDL.
+
+[Func="Navigator::HasDataStoreSupport",
+ ChromeConstructor,
+ Exposed=(Window,Worker)]
 interface DataStore : EventTarget {
   // Returns the label of the DataSource.
+  [GetterThrows]
   readonly attribute DOMString name;
 
   // Returns the origin of the DataSource (e.g., 'facebook.com').
   // This value is the manifest URL of the owner app.
+  [GetterThrows]
   readonly attribute DOMString owner;
 
   // is readOnly a F(current_app, datastore) function? yes
+  [GetterThrows]
   readonly attribute boolean readOnly;
 
-  // Promise<any>
-  Promise get(unsigned long id);
+  [Throws]
+  Promise<any> get(DataStoreKey... id);
 
-  // Promise<any>
-  Promise get(sequence<unsigned long> id);
+  [Throws]
+  Promise<void> put(any obj, DataStoreKey id, optional DOMString revisionId = "");
 
-  // Promise<void>
-  Promise put(any obj, unsigned long id);
+  [Throws]
+  Promise<DataStoreKey> add(any obj, optional DataStoreKey id,
+                            optional DOMString revisionId = "");
 
-  // Promise<unsigned long>
-  Promise add(any obj, optional unsigned long id);
+  [Throws]
+  Promise<boolean> remove(DataStoreKey id, optional DOMString revisionId = "");
 
-  // Promise<boolean>
-  Promise remove(unsigned long id);
+  [Throws]
+  Promise<void> clear(optional DOMString revisionId = "");
 
-  // Promise<void>
-  Promise clear();
-
+  [GetterThrows]
   readonly attribute DOMString revisionId;
 
   attribute EventHandler onchange;
 
-  // Promise<unsigned long>
-  Promise getLength();
+  [Throws]
+  Promise<unsigned long> getLength();
 
+  [NewObject, Throws]
   DataStoreCursor sync(optional DOMString revisionId = "");
 };
 
-[Pref="dom.datastore.enabled",
- JSImplementation="@mozilla.org/dom/datastore-cursor;1"]
-interface DataStoreCursor {
+partial interface DataStore {
+  [ChromeOnly, Throws]
+  void setDataStoreImpl(DataStoreImpl store);
+};
 
+// TODO Bug 957086 - The constructor and the setDataStoreCursorImpl(...) will be
+//                   removed once the DataStore API is fully rewritten in C++,
+//                   which currently plays a role of C++ proxy directing to the
+//                   JS codes implemented by the DataStoreCursorImpl WebIDL.
+
+[Func="Navigator::HasDataStoreSupport",
+ ChromeConstructor,
+ Exposed=(Window,Worker)]
+interface DataStoreCursor {
   // the DataStore
+  [GetterThrows]
   readonly attribute DataStore store;
 
-  // Promise<DataStoreTask>
-  Promise next();
+  [Throws]
+  Promise<DataStoreTask> next();
 
+  [Throws]
   void close();
+};
+
+partial interface DataStoreCursor {
+  [ChromeOnly]
+  void setDataStoreCursorImpl(DataStoreCursorImpl cursor);
 };
 
 enum DataStoreOperation {
@@ -70,6 +98,15 @@ dictionary DataStoreTask {
   DOMString revisionId;
 
   DataStoreOperation operation;
-  unsigned long id;
+
+  // When |operation| is "clear" or "done", this must return null.
+  DataStoreKey? id;
   any data;
+};
+
+// For internal use.
+dictionary DataStoreRevisionData {
+  DOMString revisionId = "";
+  unsigned long objectId = 0;
+  DOMString operation = "";
 };

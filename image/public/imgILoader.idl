@@ -16,9 +16,9 @@ interface nsIStreamListener;
 interface nsIURI;
 
 interface nsISimpleEnumerator;
-interface nsIChannelPolicy;
 
 #include "nsIRequest.idl" // for nsLoadFlags
+#include "nsIContentPolicy.idl" // for nsContentPolicyType
 
 /**
  * imgILoader interface
@@ -27,7 +27,7 @@ interface nsIChannelPolicy;
  * @version 0.3
  * @see imagelib2
  */
-[scriptable, builtinclass, uuid(c8126129-8dac-43cd-b1ba-3896fba2dd01)]
+[scriptable, builtinclass, uuid(42ef3b0a-cd82-454b-b4c4-f3470014a68b)]
 interface imgILoader : nsISupports
 {
   // Extra flags to pass to loadImage if you want a load to use CORS
@@ -47,6 +47,9 @@ interface imgILoader : nsISupports
    * @param aLoadFlags Load flags for the request
    * @param aCacheKey cache key to use for a load if the original
    *                  image came from a request that had post data
+   * @param aContentPolicyType [optional] the nsContentPolicyType to
+   *                           use for this load. Defaults to
+   *                           nsIContentPolicy::TYPE_IMAGE
 
 
    * libpr0n does NOT keep a strong ref to the observer; this prevents
@@ -63,13 +66,14 @@ interface imgILoader : nsISupports
                              in nsISupports aCX,
                              in nsLoadFlags aLoadFlags,
                              in nsISupports cacheKey,
-                             in nsIChannelPolicy channelPolicy);
+                             [optional]
+                             in nsContentPolicyType aContentPolicyType);
 
   /**
    * Start the load and decode of an image.
    * @param aChannel the channel to load the image from.  This must
    *                 already be opened before ths method is called, and there
-   *                 must have been no OnDataAvailable calls for it yet.   
+   *                 must have been no OnDataAvailable calls for it yet.
    * @param aObserver the observer (may be null)
    * @param cx some random data
    * @param aListener [out]

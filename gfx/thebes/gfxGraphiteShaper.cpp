@@ -6,6 +6,8 @@
 #include "gfxGraphiteShaper.h"
 #include "nsString.h"
 #include "gfxContext.h"
+#include "gfxFontConstants.h"
+#include "gfxTextRun.h"
 
 #include "graphite2/Font.h"
 #include "graphite2/Segment.h"
@@ -29,7 +31,7 @@ using namespace mozilla; // for AutoSwap_* types
 gfxGraphiteShaper::gfxGraphiteShaper(gfxFont *aFont)
     : gfxFontShaper(aFont),
       mGrFace(mFont->GetFontEntry()->GetGrFace()),
-      mGrFont(nullptr)
+      mGrFont(nullptr), mFallbackToSmallCaps(false)
 {
     mCallbackData.mFont = aFont;
     mCallbackData.mShaper = this;
@@ -83,10 +85,11 @@ AddFeature(const uint32_t& aTag, uint32_t& aValue, void *aUserArg)
 
 bool
 gfxGraphiteShaper::ShapeText(gfxContext      *aContext,
-                             const PRUnichar *aText,
+                             const char16_t *aText,
                              uint32_t         aOffset,
                              uint32_t         aLength,
                              int32_t          aScript,
+                             bool             aVertical,
                              gfxShapedText   *aShapedText)
 {
     // some font back-ends require this in order to get proper hinted metrics
@@ -95,6 +98,8 @@ gfxGraphiteShaper::ShapeText(gfxContext      *aContext,
     }
 
     mCallbackData.mContext = aContext;
+
+    const gfxFontStyle *style = mFont->GetStyle();
 
     if (!mGrFont) {
         if (!mGrFace) {
@@ -116,10 +121,24 @@ gfxGraphiteShaper::ShapeText(gfxContext      *aContext,
         if (!mGrFont) {
             return false;
         }
+
+        // determine whether petite-caps falls back to small-caps
+        if (style->variantCaps != NS_FONT_VARIANT_CAPS_NORMAL) {
+            switch (style->variantCaps) {
+                case NS_FONT_VARIANT_CAPS_ALLPETITE:
+                case NS_FONT_VARIANT_CAPS_PETITECAPS:
+                    bool synLower, synUpper;
+                    mFont->SupportsVariantCaps(aScript, style->variantCaps,
+                                               mFallbackToSmallCaps, synLower,
+                                               synUpper);
+                    break;
+                default:
+                    break;
+            }
+        }
     }
 
     gfxFontEntry *entry = mFont->GetFontEntry();
-    const gfxFontStyle *style = mFont->GetStyle();
     uint32_t grLang = 0;
     if (style->languageOverride) {
         grLang = MakeGraphiteLangTag(style->languageOverride);
@@ -132,13 +151,14 @@ gfxGraphiteShaper::ShapeText(gfxContext      *aContext,
     }
     gr_feature_val *grFeatures = gr_face_featureval_for_lang(mGrFace, grLang);
 
+    // if style contains font-specific features
     nsDataHashtable<nsUint32HashKey,uint32_t> mergedFeatures;
 
-    // if style contains font-specific features
     if (MergeFontFeatures(style,
                           mFont->GetFontEntry()->mFeatureSettings,
                           aShapedText->DisableLigatures(),
                           mFont->GetFontEntry()->FamilyName(),
+                          mFallbackToSmallCaps,
                           mergedFeatures))
     {
         // enumerate result and insert into Graphite feature list
@@ -183,7 +203,7 @@ gfxGraphiteShaper::SetGlyphsFromSegment(gfxContext      *aContext,
                                         gfxShapedText   *aShapedText,
                                         uint32_t         aOffset,
                                         uint32_t         aLength,
-                                        const PRUnichar *aText,
+                                        const char16_t *aText,
                                         gr_segment      *aSegment)
 {
     int32_t dev2appUnits = aShapedText->GetAppUnitsPerDevUnit();
@@ -192,10 +212,10 @@ gfxGraphiteShaper::SetGlyphsFromSegment(gfxContext      *aContext,
     uint32_t glyphCount = gr_seg_n_slots(aSegment);
 
     // identify clusters; graphite may have reordered/expanded/ligated glyphs.
-    nsAutoTArray<Cluster,SMALL_GLYPH_RUN> clusters;
-    nsAutoTArray<uint16_t,SMALL_GLYPH_RUN> gids;
-    nsAutoTArray<float,SMALL_GLYPH_RUN> xLocs;
-    nsAutoTArray<float,SMALL_GLYPH_RUN> yLocs;
+    AutoFallibleTArray<Cluster,SMALL_GLYPH_RUN> clusters;
+    AutoFallibleTArray<uint16_t,SMALL_GLYPH_RUN> gids;
+    AutoFallibleTArray<float,SMALL_GLYPH_RUN> xLocs;
+    AutoFallibleTArray<float,SMALL_GLYPH_RUN> yLocs;
 
     if (!clusters.SetLength(aLength) ||
         !gids.SetLength(glyphCount) ||

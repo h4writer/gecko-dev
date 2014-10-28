@@ -20,6 +20,7 @@
 // Boilerplate used to be able to import this module both from the main
 // thread and from worker threads.
 if (typeof Components != "undefined") {
+  Components.utils.importGlobalProperties(["URL"]);
   // Global definition of |exports|, to keep everybody happy.
   // In non-main thread, |exports| is provided by the module
   // loader.
@@ -33,7 +34,9 @@ let EXPORTED_SYMBOLS = [
   "dirname",
   "join",
   "normalize",
-  "split"
+  "split",
+  "toFileURI",
+  "fromFileURI",
 ];
 
 /**
@@ -75,15 +78,23 @@ exports.dirname = dirname;
  *  var path = OS.Path.join(tmpDir, "foo", "bar");
  *
  * Under Unix, this will return "/tmp/foo/bar".
+ *
+ * Empty components are ignored, i.e. `OS.Path.join("foo", "", "bar)` is the
+ * same as `OS.Path.join("foo", "bar")`.
  */
-let join = function(path /*...*/) {
+let join = function(...path) {
   // If there is a path that starts with a "/", eliminate everything before
   let paths = [];
-  for each(let i in arguments) {
-    if (i.length != 0 && i[0] == "/") {
-      paths = [i];
+  for (let subpath of path) {
+    if (subpath == null) {
+      throw new TypeError("invalid path component");
+    }
+    if (subpath.length == 0) {
+      continue;
+    } else if (subpath[0] == "/") {
+      paths = [subpath];
     } else {
-      paths.push(i);
+      paths.push(subpath);
     }
   }
   return paths.join("/");
@@ -147,6 +158,37 @@ let split = function(path) {
   };
 };
 exports.split = split;
+
+/**
+ * Returns the file:// URI file path of the given local file path.
+ */
+// The case of %3b is designed to match Services.io, but fundamentally doesn't matter.
+let toFileURIExtraEncodings = {';': '%3b', '?': '%3F', "'": '%27', '#': '%23'};
+let toFileURI = function toFileURI(path) {
+  let uri = encodeURI(this.normalize(path));
+
+  // add a prefix, and encodeURI doesn't escape a few characters that we do
+  // want to escape, so fix that up
+  let prefix = "file://";
+  uri = prefix + uri.replace(/[;?'#]/g, match => toFileURIExtraEncodings[match]);
+
+  return uri;
+};
+exports.toFileURI = toFileURI;
+
+/**
+ * Returns the local file path from a given file URI.
+ */
+let fromFileURI = function fromFileURI(uri) {
+  let url = new URL(uri);
+  if (url.protocol != 'file:') {
+    throw new Error("fromFileURI expects a file URI");
+  }
+  let path = this.normalize(decodeURIComponent(url.pathname));
+  return path;
+};
+exports.fromFileURI = fromFileURI;
+
 
 //////////// Boilerplate
 if (typeof Components != "undefined") {

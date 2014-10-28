@@ -18,8 +18,8 @@
 
 using namespace mozilla;
 
-NS_IMPL_ISUPPORTS_INHERITED1(nsEffectiveTLDService, MemoryUniReporter,
-                             nsIEffectiveTLDService)
+NS_IMPL_ISUPPORTS(nsEffectiveTLDService, nsIEffectiveTLDService,
+                  nsIMemoryReporter)
 
 // ----------------------------------------------------------------------
 
@@ -62,14 +62,7 @@ nsDomainEntry::FuncForStaticAsserts(void)
 static nsEffectiveTLDService *gService = nullptr;
 
 nsEffectiveTLDService::nsEffectiveTLDService()
-  // We'll probably have to rehash at least once, since nsTHashtable doesn't
-  // use a perfect hash, but at least we'll save a few rehashes along the way.
-  // Next optimization here is to precompute the hash using something like
-  // gperf, but one step at a time.  :-)
-  : MemoryUniReporter("explicit/xpcom/effective-TLD-service",
-                       KIND_HEAP, UNITS_BYTES,
-                       "Memory used by the effective TLD service.")
-  , mHash(ArrayLength(nsDomainEntry::entries))
+  : mHash(ArrayLength(nsDomainEntry::entries))
 {
 }
 
@@ -110,10 +103,16 @@ nsEffectiveTLDService::~nsEffectiveTLDService()
   gService = nullptr;
 }
 
-int64_t
-nsEffectiveTLDService::Amount()
+MOZ_DEFINE_MALLOC_SIZE_OF(EffectiveTLDServiceMallocSizeOf)
+
+NS_IMETHODIMP
+nsEffectiveTLDService::CollectReports(nsIHandleReportCallback* aHandleReport,
+                                      nsISupports* aData, bool aAnonymize)
 {
-  return SizeOfIncludingThis(MallocSizeOf);
+  return MOZ_COLLECT_REPORT(
+    "explicit/xpcom/effective-TLD-service", KIND_HEAP, UNITS_BYTES,
+    SizeOfIncludingThis(EffectiveTLDServiceMallocSizeOf),
+    "Memory used by the effective TLD service.");
 }
 
 size_t

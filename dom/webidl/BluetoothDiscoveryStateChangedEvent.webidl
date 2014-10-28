@@ -4,13 +4,16 @@
  * You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-[Constructor(DOMString type, optional BluetoothDiscoveryStateChangedEventInit eventInitDict), HeaderFile="GeneratedEventClasses.h"]
+[Constructor(DOMString type,
+             optional BluetoothDiscoveryStateChangedEventInit eventInitDict),
+ CheckPermissions="bluetooth"]
 interface BluetoothDiscoveryStateChangedEvent : Event
 {
-  readonly attribute boolean discovering;
+    readonly attribute boolean discovering;
 };
 
 dictionary BluetoothDiscoveryStateChangedEventInit : EventInit
 {
-  boolean discovering = false;
+    boolean discovering = false;
 };
+

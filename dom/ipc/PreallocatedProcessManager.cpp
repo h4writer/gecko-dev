@@ -8,10 +8,10 @@
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/dom/ContentParent.h"
+#include "mozilla/dom/ScriptSettings.h"
 #include "nsIPropertyBag2.h"
 #include "ProcessPriorityManager.h"
 #include "nsServiceManagerUtils.h"
-#include "nsCxPusher.h"
 
 #ifdef MOZ_NUWA_PROCESS
 #include "ipc/Nuwa.h"
@@ -54,11 +54,12 @@ public:
   void DelayedNuwaFork();
   void PublishSpareProcess(ContentParent* aContent);
   void MaybeForgetSpare(ContentParent* aContent);
+  bool IsNuwaReady();
   void OnNuwaReady();
+  bool PreallocatedProcessReady();
   already_AddRefed<ContentParent> GetSpareProcess();
 
 private:
-  void OnNuwaForkTimeout();
   void NuwaFork();
 
   // initialization off the critical path of app startup.
@@ -67,7 +68,6 @@ private:
   // The array containing the preallocated processes. 4 as the inline storage size
   // should be enough so we don't need to grow the nsAutoTArray.
   nsAutoTArray<nsRefPtr<ContentParent>, 4> mSpareProcesses;
-  nsTArray<CancelableTask*> mNuwaForkWaitTasks;
 
   // Nuwa process is ready for creating new process.
   bool mIsNuwaReady;
@@ -77,6 +77,7 @@ private:
   static mozilla::StaticRefPtr<PreallocatedProcessManagerImpl> sSingleton;
 
   PreallocatedProcessManagerImpl();
+  ~PreallocatedProcessManagerImpl() {}
   DISALLOW_EVIL_CONSTRUCTORS(PreallocatedProcessManagerImpl);
 
   void Init();
@@ -107,7 +108,7 @@ PreallocatedProcessManagerImpl::Singleton()
   return sSingleton;
 }
 
-NS_IMPL_ISUPPORTS1(PreallocatedProcessManagerImpl, nsIObserver)
+NS_IMPL_ISUPPORTS(PreallocatedProcessManagerImpl, nsIObserver)
 
 PreallocatedProcessManagerImpl::PreallocatedProcessManagerImpl()
   : mEnabled(false)
@@ -135,7 +136,7 @@ PreallocatedProcessManagerImpl::Init()
 NS_IMETHODIMP
 PreallocatedProcessManagerImpl::Observe(nsISupports* aSubject,
                                         const char* aTopic,
-                                        const PRUnichar* aData)
+                                        const char16_t* aData)
 {
   if (!strcmp("ipc:content-shutdown", aTopic)) {
     ObserveProcessShutdown(aSubject);
@@ -246,7 +247,7 @@ PreallocatedProcessManagerImpl::DelayedNuwaFork()
   mPreallocateAppProcessTask = nullptr;
 
   if (!mIsNuwaReady) {
-    if (!mPreallocatedAppProcess && !mShutdown) {
+    if (!mPreallocatedAppProcess && !mShutdown && mEnabled) {
       mPreallocatedAppProcess = ContentParent::RunNuwaProcess();
     }
     // else mPreallocatedAppProcess is starting. It will NuwaFork() when ready.
@@ -293,12 +294,7 @@ PreallocatedProcessManagerImpl::PublishSpareProcess(ContentParent* aContent)
       do_GetService("@mozilla.org/parentprocessmessagemanager;1");
     nsresult rv = ppmm->BroadcastAsyncMessage(
       NS_LITERAL_STRING("TEST-ONLY:nuwa-add-new-process"),
-      JSVAL_NULL, JSVAL_NULL, cx, 1);
-  }
-
-  if (!mNuwaForkWaitTasks.IsEmpty()) {
-    mNuwaForkWaitTasks.ElementAt(0)->Cancel();
-    mNuwaForkWaitTasks.RemoveElementAt(0);
+      JS::NullHandleValue, JS::NullHandleValue, cx, 1);
   }
 
   mSpareProcesses.AppendElement(aContent);
@@ -316,8 +312,19 @@ PreallocatedProcessManagerImpl::MaybeForgetSpare(ContentParent* aContent)
   if (aContent == mPreallocatedAppProcess) {
     mPreallocatedAppProcess = nullptr;
     mIsNuwaReady = false;
+    while (mSpareProcesses.Length() > 0) {
+      nsRefPtr<ContentParent> process = mSpareProcesses[mSpareProcesses.Length() - 1];
+      process->Close();
+      mSpareProcesses.RemoveElementAt(mSpareProcesses.Length() - 1);
+    }
     ScheduleDelayedNuwaFork();
   }
+}
+
+bool
+PreallocatedProcessManagerImpl::IsNuwaReady()
+{
+  return mIsNuwaReady;
 }
 
 void
@@ -325,7 +332,7 @@ PreallocatedProcessManagerImpl::OnNuwaReady()
 {
   NS_ASSERTION(!mIsNuwaReady, "Multiple Nuwa processes created!");
   ProcessPriorityManager::SetProcessPriority(mPreallocatedAppProcess,
-                                             hal::PROCESS_PRIORITY_FOREGROUND);
+                                             hal::PROCESS_PRIORITY_MASTER);
   mIsNuwaReady = true;
   if (Preferences::GetBool("dom.ipc.processPriorityManager.testMode")) {
     AutoJSContext cx;
@@ -333,33 +340,21 @@ PreallocatedProcessManagerImpl::OnNuwaReady()
       do_GetService("@mozilla.org/parentprocessmessagemanager;1");
     nsresult rv = ppmm->BroadcastAsyncMessage(
       NS_LITERAL_STRING("TEST-ONLY:nuwa-ready"),
-      JSVAL_NULL, JSVAL_NULL, cx, 1);
+      JS::NullHandleValue, JS::NullHandleValue, cx, 1);
   }
   NuwaFork();
 }
 
-void
-PreallocatedProcessManagerImpl::OnNuwaForkTimeout()
+bool
+PreallocatedProcessManagerImpl::PreallocatedProcessReady()
 {
-  if (!mNuwaForkWaitTasks.IsEmpty()) {
-    mNuwaForkWaitTasks.RemoveElementAt(0);
-  }
-
-  // We haven't RecvAddNewProcess() after NuwaFork(). Maybe the main
-  // thread of the Nuwa process is in deadlock.
-  MOZ_ASSERT(false, "Can't fork from the nuwa process.");
+  return !mSpareProcesses.IsEmpty();
 }
+
 
 void
 PreallocatedProcessManagerImpl::NuwaFork()
 {
-  CancelableTask* nuwaForkTimeoutTask = NewRunnableMethod(
-    this, &PreallocatedProcessManagerImpl::OnNuwaForkTimeout);
-  mNuwaForkWaitTasks.AppendElement(nuwaForkTimeoutTask);
-
-  MessageLoop::current()->PostDelayedTask(FROM_HERE,
-                                          nuwaForkTimeoutTask,
-                                          NUWA_FORK_WAIT_DURATION_MS);
   mPreallocatedAppProcess->SendNuwaFork();
 }
 #endif
@@ -473,6 +468,19 @@ PreallocatedProcessManager::OnNuwaReady()
 {
   GetPPMImpl()->OnNuwaReady();
 }
+
+/* static */ bool
+PreallocatedProcessManager::IsNuwaReady()
+{
+  return GetPPMImpl()->IsNuwaReady();
+}
+
+/*static */ bool
+PreallocatedProcessManager::PreallocatedProcessReady()
+{
+  return GetPPMImpl()->PreallocatedProcessReady();
+}
+
 #endif
 
 } // namespace mozilla

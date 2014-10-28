@@ -7,36 +7,18 @@ function run_test() {
   run_next_test();
 }
 
-function _getWorker() {
-  let _postedMessage;
-  let _worker = newWorker({
-    postRILMessage: function fakePostRILMessage(data) {
-    },
-    postMessage: function fakePostMessage(message) {
-      _postedMessage = message;
-    }
-  });
-  return {
-    get postedMessage() {
-      return _postedMessage;
-    },
-    get worker() {
-      return _worker;
-    }
-  };
-}
-
 add_test(function test_setVoicePrivacyMode_success() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
-  worker.RIL.setVoicePrivacyMode = function fakeSetVoicePrivacyMode(options) {
-    worker.RIL[REQUEST_CDMA_SET_PREFERRED_VOICE_PRIVACY_MODE](0, {
+  context.RIL.setVoicePrivacyMode = function fakeSetVoicePrivacyMode(options) {
+    context.RIL[REQUEST_CDMA_SET_PREFERRED_VOICE_PRIVACY_MODE](0, {
       rilRequestError: ERROR_SUCCESS
     });
   };
 
-  worker.RIL.setVoicePrivacyMode({
+  context.RIL.setVoicePrivacyMode({
     enabled: true
   });
 
@@ -48,16 +30,17 @@ add_test(function test_setVoicePrivacyMode_success() {
 });
 
 add_test(function test_setVoicePrivacyMode_generic_failure() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
-  worker.RIL.setVoicePrivacyMode = function fakeSetVoicePrivacyMode(options) {
-    worker.RIL[REQUEST_CDMA_SET_PREFERRED_VOICE_PRIVACY_MODE](0, {
+  context.RIL.setVoicePrivacyMode = function fakeSetVoicePrivacyMode(options) {
+    context.RIL[REQUEST_CDMA_SET_PREFERRED_VOICE_PRIVACY_MODE](0, {
       rilRequestError: ERROR_GENERIC_FAILURE
     });
   };
 
-  worker.RIL.setVoicePrivacyMode({
+  context.RIL.setVoicePrivacyMode({
     enabled: true
   });
 
@@ -69,20 +52,21 @@ add_test(function test_setVoicePrivacyMode_generic_failure() {
 });
 
 add_test(function test_queryVoicePrivacyMode_success_enabled_true() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
-  worker.Buf.readInt32List = function fakeReadUint32List() {
+  context.Buf.readInt32List = function fakeReadUint32List() {
     return [1];
   };
 
-  worker.RIL.queryVoicePrivacyMode = function fakeQueryVoicePrivacyMode(options) {
-    worker.RIL[REQUEST_CDMA_QUERY_PREFERRED_VOICE_PRIVACY_MODE](1, {
+  context.RIL.queryVoicePrivacyMode = function fakeQueryVoicePrivacyMode(options) {
+    context.RIL[REQUEST_CDMA_QUERY_PREFERRED_VOICE_PRIVACY_MODE](1, {
       rilRequestError: ERROR_SUCCESS
     });
   };
 
-  worker.RIL.queryVoicePrivacyMode();
+  context.RIL.queryVoicePrivacyMode();
 
   let postedMessage = workerHelper.postedMessage;
 
@@ -92,20 +76,21 @@ add_test(function test_queryVoicePrivacyMode_success_enabled_true() {
 });
 
 add_test(function test_queryVoicePrivacyMode_success_enabled_false() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
-  worker.Buf.readInt32List = function fakeReadUint32List() {
+  context.Buf.readInt32List = function fakeReadUint32List() {
     return [0];
   };
 
-  worker.RIL.queryVoicePrivacyMode = function fakeQueryVoicePrivacyMode(options) {
-    worker.RIL[REQUEST_CDMA_QUERY_PREFERRED_VOICE_PRIVACY_MODE](1, {
+  context.RIL.queryVoicePrivacyMode = function fakeQueryVoicePrivacyMode(options) {
+    context.RIL[REQUEST_CDMA_QUERY_PREFERRED_VOICE_PRIVACY_MODE](1, {
       rilRequestError: ERROR_SUCCESS
     });
   };
 
-  worker.RIL.queryVoicePrivacyMode();
+  context.RIL.queryVoicePrivacyMode();
 
   let postedMessage = workerHelper.postedMessage;
 

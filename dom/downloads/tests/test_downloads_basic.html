@@ -26,7 +26,6 @@ SimpleTest.waitForExplicitFinish();
 var index = -1;
 var todayDate = new Date();
 var baseServeURL = "http://mochi.test:8888/tests/dom/downloads/tests/";
-var baseDownloadPath = "/mnt/sdcard/downloads/";
 var lastKnownCurrentBytes = 0;
 
 function next() {
@@ -45,20 +44,17 @@ function next() {
 function checkConsistentDownloadAttributes(download) {
   var href = document.getElementById("download1").getAttribute("href");
   var expectedServeURL = baseServeURL + href;
-  var expectedDownloadPath = baseDownloadPath + "test.bin";
+  var destinationRegEx = /test\(?[0-9]*\)?\.bin$/;
 
   // bug 945323: Download path isn't honoring download attribute
-  todo(download.path === expectedDownloadPath,
-       "Download path = " + expectedDownloadPath);
+  ok(destinationRegEx.test(download.path),
+     "Download path '" + download.path +
+     "' should match '" + destinationRegEx + "' regexp.");
 
-  // bug 948287: Accessing startTime attribute at download start fires
-  //             NS_ERROR_UNEXPECTED in emulator
-  //ok(download.startTime >= todayDate,
-  //   "Download start time should be greater than or equal to today");
+  ok(download.startTime >= todayDate,
+     "Download start time should be greater than or equal to today");
 
-  // bug 945366: Accessing error attribute at download start fires
-  //             NS_ERROR_UNEXPECTED in emulator
-  //is(download.error, null, "Download does not have an error");
+  is(download.error, null, "Download does not have an error");
 
   is(download.url, expectedServeURL,
      "Download URL = " + expectedServeURL);

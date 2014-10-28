@@ -15,6 +15,10 @@ Components.utils.import("resource://gre/modules/Services.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "PrivateBrowsingUtils",
   "resource://gre/modules/PrivateBrowsingUtils.jsm");
+XPCOMUtils.defineLazyModuleGetter(this, "fxAccounts",
+  "resource://gre/modules/FxAccounts.jsm");
+XPCOMUtils.defineLazyModuleGetter(this, "Promise",
+  "resource://gre/modules/Promise.jsm");
 
 // Url to fetch snippets, in the urlFormatter service format.
 const SNIPPETS_URL_PREF = "browser.aboutHomeSnippets.updateUrl";
@@ -146,7 +150,21 @@ let AboutHome = {
         break;
 
       case "AboutHome:Sync":
-        window.openPreferences("paneSync");
+        let weave = Cc["@mozilla.org/weave/service;1"]
+                      .getService(Ci.nsISupports)
+                      .wrappedJSObject;
+
+        if (weave.fxAccountsEnabled) {
+          fxAccounts.getSignedInUser().then(userData => {
+            if (userData) {
+              window.openPreferences("paneSync");
+            } else {
+              window.loadURI("about:accounts?entrypoint=abouthome");
+            }
+          });
+        } else {
+          window.openPreferences("paneSync");
+        }
         break;
 
       case "AboutHome:Settings":
@@ -165,13 +183,25 @@ let AboutHome = {
           Cu.reportError(ex);
           break;
         }
-        let engine = Services.search.currentEngine;
+
+        Services.search.init(function(status) {
+          if (!Components.isSuccessCode(status)) {
+            return;
+          }
+
+          let engine = Services.search.currentEngine;
 #ifdef MOZ_SERVICES_HEALTHREPORT
-        window.BrowserSearch.recordSearchInHealthReport(engine, "abouthome");
+          window.BrowserSearch.recordSearchInHealthReport(engine, "abouthome", data.selection);
 #endif
-        // Trigger a search through nsISearchEngine.getSubmission()
-        let submission = engine.getSubmission(data.searchTerms, null, "homepage");
-        window.loadURI(submission.uri.spec, null, submission.postData);
+          // Trigger a search through nsISearchEngine.getSubmission()
+          let submission = engine.getSubmission(data.searchTerms, null, "homepage");
+          window.loadURI(submission.uri.spec, null, submission.postData);
+
+          // Used for testing
+          let mm = aMessage.target.messageManager;
+          mm.sendAsyncMessage("AboutHome:SearchTriggered", aMessage.data.searchData);
+        });
+
         break;
     }
   },
@@ -183,13 +213,26 @@ let AboutHome = {
     Components.utils.import("resource:///modules/sessionstore/SessionStore.jsm",
       wrapper);
     let ss = wrapper.SessionStore;
+
     ss.promiseInitialized.then(function() {
+      let deferred = Promise.defer();
+
+      Services.search.init(function (status){
+        if (!Components.isSuccessCode(status)) {
+          deferred.reject(status);
+        } else {
+          deferred.resolve(Services.search.defaultEngine.name);
+        }
+      });
+
+      return deferred.promise;
+    }).then(function(engineName) {
       let data = {
         showRestoreLastSession: ss.canRestoreLastSession,
         snippetsURL: AboutHomeUtils.snippetsURL,
         showKnowYourRights: AboutHomeUtils.showKnowYourRights,
         snippetsVersion: AboutHomeUtils.snippetsVersion,
-        defaultEngineName: Services.search.defaultEngine.name
+        defaultEngineName: engineName
       };
 
       if (AboutHomeUtils.showKnowYourRights) {
@@ -198,14 +241,23 @@ let AboutHome = {
         Services.prefs.setBoolPref("browser.rights." + currentVersion + ".shown", true);
       }
 
-      if (target) {
+      if (target && target.messageManager) {
         target.messageManager.sendAsyncMessage("AboutHome:Update", data);
       } else {
         let mm = Cc["@mozilla.org/globalmessagemanager;1"].getService(Ci.nsIMessageListenerManager);
         mm.broadcastAsyncMessage("AboutHome:Update", data);
       }
     }).then(null, function onError(x) {
-      Cu.reportError("Error in AboutHome.sendAboutHomeData " + x);
+      Cu.reportError("Error in AboutHome.sendAboutHomeData: " + x);
     });
   },
+
+  /**
+   * Focuses the search input in the page with the given message manager.
+   * @param  messageManager
+   *         The MessageManager object of the selected browser.
+   */
+  focusInput: function (messageManager) {
+    messageManager.sendAsyncMessage("AboutHome:FocusInput");
+  }
 };

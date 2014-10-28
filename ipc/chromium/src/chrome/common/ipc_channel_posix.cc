@@ -22,16 +22,19 @@
 #include "base/lock.h"
 #include "base/logging.h"
 #include "base/process_util.h"
-#include "base/scoped_ptr.h"
 #include "base/string_util.h"
 #include "base/singleton.h"
-#include "base/stats_counters.h"
-#include "chrome/common/chrome_counters.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/common/file_descriptor_set_posix.h"
 #include "chrome/common/ipc_logging.h"
 #include "chrome/common/ipc_message_utils.h"
 #include "mozilla/ipc/ProtocolUtils.h"
+#include "mozilla/UniquePtr.h"
+
+#ifdef MOZ_TASK_TRACER
+#include "GeckoTaskTracerImpl.h"
+using namespace mozilla::tasktracer;
+#endif
 
 namespace IPC {
 
@@ -210,13 +213,13 @@ bool ClientConnectToFifo(const std::string &pipe_name, int* client_socket) {
   // Create socket.
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {
-    LOG(ERROR) << "fd is invalid";
+    CHROMIUM_LOG(ERROR) << "fd is invalid";
     return false;
   }
 
   // Make socket non-blocking
   if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1) {
-    LOG(ERROR) << "fcntl failed";
+    CHROMIUM_LOG(ERROR) << "fcntl failed";
     HANDLE_EINTR(close(fd));
     return false;
   }
@@ -263,9 +266,9 @@ Channel::ChannelImpl::ChannelImpl(const std::wstring& channel_id, Mode mode,
 
   if (!CreatePipe(channel_id, mode)) {
     // The pipe may have been closed already.
-    LOG(WARNING) << "Unable to create pipe named \"" << channel_id <<
-                    "\" in " << (mode == MODE_SERVER ? "server" : "client") <<
-                    " mode error(" << strerror(errno) << ").";
+    CHROMIUM_LOG(WARNING) << "Unable to create pipe named \"" << channel_id <<
+                             "\" in " << (mode == MODE_SERVER ? "server" : "client") <<
+                             " mode error(" << strerror(errno) << ").";
   }
 }
 
@@ -279,6 +282,8 @@ Channel::ChannelImpl::ChannelImpl(int fd, Mode mode, Listener* listener)
 }
 
 void Channel::ChannelImpl::Init(Mode mode, Listener* listener) {
+  DCHECK(kControlBufferSlopBytes >= CMSG_SPACE(0));
+
   mode_ = mode;
   is_blocked_on_write_ = false;
   message_send_bytes_written_ = 0;
@@ -366,9 +371,9 @@ void Channel::ChannelImpl::ResetFileDescriptor(int fd) {
 }
 
 bool Channel::ChannelImpl::EnqueueHelloMessage() {
-  scoped_ptr<Message> msg(new Message(MSG_ROUTING_NONE,
-                                      HELLO_MESSAGE_TYPE,
-                                      IPC::Message::PRIORITY_NORMAL));
+  mozilla::UniquePtr<Message> msg(new Message(MSG_ROUTING_NONE,
+                                              HELLO_MESSAGE_TYPE,
+                                              IPC::Message::PRIORITY_NORMAL));
   if (!msg->WriteInt(base::GetCurrentProcId())) {
     Close();
     return false;
@@ -378,14 +383,20 @@ bool Channel::ChannelImpl::EnqueueHelloMessage() {
   return true;
 }
 
-static void
-ClearAndShrink(std::string& s, size_t capacity)
+void Channel::ChannelImpl::ClearAndShrinkInputOverflowBuf()
 {
-  // This swap trick is the closest thing C++ has to a guaranteed way to
-  // shrink the capacity of a string.
-  std::string tmp;
-  tmp.reserve(capacity);
-  s.swap(tmp);
+  // If input_overflow_buf_ has grown, shrink it back to its normal size.
+  static size_t previousCapacityAfterClearing = 0;
+  if (input_overflow_buf_.capacity() > previousCapacityAfterClearing) {
+    // This swap trick is the closest thing C++ has to a guaranteed way
+    // to shrink the capacity of a string.
+    std::string tmp;
+    tmp.reserve(Channel::kReadBufferSize);
+    input_overflow_buf_.swap(tmp);
+    previousCapacityAfterClearing = input_overflow_buf_.capacity();
+  } else {
+    input_overflow_buf_.clear();
+  }
 }
 
 bool Channel::ChannelImpl::Connect() {
@@ -443,7 +454,7 @@ bool Channel::ChannelImpl::ProcessIncomingMessages() {
         if (errno == EAGAIN) {
           return true;
         } else {
-          LOG(ERROR) << "pipe error (" << pipe_ << "): " << strerror(errno);
+          CHROMIUM_LOG(ERROR) << "pipe error (" << pipe_ << "): " << strerror(errno);
           return false;
         }
       } else if (bytes_read == 0) {
@@ -491,9 +502,9 @@ bool Channel::ChannelImpl::ProcessIncomingMessages() {
           num_wire_fds = payload_len / 4;
 
           if (msg.msg_flags & MSG_CTRUNC) {
-            LOG(ERROR) << "SCM_RIGHTS message was truncated"
-                       << " cmsg_len:" << cmsg->cmsg_len
-                       << " fd:" << pipe_;
+            CHROMIUM_LOG(ERROR) << "SCM_RIGHTS message was truncated"
+                                << " cmsg_len:" << cmsg->cmsg_len
+                                << " fd:" << pipe_;
             for (unsigned i = 0; i < num_wire_fds; ++i)
               HANDLE_EINTR(close(wire_fds[i]));
             return false;
@@ -514,8 +525,8 @@ bool Channel::ChannelImpl::ProcessIncomingMessages() {
     } else {
       if (input_overflow_buf_.size() >
          static_cast<size_t>(kMaximumMessageSize - bytes_read)) {
-        ClearAndShrink(input_overflow_buf_, Channel::kReadBufferSize);
-        LOG(ERROR) << "IPC message is too big";
+        ClearAndShrinkInputOverflowBuf();
+        CHROMIUM_LOG(ERROR) << "IPC message is too big";
         return false;
       }
       input_overflow_buf_.append(input_buf_, bytes_read);
@@ -562,12 +573,12 @@ bool Channel::ChannelImpl::ProcessIncomingMessages() {
           }
 
           if (error) {
-            LOG(WARNING) << error
-                         << " channel:" << this
-                         << " message-type:" << m.type()
-                         << " header()->num_fds:" << m.header()->num_fds
-                         << " num_fds:" << num_fds
-                         << " fds_i:" << fds_i;
+            CHROMIUM_LOG(WARNING) << error
+                                  << " channel:" << this
+                                  << " message-type:" << m.type()
+                                  << " header()->num_fds:" << m.header()->num_fds
+                                  << " num_fds:" << num_fds
+                                  << " fds_i:" << fds_i;
             // close the existing file descriptors so that we don't leak them
             for (unsigned i = fds_i; i < num_fds; ++i)
               HANDLE_EINTR(close(fds[i]));
@@ -595,6 +606,14 @@ bool Channel::ChannelImpl::ProcessIncomingMessages() {
         DLOG(INFO) << "received message on channel @" << this <<
                       " with type " << m.type();
 #endif
+
+#ifdef MOZ_TASK_TRACER
+        AutoSaveCurTraceInfo saveCurTraceInfo;
+        SetCurTraceInfo(m.header()->source_event_id,
+                        m.header()->parent_task_id,
+                        m.header()->source_event_type);
+#endif
+
         if (m.routing_id() == MSG_ROUTING_NONE &&
             m.type() == HELLO_MESSAGE_TYPE) {
           // The Hello message contains only the process id.
@@ -615,7 +634,7 @@ bool Channel::ChannelImpl::ProcessIncomingMessages() {
       }
     }
     if (end == p) {
-      ClearAndShrink(input_overflow_buf_, Channel::kReadBufferSize);
+      ClearAndShrinkInputOverflowBuf();
     } else if (!overflowp) {
       // p is from input_buf_
       input_overflow_buf_.assign(p, end - p);
@@ -668,7 +687,7 @@ bool Channel::ChannelImpl::ProcessOutgoingMessages() {
       const unsigned num_fds = msg->file_descriptor_set()->size();
 
       if (num_fds > FileDescriptorSet::MAX_DESCRIPTORS_PER_MESSAGE) {
-        LOG(FATAL) << "Too many file descriptors!";
+        CHROMIUM_LOG(FATAL) << "Too many file descriptors!";
         // This should not be reached.
         return false;
       }
@@ -688,6 +707,11 @@ bool Channel::ChannelImpl::ProcessOutgoingMessages() {
       msg->set_fd_cookie(++last_pending_fd_id_);
 #endif
     }
+#ifdef MOZ_TASK_TRACER
+    GetCurTraceInfo(&msg->header()->source_event_id,
+                    &msg->header()->parent_task_id,
+                    &msg->header()->source_event_type);
+#endif
 
     size_t amt_to_write = msg->size() - message_send_bytes_written_;
     DCHECK(amt_to_write != 0);
@@ -707,7 +731,7 @@ bool Channel::ChannelImpl::ProcessOutgoingMessages() {
 #endif
 
     if (bytes_written < 0 && errno != EAGAIN) {
-      LOG(ERROR) << "pipe error: " << strerror(errno);
+      CHROMIUM_LOG(ERROR) << "pipe error: " << strerror(errno);
       return false;
     }
 

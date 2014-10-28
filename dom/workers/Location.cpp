@@ -25,15 +25,16 @@ WorkerLocation::Create(WorkerPrivate::LocationInfo& aInfo)
                        NS_ConvertUTF8toUTF16(aInfo.mPort),
                        NS_ConvertUTF8toUTF16(aInfo.mPathname),
                        NS_ConvertUTF8toUTF16(aInfo.mSearch),
-                       NS_ConvertUTF8toUTF16(aInfo.mHash));
+                       NS_ConvertUTF8toUTF16(aInfo.mHash),
+                       aInfo.mOrigin);
 
   return location.forget();
 }
 
 JSObject*
-WorkerLocation::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope)
+WorkerLocation::WrapObject(JSContext* aCx)
 {
-  return WorkerLocationBinding_workers::Wrap(aCx, aScope, this);
+  return WorkerLocationBinding_workers::Wrap(aCx, this);
 }
 
 END_WORKERS_NAMESPACE

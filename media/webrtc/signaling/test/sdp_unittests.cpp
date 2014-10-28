@@ -191,6 +191,14 @@ class SdpTest : public ::testing::Test {
                                          type), SDP_SUCCESS);
       return inst_num;
     }
+    u16 AddNewExtMap(int level, const char* uri) {
+      u16 inst_num = 0;
+      EXPECT_EQ(sdp_add_new_attr(sdp_ptr_, level, 0, SDP_ATTR_EXTMAP,
+                                 &inst_num), SDP_SUCCESS);
+      EXPECT_EQ(sdp_attr_set_extmap(sdp_ptr_, level, inst_num,
+                                    uri, inst_num), SDP_SUCCESS);
+      return inst_num;
+    }
 
     u16 AddNewFmtpMaxFs(int level, u32 max_fs) {
       u16 inst_num = 0;
@@ -725,6 +733,23 @@ TEST_F(SdpTest, parseRtcpFbAllPayloads) {
               SDP_RTCP_FB_ACK_RPSI);
   }
 }
+TEST_F(SdpTest, addExtMap) {
+  InitLocalSdp();
+  int level = AddNewMedia(SDP_MEDIA_VIDEO);
+  AddNewExtMap(level, SDP_EXTMAP_AUDIO_LEVEL);
+  std::string body = SerializeSdp();
+  ASSERT_NE(body.find("a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n"), std::string::npos);
+}
+
+TEST_F(SdpTest, parseExtMap) {
+  ParseSdp(kVideoSdp +
+    "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n");
+  ASSERT_STREQ(sdp_attr_get_extmap_uri(sdp_ptr_, 1, 1),
+            SDP_EXTMAP_AUDIO_LEVEL);
+  ASSERT_EQ(sdp_attr_get_extmap_id(sdp_ptr_, 1, 1),
+            1);
+
+}
 
 TEST_F(SdpTest, parseFmtpMaxFs) {
   u32 val = 0;
@@ -732,7 +757,6 @@ TEST_F(SdpTest, parseFmtpMaxFs) {
   ASSERT_EQ(sdp_attr_get_fmtp_max_fs(sdp_ptr_, 1, 0, 1, &val), SDP_SUCCESS);
   ASSERT_EQ(val, 300);
 }
-
 TEST_F(SdpTest, parseFmtpMaxFr) {
   u32 val = 0;
   ParseSdp(kVideoSdp + "a=fmtp:120 max-fs=300;max-fr=30\r\n");
@@ -763,6 +787,27 @@ TEST_F(SdpTest, addFmtpMaxFsFr) {
   std::string body = SerializeSdp();
   ASSERT_NE(body.find("a=fmtp:120 max-fs=300;max-fr=30\r\n"),
             std::string::npos);
+}
+
+TEST_F(SdpTest, addIceLite) {
+    InitLocalSdp();
+    u16 inst_num = 0;
+    EXPECT_EQ(sdp_add_new_attr(sdp_ptr_, SDP_SESSION_LEVEL, 0,
+                               SDP_ATTR_ICE_LITE, &inst_num), SDP_SUCCESS);
+    std::string body = SerializeSdp();
+    ASSERT_NE(body.find("a=ice-lite\r\n"), std::string::npos);
+}
+
+TEST_F(SdpTest, parseIceLite) {
+    std::string sdp =
+        "v=0\r\n"
+        "o=- 137331303 2 IN IP4 127.0.0.1\r\n"
+        "s=SIP Call\r\n"
+        "t=0 0\r\n"
+        "a=ice-lite\r\n";
+  ParseSdp(sdp);
+  ASSERT_TRUE(sdp_attr_is_present(sdp_ptr_, SDP_ATTR_ICE_LITE,
+                                  SDP_SESSION_LEVEL, 0));
 }
 
 } // End namespace test.

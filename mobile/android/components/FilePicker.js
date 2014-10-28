@@ -10,6 +10,8 @@ Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/FileUtils.jsm");
 
+Cu.importGlobalProperties(['File']);
+
 function FilePicker() {
 }
 
@@ -23,10 +25,13 @@ FilePicker.prototype = {
   _filePath: null,
   _promptActive: false,
   _filterIndex: 0,
+  _addToRecentDocs: false,
+  _title: "",
 
   init: function(aParent, aTitle, aMode) {
     this._domWin = aParent;
     this._mode = aMode;
+    this._title = aTitle;
     Services.obs.addObserver(this, "FilePicker:Result", false);
 
     let idService = Cc["@mozilla.org/uuid-generator;1"].getService(Ci.nsIUUIDGenerator); 
@@ -140,21 +145,32 @@ FilePicker.prototype = {
     if (!f) {
         return null;
     }
-    return File(f);
+
+    if (this._domWin) {
+      return new this._domWin.File(f);
+    }
+
+    return new File(f);
   },
 
   get domfiles() {
+    let win = this._domWin;
     return this.getEnumerator([this.file], function(file) {
-      return File(file);
+      if (win) {
+        let utils = win.QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIDOMWindowUtils);
+        return utils.wrapDOMFile(file);
+      }
+
+      return new File(file);
     });
   },
 
   get addToRecentDocs() {
-    throw Components.results.NS_ERROR_NOT_IMPLEMENTED;
+    return this._addToRecentDocs;
   },
 
   set addToRecentDocs(val) {
-    throw Components.results.NS_ERROR_NOT_IMPLEMENTED;
+    this._addToRecentDocs = val;
   },
 
   get mode() {
@@ -196,8 +212,20 @@ FilePicker.prototype = {
   _sendMessage: function() {
     let msg = {
       type: "FilePicker:Show",
-      guid: this.guid
+      guid: this.guid,
+      guid: this.guid,
+      title: this._title,
     };
+
+    // Knowing the window lets us destroy any temp files when the tab is closed
+    // Other consumers of the file picker may have to either wait for Android
+    // to clean up the temp dir (not guaranteed) or clean up after themselves.
+    let win = Services.wm.getMostRecentWindow('navigator:browser');
+    let tab = win.BrowserApp.getTabForWindow(this._domWin.top)
+    if (tab) {
+      msg.tabId = tab.id;
+    }
+
     if (!this._extensionsFilter && !this._mimeTypeFilter) {
       // If neither filters is set show anything we can.
       msg.mode = "mimeType";
@@ -214,7 +242,7 @@ FilePicker.prototype = {
   },
 
   sendMessageToJava: function(aMsg) {
-    Services.androidBridge.handleGeckoMessage(JSON.stringify(aMsg));
+    Services.androidBridge.handleGeckoMessage(aMsg);
   },
 
   observe: function(aSubject, aTopic, aData) {

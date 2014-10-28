@@ -10,8 +10,8 @@
 #include "BasicLayers.h"                // for BasicLayerManager
 #include "Layers.h"                     // for Layer, ContainerLayer
 #include "nsDebug.h"                    // for NS_ASSERTION
+#include "nsISupportsImpl.h"            // for MOZ_COUNT_CTOR
 #include "nsISupportsUtils.h"           // for NS_ADDREF, NS_RELEASE
-#include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR
 struct nsIntRect;
 
 namespace mozilla {
@@ -19,43 +19,51 @@ namespace layers {
 
 class BasicContainerLayer : public ContainerLayer, public BasicImplData {
 public:
-  BasicContainerLayer(BasicLayerManager* aManager) :
+  explicit BasicContainerLayer(BasicLayerManager* aManager) :
     ContainerLayer(aManager,
                    static_cast<BasicImplData*>(MOZ_THIS_IN_INITIALIZER_LIST()))
   {
     MOZ_COUNT_CTOR(BasicContainerLayer);
     mSupportsComponentAlphaChildren = true;
   }
+protected:
   virtual ~BasicContainerLayer();
 
+public:
   virtual void SetVisibleRegion(const nsIntRegion& aRegion)
   {
     NS_ASSERTION(BasicManager()->InConstruction(),
                  "Can only set properties in construction phase");
     ContainerLayer::SetVisibleRegion(aRegion);
   }
-  virtual void InsertAfter(Layer* aChild, Layer* aAfter)
+  virtual bool InsertAfter(Layer* aChild, Layer* aAfter)
   {
-    NS_ASSERTION(BasicManager()->InConstruction(),
-                 "Can only set properties in construction phase");
-    ContainerLayer::InsertAfter(aChild, aAfter);
+    if (!BasicManager()->InConstruction()) {
+      NS_ERROR("Can only set properties in construction phase");
+      return false;
+    }
+    return ContainerLayer::InsertAfter(aChild, aAfter);
   }
 
-  virtual void RemoveChild(Layer* aChild)
+  virtual bool RemoveChild(Layer* aChild)
   { 
-    NS_ASSERTION(BasicManager()->InConstruction(),
-                 "Can only set properties in construction phase");
-    ContainerLayer::RemoveChild(aChild);
+    if (!BasicManager()->InConstruction()) {
+      NS_ERROR("Can only set properties in construction phase");
+      return false;
+    }
+    return ContainerLayer::RemoveChild(aChild);
   }
 
-  virtual void RepositionChild(Layer* aChild, Layer* aAfter)
+  virtual bool RepositionChild(Layer* aChild, Layer* aAfter)
   {
-    NS_ASSERTION(BasicManager()->InConstruction(),
-                 "Can only set properties in construction phase");
-    ContainerLayer::RepositionChild(aChild, aAfter);
+    if (!BasicManager()->InConstruction()) {
+      NS_ERROR("Can only set properties in construction phase");
+      return false;
+    }
+    return ContainerLayer::RepositionChild(aChild, aAfter);
   }
 
-  virtual void ComputeEffectiveTransforms(const gfx3DMatrix& aTransformToSurface);
+  virtual void ComputeEffectiveTransforms(const gfx::Matrix4x4& aTransformToSurface);
 
   /**
    * Returns true when:
@@ -76,8 +84,15 @@ public:
 
   void SetSupportsComponentAlphaChildren(bool aSupports) { mSupportsComponentAlphaChildren = aSupports; }
 
-  virtual void Validate(LayerManager::DrawThebesLayerCallback aCallback,
-                        void* aCallbackData) MOZ_OVERRIDE;
+  virtual void Validate(LayerManager::DrawPaintedLayerCallback aCallback,
+                        void* aCallbackData,
+                        ReadbackProcessor* aReadback) MOZ_OVERRIDE;
+
+  /**
+   * We don't really have a hard restriction for max layer size, but we pick
+   * 4096 to avoid excessive memory usage.
+   */
+  virtual int32_t GetMaxLayerSize() MOZ_OVERRIDE { return 4096; }
 
 protected:
   BasicLayerManager* BasicManager()

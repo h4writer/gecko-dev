@@ -12,6 +12,8 @@ const nsIAccessibleTextChangeEvent =
   Components.interfaces.nsIAccessibleTextChangeEvent;
 const nsIAccessibleVirtualCursorChangeEvent =
   Components.interfaces.nsIAccessibleVirtualCursorChangeEvent;
+const nsIAccessibleObjectAttributeChangedEvent =
+  Components.interfaces.nsIAccessibleObjectAttributeChangedEvent;
 
 const nsIAccessibleStates = Components.interfaces.nsIAccessibleStates;
 const nsIAccessibleRole = Components.interfaces.nsIAccessibleRole;
@@ -19,6 +21,7 @@ const nsIAccessibleScrollType = Components.interfaces.nsIAccessibleScrollType;
 const nsIAccessibleCoordinateType = Components.interfaces.nsIAccessibleCoordinateType;
 
 const nsIAccessibleRelation = Components.interfaces.nsIAccessibleRelation;
+const nsIAccessibleTextRange = Components.interfaces.nsIAccessibleTextRange;
 
 const nsIAccessible = Components.interfaces.nsIAccessible;
 
@@ -31,7 +34,6 @@ const nsIAccessibleEditableText = Components.interfaces.nsIAccessibleEditableTex
 const nsIAccessibleHyperLink = Components.interfaces.nsIAccessibleHyperLink;
 const nsIAccessibleHyperText = Components.interfaces.nsIAccessibleHyperText;
 
-const nsIAccessibleCursorable = Components.interfaces.nsIAccessibleCursorable;
 const nsIAccessibleImage = Components.interfaces.nsIAccessibleImage;
 const nsIAccessiblePivot = Components.interfaces.nsIAccessiblePivot;
 const nsIAccessibleSelectable = Components.interfaces.nsIAccessibleSelectable;
@@ -82,7 +84,7 @@ const kEmbedChar = String.fromCharCode(0xfffc);
 const kDiscBulletChar = String.fromCharCode(0x2022);
 const kDiscBulletText = kDiscBulletChar + " ";
 const kCircleBulletText = String.fromCharCode(0x25e6) + " ";
-const kSquareBulletText = String.fromCharCode(0x25aa) + " ";
+const kSquareBulletText = String.fromCharCode(0x25fe) + " ";
 
 const MAX_TRIM_LENGTH = 100;
 
@@ -170,7 +172,7 @@ function getNode(aAccOrNodeOrID, aDocument)
   if (aAccOrNodeOrID instanceof nsIAccessible)
     return aAccOrNodeOrID.DOMNode;
 
-  node = (aDocument || document).getElementById(aAccOrNodeOrID);
+  var node = (aDocument || document).getElementById(aAccOrNodeOrID);
   if (!node) {
     ok(false, "Can't get DOM element for " + aAccOrNodeOrID);
     return null;
@@ -236,7 +238,7 @@ function getAccessible(aAccOrElmOrID, aInterfaces, aElmObj, aDoNotFailIf)
 
     if (!acc) {
       if (!(aDoNotFailIf & DONOTFAIL_IF_NO_ACC))
-        ok(false, "Can't get accessible for " + aAccOrElmOrID);
+        ok(false, "Can't get accessible for " + prettyName(aAccOrElmOrID));
 
       return null;
     }
@@ -245,27 +247,20 @@ function getAccessible(aAccOrElmOrID, aInterfaces, aElmObj, aDoNotFailIf)
   if (!aInterfaces)
     return acc;
 
-  if (aInterfaces instanceof Array) {
-    for (var index = 0; index < aInterfaces.length; index++) {
-      try {
-        acc.QueryInterface(aInterfaces[index]);
-      } catch (e) {
-        if (!(aDoNotFailIf & DONOTFAIL_IF_NO_INTERFACE))
-          ok(false, "Can't query " + aInterfaces[index] + " for " + aAccOrElmOrID);
+  if (!(aInterfaces instanceof Array))
+    aInterfaces = [ aInterfaces ];
 
-        return null;
-      }
+  for (var index = 0; index < aInterfaces.length; index++) {
+    try {
+      acc.QueryInterface(aInterfaces[index]);
+    } catch (e) {
+      if (!(aDoNotFailIf & DONOTFAIL_IF_NO_INTERFACE))
+        ok(false, "Can't query " + aInterfaces[index] + " for " + aAccOrElmOrID);
+
+      return null;
     }
-    return acc;
   }
-  
-  try {
-    acc.QueryInterface(aInterfaces);
-  } catch (e) {
-    ok(false, "Can't query " + aInterfaces + " for " + aAccOrElmOrID);
-    return null;
-  }
-  
+
   return acc;
 }
 
@@ -441,7 +436,7 @@ function testAccessibleTree(aAccOrElmOrID, aAccTree, aFlags)
       }
 
       break;
-    } 
+    }
 
     default:
       if (prop.indexOf("todo_") == 0)

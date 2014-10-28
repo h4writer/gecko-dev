@@ -19,6 +19,7 @@
 using namespace mozilla;
 using namespace mozilla::dom;
 using namespace mozilla::layers;
+using namespace mozilla::gfx;
 
 class nsDisplayCanvas : public nsDisplayItem {
 public:
@@ -36,7 +37,7 @@ public:
   NS_DISPLAY_DECL_NAME("nsDisplayCanvas", TYPE_CANVAS)
 
   virtual nsRegion GetOpaqueRegion(nsDisplayListBuilder* aBuilder,
-                                   bool* aSnap) {
+                                   bool* aSnap) MOZ_OVERRIDE {
     *aSnap = false;
     nsIFrame* f = Frame();
     HTMLCanvasElement *canvas =
@@ -48,7 +49,8 @@ public:
     return result;
   }
 
-  virtual nsRect GetBounds(nsDisplayListBuilder* aBuilder, bool* aSnap) {
+  virtual nsRect GetBounds(nsDisplayListBuilder* aBuilder,
+                           bool* aSnap) MOZ_OVERRIDE {
     *aSnap = true;
     nsHTMLCanvasFrame* f = static_cast<nsHTMLCanvasFrame*>(Frame());
     return f->GetInnerArea() + ToReferenceFrame();
@@ -56,14 +58,14 @@ public:
 
   virtual already_AddRefed<Layer> BuildLayer(nsDisplayListBuilder* aBuilder,
                                              LayerManager* aManager,
-                                             const ContainerLayerParameters& aContainerParameters)
+                                             const ContainerLayerParameters& aContainerParameters) MOZ_OVERRIDE
   {
     return static_cast<nsHTMLCanvasFrame*>(mFrame)->
       BuildLayer(aBuilder, aManager, this, aContainerParameters);
   }
   virtual LayerState GetLayerState(nsDisplayListBuilder* aBuilder,
                                    LayerManager* aManager,
-                                   const ContainerLayerParameters& aParameters)
+                                   const ContainerLayerParameters& aParameters) MOZ_OVERRIDE
   {
     if (HTMLCanvasElement::FromContent(mFrame->GetContent())->ShouldForceInactiveLayer(aManager))
       return LAYER_INACTIVE;
@@ -91,9 +93,9 @@ NS_QUERYFRAME_TAIL_INHERITING(nsContainerFrame)
 NS_IMPL_FRAMEARENA_HELPERS(nsHTMLCanvasFrame)
 
 void
-nsHTMLCanvasFrame::Init(nsIContent* aContent,
-                        nsIFrame*   aParent,
-                        nsIFrame*   aPrevInFlow)
+nsHTMLCanvasFrame::Init(nsIContent*       aContent,
+                        nsContainerFrame* aParent,
+                        nsIFrame*         aPrevInFlow)
 {
   nsContainerFrame::Init(aContent, aParent, aPrevInFlow);
 
@@ -123,7 +125,7 @@ nsHTMLCanvasFrame::GetCanvasSize()
 }
 
 /* virtual */ nscoord
-nsHTMLCanvasFrame::GetMinWidth(nsRenderingContext *aRenderingContext)
+nsHTMLCanvasFrame::GetMinISize(nsRenderingContext *aRenderingContext)
 {
   // XXX The caller doesn't account for constraints of the height,
   // min-height, and max-height properties.
@@ -133,7 +135,7 @@ nsHTMLCanvasFrame::GetMinWidth(nsRenderingContext *aRenderingContext)
 }
 
 /* virtual */ nscoord
-nsHTMLCanvasFrame::GetPrefWidth(nsRenderingContext *aRenderingContext)
+nsHTMLCanvasFrame::GetPrefISize(nsRenderingContext *aRenderingContext)
 {
   // XXX The caller doesn't account for constraints of the height,
   // min-height, and max-height properties.
@@ -150,10 +152,15 @@ nsHTMLCanvasFrame::GetIntrinsicRatio()
                 nsPresContext::CSSPixelsToAppUnits(size.height));
 }
 
-/* virtual */ nsSize
+/* virtual */
+LogicalSize
 nsHTMLCanvasFrame::ComputeSize(nsRenderingContext *aRenderingContext,
-                               nsSize aCBSize, nscoord aAvailableWidth,
-                               nsSize aMargin, nsSize aBorder, nsSize aPadding,
+                               WritingMode aWM,
+                               const LogicalSize& aCBSize,
+                               nscoord aAvailableISize,
+                               const LogicalSize& aMargin,
+                               const LogicalSize& aBorder,
+                               const LogicalSize& aPadding,
                                uint32_t aFlags)
 {
   nsIntSize size = GetCanvasSize();
@@ -165,12 +172,16 @@ nsHTMLCanvasFrame::ComputeSize(nsRenderingContext *aRenderingContext,
   nsSize intrinsicRatio = GetIntrinsicRatio(); // won't actually be used
 
   return nsLayoutUtils::ComputeSizeWithIntrinsicDimensions(
+                            aWM,
                             aRenderingContext, this,
-                            intrinsicSize, intrinsicRatio, aCBSize,
-                            aMargin, aBorder, aPadding);
+                            intrinsicSize, intrinsicRatio,
+                            aCBSize,
+                            aMargin,
+                            aBorder,
+                            aPadding);
 }
 
-NS_IMETHODIMP
+void
 nsHTMLCanvasFrame::Reflow(nsPresContext*           aPresContext,
                           nsHTMLReflowMetrics&     aMetrics,
                           const nsHTMLReflowState& aReflowState,
@@ -180,61 +191,67 @@ nsHTMLCanvasFrame::Reflow(nsPresContext*           aPresContext,
   DISPLAY_REFLOW(aPresContext, this, aReflowState, aMetrics, aStatus);
   NS_FRAME_TRACE(NS_FRAME_TRACE_CALLS,
                   ("enter nsHTMLCanvasFrame::Reflow: availSize=%d,%d",
-                  aReflowState.availableWidth, aReflowState.availableHeight));
+                  aReflowState.AvailableWidth(), aReflowState.AvailableHeight()));
 
   NS_PRECONDITION(mState & NS_FRAME_IN_REFLOW, "frame is not in reflow");
 
   aStatus = NS_FRAME_COMPLETE;
 
-  aMetrics.width = aReflowState.ComputedWidth();
-  aMetrics.height = aReflowState.ComputedHeight();
+  WritingMode wm = aReflowState.GetWritingMode();
+  LogicalSize finalSize(wm,
+                        aReflowState.ComputedISize(),
+                        aReflowState.ComputedBSize());
 
   // stash this away so we can compute our inner area later
-  mBorderPadding   = aReflowState.mComputedBorderPadding;
+  mBorderPadding   = aReflowState.ComputedLogicalBorderPadding();
 
-  aMetrics.width += mBorderPadding.left + mBorderPadding.right;
-  aMetrics.height += mBorderPadding.top + mBorderPadding.bottom;
+  finalSize.ISize(wm) += mBorderPadding.IStartEnd(wm);
+  finalSize.BSize(wm) += mBorderPadding.BStartEnd(wm);
 
   if (GetPrevInFlow()) {
-    nscoord y = GetContinuationOffset(&aMetrics.width);
-    aMetrics.height -= y + mBorderPadding.top;
-    aMetrics.height = std::max(0, aMetrics.height);
+    nscoord y = GetContinuationOffset(&finalSize.ISize(wm));
+    finalSize.BSize(wm) -= y + mBorderPadding.BStart(wm);
+    finalSize.BSize(wm) = std::max(0, finalSize.BSize(wm));
   }
 
+  aMetrics.SetSize(wm, finalSize);
   aMetrics.SetOverflowAreasToDesiredBounds();
   FinishAndStoreOverflow(&aMetrics);
 
   // Reflow the single anon block child.
   nsReflowStatus childStatus;
-  nsSize availSize(aReflowState.ComputedWidth(), NS_UNCONSTRAINEDSIZE);
   nsIFrame* childFrame = mFrames.FirstChild();
+  WritingMode childWM = childFrame->GetWritingMode();
+  LogicalSize availSize = aReflowState.ComputedSize(childWM);
+  availSize.BSize(childWM) = NS_UNCONSTRAINEDSIZE;
   NS_ASSERTION(!childFrame->GetNextSibling(), "HTML canvas should have 1 kid");
-  nsHTMLReflowMetrics childDesiredSize(aMetrics.mFlags);
+  nsHTMLReflowMetrics childDesiredSize(aReflowState.GetWritingMode(), aMetrics.mFlags);
   nsHTMLReflowState childReflowState(aPresContext, aReflowState, childFrame,
                                      availSize);
   ReflowChild(childFrame, aPresContext, childDesiredSize, childReflowState,
               0, 0, 0, childStatus, nullptr);
-  FinishReflowChild(childFrame, aPresContext, &childReflowState,
-                    childDesiredSize, 0, 0, 0);
+  FinishReflowChild(childFrame, aPresContext, childDesiredSize,
+                    &childReflowState, 0, 0, 0);
 
   NS_FRAME_TRACE(NS_FRAME_TRACE_CALLS,
                   ("exit nsHTMLCanvasFrame::Reflow: size=%d,%d",
-                  aMetrics.width, aMetrics.height));
+                   aMetrics.ISize(wm), aMetrics.BSize(wm)));
   NS_FRAME_SET_TRUNCATION(aStatus, aReflowState, aMetrics);
-
-  return NS_OK;
 }
 
 // FIXME taken from nsImageFrame, but then had splittable frame stuff
 // removed.  That needs to be fixed.
+// XXXdholbert As in nsImageFrame, this function's clients should probably
+// just be calling GetContentRectRelativeToSelf().
 nsRect 
 nsHTMLCanvasFrame::GetInnerArea() const
 {
+  nsMargin bp = mBorderPadding.GetPhysicalMargin(GetWritingMode());
   nsRect r;
-  r.x = mBorderPadding.left;
-  r.y = mBorderPadding.top;
-  r.width = mRect.width - mBorderPadding.left - mBorderPadding.right;
-  r.height = mRect.height - mBorderPadding.top - mBorderPadding.bottom;
+  r.x = bp.left;
+  r.y = bp.top;
+  r.width = mRect.width - bp.left - bp.right;
+  r.height = mRect.height - bp.top - bp.bottom;
   return r;
 }
 
@@ -244,7 +261,7 @@ nsHTMLCanvasFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
                               nsDisplayItem* aItem,
                               const ContainerLayerParameters& aContainerParameters)
 {
-  nsRect area = GetContentRect() - GetPosition() + aItem->ToReferenceFrame();
+  nsRect area = GetContentRectRelativeToSelf() + aItem->ToReferenceFrame();
   HTMLCanvasElement* element = static_cast<HTMLCanvasElement*>(GetContent());
   nsIntSize canvasSize = GetCanvasSize();
 
@@ -266,12 +283,12 @@ nsHTMLCanvasFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
                       presContext->AppUnitsToGfxUnits(area.height));
 
   // Transform the canvas into the right place
-  gfxMatrix transform;
-  transform.Translate(r.TopLeft() + aContainerParameters.mOffset);
-  transform.Scale(r.Width()/canvasSize.width, r.Height()/canvasSize.height);
-  layer->SetBaseTransform(gfx3DMatrix::From2D(transform));
+  gfxPoint p = r.TopLeft() + aContainerParameters.mOffset;
+  Matrix transform = Matrix::Translation(p.x, p.y);
+  transform.PreScale(r.Width() / canvasSize.width,
+                     r.Height() / canvasSize.height);
+  layer->SetBaseTransform(gfx::Matrix4x4::From2D(transform));
   layer->SetFilter(nsLayoutUtils::GetGraphicsFilterForFrame(this));
-  layer->SetVisibleRegion(nsIntRect(0, 0, canvasSize.width, canvasSize.height));
 
   return layer.forget();
 }
@@ -320,7 +337,7 @@ nsHTMLCanvasFrame::GetContinuationOffset(nscoord* aWidth) const
       }
       offset += rect.height;
     }
-    offset -= mBorderPadding.top;
+    offset -= mBorderPadding.GetPhysicalMargin(GetWritingMode()).top;
     offset = std::max(0, offset);
   }
   return offset;
@@ -334,8 +351,8 @@ nsHTMLCanvasFrame::AccessibleType()
 }
 #endif
 
-#ifdef DEBUG
-NS_IMETHODIMP
+#ifdef DEBUG_FRAME_DUMP
+nsresult
 nsHTMLCanvasFrame::GetFrameName(nsAString& aResult) const
 {
   return MakeFrameName(NS_LITERAL_STRING("HTMLCanvas"), aResult);

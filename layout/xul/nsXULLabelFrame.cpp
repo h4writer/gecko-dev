@@ -5,10 +5,12 @@
 
 /* derived class of nsBlockFrame used for xul:label elements */
 
+#include "mozilla/EventStateManager.h"
 #include "nsXULLabelFrame.h"
 #include "nsHTMLParts.h"
-#include "nsINameSpaceManager.h"
-#include "nsEventStateManager.h"
+#include "nsNameSpaceManager.h"
+
+using namespace mozilla;
 
 nsIFrame*
 NS_NewXULLabelFrame(nsIPresShell* aPresShell, nsStyleContext* aContext)
@@ -47,7 +49,7 @@ nsXULLabelFrame::RegUnregAccessKey(bool aDoReg)
 
   // With a valid PresContext we can get the ESM 
   // and register the access key
-  nsEventStateManager *esm = PresContext()->EventStateManager();
+  EventStateManager* esm = PresContext()->EventStateManager();
 
   uint32_t key = accessKey.First();
   if (aDoReg)
@@ -62,9 +64,9 @@ nsXULLabelFrame::RegUnregAccessKey(bool aDoReg)
 // nsIFrame
 
 void
-nsXULLabelFrame::Init(nsIContent*      aContent,
-                      nsIFrame*        aParent,
-                      nsIFrame*        aPrevInFlow)
+nsXULLabelFrame::Init(nsIContent*       aContent,
+                      nsContainerFrame* aParent,
+                      nsIFrame*         aPrevInFlow)
 {
   nsBlockFrame::Init(aContent, aParent, aPrevInFlow);
 
@@ -80,7 +82,7 @@ nsXULLabelFrame::DestroyFrom(nsIFrame* aDestructRoot)
   nsBlockFrame::DestroyFrom(aDestructRoot);
 } 
 
-NS_IMETHODIMP
+nsresult
 nsXULLabelFrame::AttributeChanged(int32_t aNameSpaceID,
                                   nsIAtom* aAttribute,
                                   int32_t aModType)
@@ -105,8 +107,8 @@ nsXULLabelFrame::GetType() const
 /////////////////////////////////////////////////////////////////////////////
 // Diagnostics
 
-#ifdef DEBUG
-NS_IMETHODIMP
+#ifdef DEBUG_FRAME_DUMP
+nsresult
 nsXULLabelFrame::GetFrameName(nsAString& aResult) const
 {
   return MakeFrameName(NS_LITERAL_STRING("XULLabel"), aResult);

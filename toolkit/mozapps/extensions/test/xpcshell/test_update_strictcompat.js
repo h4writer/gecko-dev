@@ -6,7 +6,6 @@
 
 const PREF_MATCH_OS_LOCALE = "intl.locale.matchOS";
 const PREF_SELECTED_LOCALE = "general.useragent.locale";
-const PREF_GETADDONS_BYIDS_PERFORMANCE = "extensions.getAddons.getWithPerformance.url";
 const PREF_GETADDONS_CACHE_ENABLED = "extensions.getAddons.cache.enabled";
 
 // The test extension uses an insecure update url.
@@ -379,9 +378,7 @@ function run_test_6() {
     "onDownloadEnded"
   ], continue_test_6);
 
-  // Fake a timer event to cause a background update and wait for the magic to
-  // happen
-  gInternalManager.notify(null);
+  AddonManagerInternal.backgroundUpdateCheck();
 }
 
 function continue_test_6(install) {
@@ -475,9 +472,7 @@ function run_test_7() {
       "onExternalInstall"
     ], check_test_7);
 
-    // Fake a timer event to cause a background update and wait for the magic to
-    // happen
-    gInternalManager.notify(null);
+    AddonManagerInternal.backgroundUpdateCheck();
   });
 }
 
@@ -901,8 +896,7 @@ function run_test_14() {
       },
     });
 
-    // Fake a timer event
-    gInternalManager.notify(null);
+    AddonManagerInternal.backgroundUpdateCheck();
   });
 }
 
@@ -1000,8 +994,7 @@ function run_test_15() {
       },
     });
 
-    // Fake a timer event
-    gInternalManager.notify(null);
+    AddonManagerInternal.backgroundUpdateCheck();
   });
 }
 
@@ -1051,8 +1044,8 @@ function run_test_16() {
   Services.prefs.setCharPref(PREF_GETADDONS_BYIDS_PERFORMANCE,
                              "http://localhost:" + gPort + "/data/test_update.xml");
   Services.prefs.setBoolPref(PREF_GETADDONS_CACHE_ENABLED, true);
-  // Fake a timer event
-  gInternalManager.notify(null);
+
+  AddonManagerInternal.backgroundUpdateCheck();
 }
 
 // Test that the update check correctly observes when an addon opts-in to

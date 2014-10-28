@@ -8,13 +8,13 @@
 
 #include <stdint.h>                     // for uint32_t, uint8_t, uint64_t
 #include <sys/types.h>                  // for int32_t
+#include "gfxTypes.h"
 #include "ImageTypes.h"                 // for ImageFormat, etc
-#include "gfxASurface.h"                // for gfxASurface, etc
-#include "gfxPoint.h"                   // for gfxIntSize
 #include "mozilla/Assertions.h"         // for MOZ_ASSERT_HELPER2
 #include "mozilla/Mutex.h"              // for Mutex
 #include "mozilla/ReentrantMonitor.h"   // for ReentrantMonitorAutoEnter, etc
 #include "mozilla/TimeStamp.h"          // for TimeStamp
+#include "mozilla/gfx/Point.h"          // For IntSize
 #include "mozilla/layers/LayersTypes.h"  // for LayersBackend, etc
 #include "mozilla/mozalloc.h"           // for operator delete, etc
 #include "nsAutoPtr.h"                  // for nsRefPtr, nsAutoArrayPtr, etc
@@ -26,34 +26,38 @@
 #include "nsSize.h"                     // for nsIntSize
 #include "nsTArray.h"                   // for nsTArray
 #include "mozilla/Atomics.h"
+#include "mozilla/WeakPtr.h"
 #include "nsThreadUtils.h"
+#include "mozilla/gfx/2D.h"
+#include "nsDataHashtable.h"
+#include "mozilla/EnumeratedArray.h"
 
 #ifndef XPCOM_GLUE_AVOID_NSPR
 /**
- * We need to be able to hold a reference to a gfxASurface from Image
+ * We need to be able to hold a reference to a Moz2D SourceSurface from Image
  * subclasses. This is potentially a problem since Images can be addrefed
  * or released off the main thread. We can ensure that we never AddRef
- * a gfxASurface off the main thread, but we might want to Release due
+ * a SourceSurface off the main thread, but we might want to Release due
  * to an Image being destroyed off the main thread.
  *
- * We use nsCountedRef<nsMainThreadSurfaceRef> to reference the
- * gfxASurface. When AddRefing, we assert that we're on the main thread.
+ * We use nsCountedRef<nsMainThreadSourceSurfaceRef> to reference the
+ * SourceSurface. When AddRefing, we assert that we're on the main thread.
  * When Releasing, if we're not on the main thread, we post an event to
  * the main thread to do the actual release.
  */
-class nsMainThreadSurfaceRef;
+class nsMainThreadSourceSurfaceRef;
 
 template <>
-class nsAutoRefTraits<nsMainThreadSurfaceRef> {
+class nsAutoRefTraits<nsMainThreadSourceSurfaceRef> {
 public:
-  typedef gfxASurface* RawRef;
+  typedef mozilla::gfx::SourceSurface* RawRef;
 
   /**
    * The XPCOM event that will do the actual release on the main thread.
    */
   class SurfaceReleaser : public nsRunnable {
   public:
-    SurfaceReleaser(RawRef aRef) : mRef(aRef) {}
+    explicit SurfaceReleaser(RawRef aRef) : mRef(aRef) {}
     NS_IMETHOD Run() {
       mRef->Release();
       return NS_OK;
@@ -97,8 +101,9 @@ namespace layers {
 
 class ImageClient;
 class SharedPlanarYCbCrImage;
-class DeprecatedSharedPlanarYCbCrImage;
 class TextureClient;
+class CompositableClient;
+class CompositableForwarder;
 class SurfaceDescriptor;
 
 struct ImageBackendData
@@ -118,7 +123,7 @@ public:
      * For use with the CompositableClient only (so that the later can
      * synchronize the TextureClient with the TextureHost).
      */
-    virtual TextureClient* GetTextureClient() = 0;
+    virtual TextureClient* GetTextureClient(CompositableClient* aClient) = 0;
 };
 
 /**
@@ -139,15 +144,12 @@ class Image {
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(Image)
 
 public:
-  virtual ~Image() {}
-
   virtual ISharedImage* AsSharedImage() { return nullptr; }
 
   ImageFormat GetFormat() { return mFormat; }
   void* GetImplData() { return mImplData; }
 
-  virtual already_AddRefed<gfxASurface> GetAsSurface() = 0;
-  virtual gfxIntSize GetSize() = 0;
+  virtual gfx::IntSize GetSize() = 0;
   virtual nsIntRect GetPictureRect()
   {
     return nsIntRect(0, 0, GetSize().width, GetSize().height);
@@ -163,6 +165,8 @@ public:
   void MarkSent() { mSent = true; }
   bool IsSentToCompositor() { return mSent; }
 
+  virtual TemporaryRef<gfx::SourceSurface> GetAsSourceSurface() = 0;
+
 protected:
   Image(void* aImplData, ImageFormat aFormat) :
     mImplData(aImplData),
@@ -171,7 +175,13 @@ protected:
     mSent(false)
   {}
 
-  nsAutoPtr<ImageBackendData> mBackendData[mozilla::layers::LAYERS_LAST];
+  // Protected destructor, to discourage deletion outside of Release():
+  virtual ~Image() {}
+
+  mozilla::EnumeratedArray<mozilla::layers::LayersBackend,
+                           mozilla::layers::LayersBackend::LAYERS_LAST,
+                           nsAutoPtr<ImageBackendData>>
+    mBackendData;
 
   void* mImplData;
   int32_t mSerial;
@@ -187,8 +197,8 @@ protected:
  * and we must avoid creating a reference loop between an ImageContainer and
  * its active image.
  */
-class BufferRecycleBin {
-  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(RecycleBin)
+class BufferRecycleBin MOZ_FINAL {
+  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(BufferRecycleBin)
 
   //typedef mozilla::gl::GLContext GLContext;
 
@@ -202,6 +212,11 @@ public:
 private:
   typedef mozilla::Mutex Mutex;
 
+  // Private destructor, to discourage deletion outside of Release():
+  ~BufferRecycleBin()
+  {
+  }
+
   // This protects mRecycledBuffers, mRecycledBufferSize, mRecycledTextures
   // and mRecycledTextureSizes
   Mutex mLock;
@@ -212,21 +227,6 @@ private:
   // This is only valid if mRecycledBuffers is non-empty
   uint32_t mRecycledBufferSize;
 };
-
-/**
- * Returns true if aFormat is in the given format array.
- */
-static inline bool
-FormatInList(const ImageFormat* aFormats, uint32_t aNumFormats,
-             ImageFormat aFormat)
-{
-  for (uint32_t i = 0; i < aNumFormats; ++i) {
-    if (aFormats[i] == aFormat) {
-      return true;
-    }
-  }
-  return false;
-}
 
 class CompositionNotifySink
 {
@@ -260,66 +260,12 @@ protected:
   ImageFactory() {}
   virtual ~ImageFactory() {}
 
-  virtual already_AddRefed<Image> CreateImage(const ImageFormat* aFormats,
-                                              uint32_t aNumFormats,
-                                              const gfxIntSize &aScaleHint,
+  virtual already_AddRefed<Image> CreateImage(ImageFormat aFormat,
+                                              const gfx::IntSize &aScaleHint,
                                               BufferRecycleBin *aRecycleBin);
 
 };
  
-/**
- * This struct is used to store RemoteImages, it is meant to be able to live in
- * shared memory. Therefor it should not contain a vtable pointer. Remote
- * users can manipulate the data in this structure to specify what image is to
- * be drawn by the container. When accessing this data users should make sure
- * the mutex synchronizing access to the structure is held!
- */
-struct RemoteImageData {
-  enum Type {
-    /**
-     * This is a format that uses raw bitmap data.
-     */
-    RAW_BITMAP,
-
-    /**
-     * This is a format that uses a pointer to a texture do draw directly
-     * from a shared texture. Any process may have created this texture handle,
-     * the process creating the texture handle is responsible for managing it's
-     * lifetime by managing the lifetime of the first D3D texture object this
-     * handle was created for. It must also ensure the handle is not set
-     * current anywhere when the last reference to this object is released.
-     */
-    DXGI_TEXTURE_HANDLE
-  };
-  /* These formats describe the format in the memory byte-order */
-  enum Format {
-    /* 8 bits per channel */
-    BGRA32,
-    /* 8 bits per channel, alpha channel is ignored */
-    BGRX32
-  };
-
-  // This should be set to true if a change was made so that the ImageContainer
-  // knows to throw out any cached RemoteImage objects.
-  bool mWasUpdated;
-  Type mType;
-  Format mFormat;
-  gfxIntSize mSize;
-  union {
-    struct {
-      /* This pointer is set by a remote process, however it will be set to
-       * the container process' address the memory of the raw bitmap resides
-       * at.
-       */
-      unsigned char *mData;
-      int mStride;
-    } mBitmap;
-#ifdef XP_WIN
-    HANDLE mTextureHandle;
-#endif
-  };
-};
-
 /**
  * A class that manages Images for an ImageLayer. The only reason
  * we need a separate class here is that ImageLayers aren't threadsafe
@@ -327,7 +273,7 @@ struct RemoteImageData {
  * be able to set the current Image from any thread, to facilitate
  * video playback without involving the main thread, for example.
  *
- * An ImageContainer can operate in one of three modes:
+ * An ImageContainer can operate in one of these modes:
  * 1) Normal. Triggered by constructing the ImageContainer with
  * DISABLE_ASYNC or when compositing is happening on the main thread.
  * SetCurrentImage changes ImageContainer state but nothing is sent to the
@@ -337,22 +283,19 @@ struct RemoteImageData {
  * SetCurrentImage sends a message through the ImageBridge to the compositor
  * thread to update the image, without going through the main thread or
  * a layer transaction.
- * 3) Remote. Initiated by calling SetRemoteImageData on the ImageContainer
- * before any other activity.
  * The ImageContainer uses a shared memory block containing a cross-process mutex
  * to communicate with the compositor thread. SetCurrentImage synchronously
  * updates the shared state to point to the new image and the old image
  * is immediately released (not true in Normal or Asynchronous modes).
  */
-class ImageContainer {
+class ImageContainer MOZ_FINAL : public SupportsWeakPtr<ImageContainer> {
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(ImageContainer)
 public:
+  MOZ_DECLARE_REFCOUNTED_TYPENAME(ImageContainer)
 
   enum { DISABLE_ASYNC = 0x0, ENABLE_ASYNC = 0x01 };
 
-  ImageContainer(int flag = 0);
-
-  ~ImageContainer();
+  explicit ImageContainer(int flag = 0);
 
   /**
    * Create an Image in one of the given formats.
@@ -362,8 +305,7 @@ public:
    * Can be called on any thread. This method takes mReentrantMonitor
    * when accessing thread-shared state.
    */
-  already_AddRefed<Image> CreateImage(const ImageFormat* aFormats,
-                                      uint32_t aNumFormats);
+  already_AddRefed<Image> CreateImage(ImageFormat aFormat);
 
   /**
    * Set an Image as the current image to display. The Image must have
@@ -464,7 +406,7 @@ public:
   void UnlockCurrentImage();
 
   /**
-   * Get the current image as a gfxASurface. This is useful for fallback
+   * Get the current image as a SourceSurface. This is useful for fallback
    * rendering.
    * This can only be called from the main thread, since cairo objects
    * can only be used from the main thread.
@@ -483,25 +425,20 @@ public:
    * the lock methods should be used to avoid the copy, however this should be
    * avoided if the surface is required for a long period of time.
    */
-  already_AddRefed<gfxASurface> GetCurrentAsSurface(gfxIntSize* aSizeResult);
+  TemporaryRef<gfx::SourceSurface> GetCurrentAsSourceSurface(gfx::IntSize* aSizeResult);
 
   /**
-   * This is similar to GetCurrentAsSurface, however this does not make a copy
-   * of the image data and requires the user to call UnlockCurrentImage when
-   * done with the image data. Once UnlockCurrentImage has been called the
-   * surface returned by this function is no longer valid! This works for any
-   * type of image. Optionally a pointer can be passed to receive the current
-   * image.
+   * Same as LockCurrentAsSurface but for Moz2D
    */
-  already_AddRefed<gfxASurface> LockCurrentAsSurface(gfxIntSize* aSizeResult,
-                                                     Image** aCurrentImage = nullptr);
+  TemporaryRef<gfx::SourceSurface> LockCurrentAsSourceSurface(gfx::IntSize* aSizeResult,
+                                                              Image** aCurrentImage = nullptr);
 
   /**
    * Returns the size of the image in pixels.
    * Can be called on any thread. This method takes mReentrantMonitor when accessing
    * thread-shared state.
    */
-  gfxIntSize GetCurrentSize();
+  gfx::IntSize GetCurrentSize();
 
   /**
    * Sets a size that the image is expected to be rendered at.
@@ -510,13 +447,18 @@ public:
    * Can be called on any thread. This method takes mReentrantMonitor
    * when accessing thread-shared state.
    */
-  void SetScaleHint(const gfxIntSize& aScaleHint)
+  void SetScaleHint(const gfx::IntSize& aScaleHint)
   { mScaleHint = aScaleHint; }
 
   void SetImageFactory(ImageFactory *aFactory)
   {
     ReentrantMonitorAutoEnter mon(mReentrantMonitor);
     mImageFactory = aFactory ? aFactory : new ImageFactory();
+  }
+
+  ImageFactory* GetImageFactory() const
+  {
+    return mImageFactory;
   }
 
   /**
@@ -579,23 +521,11 @@ public:
     mCompositionNotifySink = aSink;
   }
 
-  /**
-   * This function is called to tell the ImageContainer where the
-   * (cross-process) segment lives where the shared data about possible
-   * remote images are stored. In addition to this a CrossProcessMutex object
-   * is passed telling the container how to synchronize access to this data.
-   * NOTE: This should be called during setup of the container and not after
-   * usage has started.
-   */
-  void SetRemoteImageData(RemoteImageData *aRemoteData,
-                          CrossProcessMutex *aRemoteDataMutex);
-  /**
-   * This can be used to check if the container has RemoteData set.
-   */
-  RemoteImageData *GetRemoteImageData() { return mRemoteData; }
-
-protected:
+private:
   typedef mozilla::ReentrantMonitor ReentrantMonitor;
+
+  // Private destructor, to discourage deletion outside of Release():
+  ~ImageContainer();
 
   void SetCurrentImageInternal(Image* aImage);
 
@@ -637,19 +567,9 @@ protected:
   // create images for this container.
   nsRefPtr<ImageFactory> mImageFactory;
 
-  gfxIntSize mScaleHint;
+  gfx::IntSize mScaleHint;
 
   nsRefPtr<BufferRecycleBin> mRecycleBin;
-
-  // This contains the remote image data for this container, if this is nullptr
-  // that means the container has no other process that may control its active
-  // image.
-  RemoteImageData *mRemoteData;
-
-  // This cross-process mutex is used to synchronise access to mRemoteData.
-  // When this mutex is held, we will always be inside the mReentrantMonitor
-  // however the same is not true vice versa.
-  CrossProcessMutex *mRemoteDataMutex;
 
   CompositionNotifySink *mCompositionNotifySink;
 
@@ -666,14 +586,14 @@ protected:
 class AutoLockImage
 {
 public:
-  AutoLockImage(ImageContainer *aContainer) : mContainer(aContainer) { mImage = mContainer->LockCurrentImage(); }
-  AutoLockImage(ImageContainer *aContainer, gfxASurface **aSurface) : mContainer(aContainer) {
-    *aSurface = mContainer->LockCurrentAsSurface(&mSize, getter_AddRefs(mImage)).get();
+  explicit AutoLockImage(ImageContainer *aContainer) : mContainer(aContainer) { mImage = mContainer->LockCurrentImage(); }
+  AutoLockImage(ImageContainer *aContainer, RefPtr<gfx::SourceSurface> *aSurface) : mContainer(aContainer) {
+    *aSurface = mContainer->LockCurrentAsSourceSurface(&mSize, getter_AddRefs(mImage));
   }
   ~AutoLockImage() { if (mContainer) { mContainer->UnlockCurrentImage(); } }
 
   Image* GetImage() { return mImage; }
-  const gfxIntSize &GetSize() { return mSize; }
+  const gfx::IntSize &GetSize() { return mSize; }
 
   void Unlock() { 
     if (mContainer) {
@@ -698,26 +618,26 @@ public:
 private:
   ImageContainer *mContainer;
   nsRefPtr<Image> mImage;
-  gfxIntSize mSize;
+  gfx::IntSize mSize;
 };
 
 struct PlanarYCbCrData {
   // Luminance buffer
   uint8_t* mYChannel;
   int32_t mYStride;
-  gfxIntSize mYSize;
+  gfx::IntSize mYSize;
   int32_t mYSkip;
   // Chroma buffers
   uint8_t* mCbChannel;
   uint8_t* mCrChannel;
   int32_t mCbCrStride;
-  gfxIntSize mCbCrSize;
+  gfx::IntSize mCbCrSize;
   int32_t mCbSkip;
   int32_t mCrSkip;
   // Picture region
   uint32_t mPicX;
   uint32_t mPicY;
-  gfxIntSize mPicSize;
+  gfx::IntSize mPicSize;
   StereoMode mStereoMode;
 
   nsIntRect GetPictureRect() const {
@@ -730,7 +650,7 @@ struct PlanarYCbCrData {
     : mYChannel(nullptr), mYStride(0), mYSize(0, 0), mYSkip(0)
     , mCbChannel(nullptr), mCrChannel(nullptr)
     , mCbCrStride(0), mCbCrSize(0, 0) , mCbSkip(0), mCrSkip(0)
-    , mPicX(0), mPicY(0), mPicSize(0, 0), mStereoMode(STEREO_MODE_MONO)
+    , mPicX(0), mPicY(0), mPicSize(0, 0), mStereoMode(StereoMode::MONO)
   {}
 };
 
@@ -819,12 +739,17 @@ public:
 
   virtual bool IsValid() { return !!mBufferSize; }
 
-  virtual gfxIntSize GetSize() { return mSize; }
+  virtual gfx::IntSize GetSize() { return mSize; }
 
-  PlanarYCbCrImage(BufferRecycleBin *aRecycleBin);
+  explicit PlanarYCbCrImage(BufferRecycleBin *aRecycleBin);
 
   virtual SharedPlanarYCbCrImage *AsSharedPlanarYCbCrImage() { return nullptr; }
-  virtual DeprecatedSharedPlanarYCbCrImage *AsDeprecatedSharedPlanarYCbCrImage() { return nullptr; }
+
+  virtual size_t SizeOfIncludingThis(MallocSizeOf aMallocSizeOf) const {
+    return aMallocSizeOf(this) + SizeOfExcludingThis(aMallocSizeOf);
+  }
+
+  virtual size_t SizeOfExcludingThis(MallocSizeOf aMallocSizeOf) const;
 
 protected:
   /**
@@ -841,7 +766,7 @@ protected:
    */
   virtual uint8_t* AllocateBuffer(uint32_t aSize);
 
-  already_AddRefed<gfxASurface> GetAsSurface();
+  TemporaryRef<gfx::SourceSurface> GetAsSourceSurface();
 
   void SetOffscreenFormat(gfxImageFormat aFormat) { mOffscreenFormat = aFormat; }
   gfxImageFormat GetOffscreenFormat();
@@ -849,9 +774,9 @@ protected:
   nsAutoArrayPtr<uint8_t> mBuffer;
   uint32_t mBufferSize;
   Data mData;
-  gfxIntSize mSize;
+  gfx::IntSize mSize;
   gfxImageFormat mOffscreenFormat;
-  nsCountedRef<nsMainThreadSurfaceRef> mSurface;
+  nsCountedRef<nsMainThreadSourceSurfaceRef> mSourceSurface;
   nsRefPtr<BufferRecycleBin> mRecycleBin;
 };
 
@@ -860,11 +785,12 @@ protected:
  * device output color space. This class is very simple as all backends
  * have to know about how to deal with drawing a cairo image.
  */
-class CairoImage : public Image {
+class CairoImage MOZ_FINAL : public Image,
+                             public ISharedImage {
 public:
   struct Data {
-    gfxASurface* mSurface;
-    gfxIntSize mSize;
+    gfx::IntSize mSize;
+    RefPtr<gfx::SourceSurface> mSourceSurface;
   };
 
   /**
@@ -874,38 +800,62 @@ public:
    */
   void SetData(const Data& aData)
   {
-    mSurface = aData.mSurface;
+    mSize = aData.mSize;
+    mSourceSurface = aData.mSourceSurface;
+  }
+
+  virtual TemporaryRef<gfx::SourceSurface> GetAsSourceSurface()
+  {
+    return mSourceSurface.get();
+  }
+
+  virtual ISharedImage* AsSharedImage() { return this; }
+  virtual uint8_t* GetBuffer() { return nullptr; }
+  virtual TextureClient* GetTextureClient(CompositableClient* aClient);
+
+  gfx::IntSize GetSize() { return mSize; }
+
+  CairoImage();
+  ~CairoImage();
+
+  gfx::IntSize mSize;
+
+  nsCountedRef<nsMainThreadSourceSurfaceRef> mSourceSurface;
+  nsDataHashtable<nsUint32HashKey, RefPtr<TextureClient> >  mTextureClients;
+};
+
+#ifdef MOZ_WIDGET_GONK
+class OverlayImage : public Image {
+  /**
+   * OverlayImage is a special Image type that does not hold any buffer.
+   * It only hold an Id as identifier to the real content of the Image.
+   * Therefore, OverlayImage must be handled by some specialized hardware(e.g. HWC) 
+   * to show its content.
+   */
+public:
+  struct Data {
+    int32_t mOverlayId;
+    gfx::IntSize mSize;
+  };
+
+  OverlayImage() : Image(nullptr, ImageFormat::OVERLAY_IMAGE) { mOverlayId = INVALID_OVERLAY; }
+
+  void SetData(const Data& aData)
+  {
+    mOverlayId = aData.mOverlayId;
     mSize = aData.mSize;
   }
 
+  TemporaryRef<gfx::SourceSurface> GetAsSourceSurface() { return nullptr; } ;
+  int32_t GetOverlayId() { return mOverlayId; }
 
-  virtual already_AddRefed<gfxASurface> GetAsSurface()
-  {
-    nsRefPtr<gfxASurface> surface = mSurface.get();
-    return surface.forget();
-  }
+  gfx::IntSize GetSize() { return mSize; }
 
-  gfxIntSize GetSize() { return mSize; }
-
-  CairoImage() : Image(nullptr, CAIRO_SURFACE) {}
-
-  nsCountedRef<nsMainThreadSurfaceRef> mSurface;
-  gfxIntSize mSize;
+private:
+  int32_t mOverlayId;
+  gfx::IntSize mSize;
 };
-
-class RemoteBitmapImage : public Image {
-public:
-  RemoteBitmapImage() : Image(nullptr, REMOTE_IMAGE_BITMAP) {}
-
-  already_AddRefed<gfxASurface> GetAsSurface();
-
-  gfxIntSize GetSize() { return mSize; }
-
-  unsigned char *mData;
-  int mStride;
-  gfxIntSize mSize;
-  RemoteImageData::Format mFormat;
-};
+#endif
 
 } //namespace
 } //namespace

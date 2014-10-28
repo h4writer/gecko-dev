@@ -46,29 +46,30 @@ public:
     MOZ_COUNT_DTOR(TextDecoder);
   }
 
-  JSObject* WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope,
-                       bool* aTookOwnership)
+  JSObject* WrapObject(JSContext* aCx, bool* aTookOwnership)
   {
-    return TextDecoderBinding::Wrap(aCx, aScope, this, aTookOwnership);
-  }
-
-  nsISupports*
-  GetParentObject()
-  {
-    return nullptr;
+    return TextDecoderBinding::Wrap(aCx, this, aTookOwnership);
   }
 
   /**
-   * Validates provided encoding and throws an exception if invalid encoding.
-   * If no encoding is provided then mEncoding is default initialised to "utf-8".
+   * Validates provided label and throws an exception if invalid label.
    *
-   * @param aEncoding    Optional encoding (case insensitive) provided.
-   *                     Default value is "utf-8" if no encoding is provided.
-   * @param aFatal       aFatal, indicates whether to throw an 'EncodingError'
-   *                     exception or not.
+   * @param aLabel       The encoding label (case insensitive) provided.
+   * @param aFatal       indicates whether to throw an 'EncodingError'
+   *                     exception or not when decoding.
    * @return aRv         EncodingError exception else null.
    */
-  void Init(const nsAString& aEncoding, const bool aFatal, ErrorResult& aRv);
+  void Init(const nsAString& aLabel, const bool aFatal, ErrorResult& aRv);
+
+  /**
+   * Performs initialization with a Gecko-canonical encoding name (as opposed
+   * to a label.)
+   *
+   * @param aEncoding    A Gecko-canonical encoding name
+   * @param aFatal       indicates whether to throw an 'EncodingError'
+   *                     exception or not when decoding.
+   */
+  void InitWithEncoding(const nsACString& aEncoding, const bool aFatal);
 
   /**
    * Return the encoding name.
@@ -106,6 +107,7 @@ public:
               const TextDecodeOptions& aOptions,
               nsAString& aOutDecodedString,
               ErrorResult& aRv) {
+    aView.ComputeLengthAndData();
     Decode(reinterpret_cast<char*>(aView.Data()), aView.Length(),
            aOptions.mStream, aOutDecodedString, aRv);
   }

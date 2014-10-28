@@ -36,22 +36,36 @@ PasswordEngine.prototype = {
   _recordObj: LoginRec,
   applyIncomingBatchSize: PASSWORDS_STORE_BATCH_SIZE,
 
+  syncPriority: 2,
+
   _syncFinish: function _syncFinish() {
     SyncEngine.prototype._syncFinish.call(this);
 
     // Delete the weave credentials from the server once
-    if (!Svc.Prefs.get("deletePwd", false)) {
+    if (!Svc.Prefs.get("deletePwdFxA", false)) {
       try {
-        let ids = Services.logins.findLogins({}, PWDMGR_HOST, "", "")
-                          .map(function(info) {
-          return info.QueryInterface(Components.interfaces.nsILoginMetaInfo).guid;
-        });
-        let coll = new Collection(this.engineURL, null, this.service);
-        coll.ids = ids;
-        let ret = coll.delete();
-        this._log.debug("Delete result: " + ret);
-
-        Svc.Prefs.set("deletePwd", true);
+        let ids = [];
+        for (let host of Utils.getSyncCredentialsHosts()) {
+          for (let info of Services.logins.findLogins({}, host, "", "")) {
+            ids.push(info.QueryInterface(Components.interfaces.nsILoginMetaInfo).guid);
+          }
+        }
+        if (ids.length) {
+          let coll = new Collection(this.engineURL, null, this.service);
+          coll.ids = ids;
+          let ret = coll.delete();
+          this._log.debug("Delete result: " + ret);
+          if (!ret.success && ret.status != 400) {
+            // A non-400 failure means try again next time.
+            return;
+          }
+        } else {
+          this._log.debug("Didn't find any passwords to delete");
+        }
+        // If there were no ids to delete, or we succeeded, or got a 400,
+        // record success.
+        Svc.Prefs.set("deletePwdFxA", true);
+        Svc.Prefs.reset("deletePwd"); // The old prefname we previously used.
       }
       catch(ex) {
         this._log.debug("Password deletes failed: " + Utils.exceptionStr(ex));
@@ -79,11 +93,6 @@ function PasswordStore(name, engine) {
   Store.call(this, name, engine);
   this._nsLoginInfo = new Components.Constructor(
     "@mozilla.org/login-manager/loginInfo;1", Ci.nsILoginInfo, "init");
-
-  XPCOMUtils.defineLazyGetter(this, "DBConnection", function() {
-    return Services.logins.QueryInterface(Ci.nsIInterfaceRequestor)
-                   .getInterface(Ci.mozIStorageConnection);
-  });
 }
 PasswordStore.prototype = {
   __proto__: Store.prototype,
@@ -128,21 +137,6 @@ PasswordStore.prototype = {
     return null;
   },
 
-  applyIncomingBatch: function applyIncomingBatch(records) {
-    if (!this.DBConnection) {
-      return Store.prototype.applyIncomingBatch.call(this, records);
-    }
-
-    return Utils.runInTransaction(this.DBConnection, function() {
-      return Store.prototype.applyIncomingBatch.call(this, records);
-    }, this);
-  },
-
-  applyIncoming: function applyIncoming(record) {
-    Store.prototype.applyIncoming.call(this, record);
-    this._sleep(0); // Yield back to main thread after synchronous operation.
-  },
-
   getAllIDs: function PasswordStore__getAllIDs() {
     let items = {};
     let logins = Services.logins.getAllLogins({});
@@ -150,8 +144,9 @@ PasswordStore.prototype = {
     for (let i = 0; i < logins.length; i++) {
       // Skip over Weave password/passphrase entries
       let metaInfo = logins[i].QueryInterface(Ci.nsILoginMetaInfo);
-      if (metaInfo.hostname == PWDMGR_HOST)
+      if (Utils.getSyncCredentialsHosts().has(metaInfo.hostname)) {
         continue;
+      }
 
       items[metaInfo.guid] = metaInfo;
     }
@@ -263,49 +258,43 @@ function PasswordTracker(name, engine) {
 PasswordTracker.prototype = {
   __proto__: Tracker.prototype,
 
-  _enabled: false,
-  observe: function PasswordTracker_observe(aSubject, aTopic, aData) {
-    switch (aTopic) {
-      case "weave:engine:start-tracking":
-        if (!this._enabled) {
-          Svc.Obs.add("passwordmgr-storage-changed", this);
-          this._enabled = true;
-        }
-        return;
-      case "weave:engine:stop-tracking":
-        if (this._enabled) {
-          Svc.Obs.remove("passwordmgr-storage-changed", this);
-          this._enabled = false;
-        }
-        return;
-    }
+  startTracking: function() {
+    Svc.Obs.add("passwordmgr-storage-changed", this);
+  },
 
-    if (this.ignoreAll)
+  stopTracking: function() {
+    Svc.Obs.remove("passwordmgr-storage-changed", this);
+  },
+
+  observe: function(subject, topic, data) {
+    Tracker.prototype.observe.call(this, subject, topic, data);
+
+    if (this.ignoreAll) {
       return;
+    }
 
     // A single add, remove or change or removing all items
     // will trigger a sync for MULTI_DEVICE.
-    switch (aData) {
-    case 'modifyLogin':
-      aSubject = aSubject.QueryInterface(Ci.nsIArray).
-        queryElementAt(1, Ci.nsILoginMetaInfo);
-      // fallthrough
-    case 'addLogin':
-    case 'removeLogin':
-      // Skip over Weave password/passphrase changes
-      aSubject.QueryInterface(Ci.nsILoginMetaInfo).
-        QueryInterface(Ci.nsILoginInfo);
-      if (aSubject.hostname == PWDMGR_HOST)
-        break;
+    switch (data) {
+      case "modifyLogin":
+        subject = subject.QueryInterface(Ci.nsIArray).queryElementAt(1, Ci.nsILoginMetaInfo);
+        // fallthrough
+      case "addLogin":
+      case "removeLogin":
+        // Skip over Weave password/passphrase changes.
+        subject.QueryInterface(Ci.nsILoginMetaInfo).QueryInterface(Ci.nsILoginInfo);
+        if (Utils.getSyncCredentialsHosts().has(subject.hostname)) {
+          break;
+        }
 
-      this.score += SCORE_INCREMENT_XLARGE;
-      this._log.trace(aData + ": " + aSubject.guid);
-      this.addChangedID(aSubject.guid);
-      break;
-    case 'removeAllLogins':
-      this._log.trace(aData);
-      this.score += SCORE_INCREMENT_XLARGE;
-      break;
+        this.score += SCORE_INCREMENT_XLARGE;
+        this._log.trace(data + ": " + subject.guid);
+        this.addChangedID(subject.guid);
+        break;
+      case "removeAllLogins":
+        this._log.trace(data);
+        this.score += SCORE_INCREMENT_XLARGE;
+        break;
     }
   }
 };

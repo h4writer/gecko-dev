@@ -17,14 +17,14 @@ const { off, emit, setListeners } = require('../event/core');
 const { EventTarget } = require('../event/target');
 const { URL } = require('../url');
 const { add, remove, has, clear, iterator } = require('../lang/weak-set');
-const { id: addonID } = require('../self');
+const { id: addonID, data } = require('../self');
 const { WindowTracker } = require('../deprecated/window-utils');
 const { isShowing } = require('./sidebar/utils');
 const { isBrowser, getMostRecentBrowserWindow, windows, isWindowPrivate } = require('../window/utils');
 const { ns } = require('../core/namespace');
 const { remove: removeFromArray } = require('../util/array');
 const { show, hide, toggle } = require('./sidebar/actions');
-const { Worker: WorkerTrait } = require('../content/worker');
+const { Worker } = require('../content/worker');
 const { contract: sidebarContract } = require('./sidebar/contract');
 const { create, dispose, updateTitle, updateURL, isSidebarShowing, showSidebar, hideSidebar } = require('./sidebar/view');
 const { defer } = require('../core/promise');
@@ -33,12 +33,9 @@ const { isLocalURL } = require('../url');
 const { ensure } = require('../system/unload');
 const { identify } = require('./id');
 const { uuid } = require('../util/uuid');
+const { viewFor } = require('../view/core');
 
-const Worker = WorkerTrait.resolve({
-  _injectInDocument: '__injectInDocument'
-}).compose({
-  get _injectInDocument() true
-});
+const resolveURL = (url) => url ? data.url(url) : url;
 
 const sidebarNS = ns();
 
@@ -90,7 +87,7 @@ const Sidebar = Class({
 
         bar.addEventListener('command', function() {
           if (isSidebarShowing(window, self)) {
-            hideSidebar(window, self);
+            hideSidebar(window, self).catch(() => {});
             return;
           }
 
@@ -112,13 +109,14 @@ const Sidebar = Class({
 
           let sbTitle = window.document.getElementById('sidebar-title');
           function onWebPanelSidebarCreated() {
-            if (panelBrowser.contentWindow.location != model.url ||
+            if (panelBrowser.contentWindow.location != resolveURL(model.url) ||
                 sbTitle.value != model.title) {
               return;
             }
 
             let worker = windowNS(window).worker = Worker({
-              window: panelBrowser.contentWindow
+              window: panelBrowser.contentWindow,
+              injectInDocument: true
             });
 
             function onWebPanelSidebarUnload() {
@@ -170,7 +168,7 @@ const Sidebar = Class({
           return;
 
         // hide the sidebar if it is showing
-        hideSidebar(window, self);
+        hideSidebar(window, self).catch(() => {});
 
         // kill the menu item
         let { bar } = windowNS(window);
@@ -244,12 +242,8 @@ const Sidebar = Class({
     updateURL(this, v);
     modelFor(this).url = v;
   },
-  show: function() {
-    return showSidebar(null, this);
-  },
-  hide: function() {
-    return hideSidebar(null, this);
-  },
+  show: function(window) showSidebar(viewFor(window), this),
+  hide: function(window) hideSidebar(viewFor(window), this),
   dispose: function() {
     const internals = sidebarNS(this);
 
@@ -258,9 +252,11 @@ const Sidebar = Class({
     remove(sidebars, this);
 
     // stop tracking windows
-    internals.tracker.unload();
-    internals.tracker = null;
+    if (internals.tracker) {
+      internals.tracker.unload();
+    }
 
+    internals.tracker = null;
     internals.windowNS = null;
 
     views.delete(this);
@@ -270,6 +266,8 @@ const Sidebar = Class({
 exports.Sidebar = Sidebar;
 
 function validateTitleAndURLCombo(sidebar, title, url) {
+  url = resolveURL(url);
+
   if (sidebar.title == title && sidebar.url == url) {
     return false;
   }

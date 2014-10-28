@@ -36,12 +36,16 @@
                    autocompletepopup="PopupAutoComplete"
                    autocompletesearch="search-autocomplete"
                    autocompletesearchparam="searchbar-history"
-                   timeout="250"
                    maxrows="10"
                    completeselectedindex="true"
                    showcommentcolumn="true"
                    tabscrolling="true"
                    xbl:inherits="disabled,disableautocomplete,searchengine,src,newlines">
+        <!--
+        Empty <box> to properly position the icon within the autocomplete
+        binding's anonymous children (the autocomplete binding positions <box>
+        children differently)
+        -->
         <xul:box>
           <xul:button class="searchbar-engine-button"
                       type="menu"
@@ -79,9 +83,13 @@
                          .getService(Components.interfaces.nsIObserverService);
         os.addObserver(this, "browser-search-engine-modified", false);
 
-        this._addedObserver = true;
+        this._initialized = true;
 
         this.searchService.init((function search_init_cb(aStatus) {
+          // Bail out if the binding's been destroyed
+          if (!this._initialized)
+            return;
+
           if (Components.isSuccessCode(aStatus)) {
             // Refresh the display (updating icon, etc)
             this.updateDisplay();
@@ -92,11 +100,12 @@
       ]]></constructor>
 
       <destructor><![CDATA[
-        if (this._addedObserver) {
+        if (this._initialized) {
+          this._initialized = false;
+
           var os = Components.classes["@mozilla.org/observer-service;1"]
                              .getService(Components.interfaces.nsIObserverService);
           os.removeObserver(this, "browser-search-engine-modified");
-          this._addedObserver = false;
         }
 
         // Make sure to break the cycle from _textbox to us. Otherwise we leak
@@ -115,6 +124,9 @@
       <field name="_engines">null</field>
       <field name="FormHistory" readonly="true">
         (Components.utils.import("resource://gre/modules/FormHistory.jsm", {})).FormHistory;
+      </field>
+      <field name="PlacesUtils" readonly="true">
+        (Components.utils.import("resource://gre/modules/PlacesUtils.jsm", {})).PlacesUtils;
       </field>
 
       <property name="engines" readonly="true">
@@ -283,9 +295,7 @@
         <parameter name="uri"/>
         <body><![CDATA[
           if (uri) {
-            let size = Math.round(16 * window.devicePixelRatio);
-            if (!uri.contains("#"))
-              uri += "#-moz-resolution=" + size + "," + size;
+            uri = this.PlacesUtils.getImageURLForResolution(window, uri);
           }
           element.setAttribute("src", uri);
         ]]></body>
@@ -387,7 +397,6 @@
             var menuitem = document.createElementNS(kXULNS, "menuitem");
             var name = engines[i].name;
             menuitem.setAttribute("label", name);
-            menuitem.setAttribute("id", name);
             menuitem.setAttribute("class", "menuitem-iconic searchbar-engine-menuitem menuitem-with-favicon");
             // Since this menu is rebuilt by the observer method whenever a new
             // engine is selected, the "selected" attribute does not need to be
@@ -526,22 +535,7 @@
       <![CDATA[
         // Speculatively connect to the current engine's search URI (and
         // suggest URI, if different) to reduce request latency
-
-        const SUGGEST_TYPE = "application/x-suggestions+json";
-        var engine = this.currentEngine;
-        var connector =
-            Services.io.QueryInterface(Components.interfaces.nsISpeculativeConnect);
-        var searchURI = engine.getSubmission("dummy", null, "searchbar").uri;
-        let callbacks = window.QueryInterface(Components.interfaces.nsIInterfaceRequestor)
-                              .getInterface(Components.interfaces.nsIWebNavigation)
-                              .QueryInterface(Components.interfaces.nsILoadContext);
-        connector.speculativeConnect(searchURI, callbacks);
-
-        if (engine.supportsResponseType(SUGGEST_TYPE)) {
-          var suggestURI = engine.getSubmission("dummy", SUGGEST_TYPE, "searchbar").uri;
-          if (suggestURI.prePath != searchURI.prePath)
-            connector.speculativeConnect(suggestURI, callbacks);
-        }
+        this.currentEngine.speculativeConnect({window: window});
       ]]></handler>
     </handlers>
   </binding>

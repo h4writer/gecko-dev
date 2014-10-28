@@ -22,10 +22,22 @@
 #downloads-button[cui-areatype="toolbar"] > #downloads-indicator-anchor > #downloads-indicator-icon {
   background: -moz-image-rect(url("chrome://browser/skin/Toolbar.png"),
                               0, 198, 18, 180) center no-repeat;
+  min-width: 18px;
+  min-height: 18px;
+}
+
+toolbar[brighttext] #downloads-button[cui-areatype="toolbar"]:not([attention]) > #downloads-indicator-anchor > #downloads-indicator-icon {
+  background: -moz-image-rect(url("chrome://browser/skin/Toolbar-inverted.png"),
+                              0, 198, 18, 180) center no-repeat;
 }
 
 #downloads-button[cui-areatype="toolbar"][attention] > #downloads-indicator-anchor > #downloads-indicator-icon {
   background-image: url("chrome://browser/skin/downloads/download-glow.png");
+}
+
+#downloads-button[cui-areatype="menu-panel"][attention] {
+  list-style-image: url("chrome://browser/skin/downloads/download-glow-menuPanel.png");
+  -moz-image-region: auto;
 }
 
 /* In the next few rules, we use :not([counter]) as a shortcut that is
@@ -35,6 +47,10 @@
   background: -moz-image-rect(url("chrome://browser/skin/Toolbar-small.png"),
                               0, 16, 16, 0) center no-repeat;
   background-size: 12px;
+}
+
+toolbar[brighttext] #downloads-button:not([counter]):not([attention]) > #downloads-indicator-anchor > #downloads-button-progress-area > #downloads-indicator-counter {
+  background-image: -moz-image-rect(url("chrome://browser/skin/Toolbar-inverted.png"), 0, 198, 18, 180);
 }
 
 #downloads-button:not([counter])[attention] > #downloads-indicator-anchor > #downloads-indicator-progress-area > #downloads-indicator-counter {
@@ -98,8 +114,14 @@
   text-align: center;
 }
 
+toolbar[brighttext] #downloads-indicator-counter {
+  color: white;
+  text-shadow: 0 0 1px rgba(0,0,0,.7),
+               0 1px 1.5px rgba(0,0,0,.5);
+}
+
 #downloads-indicator-progress {
-  width: 16px;
+  width: 18px;
   height: 6px;
   min-width: 0;
   min-height: 0;

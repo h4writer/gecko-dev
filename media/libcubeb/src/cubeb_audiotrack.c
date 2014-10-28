@@ -71,7 +71,7 @@ struct AudioTrack {
   /* static */ int (*get_output_latency)(uint32_t* latency, int stream);
   /* static */ int (*get_output_samplingrate)(int* samplerate, int stream);
                status_t (*set_marker_position)(void* instance, unsigned int);
-
+               status_t (*set_volume)(void* instance, float left, float right);
 };
 
 struct cubeb {
@@ -251,6 +251,7 @@ audiotrack_init(cubeb ** context, char const * context_name)
   DLSYM_DLERROR("_ZN7android10AudioTrack5pauseEv", ctx->klass.pause, ctx->library);
   DLSYM_DLERROR("_ZN7android10AudioTrack11getPositionEPj", ctx->klass.get_position, ctx->library);
   DLSYM_DLERROR("_ZN7android10AudioTrack17setMarkerPositionEj", ctx->klass.set_marker_position, ctx->library);
+  DLSYM_DLERROR("_ZN7android10AudioTrack9setVolumeEff", ctx->klass.set_volume, ctx->library);
 
   /* check that we have a combination of symbol that makes sense */
   c = &ctx->klass;
@@ -298,7 +299,7 @@ audiotrack_get_min_latency(cubeb * ctx, cubeb_stream_params params, uint32_t * l
    * audiotrack_stream_init), so this value is not going to be used. */
   int rv;
 
-  rv = audiotrack_get_min_frame_count(ctx, &params, latency_ms);
+  rv = audiotrack_get_min_frame_count(ctx, &params, (int *)latency_ms);
   if (rv != CUBEB_OK) {
     return CUBEB_ERROR;
   }
@@ -314,7 +315,7 @@ audiotrack_get_preferred_sample_rate(cubeb * ctx, uint32_t * rate)
 {
   status_t rv;
 
-  rv = ctx->klass.get_output_samplingrate(rate, 3 /* MUSIC */);
+  rv = ctx->klass.get_output_samplingrate((int32_t *)rate, 3 /* MUSIC */);
 
   return rv == 0 ? CUBEB_OK : CUBEB_ERROR;
 }
@@ -338,7 +339,7 @@ audiotrack_stream_init(cubeb * ctx, cubeb_stream ** stream, char const * stream_
 {
   cubeb_stream * stm;
   int32_t channels;
-  int32_t min_frame_count;
+  uint32_t min_frame_count;
 
   assert(ctx && stream);
 
@@ -347,7 +348,7 @@ audiotrack_stream_init(cubeb * ctx, cubeb_stream ** stream, char const * stream_
     return CUBEB_ERROR_INVALID_FORMAT;
   }
 
-  if (audiotrack_get_min_frame_count(ctx, &stream_params, &min_frame_count)) {
+  if (audiotrack_get_min_frame_count(ctx, &stream_params, (int *)&min_frame_count)) {
     return CUBEB_ERROR;
   }
 
@@ -468,6 +469,27 @@ audiotrack_stream_get_latency(cubeb_stream * stream, uint32_t * latency)
   return 0;
 }
 
+int
+audiotrack_stream_set_volume(cubeb_stream * stream, float volume)
+{
+  status_t status;
+
+  status = stream->context->klass.set_volume(stream->instance, volume, volume);
+
+  if (status) {
+    return CUBEB_ERROR;
+  }
+
+  return CUBEB_OK;
+}
+
+int
+audiotrack_stream_set_panning(cubeb_stream * stream, float panning)
+{
+  assert(false && "not implemented.");
+  return CUBEB_OK;
+}
+
 static struct cubeb_ops const audiotrack_ops = {
   .init = audiotrack_init,
   .get_backend_id = audiotrack_get_backend_id,
@@ -480,5 +502,10 @@ static struct cubeb_ops const audiotrack_ops = {
   .stream_start = audiotrack_stream_start,
   .stream_stop = audiotrack_stream_stop,
   .stream_get_position = audiotrack_stream_get_position,
-  .stream_get_latency = audiotrack_stream_get_latency
+  .stream_get_latency = audiotrack_stream_get_latency,
+  .stream_set_volume = audiotrack_stream_set_volume,
+  .stream_set_panning = audiotrack_stream_set_panning,
+  .stream_get_current_device = NULL,
+  .stream_device_destroy = NULL,
+  .stream_register_device_changed_callback = NULL
 };

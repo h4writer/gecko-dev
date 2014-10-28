@@ -38,9 +38,9 @@ nsInputStreamChannel::OpenContentStream(bool async, nsIInputStream **result,
 //-----------------------------------------------------------------------------
 // nsInputStreamChannel::nsISupports
 
-NS_IMPL_ISUPPORTS_INHERITED1(nsInputStreamChannel,
-                             nsBaseChannel,
-                             nsIInputStreamChannel)
+NS_IMPL_ISUPPORTS_INHERITED(nsInputStreamChannel,
+                            nsBaseChannel,
+                            nsIInputStreamChannel)
 
 //-----------------------------------------------------------------------------
 // nsInputStreamChannel::nsIInputStreamChannel
@@ -90,3 +90,17 @@ nsInputStreamChannel::GetIsSrcdocChannel(bool *aIsSrcdocChannel)
   return NS_OK;
 }
 
+NS_IMETHODIMP
+nsInputStreamChannel::GetBaseURI(nsIURI** aBaseURI)
+{
+  *aBaseURI = mBaseURI;
+  NS_IF_ADDREF(*aBaseURI);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsInputStreamChannel::SetBaseURI(nsIURI* aBaseURI)
+{
+  mBaseURI = aBaseURI;
+  return NS_OK;
+}

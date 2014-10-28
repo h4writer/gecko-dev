@@ -38,21 +38,21 @@ GLBlitTextureImageHelper::BlitTextureImage(TextureImage *aSrc, const nsIntRect& 
     NS_ASSERTION(!aSrc->InUpdate(), "Source texture is in update!");
     NS_ASSERTION(!aDst->InUpdate(), "Destination texture is in update!");
 
-    if (aSrcRect.IsEmpty() || aDstRect.IsEmpty())
+    if (!aSrc || !aDst || aSrcRect.IsEmpty() || aDstRect.IsEmpty())
         return;
 
     int savedFb = 0;
     mGL->fGetIntegerv(LOCAL_GL_FRAMEBUFFER_BINDING, &savedFb);
 
-    mGL->fDisable(LOCAL_GL_SCISSOR_TEST);
-    mGL->fDisable(LOCAL_GL_BLEND);
+    ScopedGLState scopedScissorTestState(mGL, LOCAL_GL_SCISSOR_TEST, false);
+    ScopedGLState scopedBlendState(mGL, LOCAL_GL_BLEND, false);
 
     // 2.0 means scale up by two
     float blitScaleX = float(aDstRect.width) / float(aSrcRect.width);
     float blitScaleY = float(aDstRect.height) / float(aSrcRect.height);
 
     // We start iterating over all destination tiles
-    aDst->BeginTileIteration();
+    aDst->BeginBigImageIteration();
     do {
         // calculate portion of the tile that is going to be painted to
         nsIntRect dstSubRect;
@@ -73,7 +73,7 @@ GLBlitTextureImageHelper::BlitTextureImage(TextureImage *aSrc, const nsIntRect& 
         SetBlitFramebufferForDestTexture(aDst->GetTextureID());
         UseBlitProgram();
 
-        aSrc->BeginTileIteration();
+        aSrc->BeginBigImageIteration();
         // now iterate over all tiles in the source Image...
         do {
             // calculate portion of the source tile that is in the source rect
@@ -113,7 +113,7 @@ GLBlitTextureImageHelper::BlitTextureImage(TextureImage *aSrc, const nsIntRect& 
             float dy0 = 2.0f * float(srcSubInDstRect.y) / float(dstSize.height) - 1.0f;
             float dx1 = 2.0f * float(srcSubInDstRect.x + srcSubInDstRect.width) / float(dstSize.width) - 1.0f;
             float dy1 = 2.0f * float(srcSubInDstRect.y + srcSubInDstRect.height) / float(dstSize.height) - 1.0f;
-            mGL->PushViewportRect(nsIntRect(0, 0, dstSize.width, dstSize.height));
+            ScopedViewportRect autoViewportRect(mGL, 0, 0, dstSize.width, dstSize.height);
 
             RectTriangles rects;
 
@@ -136,44 +136,28 @@ GLBlitTextureImageHelper::BlitTextureImage(TextureImage *aSrc, const nsIntRect& 
 
                 // now put the coords into the d[xy]0 .. d[xy]1 coordinate space
                 // from the 0..1 that it comes out of decompose
-                RectTriangles::vert_coord* v = (RectTriangles::vert_coord*)rects.vertexPointer();
+                InfallibleTArray<RectTriangles::coord>& coords = rects.vertCoords();
 
-                for (unsigned int i = 0; i < rects.elements(); ++i) {
-                    v[i].x = (v[i].x * (dx1 - dx0)) + dx0;
-                    v[i].y = (v[i].y * (dy1 - dy0)) + dy0;
+                for (unsigned int i = 0; i < coords.Length(); ++i) {
+                    coords[i].x = (coords[i].x * (dx1 - dx0)) + dx0;
+                    coords[i].y = (coords[i].y * (dy1 - dy0)) + dy0;
                 }
             }
 
             ScopedBindTextureUnit autoTexUnit(mGL, LOCAL_GL_TEXTURE0);
             ScopedBindTexture autoTex(mGL, aSrc->GetTextureID());
-
-            mGL->fBindBuffer(LOCAL_GL_ARRAY_BUFFER, 0);
-
-            mGL->fVertexAttribPointer(0, 2, LOCAL_GL_FLOAT, LOCAL_GL_FALSE, 0, rects.vertexPointer());
-            mGL->fVertexAttribPointer(1, 2, LOCAL_GL_FLOAT, LOCAL_GL_FALSE, 0, rects.texCoordPointer());
-
-            mGL->fEnableVertexAttribArray(0);
-            mGL->fEnableVertexAttribArray(1);
+            ScopedVertexAttribPointer autoAttrib0(mGL, 0, 2, LOCAL_GL_FLOAT, LOCAL_GL_FALSE, 0, 0, rects.vertCoords().Elements());
+            ScopedVertexAttribPointer autoAttrib1(mGL, 1, 2, LOCAL_GL_FLOAT, LOCAL_GL_FALSE, 0, 0, rects.texCoords().Elements());
 
             mGL->fDrawArrays(LOCAL_GL_TRIANGLES, 0, rects.elements());
 
-            mGL->fDisableVertexAttribArray(0);
-            mGL->fDisableVertexAttribArray(1);
-
-            mGL->PopViewportRect();
         } while (aSrc->NextTile());
     } while (aDst->NextTile());
-
-    mGL->fVertexAttribPointer(0, 2, LOCAL_GL_FLOAT, LOCAL_GL_FALSE, 0, nullptr);
-    mGL->fVertexAttribPointer(1, 2, LOCAL_GL_FLOAT, LOCAL_GL_FALSE, 0, nullptr);
 
     // unbind the previous texture from the framebuffer
     SetBlitFramebufferForDestTexture(0);
 
     mGL->fBindFramebuffer(LOCAL_GL_FRAMEBUFFER, savedFb);
-
-    mGL->fEnable(LOCAL_GL_SCISSOR_TEST);
-    mGL->fEnable(LOCAL_GL_BLEND);
 }
 
 void
@@ -193,7 +177,7 @@ GLBlitTextureImageHelper::SetBlitFramebufferForDestTexture(GLuint aTexture)
     GLenum result = mGL->fCheckFramebufferStatus(LOCAL_GL_FRAMEBUFFER);
     if (aTexture && (result != LOCAL_GL_FRAMEBUFFER_COMPLETE)) {
         nsAutoCString msg;
-        msg.Append("Framebuffer not complete -- error 0x");
+        msg.AppendLiteral("Framebuffer not complete -- error 0x");
         msg.AppendInt(result, 16);
         // Note: if you are hitting this, it is likely that
         // your texture is not texture complete -- that is, you
@@ -249,7 +233,7 @@ GLBlitTextureImageHelper::UseBlitProgram()
             mGL->fGetShaderInfoLog(shaders[i], len, (GLint*) &len, (char*) log.BeginWriting());
             log.SetLength(len);
 
-            printf_stderr("Shader %d compilation failed:\n%s\n", log.get());
+            printf_stderr("Shader %d compilation failed:\n%s\n", i, log.get());
             return;
         }
 

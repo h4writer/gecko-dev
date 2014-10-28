@@ -8,7 +8,7 @@
 
 namespace mozilla {
 
-NS_IMPL_ISUPPORTS2(LoadContext, nsILoadContext, nsIInterfaceRequestor)
+NS_IMPL_ISUPPORTS(LoadContext, nsILoadContext, nsIInterfaceRequestor)
 
 //-----------------------------------------------------------------------------
 // LoadContext::nsILoadContext
@@ -37,6 +37,14 @@ LoadContext::GetTopFrameElement(nsIDOMElement** aElement)
 {
   nsCOMPtr<nsIDOMElement> element = do_QueryReferent(mTopFrameElement);
   element.forget(aElement);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+LoadContext::GetNestedFrameId(uint64_t* aId)
+{
+  NS_ENSURE_ARG(aId);
+  *aId = mNestedFrameId;
   return NS_OK;
 }
 
@@ -82,6 +90,26 @@ LoadContext::SetUsePrivateBrowsing(bool aUsePrivateBrowsing)
 
 NS_IMETHODIMP
 LoadContext::SetPrivateBrowsing(bool aUsePrivateBrowsing)
+{
+  MOZ_ASSERT(mIsNotNull);
+
+  // We shouldn't need this on parent...
+  return NS_ERROR_UNEXPECTED;
+}
+
+NS_IMETHODIMP
+LoadContext::GetUseRemoteTabs(bool* aUseRemoteTabs)
+{
+  MOZ_ASSERT(mIsNotNull);
+
+  NS_ENSURE_ARG_POINTER(aUseRemoteTabs);
+
+  *aUseRemoteTabs = mUseRemoteTabs;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+LoadContext::SetRemoteTabs(bool aUseRemoteTabs)
 {
   MOZ_ASSERT(mIsNotNull);
 

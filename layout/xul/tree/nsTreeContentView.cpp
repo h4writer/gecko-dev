@@ -3,7 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "nsINameSpaceManager.h"
+#include "nsNameSpaceManager.h"
 #include "nsGkAtoms.h"
 #include "nsIBoxObject.h"
 #include "nsTreeUtils.h"
@@ -11,13 +11,12 @@
 #include "ChildIterator.h"
 #include "nsDOMClassInfoID.h"
 #include "nsError.h"
-#include "nsEventStates.h"
-#include "nsINodeInfo.h"
 #include "nsIXULSortService.h"
 #include "nsContentUtils.h"
 #include "nsTreeBodyFrame.h"
 #include "mozilla/dom/Element.h"
 #include "nsServiceManagerUtils.h"
+#include "nsIDocument.h"
 
 using namespace mozilla;
 
@@ -111,16 +110,14 @@ NS_NewTreeContentView(nsITreeView** aResult)
   return NS_OK;
 }
 
-NS_IMPL_CYCLE_COLLECTION_4(nsTreeContentView,
-                           mBoxObject,
-                           mSelection,
-                           mRoot,
-                           mBody)
+NS_IMPL_CYCLE_COLLECTION(nsTreeContentView,
+                         mBoxObject,
+                         mSelection,
+                         mRoot,
+                         mBody)
 
 NS_IMPL_CYCLE_COLLECTING_ADDREF(nsTreeContentView)
 NS_IMPL_CYCLE_COLLECTING_RELEASE(nsTreeContentView)
-
-DOMCI_DATA(TreeContentView, nsTreeContentView)
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(nsTreeContentView)
   NS_INTERFACE_MAP_ENTRY(nsITreeView)
@@ -489,7 +486,7 @@ nsTreeContentView::SetTree(nsITreeBoxObject* aTree)
     NS_ENSURE_STATE(mRoot);
 
     // Add ourselves to document's observers.
-    nsIDocument* document = mRoot->GetDocument();
+    nsIDocument* document = mRoot->GetComposedDoc();
     if (document) {
       document->AddObserver(this);
       mDocument = document;
@@ -556,7 +553,7 @@ nsTreeContentView::CycleHeader(nsITreeColumn* aCol)
 
         nsAutoString hints;
         column->GetAttr(kNameSpaceID_None, nsGkAtoms::sorthints, hints);
-        sortdirection.AppendLiteral(" ");
+        sortdirection.Append(' ');
         sortdirection += hints;
 
         nsCOMPtr<nsIDOMNode> rootnode = do_QueryInterface(mRoot);
@@ -674,19 +671,19 @@ nsTreeContentView::SetCellText(int32_t aRow, nsITreeColumn* aCol, const nsAStrin
 }
 
 NS_IMETHODIMP
-nsTreeContentView::PerformAction(const PRUnichar* aAction)
+nsTreeContentView::PerformAction(const char16_t* aAction)
 {
   return NS_OK;
 }
 
 NS_IMETHODIMP
-nsTreeContentView::PerformActionOnRow(const PRUnichar* aAction, int32_t aRow)
+nsTreeContentView::PerformActionOnRow(const char16_t* aAction, int32_t aRow)
 {
   return NS_OK;
 }
 
 NS_IMETHODIMP
-nsTreeContentView::PerformActionOnCell(const PRUnichar* aAction, int32_t aRow, nsITreeColumn* aCol)
+nsTreeContentView::PerformActionOnCell(const char16_t* aAction, int32_t aRow, nsITreeColumn* aCol)
 {
   return NS_OK;
 }

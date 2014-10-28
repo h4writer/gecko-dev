@@ -9,23 +9,25 @@
 #include "mozilla/dom/telephony/TelephonyCommon.h"
 #include "mozilla/dom/telephony/PTelephonyChild.h"
 #include "mozilla/dom/telephony/PTelephonyRequestChild.h"
-#include "nsITelephonyProvider.h"
+#include "nsITelephonyService.h"
 
 BEGIN_TELEPHONY_NAMESPACE
+
+class TelephonyIPCService;
 
 class TelephonyChild : public PTelephonyChild
 {
 public:
-  TelephonyChild(nsITelephonyListener* aListener);
+  explicit TelephonyChild(TelephonyIPCService* aService);
 
 protected:
-  virtual ~TelephonyChild() {}
+  virtual ~TelephonyChild();
 
   virtual void
   ActorDestroy(ActorDestroyReason aWhy) MOZ_OVERRIDE;
 
   virtual PTelephonyRequestChild*
-  AllocPTelephonyRequestChild() MOZ_OVERRIDE;
+  AllocPTelephonyRequestChild(const IPCTelephonyRequest& aRequest) MOZ_OVERRIDE;
 
   virtual bool
   DeallocPTelephonyRequestChild(PTelephonyRequestChild* aActor) MOZ_OVERRIDE;
@@ -40,7 +42,7 @@ protected:
 
   virtual bool
   RecvNotifyCdmaCallWaiting(const uint32_t& aClientId,
-                            const nsString& aNumber) MOZ_OVERRIDE;
+                            const IPCCdmaWaitingCallData& aData) MOZ_OVERRIDE;
 
   virtual bool
   RecvNotifyConferenceCallStateChanged(const uint16_t& aCallState) MOZ_OVERRIDE;
@@ -55,13 +57,14 @@ protected:
                                  const uint16_t& aNotification) MOZ_OVERRIDE;
 
 private:
-  nsCOMPtr<nsITelephonyListener> mListener;
+  nsRefPtr<TelephonyIPCService> mService;
 };
 
 class TelephonyRequestChild : public PTelephonyRequestChild
 {
 public:
-  TelephonyRequestChild(nsITelephonyListener* aListener);
+  TelephonyRequestChild(nsITelephonyListener* aListener,
+                        nsITelephonyCallback* aCallback);
 
 protected:
   virtual ~TelephonyRequestChild() {}
@@ -70,14 +73,33 @@ protected:
   ActorDestroy(ActorDestroyReason aWhy) MOZ_OVERRIDE;
 
   virtual bool
-  Recv__delete__() MOZ_OVERRIDE;
+  Recv__delete__(const IPCTelephonyResponse& aResponse) MOZ_OVERRIDE;
 
   virtual bool
   RecvNotifyEnumerateCallState(const uint32_t& aClientId,
                                const IPCCallStateData& aData) MOZ_OVERRIDE;
 
+  virtual bool
+  RecvNotifyDialMMI(const nsString& aServiceCode) MOZ_OVERRIDE;
+
 private:
+  bool
+  DoResponse(const SuccessResponse& aResponse);
+
+  bool
+  DoResponse(const ErrorResponse& aResponse);
+
+  bool
+  DoResponse(const DialResponseCallSuccess& aResponse);
+
+  bool
+  DoResponse(const DialResponseMMISuccess& aResponse);
+
+  bool
+  DoResponse(const DialResponseMMIError& aResponse);
+
   nsCOMPtr<nsITelephonyListener> mListener;
+  nsCOMPtr<nsITelephonyCallback> mCallback;
 };
 
 END_TELEPHONY_NAMESPACE

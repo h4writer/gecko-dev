@@ -79,6 +79,8 @@
 #define AUDIO_MP3                           "audio/mpeg"
 #define AUDIO_MP4                           "audio/mp4"
 #define AUDIO_AMR                           "audio/amr"
+#define AUDIO_3GPP                          "audio/3gpp"
+#define AUDIO_MIDI                          "audio/x-midi"
 
 #define BINARY_OCTET_STREAM                 "binary/octet-stream"
 
@@ -110,6 +112,7 @@
 #define MULTIPART_ALTERNATIVE               "multipart/alternative"
 #define MULTIPART_APPLEDOUBLE               "multipart/appledouble"
 #define MULTIPART_DIGEST                    "multipart/digest"
+#define MULTIPART_FORM_DATA                 "multipart/form-data"
 #define MULTIPART_HEADER_SET                "multipart/header-set"
 #define MULTIPART_MIXED                     "multipart/mixed"
 #define MULTIPART_PARALLEL                  "multipart/parallel"
@@ -144,6 +147,7 @@
 #define VIDEO_OGG                           "video/ogg"
 #define VIDEO_WEBM                          "video/webm"
 #define VIDEO_3GPP                          "video/3gpp"
+#define VIDEO_3GPP2                         "video/3gpp2"
 #define APPLICATION_OGG                     "application/ogg"
 
 /* x-uuencode-apple-single. QuickMail made me do this. */

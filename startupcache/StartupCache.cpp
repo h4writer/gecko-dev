@@ -7,6 +7,7 @@
 #include "prio.h"
 #include "pldhash.h"
 #include "nsXPCOMStrings.h"
+#include "mozilla/IOInterposer.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/scache/StartupCache.h"
 
@@ -55,7 +56,7 @@ MOZ_DEFINE_MALLOC_SIZE_OF(StartupCacheMallocSizeOf)
 
 NS_IMETHODIMP
 StartupCache::CollectReports(nsIHandleReportCallback* aHandleReport,
-                             nsISupports* aData)
+                             nsISupports* aData, bool aAnonymize)
 {
 #define REPORT(_path, _kind, _amount, _desc)                                \
   do {                                                                      \
@@ -78,14 +79,12 @@ StartupCache::CollectReports(nsIHandleReportCallback* aHandleReport,
          "mapping.");
 
   return NS_OK;
-};
+}
 
 static const char sStartupCacheName[] = "startupCache." SC_WORDSIZE "." SC_ENDIAN;
 #if defined(XP_WIN) && defined(MOZ_METRO)
 static const char sMetroStartupCacheName[] = "metroStartupCache." SC_WORDSIZE "." SC_ENDIAN;
 #endif
-
-static NS_DEFINE_CID(kZipReaderCID, NS_ZIPREADER_CID);
 
 StartupCache*
 StartupCache::GetSingleton()
@@ -94,6 +93,9 @@ StartupCache::GetSingleton()
     if (XRE_GetProcessType() != GeckoProcessType_Default) {
       return nullptr;
     }
+#ifdef MOZ_DISABLE_STARTUP_CACHE
+    return nullptr;
+#endif
 
     StartupCache::InitSingleton();
   }
@@ -125,7 +127,7 @@ bool StartupCache::gShutdownInitiated;
 bool StartupCache::gIgnoreDiskCache;
 enum StartupCache::TelemetrifyAge StartupCache::gPostFlushAgeAction = StartupCache::IGNORE_AGE;
 
-NS_IMPL_ISUPPORTS1(StartupCache, nsIMemoryReporter)
+NS_IMPL_ISUPPORTS(StartupCache, nsIMemoryReporter)
 
 StartupCache::StartupCache()
   : mArchive(nullptr), mStartupWriteInitiated(false), mWriteThread(nullptr)
@@ -145,7 +147,7 @@ StartupCache::~StartupCache()
   // If we shutdown quickly timer wont have fired. Instead of writing
   // it on the main thread and block the shutdown we simply wont update
   // the startup cache. Always do this if the file doesn't exist since
-  // we use it part of the packge step.
+  // we use it part of the package step.
   if (!mArchive) {
     WriteToDisk();
   }
@@ -536,7 +538,17 @@ void
 StartupCache::ThreadedWrite(void *aClosure)
 {
   PR_SetCurrentThreadName("StartupCache");
-  gStartupCache->WriteToDisk();
+  mozilla::IOInterposer::RegisterCurrentThread();
+  /*
+   * It is safe to use the pointer passed in aClosure to reference the
+   * StartupCache object because the thread's lifetime is tightly coupled to
+   * the lifetime of the StartupCache object; this thread is joined in the
+   * StartupCache destructor, guaranteeing that this function runs if and only
+   * if the StartupCache object is valid.
+   */
+  StartupCache* startupCacheObj = static_cast<StartupCache*>(aClosure);
+  startupCacheObj->WriteToDisk();
+  mozilla::IOInterposer::UnregisterCurrentThread();
 }
 
 /*
@@ -547,21 +559,29 @@ StartupCache::ThreadedWrite(void *aClosure)
 void
 StartupCache::WriteTimeout(nsITimer *aTimer, void *aClosure)
 {
-  gStartupCache->mWriteThread = PR_CreateThread(PR_USER_THREAD,
-                                                StartupCache::ThreadedWrite,
-                                                nullptr,
-                                                PR_PRIORITY_NORMAL,
-                                                PR_LOCAL_THREAD,
-                                                PR_JOINABLE_THREAD,
-                                                0);
+  /*
+   * It is safe to use the pointer passed in aClosure to reference the
+   * StartupCache object because the timer's lifetime is tightly coupled to
+   * the lifetime of the StartupCache object; this timer is canceled in the
+   * StartupCache destructor, guaranteeing that this function runs if and only
+   * if the StartupCache object is valid.
+   */
+  StartupCache* startupCacheObj = static_cast<StartupCache*>(aClosure);
+  startupCacheObj->mWriteThread = PR_CreateThread(PR_USER_THREAD,
+                                                  StartupCache::ThreadedWrite,
+                                                  startupCacheObj,
+                                                  PR_PRIORITY_NORMAL,
+                                                  PR_GLOBAL_THREAD,
+                                                  PR_JOINABLE_THREAD,
+                                                  0);
 }
 
 // We don't want to refcount StartupCache, so we'll just
 // hold a ref to this and pass it to observerService instead.
-NS_IMPL_ISUPPORTS1(StartupCacheListener, nsIObserver)
+NS_IMPL_ISUPPORTS(StartupCacheListener, nsIObserver)
 
 nsresult
-StartupCacheListener::Observe(nsISupports *subject, const char* topic, const PRUnichar* data)
+StartupCacheListener::Observe(nsISupports *subject, const char* topic, const char16_t* data)
 {
   StartupCache* sc = StartupCache::GetSingleton();
   if (!sc)
@@ -618,8 +638,8 @@ StartupCache::RecordAgesAlways()
 
 // StartupCacheDebugOutputStream implementation
 #ifdef DEBUG
-NS_IMPL_ISUPPORTS3(StartupCacheDebugOutputStream, nsIObjectOutputStream, 
-                   nsIBinaryOutputStream, nsIOutputStream)
+NS_IMPL_ISUPPORTS(StartupCacheDebugOutputStream, nsIObjectOutputStream, 
+                  nsIBinaryOutputStream, nsIOutputStream)
 
 bool
 StartupCacheDebugOutputStream::CheckReferences(nsISupports* aObject)
@@ -713,7 +733,7 @@ StartupCacheDebugOutputStream::PutBuffer(char* aBuffer, uint32_t aLength)
 
 StartupCacheWrapper* StartupCacheWrapper::gStartupCacheWrapper = nullptr;
 
-NS_IMPL_ISUPPORTS1(StartupCacheWrapper, nsIStartupCache)
+NS_IMPL_ISUPPORTS(StartupCacheWrapper, nsIStartupCache)
 
 StartupCacheWrapper* StartupCacheWrapper::GetSingleton() 
 {

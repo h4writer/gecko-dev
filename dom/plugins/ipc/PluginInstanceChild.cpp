@@ -12,8 +12,10 @@
 #include "StreamNotifyChild.h"
 #include "PluginProcessChild.h"
 #include "gfxASurface.h"
-#include "gfxContext.h"
+#include "gfxPlatform.h"
+#include "gfx2DGlue.h"
 #include "nsNPAPIPluginInstance.h"
+#include "mozilla/gfx/2D.h"
 #ifdef MOZ_X11
 #include "gfxXlibSurface.h"
 #endif
@@ -36,19 +38,15 @@ using namespace mozilla;
 using mozilla::ipc::ProcessChild;
 using namespace mozilla::plugins;
 using namespace mozilla::layers;
+using namespace mozilla::gfx;
 using namespace std;
 
 #ifdef MOZ_WIDGET_GTK
 
 #include <gtk/gtk.h>
-#if (MOZ_WIDGET_GTK == 3)
-#include <gtk/gtkx.h>
-#endif
 #include <gdk/gdkx.h>
 #include <gdk/gdk.h>
-#if (MOZ_WIDGET_GTK == 2)
 #include "gtk2xtbin.h"
-#endif
 
 #elif defined(MOZ_WIDGET_QT)
 #undef KeyPress
@@ -96,18 +94,42 @@ struct RunnableMethodTraits<PluginInstanceChild>
     static void ReleaseCallee(PluginInstanceChild* obj) { }
 };
 
+/**
+ * We can't use gfxPlatform::CreateDrawTargetForSurface() because calling
+ * gfxPlatform::GetPlatform() instantiates the prefs service, and that's not
+ * allowed from processes other than the main process. So we have our own
+ * version here.
+ */
+static RefPtr<DrawTarget>
+CreateDrawTargetForSurface(gfxASurface *aSurface)
+{
+  SurfaceFormat format;
+  if (aSurface->GetContentType() == gfxContentType::ALPHA) {
+    format = SurfaceFormat::A8;
+  } else if (aSurface->GetContentType() == gfxContentType::COLOR) {
+    format = SurfaceFormat::B8G8R8X8;
+  } else {
+    format = SurfaceFormat::B8G8R8A8;
+  }
+  RefPtr<DrawTarget> drawTarget =
+    Factory::CreateDrawTargetForCairoSurface(aSurface->CairoSurface(),
+                                             ToIntSize(gfxIntSize(aSurface->GetSize())),
+                                             &format);
+  aSurface->SetData(&kDrawTarget, drawTarget, nullptr);
+  return drawTarget;
+}
+
 PluginInstanceChild::PluginInstanceChild(const NPPluginFuncs* aPluginIface)
     : mPluginIface(aPluginIface)
 #if defined(XP_MACOSX)
     , mContentsScaleFactor(1.0)
 #endif
     , mDrawingModel(kDefaultDrawingModel)
-    , mCurrentAsyncSurface(0)
     , mAsyncInvalidateMutex("PluginInstanceChild::mAsyncInvalidateMutex")
     , mAsyncInvalidateTask(0)
     , mCachedWindowActor(nullptr)
     , mCachedElementActor(nullptr)
-#if (MOZ_WIDGET_GTK == 2)
+#ifdef MOZ_WIDGET_GTK
     , mXEmbed(false)
 #endif // MOZ_WIDGET_GTK
 #if defined(OS_WIN)
@@ -136,7 +158,7 @@ PluginInstanceChild::PluginInstanceChild(const NPPluginFuncs* aPluginIface)
 #endif
     , mAccumulatedInvalidRect(0,0,0,0)
     , mIsTransparent(false)
-    , mSurfaceType(gfxSurfaceTypeMax)
+    , mSurfaceType(gfxSurfaceType::Max)
     , mCurrentInvalidateTask(nullptr)
     , mCurrentAsyncSetWindowTask(nullptr)
     , mPendingPluginCall(false)
@@ -151,7 +173,7 @@ PluginInstanceChild::PluginInstanceChild(const NPPluginFuncs* aPluginIface)
 #if defined(MOZ_X11) && defined(XP_UNIX) && !defined(XP_MACOSX)
     mWindow.ws_info = &mWsInfo;
     memset(&mWsInfo, 0, sizeof(mWsInfo));
-#if (MOZ_WIDGET_GTK == 2)
+#ifdef MOZ_WIDGET_GTK
     mWsInfo.display = nullptr;
     mXtClient.top_widget = nullptr;
 #else
@@ -358,25 +380,6 @@ PluginInstanceChild::NPN_GetValue(NPNVariable aVar,
 #endif
     }
 
-    case NPNVsupportsAsyncBitmapSurfaceBool: {
-#ifdef XP_WIN
-        *((NPBool*)aValue) = PluginModuleChild::current()->AsyncDrawingAllowed();
-#else
-        // We do not support non-windows yet.
-        *((NPBool*)aValue) = false;
-#endif
-        return NPERR_NO_ERROR;
-    }
-
-#ifdef XP_WIN
-    case NPNVsupportsAsyncWindowsDXGISurfaceBool: {
-        bool val;
-        CallNPN_GetValue_DrawingModelSupport(NPNVsupportsAsyncWindowsDXGISurfaceBool, &val);
-        *((NPBool*)aValue) = val;
-        return NPERR_NO_ERROR;
-    }
-#endif
-
 #ifdef XP_MACOSX
    case NPNVsupportsCoreGraphicsBool: {
         *((NPBool*)aValue) = true;
@@ -481,7 +484,7 @@ PluginInstanceChild::NPN_SetValue(NPPVariable aVar, void* aValue)
             return NPERR_GENERIC_ERROR;
 
         NPWindowType newWindowType = windowed ? NPWindowTypeWindow : NPWindowTypeDrawable;
-#if (MOZ_WIDGET_GTK == 2)
+#ifdef MOZ_WIDGET_GTK
         if (mWindow.type != newWindowType && mWsInfo.display) {
            // plugin type has been changed but we already have a valid display
            // so update it for the recent plugin mode
@@ -520,24 +523,9 @@ PluginInstanceChild::NPN_SetValue(NPPVariable aVar, void* aValue)
         NPError rv;
         int drawingModel = (int16_t) (intptr_t) aValue;
 
-        if (!PluginModuleChild::current()->AsyncDrawingAllowed() &&
-            IsDrawingModelAsync(drawingModel)) {
-            return NPERR_GENERIC_ERROR;
-        }              
-
-        CrossProcessMutexHandle handle;
-        OptionalShmem optionalShmem;
-        if (!CallNPN_SetValue_NPPVpluginDrawingModel(drawingModel, &optionalShmem, &handle, &rv))
+        if (!CallNPN_SetValue_NPPVpluginDrawingModel(drawingModel, &rv))
             return NPERR_GENERIC_ERROR;
 
-        if (IsDrawingModelAsync(drawingModel)) {
-            if (optionalShmem.type() != OptionalShmem::TShmem) {
-                return NPERR_GENERIC_ERROR;
-            }
-            mRemoteImageDataShmem = optionalShmem.get_Shmem();
-            mRemoteImageData = mRemoteImageDataShmem.get<RemoteImageData>();
-            mRemoteImageDataMutex = new CrossProcessMutex(handle);
-        }
         mDrawingModel = drawingModel;
 
 #ifdef XP_MACOSX
@@ -1025,7 +1013,7 @@ bool PluginInstanceChild::CreateWindow(const NPRemoteWindow& aWindow)
                       aWindow.x, aWindow.y,
                       aWindow.width, aWindow.height));
 
-#if (MOZ_WIDGET_GTK == 2)
+#ifdef MOZ_WIDGET_GTK
     if (mXEmbed) {
         mWindow.window = reinterpret_cast<void*>(aWindow.window);
     }
@@ -1054,7 +1042,7 @@ void PluginInstanceChild::DeleteWindow()
   if (!mWindow.window)
       return;
 
-#if (MOZ_WIDGET_GTK == 2)
+#ifdef MOZ_WIDGET_GTK
   if (mXtClient.top_widget) {     
       xt_client_unrealize(&mXtClient);
       xt_client_destroy(&mXtClient); 
@@ -1102,7 +1090,7 @@ PluginInstanceChild::AnswerNPP_SetWindow(const NPRemoteWindow& aWindow)
         CreateWindow(aWindow);
     }
 
-#if (MOZ_WIDGET_GTK == 2)
+#ifdef MOZ_WIDGET_GTK
     if (mXEmbed && gtk_check_version(2,18,7) != nullptr) { // older
         if (aWindow.type == NPWindowTypeWindow) {
             GdkWindow* socket_window = gdk_window_lookup(static_cast<GdkNativeWindow>(aWindow.window));
@@ -1235,7 +1223,7 @@ PluginInstanceChild::AnswerNPP_SetWindow(const NPRemoteWindow& aWindow)
 bool
 PluginInstanceChild::Initialize()
 {
-#if (MOZ_WIDGET_GTK == 2)
+#ifdef MOZ_WIDGET_GTK
     NPError rv;
 
     if (mWsInfo.display) {
@@ -1479,7 +1467,7 @@ PluginInstanceChild::PluginWindowProcInternal(HWND hWnd,
       wchar_t szClass[26];
       HWND hwnd = GetForegroundWindow();
       if (hwnd && GetClassNameW(hwnd, szClass,
-                                sizeof(szClass)/sizeof(PRUnichar)) &&
+                                sizeof(szClass)/sizeof(char16_t)) &&
           !wcscmp(szClass, kFlashFullscreenClass)) {
         ReleaseCapture();
         SetFocus(hwnd);
@@ -1925,7 +1913,7 @@ PluginInstanceChild::SharedSurfacePaint(NPEvent& evcopy)
         break;
         case RENDER_BACK_ONE:
               // Handle a double pass render used in alpha extraction for transparent
-              // plugins. (See nsObjectFrame and gfxWindowsNativeDrawing for details.)
+              // plugins. (See nsPluginFrame and gfxWindowsNativeDrawing for details.)
               // We render twice, once to the shared dib, and once to a cache which
               // we copy back on a second paint. These paints can't be spread across
               // multiple rpc messages as delays cause animation frame changes.
@@ -2062,7 +2050,7 @@ PluginInstanceChild::EnumThreadWindowsCallback(HWND hWnd,
     }
 
     wchar_t className[64];
-    if (!GetClassNameW(hWnd, className, sizeof(className)/sizeof(PRUnichar)))
+    if (!GetClassNameW(hWnd, className, sizeof(className)/sizeof(char16_t)))
       return TRUE;
     
     if (!wcscmp(className, L"SWFlash_PlaceholderX")) {
@@ -2462,212 +2450,6 @@ PluginInstanceChild::NPN_URLRedirectResponse(void* notifyData, NPBool allow)
     NS_ASSERTION(false, "Couldn't find stream for redirect response!");
 }
 
-NPError
-PluginInstanceChild::DeallocateAsyncBitmapSurface(NPAsyncSurface *aSurface)
-{
-    AsyncBitmapData* data;
-    
-    if (!mAsyncBitmaps.Get(aSurface, &data)) {
-        return NPERR_INVALID_PARAM;
-    }
-
-    DeallocShmem(data->mShmem);
-    aSurface->bitmap.data = nullptr;
-
-    mAsyncBitmaps.Remove(aSurface);
-    return NPERR_NO_ERROR;
-}
-
-bool
-PluginInstanceChild::IsAsyncDrawing()
-{
-    return IsDrawingModelAsync(mDrawingModel);
-}
-
-NPError
-PluginInstanceChild::NPN_InitAsyncSurface(NPSize *size, NPImageFormat format,
-                                          void *initData, NPAsyncSurface *surface)
-{
-    AssertPluginThread();
-
-    surface->bitmap.data = nullptr;
-
-    if (!IsAsyncDrawing()) {
-        return NPERR_GENERIC_ERROR;
-    }
-
-    switch (mDrawingModel) {
-    case NPDrawingModelAsyncBitmapSurface: {
-            if (mAsyncBitmaps.Get(surface, nullptr)) {
-                return NPERR_INVALID_PARAM;
-            }
-
-            if (size->width < 0 || size->height < 0) {
-                return NPERR_INVALID_PARAM;
-            }
-
-
-            bool result;
-            NPRemoteAsyncSurface remote;
-
-            if (!CallNPN_InitAsyncSurface(gfxIntSize(size->width, size->height), format, &remote, &result) || !result) {
-                return NPERR_OUT_OF_MEMORY_ERROR;
-            }
-
-            NS_ABORT_IF_FALSE(remote.data().get_Shmem().IsWritable(),
-                "Failed to create writable shared memory.");
-            
-            AsyncBitmapData *data = new AsyncBitmapData;
-            mAsyncBitmaps.Put(surface, data);
-
-            data->mRemotePtr = (void*)remote.hostPtr();
-            data->mShmem = remote.data().get_Shmem();
-
-            surface->bitmap.data = data->mShmem.get<unsigned char>();
-            surface->bitmap.stride = remote.stride();
-            surface->format = remote.format();
-            surface->size.width = remote.size().width;
-            surface->size.height = remote.size().height;
-
-            return NPERR_NO_ERROR;
-        }
-#ifdef XP_WIN
-    case NPDrawingModelAsyncWindowsDXGISurface: {
-            if (size->width < 0 || size->height < 0) {
-                return NPERR_INVALID_PARAM;
-            }
-            bool result;
-            NPRemoteAsyncSurface remote;
-
-            if (!CallNPN_InitAsyncSurface(gfxIntSize(size->width, size->height), format, &remote, &result) || !result) {
-                return NPERR_OUT_OF_MEMORY_ERROR;
-            }
-
-            surface->format = remote.format();
-            surface->size.width = remote.size().width;
-            surface->size.height = remote.size().height;
-            surface->sharedHandle = remote.data().get_DXGISharedSurfaceHandle();
-
-            return NPERR_NO_ERROR;
-        }
-#endif
-    }
-
-    return NPERR_GENERIC_ERROR;
-}
-
-NPError
-PluginInstanceChild::NPN_FinalizeAsyncSurface(NPAsyncSurface *surface)
-{
-    AssertPluginThread();
-
-    if (!IsAsyncDrawing()) {
-        return NPERR_GENERIC_ERROR;
-    }
-
-    switch (mDrawingModel) {
-    case NPDrawingModelAsyncBitmapSurface: {
-            AsyncBitmapData *bitmapData;
-
-            if (!mAsyncBitmaps.Get(surface, &bitmapData)) {
-                return NPERR_GENERIC_ERROR;
-            }
-
-            {
-                CrossProcessMutexAutoLock autoLock(*mRemoteImageDataMutex);
-                RemoteImageData *data = mRemoteImageData;
-                if (data->mBitmap.mData == bitmapData->mRemotePtr) {
-                    data->mBitmap.mData = nullptr;
-                    data->mSize = gfxIntSize(0, 0);
-                    data->mWasUpdated = true;
-                }
-            }
-
-            return DeallocateAsyncBitmapSurface(surface);
-        }
-#ifdef XP_WIN
-    case NPDrawingModelAsyncWindowsDXGISurface: {
-            
-            {
-                CrossProcessMutexAutoLock autoLock(*mRemoteImageDataMutex);
-                RemoteImageData *data = mRemoteImageData;
-                if (data->mTextureHandle == surface->sharedHandle) {
-                    data->mTextureHandle = nullptr;
-                    data->mSize = gfxIntSize(0, 0);
-                    data->mWasUpdated = true;
-                }
-            }
-
-            SendReleaseDXGISharedSurface(surface->sharedHandle);
-            return NPERR_NO_ERROR;
-        }
-#endif
-    }
-
-    return NPERR_GENERIC_ERROR;
-}
-
-void
-PluginInstanceChild::NPN_SetCurrentAsyncSurface(NPAsyncSurface *surface, NPRect *changed)
-{
-    if (!IsAsyncDrawing()) {
-        return;
-    }
-
-    RemoteImageData *data = mRemoteImageData;
-
-    if (!surface) {
-        CrossProcessMutexAutoLock autoLock(*mRemoteImageDataMutex);
-        data->mBitmap.mData = nullptr;
-        data->mSize = gfxIntSize(0, 0);
-        data->mWasUpdated = true;
-    } else {
-        switch (mDrawingModel) {
-        case NPDrawingModelAsyncBitmapSurface:
-            {
-                AsyncBitmapData *bitmapData;
-        
-                if (!mAsyncBitmaps.Get(surface, &bitmapData)) {
-                    return;
-                }
-              
-                CrossProcessMutexAutoLock autoLock(*mRemoteImageDataMutex);
-                data->mBitmap.mData = (unsigned char*)bitmapData->mRemotePtr;
-                data->mSize = gfxIntSize(surface->size.width, surface->size.height);
-                data->mFormat = surface->format == NPImageFormatBGRX32 ?
-                                RemoteImageData::BGRX32 : RemoteImageData::BGRA32;
-                data->mBitmap.mStride = surface->bitmap.stride;
-                data->mWasUpdated = true;
-                break;
-            }
-#ifdef XP_WIN
-        case NPDrawingModelAsyncWindowsDXGISurface:
-            {
-                CrossProcessMutexAutoLock autoLock(*mRemoteImageDataMutex);
-                data->mType = RemoteImageData::DXGI_TEXTURE_HANDLE;
-                data->mSize = gfxIntSize(surface->size.width, surface->size.height);
-                data->mFormat = surface->format == NPImageFormatBGRX32 ?
-                                RemoteImageData::BGRX32 : RemoteImageData::BGRA32;
-                data->mTextureHandle = surface->sharedHandle;
-
-                data->mWasUpdated = true;
-                break;
-            }
-#endif
-        }
-    }
-
-    {
-        MutexAutoLock autoLock(mAsyncInvalidateMutex);
-        if (!mAsyncInvalidateTask) {
-            mAsyncInvalidateTask = 
-                NewRunnableMethod<PluginInstanceChild, void (PluginInstanceChild::*)()>
-                    (this, &PluginInstanceChild::DoAsyncRedraw);
-            ProcessChild::message_loop()->PostTask(FROM_HERE, mAsyncInvalidateTask);
-        }
-    }
-}
-
 void
 PluginInstanceChild::DoAsyncRedraw()
 {
@@ -2763,16 +2545,10 @@ PluginInstanceChild::DoAsyncSetWindow(const gfxSurfaceType& aSurfaceType,
     }
 }
 
-static inline gfxRect
-GfxFromNsRect(const nsIntRect& aRect)
-{
-    return gfxRect(aRect.x, aRect.y, aRect.width, aRect.height);
-}
-
 bool
 PluginInstanceChild::CreateOptSurface(void)
 {
-    NS_ABORT_IF_FALSE(mSurfaceType != gfxSurfaceTypeMax,
+    NS_ABORT_IF_FALSE(mSurfaceType != gfxSurfaceType::Max,
                       "Need a valid surface type here");
     NS_ASSERTION(!mCurrentSurface, "mCurrentSurfaceActor can get out of sync.");
 
@@ -2780,18 +2556,18 @@ PluginInstanceChild::CreateOptSurface(void)
     // Use an opaque surface unless we're transparent and *don't* have
     // a background to source from.
     gfxImageFormat format =
-        (mIsTransparent && !mBackground) ? gfxImageFormatARGB32 :
-                                           gfxImageFormatRGB24;
+        (mIsTransparent && !mBackground) ? gfxImageFormat::ARGB32 :
+                                           gfxImageFormat::RGB24;
 
 #ifdef MOZ_X11
     Display* dpy = mWsInfo.display;
     Screen* screen = DefaultScreenOfDisplay(dpy);
-    if (format == gfxImageFormatRGB24 &&
+    if (format == gfxImageFormat::RGB24 &&
         DefaultDepth(dpy, DefaultScreen(dpy)) == 16) {
-        format = gfxImageFormatRGB16_565;
+        format = gfxImageFormat::RGB16_565;
     }
 
-    if (mSurfaceType == gfxSurfaceTypeXlib) {
+    if (mSurfaceType == gfxSurfaceType::Xlib) {
         if (!mIsTransparent  || mBackground) {
             Visual* defaultVisual = DefaultVisualOfScreen(screen);
             mCurrentSurface =
@@ -2815,8 +2591,8 @@ PluginInstanceChild::CreateOptSurface(void)
 #endif
 
 #ifdef XP_WIN
-    if (mSurfaceType == gfxSurfaceTypeWin32 ||
-        mSurfaceType == gfxSurfaceTypeD2D) {
+    if (mSurfaceType == gfxSurfaceType::Win32 ||
+        mSurfaceType == gfxSurfaceType::D2D) {
         bool willHaveTransparentPixels = mIsTransparent && !mBackground;
 
         SharedDIBSurface* s = new SharedDIBSurface();
@@ -2855,7 +2631,7 @@ PluginInstanceChild::MaybeCreatePlatformHelperSurface(void)
     mDoAlphaExtraction = false;
     bool createHelperSurface = false;
 
-    if (mCurrentSurface->GetType() == gfxSurfaceTypeXlib) {
+    if (mCurrentSurface->GetType() == gfxSurfaceType::Xlib) {
         static_cast<gfxXlibSurface*>(mCurrentSurface.get())->
             GetColormapAndVisual(&colormap, &visual);
         // Create helper surface if layer surface visual not same as default
@@ -2865,7 +2641,7 @@ PluginInstanceChild::MaybeCreatePlatformHelperSurface(void)
             visual = defaultVisual;
             mDoAlphaExtraction = mIsTransparent;
         }
-    } else if (mCurrentSurface->GetType() == gfxSurfaceTypeImage) {
+    } else if (mCurrentSurface->GetType() == gfxSurfaceType::Image) {
         // For image layer surface we should always create helper surface
         createHelperSurface = true;
         // Check if we can create helper surface with non-default visual
@@ -2918,9 +2694,9 @@ PluginInstanceChild::EnsureCurrentBuffer(void)
         if (winSize != surfSize ||
             (mBackground && !CanPaintOnBackground()) ||
             (mBackground &&
-             GFX_CONTENT_COLOR != mCurrentSurface->GetContentType()) ||
+             gfxContentType::COLOR != mCurrentSurface->GetContentType()) ||
             (!mBackground && mIsTransparent &&
-             GFX_CONTENT_COLOR == mCurrentSurface->GetContentType())) {
+             gfxContentType::COLOR == mCurrentSurface->GetContentType())) {
             // Don't try to use an old, invalid DC.
             mWindow.window = nullptr;
             ClearCurrentSurface();
@@ -3013,7 +2789,7 @@ PluginInstanceChild::UpdateWindowAttributes(bool aForceSetWindow)
 #ifdef MOZ_X11
     Visual* visual = nullptr;
     Colormap colormap = 0;
-    if (curSurface && curSurface->GetType() == gfxSurfaceTypeXlib) {
+    if (curSurface && curSurface->GetType() == gfxSurfaceType::Xlib) {
         static_cast<gfxXlibSurface*>(curSurface.get())->
             GetColormapAndVisual(&colormap, &visual);
         if (visual != mWsInfo.visual || colormap != mWsInfo.colormap) {
@@ -3105,7 +2881,7 @@ PluginInstanceChild::PaintRectToPlatformSurface(const nsIntRect& aRect,
 
 #ifdef MOZ_X11
     {
-        NS_ASSERTION(aSurface->GetType() == gfxSurfaceTypeXlib,
+        NS_ASSERTION(aSurface->GetType() == gfxSurfaceType::Xlib,
                      "Non supported platform surface type");
 
         NPEvent pluginEvent;
@@ -3175,23 +2951,26 @@ PluginInstanceChild::PaintRectToSurface(const nsIntRect& aRect,
 #endif
 
     if (mIsTransparent && !CanPaintOnBackground()) {
-       // Clear surface content for transparent rendering
-       nsRefPtr<gfxContext> ctx = new gfxContext(renderSurface);
-       ctx->SetDeviceColor(aColor);
-       ctx->SetOperator(gfxContext::OPERATOR_SOURCE);
-       ctx->Rectangle(GfxFromNsRect(plPaintRect));
-       ctx->Fill();
+        RefPtr<DrawTarget> dt = CreateDrawTargetForSurface(renderSurface);
+        gfx::Rect rect(plPaintRect.x, plPaintRect.y,
+                       plPaintRect.width, plPaintRect.height);
+        // Moz2D treats OP_SOURCE operations as unbounded, so we need to
+        // clip to the rect that we want to fill:
+        dt->PushClipRect(rect);
+        dt->FillRect(rect, ColorPattern(ToColor(aColor)), // aColor is already a device color
+                     DrawOptions(1.f, CompositionOp::OP_SOURCE));
+        dt->PopClip();
+        dt->Flush();
     }
 
     PaintRectToPlatformSurface(plPaintRect, renderSurface);
 
     if (renderSurface != aSurface) {
         // Copy helper surface content to target
-        nsRefPtr<gfxContext> ctx = new gfxContext(aSurface);
-        ctx->SetSource(renderSurface);
-        ctx->SetOperator(gfxContext::OPERATOR_SOURCE);
-        ctx->Rectangle(GfxFromNsRect(aRect));
-        ctx->Fill();
+        RefPtr<DrawTarget> dt = CreateDrawTargetForSurface(aSurface);
+        RefPtr<SourceSurface> surface =
+            gfxPlatform::GetSourceSurfaceForSurface(dt, renderSurface);
+        dt->CopySurface(surface, ToIntRect(aRect), ToIntPoint(aRect.TopLeft()));
     }
 }
 
@@ -3199,7 +2978,7 @@ void
 PluginInstanceChild::PaintRectWithAlphaExtraction(const nsIntRect& aRect,
                                                   gfxASurface* aSurface)
 {
-    NS_ABORT_IF_FALSE(aSurface->GetContentType() == GFX_CONTENT_COLOR_ALPHA,
+    NS_ABORT_IF_FALSE(aSurface->GetContentType() == gfxContentType::COLOR_ALPHA,
                       "Refusing to pointlessly recover alpha");
 
     nsIntRect rect(aRect);
@@ -3207,11 +2986,11 @@ PluginInstanceChild::PaintRectWithAlphaExtraction(const nsIntRect& aRect,
     // recovered directly to it, do that to save a tmp surface and
     // copy.
     bool useSurfaceSubimageForBlack = false;
-    if (gfxSurfaceTypeImage == aSurface->GetType()) {
+    if (gfxSurfaceType::Image == aSurface->GetType()) {
         gfxImageSurface* surfaceAsImage =
             static_cast<gfxImageSurface*>(aSurface);
         useSurfaceSubimageForBlack =
-            (surfaceAsImage->Format() == gfxImageFormatARGB32);
+            (surfaceAsImage->Format() == gfxImageFormat::ARGB32);
         // If we're going to use a subimage, nudge the rect so that we
         // can use optimal alpha recovery.  If we're not using a
         // subimage, the temporaries should automatically get
@@ -3230,7 +3009,7 @@ PluginInstanceChild::PaintRectWithAlphaExtraction(const nsIntRect& aRect,
     gfxPoint deviceOffset = -targetRect.TopLeft();
 
     // We always use a temporary "white image"
-    whiteImage = new gfxImageSurface(targetSize, gfxImageFormatRGB24);
+    whiteImage = new gfxImageSurface(targetSize, gfxImageFormat::RGB24);
     if (whiteImage->CairoStatus()) {
         return;
     }
@@ -3246,12 +3025,10 @@ PluginInstanceChild::PaintRectWithAlphaExtraction(const nsIntRect& aRect,
     // background and copy the result
     PaintRectToSurface(rect, aSurface, gfxRGBA(1.0, 1.0, 1.0));
     {
-        gfxRect copyRect(gfxPoint(0, 0), targetRect.Size());
-        nsRefPtr<gfxContext> ctx = new gfxContext(whiteImage);
-        ctx->SetOperator(gfxContext::OPERATOR_SOURCE);
-        ctx->SetSource(aSurface, deviceOffset);
-        ctx->Rectangle(copyRect);
-        ctx->Fill();
+        RefPtr<DrawTarget> dt = CreateDrawTargetForSurface(whiteImage);
+        RefPtr<SourceSurface> surface =
+            gfxPlatform::GetSourceSurfaceForSurface(dt, aSurface);
+        dt->CopySurface(surface, ToIntRect(rect), IntPoint());
     }
 
     // Paint the plugin directly onto the target, with a black
@@ -3273,7 +3050,7 @@ PluginInstanceChild::PaintRectWithAlphaExtraction(const nsIntRect& aRect,
         blackImage = surface->GetSubimage(targetRect);
     } else {
         blackImage = new gfxImageSurface(targetSize,
-                                         gfxImageFormatARGB32);
+                                         gfxImageFormat::ARGB32);
     }
 
     // Paint onto black background
@@ -3292,11 +3069,12 @@ PluginInstanceChild::PaintRectWithAlphaExtraction(const nsIntRect& aRect,
     // If we had to use a temporary black surface, copy the pixels
     // with alpha back to the target
     if (!useSurfaceSubimageForBlack) {
-        nsRefPtr<gfxContext> ctx = new gfxContext(aSurface);
-        ctx->SetOperator(gfxContext::OPERATOR_SOURCE);
-        ctx->SetSource(blackImage);
-        ctx->Rectangle(targetRect);
-        ctx->Fill();
+        RefPtr<DrawTarget> dt = CreateDrawTargetForSurface(aSurface);
+        RefPtr<SourceSurface> surface =
+            gfxPlatform::GetSourceSurfaceForSurface(dt, blackImage);
+        dt->CopySurface(surface,
+                        IntRect(0, 0, rect.width, rect.height),
+                        ToIntPoint(rect.TopLeft()));
     }
 }
 
@@ -3417,7 +3195,7 @@ PluginInstanceChild::ShowPluginFrame()
     }
 
     bool haveTransparentPixels =
-        GFX_CONTENT_COLOR_ALPHA == mCurrentSurface->GetContentType();
+        gfxContentType::COLOR_ALPHA == mCurrentSurface->GetContentType();
     PLUGIN_LOG_DEBUG(
         ("[InstanceChild][%p] Painting%s <x=%d,y=%d, w=%d,h=%d> on surface <w=%d,h=%d>",
          this, haveTransparentPixels ? " with alpha" : "",
@@ -3428,12 +3206,14 @@ PluginInstanceChild::ShowPluginFrame()
         PLUGIN_LOG_DEBUG(("  (on background)"));
         // Source the background pixels ...
         {
-            nsRefPtr<gfxContext> ctx =
-                new gfxContext(mHelperSurface ? mHelperSurface : mCurrentSurface);
-            ctx->SetSource(mBackground);
-            ctx->SetOperator(gfxContext::OPERATOR_SOURCE);
-            ctx->Rectangle(gfxRect(rect.x, rect.y, rect.width, rect.height));
-            ctx->Fill();
+            nsRefPtr<gfxASurface> surface =
+                mHelperSurface ? mHelperSurface : mCurrentSurface;
+            RefPtr<DrawTarget> dt = CreateDrawTargetForSurface(surface);
+            RefPtr<SourceSurface> backgroundSurface =
+                gfxPlatform::GetSourceSurfaceForSurface(dt, mBackground);
+            dt->CopySurface(backgroundSurface,
+                            ToIntRect(rect),
+                            ToIntPoint(rect.TopLeft()));
         }
         // ... and hand off to the plugin
         // BEWARE: mBackground may die during this call
@@ -3483,7 +3263,7 @@ PluginInstanceChild::ShowPluginFrame()
                  (uint16_t)rect.YMost(), (uint16_t)rect.XMost() };
     SurfaceDescriptor currSurf;
 #ifdef MOZ_X11
-    if (mCurrentSurface->GetType() == gfxSurfaceTypeXlib) {
+    if (mCurrentSurface->GetType() == gfxSurfaceType::Xlib) {
         gfxXlibSurface *xsurf = static_cast<gfxXlibSurface*>(mCurrentSurface.get());
         currSurf = SurfaceDescriptorX11(xsurf);
         // Need to sync all pending x-paint requests
@@ -3535,7 +3315,7 @@ PluginInstanceChild::ReadbackDifferenceRect(const nsIntRect& rect)
     // We can read safely from XSurface,SharedDIBSurface and Unsafe SharedMemory,
     // because PluginHost is not able to modify that surface
 #if defined(MOZ_X11)
-    if (mBackSurface->GetType() != gfxSurfaceTypeXlib &&
+    if (mBackSurface->GetType() != gfxSurfaceType::Xlib &&
         !gfxSharedImageSurface::IsSharedImage(mBackSurface))
         return false;
 #elif defined(XP_WIN)
@@ -3557,18 +3337,17 @@ PluginInstanceChild::ReadbackDifferenceRect(const nsIntRect& rect)
          mSurfaceDifferenceRect.width, mSurfaceDifferenceRect.height));
 
     // Read back previous content
-    nsRefPtr<gfxContext> ctx = new gfxContext(mCurrentSurface);
-    ctx->SetOperator(gfxContext::OPERATOR_SOURCE);
-    ctx->SetSource(mBackSurface);
+    RefPtr<DrawTarget> dt = CreateDrawTargetForSurface(mCurrentSurface);
+    RefPtr<SourceSurface> source =
+        gfxPlatform::GetSourceSurfaceForSurface(dt, mBackSurface);
     // Subtract from mSurfaceDifferenceRect area which is overlapping with rect
     nsIntRegion result;
     result.Sub(mSurfaceDifferenceRect, nsIntRegion(rect));
     nsIntRegionRectIterator iter(result);
     const nsIntRect* r;
     while ((r = iter.Next()) != nullptr) {
-        ctx->Rectangle(GfxFromNsRect(*r));
+        dt->CopySurface(source, ToIntRect(*r), ToIntPoint(r->TopLeft()));
     }
-    ctx->Fill();
 
     return true;
 }
@@ -3899,16 +3678,6 @@ PluginInstanceChild::ClearAllSurfaces()
 #endif
 }
 
-PLDHashOperator
-PluginInstanceChild::DeleteSurface(NPAsyncSurface* surf, nsAutoPtr<AsyncBitmapData> &data, void* userArg)
-{
-    PluginInstanceChild *inst = static_cast<PluginInstanceChild*>(userArg);
-
-    inst->DeallocShmem(data->mShmem);
-
-    return PL_DHASH_REMOVE;
-}
-
 bool
 PluginInstanceChild::AnswerNPP_Destroy(NPError* aResult)
 {
@@ -3984,12 +3753,7 @@ PluginInstanceChild::AnswerNPP_Destroy(NPError* aResult)
 
     mPendingAsyncCalls.Clear();
     
-    if (mAsyncBitmaps.Count()) {
-        NS_ERROR("Not all AsyncBitmaps were finalized by a plugin!");
-        mAsyncBitmaps.Enumerate(DeleteSurface, this);
-    }
-
-#if (MOZ_WIDGET_GTK == 2)
+#ifdef MOZ_WIDGET_GTK
     if (mWindow.type == NPWindowTypeWindow && !mXEmbed) {
       xt_client_xloop_destroy();
     }

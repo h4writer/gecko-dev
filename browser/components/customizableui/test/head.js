@@ -2,21 +2,29 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+"use strict";
 
 // Avoid leaks by using tmp for imports...
 let tmp = {};
 Cu.import("resource://gre/modules/Promise.jsm", tmp);
-Cu.import("resource://gre/modules/Task.jsm", tmp);
 Cu.import("resource:///modules/CustomizableUI.jsm", tmp);
-let {Promise, Task, CustomizableUI} = tmp;
+let {Promise, CustomizableUI} = tmp;
 
 let ChromeUtils = {};
-let scriptLoader = Cc["@mozilla.org/moz/jssubscript-loader;1"].getService(Ci.mozIJSSubScriptLoader);
-scriptLoader.loadSubScript("chrome://mochikit/content/tests/SimpleTest/ChromeUtils.js", ChromeUtils);
+Services.scriptloader.loadSubScript("chrome://mochikit/content/tests/SimpleTest/ChromeUtils.js", ChromeUtils);
+
+Services.prefs.setBoolPref("browser.uiCustomization.skipSourceNodeCheck", true);
+registerCleanupFunction(() => Services.prefs.clearUserPref("browser.uiCustomization.skipSourceNodeCheck"));
+
+// Remove temporary e10s related new window options in customize ui,
+// they break a lot of tests.
+CustomizableUI.destroyWidget("e10s-button");
+CustomizableUI.removeWidgetFromArea("e10s-button");
 
 let {synthesizeDragStart, synthesizeDrop} = ChromeUtils;
 
 const kNSXUL = "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul";
+const kTabEventFailureTimeoutInMs = 20000;
 
 function createDummyXULButton(id, label) {
   let btn = document.createElementNS(kNSXUL, "toolbarbutton");
@@ -29,7 +37,7 @@ function createDummyXULButton(id, label) {
 
 let gAddedToolbars = new Set();
 
-function createToolbarWithPlacements(id, placements) {
+function createToolbarWithPlacements(id, placements = []) {
   gAddedToolbars.add(id);
   let tb = document.createElementNS(kNSXUL, "toolbar");
   tb.id = id;
@@ -42,13 +50,63 @@ function createToolbarWithPlacements(id, placements) {
   return tb;
 }
 
+function createOverflowableToolbarWithPlacements(id, placements) {
+  gAddedToolbars.add(id);
+
+  let tb = document.createElementNS(kNSXUL, "toolbar");
+  tb.id = id;
+  tb.setAttribute("customizationtarget", id + "-target");
+
+  let customizationtarget = document.createElementNS(kNSXUL, "hbox");
+  customizationtarget.id = id + "-target";
+  customizationtarget.setAttribute("flex", "1");
+  tb.appendChild(customizationtarget);
+
+  let overflowPanel = document.createElementNS(kNSXUL, "panel");
+  overflowPanel.id = id + "-overflow";
+  document.getElementById("mainPopupSet").appendChild(overflowPanel);
+
+  let overflowList = document.createElementNS(kNSXUL, "vbox");
+  overflowList.id = id + "-overflow-list";
+  overflowPanel.appendChild(overflowList);
+
+  let chevron = document.createElementNS(kNSXUL, "toolbarbutton");
+  chevron.id = id + "-chevron";
+  tb.appendChild(chevron);
+
+  CustomizableUI.registerArea(id, {
+    type: CustomizableUI.TYPE_TOOLBAR,
+    defaultPlacements: placements,
+    overflowable: true,
+  });
+
+  tb.setAttribute("customizable", "true");
+  tb.setAttribute("overflowable", "true");
+  tb.setAttribute("overflowpanel", overflowPanel.id);
+  tb.setAttribute("overflowtarget", overflowList.id);
+  tb.setAttribute("overflowbutton", chevron.id);
+
+  gNavToolbox.appendChild(tb);
+  return tb;
+}
+
 function removeCustomToolbars() {
   CustomizableUI.reset();
   for (let toolbarId of gAddedToolbars) {
     CustomizableUI.unregisterArea(toolbarId, true);
-    document.getElementById(toolbarId).remove();
+    let tb = document.getElementById(toolbarId);
+    if (tb.hasAttribute("overflowpanel")) {
+      let panel = document.getElementById(tb.getAttribute("overflowpanel"));
+      if (panel)
+        panel.remove();
+    }
+    tb.remove();
   }
   gAddedToolbars.clear();
+}
+
+function getToolboxCustomToolbarId(toolbarName) {
+  return "__customToolbar_" + toolbarName.replace(" ", "_");
 }
 
 function resetCustomization() {
@@ -56,12 +114,9 @@ function resetCustomization() {
 }
 
 function isInWin8() {
-  let sysInfo = Services.sysinfo;
-  let osName = sysInfo.getProperty("name");
-  let version = sysInfo.getProperty("version");
-
-  // Windows 8 is version >= 6.2
-  return osName == "Windows_NT" && version >= 6.2;
+  if (!Services.metro)
+    return false;
+  return Services.metro.supported;
 }
 
 function addSwitchToMetroButtonInWindows8(areaPanelPlacements) {
@@ -109,7 +164,7 @@ function todoAssertAreaPlacements(areaId, expectedPlacements) {
     }
   }
   todo(isPassing, "The area placements for " + areaId +
-                  " should equal the expected placements.")
+                  " should equal the expected placements.");
 }
 
 function getAreaWidgetIds(areaId) {
@@ -128,8 +183,10 @@ function endCustomizing(aWindow=window) {
   if (aWindow.document.documentElement.getAttribute("customizing") != "true") {
     return true;
   }
+  Services.prefs.setBoolPref("browser.uiCustomization.disableAnimation", true);
   let deferredEndCustomizing = Promise.defer();
   function onCustomizationEnds() {
+    Services.prefs.setBoolPref("browser.uiCustomization.disableAnimation", false);
     aWindow.gNavToolbox.removeEventListener("aftercustomization", onCustomizationEnds);
     deferredEndCustomizing.resolve();
   }
@@ -163,13 +220,24 @@ function startCustomizing(aWindow=window) {
   if (aWindow.document.documentElement.getAttribute("customizing") == "true") {
     return;
   }
+  Services.prefs.setBoolPref("browser.uiCustomization.disableAnimation", true);
   let deferred = Promise.defer();
   function onCustomizing() {
     aWindow.gNavToolbox.removeEventListener("customizationready", onCustomizing);
+    Services.prefs.setBoolPref("browser.uiCustomization.disableAnimation", false);
     deferred.resolve();
   }
   aWindow.gNavToolbox.addEventListener("customizationready", onCustomizing);
   aWindow.gCustomizeMode.enter();
+  return deferred.promise;
+}
+
+function promiseObserverNotified(aTopic) {
+  let deferred = Promise.defer();
+  Services.obs.addObserver(function onNotification(aSubject, aTopic, aData) {
+    Services.obs.removeObserver(onNotification, aTopic);
+      deferred.resolve({subject: aSubject, data: aData});
+    }, aTopic, false);
   return deferred.promise;
 }
 
@@ -191,6 +259,16 @@ function openAndLoadWindow(aOptions, aWaitForDelayedStartup=false) {
       deferred.resolve(win);
     });
   }
+  return deferred.promise;
+}
+
+function promiseWindowClosed(win) {
+  let deferred = Promise.defer();
+  win.addEventListener("unload", function onunload() {
+    win.removeEventListener("unload", onunload);
+    deferred.resolve();
+  });
+  win.close();
   return deferred.promise;
 }
 
@@ -242,6 +320,40 @@ function promisePanelElementHidden(win, aPanel) {
   return deferred.promise;
 }
 
+function isPanelUIOpen() {
+  return PanelUI.panel.state == "open" || PanelUI.panel.state == "showing";
+}
+
+function subviewShown(aSubview) {
+  let deferred = Promise.defer();
+  let win = aSubview.ownerDocument.defaultView;
+  let timeoutId = win.setTimeout(() => {
+    deferred.reject("Subview (" + aSubview.id + ") did not show within 20 seconds.");
+  }, 20000);
+  function onViewShowing(e) {
+    aSubview.removeEventListener("ViewShowing", onViewShowing);
+    win.clearTimeout(timeoutId);
+    deferred.resolve();
+  };
+  aSubview.addEventListener("ViewShowing", onViewShowing);
+  return deferred.promise;
+}
+
+function subviewHidden(aSubview) {
+  let deferred = Promise.defer();
+  let win = aSubview.ownerDocument.defaultView;
+  let timeoutId = win.setTimeout(() => {
+    deferred.reject("Subview (" + aSubview.id + ") did not hide within 20 seconds.");
+  }, 20000);
+  function onViewHiding(e) {
+    aSubview.removeEventListener("ViewHiding", onViewHiding);
+    win.clearTimeout(timeoutId);
+    deferred.resolve();
+  };
+  aSubview.addEventListener("ViewHiding", onViewHiding);
+  return deferred.promise;
+}
+
 function waitForCondition(aConditionFn, aMaxTries=50, aCheckInterval=100) {
   function tryNow() {
     tries++;
@@ -268,37 +380,136 @@ function waitFor(aTimeout=100) {
   return deferred.promise;
 }
 
-function testRunner(testAry, asyncCleanup) {
-  Services.prefs.setBoolPref("browser.uiCustomization.disableAnimation", true);
-  for (let test of testAry) {
-    info(test.desc);
+/**
+ * Starts a load in an existing tab and waits for it to finish (via some event).
+ *
+ * @param aTab       The tab to load into.
+ * @param aUrl       The url to load.
+ * @param aEventType The load event type to wait for.  Defaults to "load".
+ * @return {Promise} resolved when the event is handled.
+ */
+function promiseTabLoadEvent(aTab, aURL, aEventType="load") {
+  let deferred = Promise.defer();
+  info("Wait for tab event: " + aEventType);
 
-    if (test.setup)
-      yield test.setup();
+  let timeoutId = setTimeout(() => {
+    aTab.linkedBrowser.removeEventListener(aEventType, onTabLoad, true);
+    deferred.reject("TabSelect did not happen within " + kTabEventFailureTimeoutInMs + "ms");
+  }, kTabEventFailureTimeoutInMs);
 
-    info("Running test");
-    try {
-      yield test.run();
-    } catch (ex) {
-      ok(false, "Unexpected exception occurred while running the test:\n" + ex);
+  function onTabLoad(event) {
+    if (event.originalTarget != aTab.linkedBrowser.contentDocument ||
+        event.target.location.href == "about:blank") {
+      info("skipping spurious load event");
+      return;
     }
-    info("Cleanup");
-    if (test.teardown)
-      yield test.teardown();
-    ok(!document.getElementById(CustomizableUI.AREA_NAVBAR).hasAttribute("overflowing"), "Shouldn't overflow");
+    clearTimeout(timeoutId);
+    aTab.linkedBrowser.removeEventListener(aEventType, onTabLoad, true);
+    info("Tab event received: " + aEventType);
+    deferred.resolve();
   }
-  if (asyncCleanup) {
-    yield asyncCleanup();
-  }
-  ok(CustomizableUI.inDefaultState, "Should remain in default state");
-  Services.prefs.clearUserPref("browser.uiCustomization.disableAnimation");
+  aTab.linkedBrowser.addEventListener(aEventType, onTabLoad, true, true);
+  aTab.linkedBrowser.loadURI(aURL);
+  return deferred.promise;
 }
 
-function runTests(testAry, asyncCleanup) {
-  Task.spawn(testRunner(gTests, asyncCleanup)).then(finish, ex => {
-    // The stack of ok() here is misleading due to Promises. The stack of the
-    // actual exception is likely much more valuable, hence concatentating it.
-    ok(false, "Unexpected exception: " + ex + " With stack: " + ex.stack);
-    finish();
-  }).then(null, Cu.reportError);
+/**
+ * Navigate back or forward in tab history and wait for it to finish.
+ *
+ * @param aDirection   Number to indicate to move backward or forward in history.
+ * @param aConditionFn Function that returns the result of an evaluated condition
+ *                     that needs to be `true` to resolve the promise.
+ * @return {Promise} resolved when navigation has finished.
+ */
+function promiseTabHistoryNavigation(aDirection = -1, aConditionFn) {
+  let deferred = Promise.defer();
+
+  let timeoutId = setTimeout(() => {
+    gBrowser.removeEventListener("pageshow", listener, true);
+    deferred.reject("Pageshow did not happen within " + kTabEventFailureTimeoutInMs + "ms");
+  }, kTabEventFailureTimeoutInMs);
+
+  function listener(event) {
+    gBrowser.removeEventListener("pageshow", listener, true);
+    clearTimeout(timeoutId);
+
+    if (aConditionFn) {
+      waitForCondition(aConditionFn).then(() => deferred.resolve(),
+                                          aReason => deferred.reject(aReason));
+    } else {
+      deferred.resolve();
+    }
+  }
+  gBrowser.addEventListener("pageshow", listener, true);
+
+  content.history.go(aDirection);
+
+  return deferred.promise;
+}
+
+function popupShown(aPopup) {
+  return promisePopupEvent(aPopup, "shown");
+}
+
+function popupHidden(aPopup) {
+  return promisePopupEvent(aPopup, "hidden");
+}
+
+/**
+ * Returns a Promise that resolves when aPopup fires an event of type
+ * aEventType. Times out and rejects after 20 seconds.
+ *
+ * @param aPopup the popup to monitor for events.
+ * @param aEventSuffix the _suffix_ for the popup event type to watch for.
+ *
+ * Example usage:
+ *   let popupShownPromise = promisePopupEvent(somePopup, "shown");
+ *   // ... something that opens a popup
+ *   yield popupShownPromise;
+ *
+ *  let popupHiddenPromise = promisePopupEvent(somePopup, "hidden");
+ *  // ... something that hides a popup
+ *  yield popupHiddenPromise;
+ */
+function promisePopupEvent(aPopup, aEventSuffix) {
+  let deferred = Promise.defer();
+  let win = aPopup.ownerDocument.defaultView;
+  let eventType = "popup" + aEventSuffix;
+
+  function onPopupEvent(e) {
+    aPopup.removeEventListener(eventType, onPopupEvent);
+    deferred.resolve();
+  };
+
+  aPopup.addEventListener(eventType, onPopupEvent);
+  return deferred.promise;
+}
+
+// This is a simpler version of the context menu check that
+// exists in contextmenu_common.js.
+function checkContextMenu(aContextMenu, aExpectedEntries, aWindow=window) {
+  let childNodes = [...aContextMenu.childNodes];
+  // Ignore hidden nodes:
+  childNodes = childNodes.filter((n) => !n.hidden);
+
+  for (let i = 0; i < childNodes.length; i++) {
+    let menuitem = childNodes[i];
+    try {
+      if (aExpectedEntries[i][0] == "---") {
+        is(menuitem.localName, "menuseparator", "menuseparator expected");
+        continue;
+      }
+
+      let selector = aExpectedEntries[i][0];
+      ok(menuitem.matches(selector), "menuitem should match " + selector + " selector");
+      let commandValue = menuitem.getAttribute("command");
+      let relatedCommand = commandValue ? aWindow.document.getElementById(commandValue) : null;
+      let menuItemDisabled = relatedCommand ?
+                               relatedCommand.getAttribute("disabled") == "true" :
+                               menuitem.getAttribute("disabled") == "true";
+      is(menuItemDisabled, !aExpectedEntries[i][1], "disabled state for " + selector);
+    } catch (e) {
+      ok(false, "Exception when checking context menu: " + e);
+    }
+  }
 }

@@ -26,7 +26,7 @@
 #define RUNDLL32_EXE L"\\rundll32.exe"
 
 
-NS_IMPL_ISUPPORTS_INHERITED1(nsMIMEInfoWin, nsMIMEInfoBase, nsIPropertyBag)
+NS_IMPL_ISUPPORTS_INHERITED(nsMIMEInfoWin, nsMIMEInfoBase, nsIPropertyBag)
 
 nsMIMEInfoWin::~nsMIMEInfoWin()
 {
@@ -614,7 +614,7 @@ nsMIMEInfoWin::GetPossibleLocalHandlers(nsIArray **_retval)
 
   nsAutoString fileExtToUse;
   if (fileExt.First() != '.')
-    fileExtToUse = PRUnichar('.');
+    fileExtToUse = char16_t('.');
   fileExtToUse.Append(NS_ConvertUTF8toUTF16(fileExt));
 
   // Note, the order in which these occur has an effect on the 
@@ -793,7 +793,7 @@ nsMIMEInfoWin::GetPossibleLocalHandlers(nsIArray **_retval)
       if (NS_SUCCEEDED(rv)) {
         nsAutoString openWithListPath(NS_LITERAL_STRING("SystemFileAssociations\\"));
         openWithListPath.Append(perceivedType); // no period
-        openWithListPath.Append(NS_LITERAL_STRING("\\OpenWithList"));
+        openWithListPath.AppendLiteral("\\OpenWithList");
 
         nsresult rv = appKey->Open(nsIWindowsRegKey::ROOT_KEY_CLASSES_ROOT,
                                    openWithListPath,

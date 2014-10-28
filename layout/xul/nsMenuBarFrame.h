@@ -22,7 +22,7 @@ class nsIContent;
 
 nsIFrame* NS_NewMenuBarFrame(nsIPresShell* aPresShell, nsStyleContext* aContext);
 
-class nsMenuBarFrame : public nsBoxFrame, public nsMenuParent
+class nsMenuBarFrame MOZ_FINAL : public nsBoxFrame, public nsMenuParent
 {
 public:
   NS_DECL_QUERYFRAME_TARGET(nsMenuBarFrame)
@@ -50,9 +50,9 @@ public:
   void InstallKeyboardNavigator();
   void RemoveKeyboardNavigator();
 
-  virtual void Init(nsIContent*      aContent,
-                    nsIFrame*        aParent,
-                    nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 
   virtual void DestroyFrom(nsIFrame* aDestructRoot) MOZ_OVERRIDE;
 
@@ -93,8 +93,8 @@ public:
     return nsBoxFrame::IsFrameOfType(aFlags);
   }
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
   {
       return MakeFrameName(NS_LITERAL_STRING("MenuBar"), aResult);
   }

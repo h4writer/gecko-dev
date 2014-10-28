@@ -1,4 +1,4 @@
-# -*- Mode: javascript; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+# -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -14,6 +14,9 @@ let CustomizationHandler = {
       case "customizationstarting":
         this._customizationStarting();
         break;
+      case "customizationchange":
+        this._customizationChange();
+        break;
       case "customizationending":
         this._customizationEnding(aEvent.detail);
         break;
@@ -21,8 +24,7 @@ let CustomizationHandler = {
   },
 
   isCustomizing: function() {
-    return document.documentElement.hasAttribute("customizing") ||
-           document.documentElement.hasAttribute("customize-exiting");
+    return document.documentElement.hasAttribute("customizing");
   },
 
   _customizationStarting: function() {
@@ -34,15 +36,24 @@ let CustomizationHandler = {
     let cmd = document.getElementById("cmd_CustomizeToolbars");
     cmd.setAttribute("disabled", "true");
 
-    let splitter = document.getElementById("urlbar-search-splitter");
-    if (splitter) {
-      splitter.parentNode.removeChild(splitter);
-    }
+    UpdateUrlbarSearchSplitterState();
 
     CombinedStopReload.uninit();
     PlacesToolbarHelper.customizeStart();
-    BookmarkingUI.customizeStart();
     DownloadsButton.customizeStart();
+
+    // The additional padding on the sides of the browser
+    // can cause the customize tab to get clipped.
+    let tabContainer = gBrowser.tabContainer;
+    if (tabContainer.getAttribute("overflow") == "true") {
+      let tabstrip = tabContainer.mTabstrip;
+      tabstrip.ensureElementIsVisible(gBrowser.selectedTab, true);
+    }
+  },
+
+  _customizationChange: function() {
+    gHomeButton.updatePersonalToolbarStyle();
+    PlacesToolbarHelper.customizeChange();
   },
 
   _customizationEnding: function(aDetails) {
@@ -70,7 +81,6 @@ let CustomizationHandler = {
     }
 
     PlacesToolbarHelper.customizeDone();
-    BookmarkingUI.customizeDone();
     DownloadsButton.customizeDone();
 
     // The url bar splitter state is dependent on whether stop/reload
@@ -82,7 +92,6 @@ let CustomizationHandler = {
     if (gURLBar) {
       URLBarSetURI();
       XULBrowserWindow.asyncUpdateUI();
-      BookmarkingUI.updateStarState();
     }
 
     // Re-enable parts of the UI we disabled during the dialog

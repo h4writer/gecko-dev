@@ -7,6 +7,8 @@
 #define __NS_SVGMASKFRAME_H__
 
 #include "mozilla/Attributes.h"
+#include "mozilla/gfx/2D.h"
+#include "mozilla/RefPtr.h"
 #include "gfxPattern.h"
 #include "gfxMatrix.h"
 #include "nsSVGContainerFrame.h"
@@ -17,12 +19,16 @@ class nsRenderingContext;
 
 typedef nsSVGContainerFrame nsSVGMaskFrameBase;
 
-class nsSVGMaskFrame : public nsSVGMaskFrameBase
+class nsSVGMaskFrame MOZ_FINAL : public nsSVGMaskFrameBase
 {
   friend nsIFrame*
   NS_NewSVGMaskFrame(nsIPresShell* aPresShell, nsStyleContext* aContext);
+
+  typedef mozilla::gfx::Matrix Matrix;
+  typedef mozilla::gfx::SourceSurface SourceSurface;
+
 protected:
-  nsSVGMaskFrame(nsStyleContext* aContext)
+  explicit nsSVGMaskFrame(nsStyleContext* aContext)
     : nsSVGMaskFrameBase(aContext)
     , mInUse(false)
   {
@@ -33,19 +39,21 @@ public:
   NS_DECL_FRAMEARENA_HELPERS
 
   // nsSVGMaskFrame method:
-  already_AddRefed<gfxPattern> ComputeMaskAlpha(nsRenderingContext *aContext,
-                                                nsIFrame* aParent,
-                                                const gfxMatrix &aMatrix,
-                                                float aOpacity = 1.0f);
+  mozilla::TemporaryRef<SourceSurface>
+  GetMaskForMaskedFrame(gfxContext* aContext,
+                        nsIFrame* aMaskedFrame,
+                        const gfxMatrix &aMatrix,
+                        float aOpacity,
+                        Matrix* aMaskTransform);
 
-  NS_IMETHOD AttributeChanged(int32_t         aNameSpaceID,
-                              nsIAtom*        aAttribute,
-                              int32_t         aModType) MOZ_OVERRIDE;
+  virtual nsresult AttributeChanged(int32_t         aNameSpaceID,
+                                    nsIAtom*        aAttribute,
+                                    int32_t         aModType) MOZ_OVERRIDE;
 
 #ifdef DEBUG
-  virtual void Init(nsIContent*      aContent,
-                    nsIFrame*        aParent,
-                    nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 #endif
 
   virtual void BuildDisplayList(nsDisplayListBuilder*   aBuilder,
@@ -59,23 +67,32 @@ public:
    */
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
   {
     return MakeFrameName(NS_LITERAL_STRING("SVGMask"), aResult);
   }
 #endif
 
 private:
+  /**
+   * If the mask element transforms its children due to
+   * maskContentUnits="objectBoundingBox" being set on it, this function
+   * returns the resulting transform.
+   */
+  gfxMatrix GetMaskTransform(nsIFrame* aMaskedFrame);
+
   // A helper class to allow us to paint masks safely. The helper
   // automatically sets and clears the mInUse flag on the mask frame
   // (to prevent nasty reference loops). It's easy to mess this up
   // and break things, so this helper makes the code far more robust.
-  class AutoMaskReferencer
+  class MOZ_STACK_CLASS AutoMaskReferencer
   {
   public:
-    AutoMaskReferencer(nsSVGMaskFrame *aFrame)
+    explicit AutoMaskReferencer(nsSVGMaskFrame *aFrame
+                                MOZ_GUARD_OBJECT_NOTIFIER_PARAM)
        : mFrame(aFrame) {
+      MOZ_GUARD_OBJECT_NOTIFIER_INIT;
       NS_ASSERTION(!mFrame->mInUse, "reference loop!");
       mFrame->mInUse = true;
     }
@@ -84,16 +101,15 @@ private:
     }
   private:
     nsSVGMaskFrame *mFrame;
+    MOZ_DECL_USE_GUARD_OBJECT_NOTIFIER
   };
 
-  nsIFrame *mMaskParent;
-  nsAutoPtr<gfxMatrix> mMaskParentMatrix;
+  gfxMatrix mMatrixForChildren;
   // recursion prevention flag
   bool mInUse;
 
   // nsSVGContainerFrame methods:
-  virtual gfxMatrix GetCanvasTM(uint32_t aFor,
-                                nsIFrame* aTransformRoot = nullptr) MOZ_OVERRIDE;
+  virtual gfxMatrix GetCanvasTM() MOZ_OVERRIDE;
 };
 
 #endif

@@ -27,10 +27,15 @@ class nsIWidget;
 // state changes as follows:
 //   ePopupClosed - initial state
 //   ePopupShowing - during the period when the popupshowing event fires
-//   ePopupOpen - between the popupshowing event and being visible. Creation
-//                of the child frames, layout and reflow occurs in this state.
-//   ePopupOpenAndVisible - layout is done and the popup's view and widget are
-//                          made visible. The popupshown event fires.
+//   ePopupOpening - between the popupshowing event and being visible. Creation
+//                   of the child frames, layout and reflow occurs in this
+//                   state. The popup is stored in the popup manager's list of
+//                   open popups during this state.
+//   ePopupVisible - layout is done and the popup's view and widget are made
+//                   visible. The popup is visible on screen but may be
+//                   transitioning. The popupshown event has not yet fired.
+//   ePopupShown - the popup has been shown and is fully ready. This state is
+//                 assigned just before the popupshown event fires.
 // When closing a popup:
 //   ePopupHidden - during the period when the popuphiding event fires and
 //                  the popup is removed.
@@ -42,9 +47,11 @@ enum nsPopupState {
   // popupshowing event has been fired.
   ePopupShowing,
   // state while a popup is open but the widget is not yet visible
-  ePopupOpen,
+  ePopupOpening,
+  // state while a popup is visible and waiting for the popupshown event
+  ePopupVisible,
   // state while a popup is open and visible on screen
-  ePopupOpenAndVisible,
+  ePopupShown,
   // state from when a popup is requested to be hidden to when it is closed.
   ePopupHiding,
   // state which indicates that the popup was hidden without firing the
@@ -63,6 +70,14 @@ enum FlipStyle {
   FlipStyle_None = 0,
   FlipStyle_Outside = 1,
   FlipStyle_Inside = 2
+};
+
+// Values for the flip attribute
+enum FlipType {
+  FlipType_Default = 0,
+  FlipType_None = 1,    // don't try to flip or translate to stay onscreen
+  FlipType_Both = 2,    // flip in both directions
+  FlipType_Slide = 3    // allow the arrow to "slide" instead of resizing
 };
 
 // values are selected so that the direction can be flipped just by
@@ -110,7 +125,30 @@ class nsViewManager;
 class nsView;
 class nsMenuPopupFrame;
 
-class nsMenuPopupFrame : public nsBoxFrame, public nsMenuParent
+// this class is used for dispatching popupshown events asynchronously.
+class nsXULPopupShownEvent : public nsRunnable, public nsIDOMEventListener
+{
+public:
+  nsXULPopupShownEvent(nsIContent *aPopup, nsPresContext* aPresContext)
+    : mPopup(aPopup), mPresContext(aPresContext)
+  {
+  }
+
+  NS_DECL_ISUPPORTS_INHERITED
+  NS_DECL_NSIRUNNABLE
+  NS_DECL_NSIDOMEVENTLISTENER
+
+  void CancelListener();
+
+protected:
+  virtual ~nsXULPopupShownEvent() { }
+
+private:
+  nsCOMPtr<nsIContent> mPopup;
+  nsRefPtr<nsPresContext> mPresContext;
+};
+
+class nsMenuPopupFrame MOZ_FINAL : public nsBoxFrame, public nsMenuParent
 {
 public:
   NS_DECL_QUERYFRAME_TARGET(nsMenuPopupFrame)
@@ -165,13 +203,13 @@ public:
   void AttachedDismissalListener();
 
   // Overridden methods
-  virtual void Init(nsIContent*      aContent,
-                    nsIFrame*        aParent,
-                    nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 
-  NS_IMETHOD AttributeChanged(int32_t aNameSpaceID,
-                              nsIAtom* aAttribute,
-                              int32_t aModType) MOZ_OVERRIDE;
+  virtual nsresult AttributeChanged(int32_t aNameSpaceID,
+                                    nsIAtom* aAttribute,
+                                    int32_t aModType) MOZ_OVERRIDE;
 
   virtual void DestroyFrom(nsIFrame* aDestructRoot) MOZ_OVERRIDE;
 
@@ -189,13 +227,14 @@ public:
   nsresult CreateWidgetForView(nsView* aView);
   uint8_t GetShadowStyle();
 
-  NS_IMETHOD SetInitialChildList(ChildListID     aListID,
-                                 nsFrameList&    aChildList) MOZ_OVERRIDE;
+  virtual void SetInitialChildList(ChildListID  aListID,
+                                   nsFrameList& aChildList) MOZ_OVERRIDE;
 
   virtual bool IsLeaf() const MOZ_OVERRIDE;
 
   // layout, position and display the popup as needed
-  void LayoutPopup(nsBoxLayoutState& aState, nsIFrame* aParentMenu, bool aSizedToPopup);
+  void LayoutPopup(nsBoxLayoutState& aState, nsIFrame* aParentMenu,
+                   nsIFrame* aAnchor, bool aSizedToPopup);
 
   nsView* GetRootViewForPopup(nsIFrame* aStartFrame);
 
@@ -204,7 +243,7 @@ public:
   // point if a screen position (mScreenXPos and mScreenYPos) are set. The popup
   // will be adjusted so that it is on screen. If aIsMove is true, then the popup
   // is being moved, and should not be flipped.
-  nsresult SetPopupPosition(nsIFrame* aAnchorFrame, bool aIsMove);
+  nsresult SetPopupPosition(nsIFrame* aAnchorFrame, bool aIsMove, bool aSizedToPopup);
 
   bool HasGeneratedChildren() { return mGeneratedChildren; }
   void SetGeneratedChildren() { mGeneratedChildren = true; }
@@ -219,9 +258,13 @@ public:
 
   nsPopupType PopupType() const { return mPopupType; }
   bool IsMenu() MOZ_OVERRIDE { return mPopupType == ePopupTypeMenu; }
-  bool IsOpen() MOZ_OVERRIDE { return mPopupState == ePopupOpen || mPopupState == ePopupOpenAndVisible; }
+  bool IsOpen() MOZ_OVERRIDE { return mPopupState == ePopupOpening ||
+                                      mPopupState == ePopupVisible ||
+                                      mPopupState == ePopupShown; }
+  bool IsVisible() { return mPopupState == ePopupVisible ||
+                            mPopupState == ePopupShown; }
 
-  bool IsDragPopup() { return mIsDragPopup; }
+  bool IsMouseTransparent() { return mMouseTransparent; }
 
   static nsIContent* GetTriggerContent(nsMenuPopupFrame* aMenuPopupFrame);
   void ClearTriggerContent() { mTriggerContent = nullptr; }
@@ -270,8 +313,8 @@ public:
 
   virtual nsIAtom* GetType() const MOZ_OVERRIDE { return nsGkAtoms::menuPopupFrame; }
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
   {
       return MakeFrameName(NS_LITERAL_STRING("MenuPopup"), aResult);
   }
@@ -301,7 +344,11 @@ public:
   // area of the screen the popup should be displayed on. Content popups,
   // however, will also be constrained by the content area, given by
   // aRootScreenRect. All coordinates are in app units.
-  nsRect GetConstraintRect(const nsRect& aAnchorRect, const nsRect& aRootScreenRect);
+  // For non-toplevel popups (which will always be panels), we will also
+  // constrain them to the available screen rect, ie they will not fall
+  // underneath the taskbar, dock or other fixed OS elements.
+  nsRect GetConstraintRect(const nsRect& aAnchorRect, const nsRect& aRootScreenRect,
+                           nsPopupLevel aPopupLevel);
 
   // Determines whether the given edges of the popup may be moved, where
   // aHorizontalSide and aVerticalSide are one of the NS_SIDE_* constants, or
@@ -325,10 +372,6 @@ public:
   // This position is in CSS pixels.
   nsIntPoint ScreenPosition() const { return nsIntPoint(mScreenXPos, mScreenYPos); }
 
-  virtual void BuildDisplayList(nsDisplayListBuilder*   aBuilder,
-                                const nsRect&           aDirtyRect,
-                                const nsDisplayListSet& aLists) MOZ_OVERRIDE;
-
   nsIntPoint GetLastClientOffset() const { return mLastClientOffset; }
 
   // Return the alignment of the popup
@@ -336,6 +379,20 @@ public:
 
   // Return the offset applied to the alignment of the popup
   nscoord GetAlignmentOffset() const { return mAlignmentOffset; }
+
+  // Clear the mPopupShownDispatcher, remove the listener and return true if
+  // mPopupShownDispatcher was non-null.
+  bool ClearPopupShownDispatcher()
+  {
+    if (mPopupShownDispatcher) {
+      mPopupShownDispatcher->CancelListener();
+      mPopupShownDispatcher = nullptr;
+      return true;
+    }
+
+    return false;
+  }
+
 protected:
 
   // returns the popup's level.
@@ -425,6 +482,8 @@ protected:
 
   nsMenuFrame* mCurrentMenu; // The current menu that is active.
 
+  nsRefPtr<nsXULPopupShownEvent> mPopupShownDispatcher;
+
   // A popup's preferred size may be different than its actual size stored in
   // mRect in the case where the popup was resized because it was too large
   // for the screen. The preferred size mPrefSize holds the full size the popup
@@ -457,10 +516,9 @@ protected:
   int8_t mPopupAnchor;
   int8_t mPosition;
 
-  // One of nsIPopupBoxObject::ROLLUP_DEFAULT/ROLLUP_CONSUME/ROLLUP_NO_CONSUME
-  int8_t mConsumeRollupEvent;
-  bool mFlipBoth; // flip in both directions
-  bool mSlide; // allow the arrow to "slide" instead of resizing
+  // One of PopupBoxObject::ROLLUP_DEFAULT/ROLLUP_CONSUME/ROLLUP_NO_CONSUME
+  uint8_t mConsumeRollupEvent;
+  FlipType mFlip; // Whether to flip
 
   bool mIsOpenChanged; // true if the open state changed since the last layout
   bool mIsContextMenu; // true for context menus
@@ -472,7 +530,7 @@ protected:
   bool mShouldAutoPosition; // Should SetPopupPosition be allowed to auto position popup?
   bool mInContentShell; // True if the popup is in a content shell
   bool mIsMenuLocked; // Should events inside this menu be ignored?
-  bool mIsDragPopup; // True if this is a popup used for drag feedback
+  bool mMouseTransparent; // True if this is a popup is transparent to mouse events
 
   // the flip modes that were used when the popup was opened
   bool mHFlip;

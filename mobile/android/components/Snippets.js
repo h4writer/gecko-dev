@@ -4,12 +4,15 @@
 
 const { classes: Cc, interfaces: Ci, utils: Cu } = Components;
 
+Cu.import("resource://gre/modules/Accounts.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 
 XPCOMUtils.defineLazyModuleGetter(this, "Home", "resource://gre/modules/Home.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "OS", "resource://gre/modules/osfile.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "Task", "resource://gre/modules/Task.jsm");
+XPCOMUtils.defineLazyModuleGetter(this, "UITelemetry", "resource://gre/modules/UITelemetry.jsm");
+
 
 XPCOMUtils.defineLazyGetter(this, "gEncoder", function() { return new gChromeWin.TextEncoder(); });
 XPCOMUtils.defineLazyGetter(this, "gDecoder", function() { return new gChromeWin.TextDecoder(); });
@@ -28,6 +31,9 @@ const SNIPPETS_GEO_LAST_UPDATE_PREF = "browser.snippets.geoLastUpdate";
 
 // Pref where we'll cache the user's country.
 const SNIPPETS_COUNTRY_CODE_PREF = "browser.snippets.countryCode";
+
+// Pref where we store an array IDs of snippets that should not be shown again
+const SNIPPETS_REMOVED_IDS_PREF = "browser.snippets.removedIds";
 
 // How frequently we update the user's country code from the server (30 days).
 const SNIPPETS_GEO_UPDATE_INTERVAL_MS = 86400000*30;
@@ -114,8 +120,15 @@ function updateCountryCode(callback) {
  */
 function updateSnippets() {
   _httpGetRequest(gSnippetsURL, function(responseText) {
-    cacheSnippets(responseText);
-    updateBanner(responseText);
+    try {
+      let messages = JSON.parse(responseText);
+      updateBanner(messages);
+
+      // Only cache the response if it is valid JSON.
+      cacheSnippets(responseText);
+    } catch (e) {
+      Cu.reportError("Error parsing snippets responseText: " + e);
+    }
   });
 }
 
@@ -135,10 +148,12 @@ function cacheSnippets(response) {
  */
 function loadSnippetsFromCache() {
   let promise = OS.File.read(gSnippetsPath);
-  promise.then(array => updateBanner(gDecoder.decode(array)), e => {
-    // If snippets.json doesn't exist, update data from the server.
+  promise.then(array => {
+    let messages = JSON.parse(gDecoder.decode(array));
+    updateBanner(messages);
+  }, e => {
     if (e instanceof OS.File.Error && e.becauseNoSuchFile) {
-      update();
+      Services.console.logStringMessage("Couldn't show snippets because cache does not exist yet.");
     } else {
       Cu.reportError("Error loading snippets from cache: " + e);
     }
@@ -152,8 +167,7 @@ var gMessageIds = [];
 /**
  * Updates set of snippets in the home banner message rotation.
  *
- * @param response responseText returned from snippets server.
- *   This should be a JSON array of message data JSON objects.
+ * @param messages JSON array of message data JSON objects.
  *   Each message object should have the following properties:
  *     - id (?): Unique identifier for this snippets message
  *     - text (string): Text to show as banner message
@@ -161,14 +175,23 @@ var gMessageIds = [];
  *     - icon (data URI): Icon to appear in banner
  *     - target_geo (string): Country code for where this message should be shown (e.g. "US")
  */
-function updateBanner(response) {
+function updateBanner(messages) {
   // Remove the current messages, if there are any.
   gMessageIds.forEach(function(id) {
     Home.banner.remove(id);
   })
   gMessageIds = [];
 
-  let messages = JSON.parse(response);
+  try {
+    let removedSnippetIds = JSON.parse(Services.prefs.getCharPref(SNIPPETS_REMOVED_IDS_PREF));
+    messages = messages.filter(function(message) {
+      // Only include the snippet if it has not been previously removed.
+      return removedSnippetIds.indexOf(message.id) === -1;
+    });
+  } catch (e) {
+    // If the pref doesn't exist, there aren't any snippets to filter out.
+  }
+
   messages.forEach(function(message) {
     // Don't add this message to the banner if it's not supposed to be shown in this country.
     if ("target_geo" in message && message.target_geo != gCountryCode) {
@@ -177,8 +200,17 @@ function updateBanner(response) {
     let id = Home.banner.add({
       text: message.text,
       icon: message.icon,
+      weight: message.weight,
       onclick: function() {
-        gChromeWin.BrowserApp.addTab(message.url);
+        let parentId = gChromeWin.BrowserApp.selectedTab.id;
+        gChromeWin.BrowserApp.addTab(message.url, { parentId: parentId });
+        UITelemetry.addEvent("action.1", "banner", null, message.id);
+      },
+      ondismiss: function() {
+        // Remove this snippet from the banner, and store its id so we'll never show it again.
+        Home.banner.remove(id);
+        removeSnippet(message.id);
+        UITelemetry.addEvent("cancel.1", "banner", null, message.id);
       },
       onshown: function() {
         // 10% of the time, record the snippet id and a timestamp
@@ -190,6 +222,23 @@ function updateBanner(response) {
     // Keep track of the message we added so that we can remove it later.
     gMessageIds.push(id);
   });
+}
+
+/**
+ * Appends snippet id to the end of `snippets-removed.txt`
+ *
+ * @param snippetId unique id for snippet, sent from snippets server
+ */
+function removeSnippet(snippetId) {
+  let removedSnippetIds;
+  try {
+    removedSnippetIds = JSON.parse(Services.prefs.getCharPref(SNIPPETS_REMOVED_IDS_PREF));
+  } catch (e) {
+    removedSnippetIds = [];
+  }
+
+  removedSnippetIds.push(snippetId);
+  Services.prefs.setCharPref(SNIPPETS_REMOVED_IDS_PREF, JSON.stringify(removedSnippetIds));
 }
 
 /**
@@ -291,6 +340,67 @@ function _httpGetRequest(url, callback) {
   xhr.send(null);
 }
 
+function loadSyncPromoBanner() {
+  Accounts.anySyncAccountsExist().then(
+    (exist) => {
+      // Don't show the banner if sync accounts exist.
+      if (exist) {
+        return;
+      }
+
+      let stringBundle = Services.strings.createBundle("chrome://browser/locale/sync.properties");
+      let text = stringBundle.GetStringFromName("promoBanner.message.text");
+      let link = stringBundle.GetStringFromName("promoBanner.message.link");
+
+      let id = Home.banner.add({
+        text: text + "<a href=\"#\">" + link + "</a>",
+        icon: "drawable://sync_promo",
+        onclick: function() {
+          // Remove the message, so that it won't show again for the rest of the app lifetime.
+          Home.banner.remove(id);
+          Accounts.launchSetup();
+
+          UITelemetry.addEvent("action.1", "banner", null, "syncpromo");
+        },
+        ondismiss: function() {
+          // Remove the sync promo message from the banner and never try to show it again.
+          Home.banner.remove(id);
+          Services.prefs.setBoolPref("browser.snippets.syncPromo.enabled", false);
+
+          UITelemetry.addEvent("cancel.1", "banner", null, "syncpromo");
+        }
+      });
+    },
+    (err) => {
+      Cu.reportError("Error checking whether sync account exists: " + err);
+    }
+  );
+}
+
+function loadHomePanelsBanner() {
+  let stringBundle = Services.strings.createBundle("chrome://browser/locale/aboutHome.properties");
+  let text = stringBundle.GetStringFromName("banner.firstrunHomepage.text");
+
+  let id = Home.banner.add({
+    text: text,
+    icon: "drawable://homepage_banner_firstrun",
+    onclick: function() {
+      // Remove the message, so that it won't show again for the rest of the app lifetime.
+      Home.banner.remove(id);
+      // User has interacted with this snippet so don't show it again.
+      Services.prefs.setBoolPref("browser.snippets.firstrunHomepage.enabled", false);
+
+      UITelemetry.addEvent("action.1", "banner", null, "firstrun-homepage");
+    },
+    ondismiss: function() {
+      Home.banner.remove(id);
+      Services.prefs.setBoolPref("browser.snippets.firstrunHomepage.enabled", false);
+
+      UITelemetry.addEvent("cancel.1", "banner", null, "firstrun-homepage");
+    }
+  });
+}
+
 function Snippets() {}
 
 Snippets.prototype = {
@@ -298,12 +408,20 @@ Snippets.prototype = {
   classID: Components.ID("{a78d7e59-b558-4321-a3d6-dffe2f1e76dd}"),
 
   observe: function(subject, topic, data) {
-    if (!Services.prefs.getBoolPref("browser.snippets.enabled")) {
-      return;
-    }
     switch(topic) {
-      case "profile-after-change":
-        loadSnippetsFromCache();
+      case "browser-delayed-startup-finished":
+        // Add snippets to be cycled through.
+        if (Services.prefs.getBoolPref("browser.snippets.firstrunHomepage.enabled")) {
+          loadHomePanelsBanner();
+        }
+
+        if (Services.prefs.getBoolPref("browser.snippets.syncPromo.enabled")) {
+          loadSyncPromoBanner();
+        }
+
+        if (Services.prefs.getBoolPref("browser.snippets.enabled")) {
+          loadSnippetsFromCache();
+        }
         break;
     }
   },

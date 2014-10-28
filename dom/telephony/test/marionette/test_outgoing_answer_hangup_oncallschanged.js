@@ -13,10 +13,8 @@ function dial() {
   telephony.oncallschanged = function oncallschanged(event) {
     log("Received 'callschanged' call event.");
 
-    if (!event.call) {
-      log("Notifying calls array is loaded. No call information accompanies.");
-      return;
-    }
+    // Check whether the 'calls' array has changed
+    ok(event.call, "undesired callschanged event");
 
     let expected_states = ["dialing", "disconnected"];
     ok(expected_states.indexOf(event.call.state) != -1,
@@ -25,7 +23,7 @@ function dial() {
     if (event.call.state == "dialing") {
       outgoing = event.call;
       ok(outgoing);
-      is(outgoing.number, number);
+      is(outgoing.id.number, number);
 
       is(outgoing, telephony.active);
       is(telephony.calls.length, 1);
@@ -46,9 +44,10 @@ function dial() {
 }
 
 function checkCallList() {
-  emulator.run("gsm list", function(result) {
+  emulator.runCmdWithCallback("gsm list", function(result) {
     log("Call list is now: " + result);
-    if ((result[0] == "outbound to  " + number + " : unknown") && (result[1] == "OK")) {
+    if (((result[0] == "outbound to  " + number + " : unknown") ||
+         (result[0] == "outbound to  " + number + " : dialing"))) {
       answer();
     } else {
       window.setTimeout(checkCallList, 100);
@@ -68,20 +67,19 @@ function answer() {
 
     is(outgoing, telephony.active);
 
-    emulator.run("gsm list", function(result) {
+    emulator.runCmdWithCallback("gsm list", function(result) {
       log("Call list (after 'connected' event) is now: " + result);
       is(result[0], "outbound to  " + number + " : active");
-      is(result[1], "OK");
       hangUp();
     });
   };
-  emulator.run("gsm accept " + number);
+  emulator.runCmdWithCallback("gsm accept " + number);
 }
 
 function hangUp() {
   log("Hanging up the outgoing call.");
 
-  emulator.run("gsm cancel " + number);
+  emulator.runCmdWithCallback("gsm cancel " + number);
 }
 
 function cleanUp() {

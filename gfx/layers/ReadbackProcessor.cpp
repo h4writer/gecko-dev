@@ -5,12 +5,10 @@
 
 #include "ReadbackProcessor.h"
 #include <sys/types.h>                  // for int32_t
-#include "Layers.h"                     // for Layer, ThebesLayer, etc
+#include "Layers.h"                     // for Layer, PaintedLayer, etc
 #include "ReadbackLayer.h"              // for ReadbackLayer, ReadbackSink
-#include "gfx3DMatrix.h"                // for gfx3DMatrix
 #include "gfxColor.h"                   // for gfxRGBA
 #include "gfxContext.h"                 // for gfxContext
-#include "gfxMatrix.h"                  // for gfxMatrix
 #include "gfxRect.h"                    // for gfxRect
 #include "mozilla/gfx/BasePoint.h"      // for BasePoint
 #include "mozilla/gfx/BaseRect.h"       // for BaseRect
@@ -46,19 +44,19 @@ ReadbackProcessor::BuildUpdates(ContainerLayer* aContainer)
 static Layer*
 FindBackgroundLayer(ReadbackLayer* aLayer, nsIntPoint* aOffset)
 {
-  gfxMatrix transform;
+  gfx::Matrix transform;
   if (!aLayer->GetTransform().Is2D(&transform) ||
       transform.HasNonIntegerTranslation())
     return nullptr;
-  nsIntPoint transformOffset(int32_t(transform.x0), int32_t(transform.y0));
+  nsIntPoint transformOffset(int32_t(transform._31), int32_t(transform._32));
 
   for (Layer* l = aLayer->GetPrevSibling(); l; l = l->GetPrevSibling()) {
-    gfxMatrix backgroundTransform;
+    gfx::Matrix backgroundTransform;
     if (!l->GetTransform().Is2D(&backgroundTransform) ||
-        backgroundTransform.HasNonIntegerTranslation())
+        gfx::ThebesMatrix(backgroundTransform).HasNonIntegerTranslation())
       return nullptr;
 
-    nsIntPoint backgroundOffset(int32_t(backgroundTransform.x0), int32_t(backgroundTransform.y0));
+    nsIntPoint backgroundOffset(int32_t(backgroundTransform._31), int32_t(backgroundTransform._32));
     nsIntRect rectInBackground(transformOffset - backgroundOffset, aLayer->GetSize());
     const nsIntRegion& visibleRegion = l->GetEffectiveVisibleRegion();
     if (!visibleRegion.Intersects(rectInBackground))
@@ -69,6 +67,7 @@ FindBackgroundLayer(ReadbackLayer* aLayer, nsIntPoint* aOffset)
       return nullptr;
 
     if (l->GetEffectiveOpacity() != 1.0 ||
+        l->GetMaskLayer() ||
         !(l->GetContentFlags() & Layer::CONTENT_OPAQUE))
       return nullptr;
 
@@ -78,7 +77,7 @@ FindBackgroundLayer(ReadbackLayer* aLayer, nsIntPoint* aOffset)
       return nullptr;
 
     Layer::LayerType type = l->GetType();
-    if (type != Layer::TYPE_COLOR && type != Layer::TYPE_THEBES)
+    if (type != Layer::TYPE_COLOR && type != Layer::TYPE_PAINTED)
       return nullptr;
 
     *aOffset = backgroundOffset - transformOffset;
@@ -120,19 +119,19 @@ ReadbackProcessor::BuildUpdatesForLayer(ReadbackLayer* aLayer)
       }
     }
   } else {
-    NS_ASSERTION(newBackground->AsThebesLayer(), "Must be ThebesLayer");
-    ThebesLayer* thebesLayer = static_cast<ThebesLayer*>(newBackground);
-    // updateRect is relative to the ThebesLayer
+    NS_ASSERTION(newBackground->AsPaintedLayer(), "Must be PaintedLayer");
+    PaintedLayer* paintedLayer = static_cast<PaintedLayer*>(newBackground);
+    // updateRect is relative to the PaintedLayer
     nsIntRect updateRect = aLayer->GetRect() - offset;
-    if (thebesLayer != aLayer->mBackgroundLayer ||
+    if (paintedLayer != aLayer->mBackgroundLayer ||
         offset != aLayer->mBackgroundLayerOffset) {
-      aLayer->mBackgroundLayer = thebesLayer;
+      aLayer->mBackgroundLayer = paintedLayer;
       aLayer->mBackgroundLayerOffset = offset;
       aLayer->mBackgroundColor = gfxRGBA(0,0,0,0);
-      thebesLayer->SetUsedForReadback(true);
+      paintedLayer->SetUsedForReadback(true);
     } else {
       nsIntRegion invalid;
-      invalid.Sub(updateRect, thebesLayer->GetValidRegion());
+      invalid.Sub(updateRect, paintedLayer->GetValidRegion());
       updateRect = invalid.GetBounds();
     }
 
@@ -142,11 +141,11 @@ ReadbackProcessor::BuildUpdatesForLayer(ReadbackLayer* aLayer)
 }
 
 void
-ReadbackProcessor::GetThebesLayerUpdates(ThebesLayer* aLayer,
+ReadbackProcessor::GetPaintedLayerUpdates(PaintedLayer* aLayer,
                                          nsTArray<Update>* aUpdates,
                                          nsIntRegion* aUpdateRegion)
 {
-  // All ThebesLayers used for readback are in mAllUpdates (some possibly
+  // All PaintedLayers used for readback are in mAllUpdates (some possibly
   // with an empty update rect).
   aLayer->SetUsedForReadback(false);
   if (aUpdateRegion) {

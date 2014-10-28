@@ -4,6 +4,8 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+TEST_DIRS += ['test']
+
 EXPORTS.mozilla += [
     'ErrorResult.h',
 ]
@@ -22,11 +24,14 @@ EXPORTS.mozilla.dom += [
     'Errors.msg',
     'Exceptions.h',
     'JSSlots.h',
+    'MozMap.h',
     'NonRefcountedDOMObject.h',
     'Nullable.h',
     'OwningNonNull.h',
     'PrimitiveConversions.h',
     'RootedDictionary.h',
+    'StructuredClone.h',
+    'ToJSValue.h',
     'TypedArray.h',
     'UnionMember.h',
 ]
@@ -36,28 +41,23 @@ FAIL_ON_WARNINGS = True
 MSVC_ENABLE_PGO = True
 
 LOCAL_INCLUDES += [
-    '/content/base/src',
-    '/content/canvas/src',
-    '/content/events/src',
-    '/content/html/content/src',
-    '/content/html/document/src',
-    '/content/media/webaudio',
-    '/content/media/webspeech/recognition',
-    '/content/svg/content/src',
-    '/content/xbl/src',
-    '/content/xml/content/src',
-    '/content/xslt/src/base',
-    '/content/xslt/src/xpath',
-    '/content/xul/content/src',
-    '/content/xul/document/src',
     '/dom/base',
     '/dom/battery',
     '/dom/bluetooth',
     '/dom/camera',
-    '/dom/file',
+    '/dom/canvas',
+    '/dom/geolocation',
+    '/dom/html',
     '/dom/indexedDB',
-    '/dom/src/geolocation',
+    '/dom/media/webaudio',
+    '/dom/media/webspeech/recognition',
+    '/dom/svg',
     '/dom/workers',
+    '/dom/xbl',
+    '/dom/xml',
+    '/dom/xslt/base',
+    '/dom/xslt/xpath',
+    '/dom/xul',
     '/js/ipc',
     '/js/xpconnect/src',
     '/js/xpconnect/wrappers',
@@ -75,6 +75,11 @@ UNIFIED_SOURCES += [
     'Date.cpp',
     'DOMJSProxyHandler.cpp',
     'Exceptions.cpp',
+    'ToJSValue.cpp',
+]
+
+SOURCES += [
+    'StructuredClone.cpp',
 ]
 
 include('/ipc/chromium/chromium-config.mozbuild')
@@ -85,3 +90,14 @@ if CONFIG['MOZ_AUDIO_CHANNEL_MANAGER']:
     ]
 
 FINAL_LIBRARY = 'xul'
+
+SPHINX_TREES['webidl'] = 'docs'
+SPHINX_PYTHON_PACKAGE_DIRS += ['mozwebidlcodegen']
+
+if CONFIG['MOZ_BUILD_APP'] in ['browser', 'mobile/android', 'xulrunner']:
+    # This is needed for Window.webidl
+    DEFINES['HAVE_SIDEBAR'] = True
+
+PYTHON_UNIT_TESTS += [
+    'mozwebidlcodegen/test/test_mozwebidlcodegen.py',
+]

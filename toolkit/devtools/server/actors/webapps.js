@@ -4,14 +4,36 @@
 
 "use strict";
 
-let Cu = Components.utils;
-let Cc = Components.classes;
-let Ci = Components.interfaces;
-let CC = Components.Constructor;
+let {Cu, Cc, Ci} = require("chrome");
 
+Cu.import("resource://gre/modules/NetUtil.jsm");
+Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/osfile.jsm");
+Cu.import("resource://gre/modules/FileUtils.jsm");
 
-let promise;
+let {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
+
+let DevToolsUtils = require("devtools/toolkit/DevToolsUtils");
+let { ActorPool } = require("devtools/server/actors/common");
+let { DebuggerServer } = require("devtools/server/main");
+let Services = require("Services");
+
+let FramesMock = null;
+
+exports.setFramesMock = function (mock) {
+  FramesMock = mock;
+};
+
+DevToolsUtils.defineLazyGetter(this, "Frames", () => {
+  // Offer a way for unit test to provide a mock
+  if (FramesMock) {
+    return FramesMock;
+  }
+  try {
+    return Cu.import("resource://gre/modules/Frames.jsm", {}).Frames;
+  } catch(e) {}
+  return null;
+});
 
 function debug(aMsg) {
   /*
@@ -21,87 +43,158 @@ function debug(aMsg) {
   */
 }
 
-function PackageUploadActor(aPath, aFile) {
-  this._path = aPath;
-  this._file = aFile;
-  this.size = 0;
+function PackageUploadActor(file) {
+  this._file = file;
+  this._path = file.path;
 }
 
+PackageUploadActor.fromRequest = function(request, file) {
+  if (request.bulk) {
+    return new PackageUploadBulkActor(file);
+  }
+  return new PackageUploadJSONActor(file);
+};
+
 PackageUploadActor.prototype = {
-  actorPrefix: "packageUploadActor",
 
   /**
    * This method isn't exposed to the client.
    * It is meant to be called by server code, in order to get
    * access to the temporary file out of the actor ID.
    */
-  getFilePath: function () {
+  get filePath() {
     return this._path;
   },
 
-  /**
-   * This method allows you to upload a piece of file.
-   * It expects a chunk argument that is the a string to write to the file.
-   */
-  chunk: function (aRequest) {
-    let chunk = aRequest.chunk;
-    if (!chunk || chunk.length <= 0) {
-      return {error: "parameterError",
-              message: "Missing or invalid chunk argument"};
+  get openedFile() {
+    if (this._openedFile) {
+      return this._openedFile;
     }
-    // Translate the string used to transfer the chunk over JSON
-    // back to a typed array
-    let data = new Uint8Array(chunk.length);
-    for (let i = 0, l = chunk.length; i < l ; i++) {
-      data[i] = chunk.charCodeAt(i);
-    }
-    return this._file.write(data)
-               .then((written) => {
-                 this.size += written;
-                 return {
-                   written: written,
-                   size: this.size
-                 };
-               });
-  },
-
-  /**
-   * This method needs to be called, when you are done uploading
-   * chunks, before trying to access/use the temporary file.
-   * Otherwise, the file may be partially written
-   * and also be locked.
-   */
-  done: function (aRequest) {
-    this._file.close();
-    return {};
+    this._openedFile = this._openFile();
+    return this._openedFile;
   },
 
   /**
    * This method allows you to delete the temporary file,
    * when you are done using it.
    */
-  remove: function (aRequest) {
+  remove: function () {
     this._cleanupFile();
     return {};
   },
 
   _cleanupFile: function () {
     try {
-      this._file.close();
+      this._closeFile();
     } catch(e) {}
     try {
       OS.File.remove(this._path);
     } catch(e) {}
   }
+
+};
+
+/**
+ * Create a new JSON package upload actor.
+ * @param file nsIFile temporary file to write to
+ */
+function PackageUploadJSONActor(file) {
+  PackageUploadActor.call(this, file);
+  this._size = 0;
+}
+
+PackageUploadJSONActor.prototype = Object.create(PackageUploadActor.prototype);
+
+PackageUploadJSONActor.prototype.actorPrefix = "packageUploadJSONActor";
+
+PackageUploadJSONActor.prototype._openFile = function() {
+  return OS.File.open(this._path, { write: true, truncate: true });
+};
+
+PackageUploadJSONActor.prototype._closeFile = function() {
+  this.openedFile.then(file => file.close());
+};
+
+/**
+ * This method allows you to upload a piece of file.
+ * It expects a chunk argument that is the a string to write to the file.
+ */
+PackageUploadJSONActor.prototype.chunk = function(aRequest) {
+  let chunk = aRequest.chunk;
+  if (!chunk || chunk.length <= 0) {
+    return {error: "parameterError",
+            message: "Missing or invalid chunk argument"};
+  }
+  // Translate the string used to transfer the chunk over JSON
+  // back to a typed array
+  let data = new Uint8Array(chunk.length);
+  for (let i = 0, l = chunk.length; i < l ; i++) {
+    data[i] = chunk.charCodeAt(i);
+  }
+  return this.openedFile
+             .then(file => file.write(data))
+             .then((written) => {
+               this._size += written;
+               return {
+                 written: written,
+                 _size: this._size
+               };
+             });
+};
+
+/**
+ * This method needs to be called, when you are done uploading
+ * chunks, before trying to access/use the temporary file.
+ * Otherwise, the file may be partially written
+ * and also be locked.
+ */
+PackageUploadJSONActor.prototype.done = function() {
+  this._closeFile();
+  return {};
 };
 
 /**
  * The request types this actor can handle.
  */
-PackageUploadActor.prototype.requestTypes = {
-  "chunk": PackageUploadActor.prototype.chunk,
-  "done": PackageUploadActor.prototype.done,
-  "remove": PackageUploadActor.prototype.remove
+PackageUploadJSONActor.prototype.requestTypes = {
+  "chunk": PackageUploadJSONActor.prototype.chunk,
+  "done": PackageUploadJSONActor.prototype.done,
+  "remove": PackageUploadJSONActor.prototype.remove
+};
+
+/**
+ * Create a new bulk package upload actor.
+ * @param file nsIFile temporary file to write to
+ */
+function PackageUploadBulkActor(file) {
+  PackageUploadActor.call(this, file);
+}
+
+PackageUploadBulkActor.prototype = Object.create(PackageUploadActor.prototype);
+
+PackageUploadBulkActor.prototype.actorPrefix = "packageUploadBulkActor";
+
+PackageUploadBulkActor.prototype._openFile = function() {
+  return FileUtils.openSafeFileOutputStream(this._file);
+};
+
+PackageUploadBulkActor.prototype._closeFile = function() {
+  FileUtils.closeSafeFileOutputStream(this.openedFile);
+};
+
+PackageUploadBulkActor.prototype.stream = function({copyTo}) {
+  return copyTo(this.openedFile).then(() => {
+    this._closeFile();
+    return {};
+  });
+};
+
+/**
+ * The request types this actor can handle.
+ */
+PackageUploadBulkActor.prototype.requestTypes = {
+  "stream": PackageUploadBulkActor.prototype.stream,
+  "remove": PackageUploadBulkActor.prototype.remove
 };
 
 /**
@@ -116,11 +209,9 @@ function WebappsActor(aConnection) {
   Cu.import("resource://gre/modules/Webapps.jsm");
   Cu.import("resource://gre/modules/AppsUtils.jsm");
   Cu.import("resource://gre/modules/FileUtils.jsm");
-  Cu.import('resource://gre/modules/Services.jsm');
-  promise = Cu.import("resource://gre/modules/commonjs/sdk/core/promise.js").Promise;
 
   // Keep reference of already created app actors.
-  // key: app frame message manager, value: ContentTabActor's grip() value
+  // key: app frame message manager, value: ContentActor's grip() value
   this._appActorsMap = new Map();
 
   this.conn = aConnection;
@@ -133,6 +224,10 @@ WebappsActor.prototype = {
   actorPrefix: "webapps",
 
   disconnect: function () {
+    try {
+      this.unwatchApps();
+    } catch(e) {}
+
     // When we stop using this actor, we should ensure removing all files.
     for (let upload of this._uploads) {
       upload.remove();
@@ -149,6 +244,11 @@ WebappsActor.prototype = {
     let reg = DOMApplicationRegistry;
     let self = this;
 
+    if (aId in reg.webapps && !reg.webapps[aId].sideloaded &&
+        !this._isUnrestrictedAccessAllowed()) {
+      throw new Error("Replacing non-sideloaded apps is not permitted.");
+    }
+
     // Clean up the deprecated manifest cache if needed.
     if (aId in reg._manifestCache) {
       delete reg._manifestCache[aId];
@@ -161,17 +261,27 @@ WebappsActor.prototype = {
     aApp.basePath = reg.getWebAppsBasePath();
     aApp.localId = (aId in reg.webapps) ? reg.webapps[aId].localId
                                         : reg._nextLocalId();
+    aApp.sideloaded = true;
 
     reg.webapps[aId] = aApp;
     reg.updatePermissionsForApp(aId);
 
-    reg._readManifests([{ id: aId }], function(aResult) {
+    reg._readManifests([{ id: aId }]).then((aResult) => {
       let manifest = aResult[0].manifest;
       aApp.name = manifest.name;
+      aApp.csp = manifest.csp || "";
+      aApp.role = manifest.role || "";
       reg.updateAppHandlers(null, manifest, aApp);
 
-      reg._saveApps(function() {
+      reg._saveApps().then(() => {
         aApp.manifest = manifest;
+
+        // We need the manifest to set the app kind for hosted apps,
+        // because of appcache.
+        if (aApp.kind == undefined) {
+          aApp.kind = manifest.appcache_path ? reg.kHostedAppcache
+                                             : reg.kHosted;
+        }
 
         // Needed to evict manifest cache on content side
         // (has to be dispatched first, otherwise other messages like
@@ -179,7 +289,7 @@ WebappsActor.prototype = {
         reg.broadcastMessage("Webapps:UpdateState", {
           app: aApp,
           manifest: manifest,
-          manifestURL: aApp.manifestURL
+          id: aApp.id
         });
         reg.broadcastMessage("Webapps:FireEvent", {
           eventType: ["downloadsuccess", "downloadapplied"],
@@ -200,7 +310,8 @@ WebappsActor.prototype = {
 
         // We can't have appcache for packaged apps.
         if (!aApp.origin.startsWith("app://")) {
-          reg.startOfflineCacheDownload(new ManifestHelper(manifest, aApp.origin));
+          reg.startOfflineCacheDownload(
+            new ManifestHelper(manifest, aApp.origin, aApp.manifestURL), aApp);
         }
       });
       // Cleanup by removing the temporary directory.
@@ -230,28 +341,38 @@ WebappsActor.prototype = {
     return type;
   },
 
-  uploadPackage: function () {
-    debug("uploadPackage\n");
+  _createTmpPackage: function() {
     let tmpDir = FileUtils.getDir("TmpD", ["file-upload"], true, false);
     if (!tmpDir.exists() || !tmpDir.isDirectory()) {
-      return {error: "fileAccessError",
-              message: "Unable to create temporary folder"};
+      return {
+        error: "fileAccessError",
+        message: "Unable to create temporary folder"
+      };
     }
     let tmpFile = tmpDir;
     tmpFile.append("package.zip");
     tmpFile.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, parseInt("0666", 8));
     if (!tmpFile.exists() || !tmpDir.isFile()) {
-      return {error: "fileAccessError",
-              message: "Unable to create temporary file"};
+      return {
+        error: "fileAccessError",
+        message: "Unable to create temporary file"
+      };
+    }
+    return tmpFile;
+  },
+
+  uploadPackage: function (request) {
+    debug("uploadPackage");
+
+    let tmpFile = this._createTmpPackage();
+    if ("error" in tmpFile) {
+      return tmpFile;
     }
 
-    return OS.File.open(tmpFile.path, { write: true, truncate: true })
-             .then((file) => {
-                let actor = new PackageUploadActor(tmpFile.path, file);
-                this._actorPool.addActor(actor);
-                this._uploads.push(actor);
-                return { actor: actor.actorID };
-             });
+    let actor = PackageUploadActor.fromRequest(request, tmpFile);
+    this._actorPool.addActor(actor);
+    this._uploads.push(actor);
+    return { actor: actor.actorID };
   },
 
   installHostedApp: function wa_actorInstallHosted(aDir, aId, aReceipts,
@@ -264,68 +385,47 @@ WebappsActor.prototype = {
       if (aManifest) {
         return promise.resolve(aManifest);
       } else {
-        let deferred = promise.defer();
-        let manFile = aDir.clone();
-        manFile.append("manifest.webapp");
-        DOMApplicationRegistry._loadJSONAsync(manFile, function(aManifest) {
-          if (!aManifest) {
-            deferred.reject("Error parsing manifest.webapp.");
-          } else {
-            deferred.resolve(aManifest);
-          }
-        });
-        return deferred.promise;
+        let manFile = OS.Path.join(aDir.path, "manifest.webapp");
+        return AppsUtils.loadJSONAsync(manFile);
       }
     }
-    function checkSideloading(aManifest) {
-      return self._getAppType(aManifest.type);
-    }
-    function writeManifest(aAppType) {
+    function writeManifest(resolution) {
       // Move manifest.webapp to the destination directory.
       // The destination directory for this app.
       let installDir = DOMApplicationRegistry._getAppDir(aId);
       if (aManifest) {
-        let deferred = promise.defer();
-        let manFile = installDir.clone();
-        manFile.append("manifest.webapp");
-        DOMApplicationRegistry._writeFile(manFile, JSON.stringify(aManifest), function () {
-          deferred.resolve(aAppType);
+        let manFile = OS.Path.join(installDir.path, "manifest.webapp");
+        return DOMApplicationRegistry._writeFile(manFile, JSON.stringify(aManifest)).then(() => {
+          return resolution;
         });
-        return deferred.promise;
       } else {
         let manFile = aDir.clone();
         manFile.append("manifest.webapp");
         manFile.moveTo(installDir, "manifest.webapp");
       }
-      return null;
+      return promise.resolve(resolution);
     }
     function readMetadata(aAppType) {
       if (aMetadata) {
         return { metadata: aMetadata, appType: aAppType };
       }
       // Read the origin and manifest url from metadata.json
-      let deferred = promise.defer();
-      let metaFile = aDir.clone();
-      metaFile.append("metadata.json");
-      DOMApplicationRegistry._loadJSONAsync(metaFile, function(aMetadata) {
+      let metaFile = OS.Path.join(aDir.path, "metadata.json");
+      return AppsUtils.loadJSONAsync(metaFile).then((aMetadata) => {
         if (!aMetadata) {
-          deferred.reject("Error parsing metadata.json.");
-          return;
+          throw("Error parsing metadata.json.");
         }
         if (!aMetadata.origin) {
-          deferred.reject("Missing 'origin' property in metadata.json");
-          return;
+          throw("Missing 'origin' property in metadata.json.");
         }
-        deferred.resolve({ metadata: aMetadata, appType: aAppType });
+        return { metadata: aMetadata, appType: aAppType };
       });
-      return deferred.promise;
     }
     let runnable = {
       run: function run() {
         try {
+          let metadata, appType;
           readManifest().
-            then(writeManifest).
-            then(checkSideloading).
             then(readMetadata).
             then(function ({ metadata, appType }) {
               let origin = metadata.origin;
@@ -340,6 +440,8 @@ WebappsActor.prototype = {
                 receipts: aReceipts,
               };
 
+              return writeManifest(app);
+            }).then(function (app) {
               self._registerApp(deferred, app, aId, aDir);
             }, function (error) {
               self._sendError(deferred, error, aId);
@@ -385,6 +487,7 @@ WebappsActor.prototype = {
             manifest = JSON.parse(jsonString);
           } catch(e) {
             self._sendError(deferred, "Error Parsing manifest.webapp: " + e, aId);
+            return;
           }
 
           let appType = self._getAppType(manifest.type);
@@ -405,6 +508,14 @@ WebappsActor.prototype = {
               self._sendError(deferred, "Invalid origin in webapp's manifest", aId);
             }
             id = uri.prePath.substring(6);
+          }
+
+          // Prevent overriding preinstalled apps
+          if (id in DOMApplicationRegistry.webapps &&
+              DOMApplicationRegistry.webapps[id].removable === false &&
+              !self._isUnrestrictedAccessAllowed()) {
+            self._sendError(deferred, "The application " + id + " can't be overridden.");
+            return;
           }
 
           // Only after security checks are made and after final app id is computed
@@ -432,11 +543,11 @@ WebappsActor.prototype = {
           // frame script. That will flush the jar cache for this app and allow
           // loading fresh updated resources if we reload its document.
           let FlushFrameScript = function (path) {
-            let jar = Components.classes["@mozilla.org/file/local;1"]
-                                .createInstance(Components.interfaces.nsILocalFile);
+            let jar = Cc["@mozilla.org/file/local;1"]
+                        .createInstance(Ci.nsILocalFile);
             jar.initWithPath(path);
-            let obs = Components.classes["@mozilla.org/observer-service;1"]
-                                .getService(Components.interfaces.nsIObserverService);
+            let obs = Cc["@mozilla.org/observer-service;1"]
+                        .getService(Ci.nsIObserverService);
             obs.notifyObservers(jar, "flush-cache-entry", null);
           };
           for each (let frame in self._appFrames()) {
@@ -455,6 +566,7 @@ WebappsActor.prototype = {
             manifestURL: manifestURL,
             appStatus: appType,
             receipts: aReceipts,
+            kind: DOMApplicationRegistry.kPackaged,
           }
 
           self._registerApp(deferred, app, id, aDir);
@@ -487,9 +599,9 @@ WebappsActor.prototype = {
 
     // Check that we are not overriding a preinstalled application.
     if (appId in reg.webapps && reg.webapps[appId].removable === false) {
-      return { error: "badParameterType",
-               message: "The application " + appId + " can't be overriden."
-             }
+      return { error: "installationFailed",
+               message: "The application " + appId + " can't be overridden."
+             };
     }
 
     let appDir = FileUtils.getDir("TmpD", ["b2g", appId], false, false);
@@ -503,7 +615,7 @@ WebappsActor.prototype = {
                  message: "Unable to find upload actor '" + aRequest.upload
                           + "'" };
       }
-      let appFile = FileUtils.File(actor.getFilePath());
+      let appFile = FileUtils.File(actor.filePath);
       if (!appFile.exists()) {
         return { error: "badParameter",
                  message: "The uploaded file doesn't exist on device" };
@@ -581,38 +693,36 @@ WebappsActor.prototype = {
       return { error: "appNotFound" };
     }
 
-    if (this._isAppAllowedForManifest(app.manifestURL)) {
-      let deferred = promise.defer();
-      reg.getManifestFor(manifestURL, function (manifest) {
-        app.manifest = manifest;
-        deferred.resolve({app: app});
-      });
-      return deferred.promise;
+    if (!this._isAppAllowedForURL(app.manifestURL)) {
+      return { error: "forbidden" };
     }
-    return { error: "forbidden" };
+
+    return reg.getManifestFor(manifestURL).then(function (manifest) {
+      app.manifest = manifest;
+      return { app: app };
+    });
   },
 
-  _areCertifiedAppsAllowed: function wa__areCertifiedAppsAllowed() {
+  _isUnrestrictedAccessAllowed: function() {
     let pref = "devtools.debugger.forbid-certified-apps";
     return !Services.prefs.getBoolPref(pref);
   },
 
-  _isAppAllowedForManifest: function wa__isAppAllowedForManifest(aManifest) {
-    if (this._areCertifiedAppsAllowed()) {
+  _isAppAllowed: function(aApp) {
+    if (this._isUnrestrictedAccessAllowed()) {
       return true;
     }
-    let type = this._getAppType(aManifest.type);
-    return type !== Ci.nsIPrincipal.APP_STATUS_CERTIFIED;
+    return aApp.sideloaded;
   },
 
   _filterAllowedApps: function wa__filterAllowedApps(aApps) {
-    return aApps.filter(app => this._isAppAllowedForManifest(app.manifest));
+    return aApps.filter(app => this._isAppAllowed(app));
   },
 
   _isAppAllowedForURL: function wa__isAppAllowedForURL(aManifestURL) {
-    return this._findManifestByURL(aManifestURL).then(manifest => {
-      return this._isAppAllowedForManifest(manifest);
-    });
+    let reg = DOMApplicationRegistry;
+    let app = reg.getAppByManifestURL(aManifestURL);
+    return this._isAppAllowed(app);
   },
 
   uninstall: function wa_actorUninstall(aRequest) {
@@ -624,19 +734,11 @@ WebappsActor.prototype = {
                message: "missing parameter manifestURL" };
     }
 
-    let deferred = promise.defer();
-    let reg = DOMApplicationRegistry;
-    reg.uninstall(
-      manifestURL,
-      function onsuccess() {
-        deferred.resolve({});
-      },
-      function onfailure(reason) {
-        deferred.resolve({ error: reason });
-      }
-    );
+    if (!this._isAppAllowedForURL(manifestURL)) {
+      return { error: "forbidden" };
+    }
 
-    return deferred.promise;
+    return DOMApplicationRegistry.uninstall(manifestURL);
   },
 
   _findManifestByURL: function wa__findManifestByURL(aManifestURL) {
@@ -645,7 +747,7 @@ WebappsActor.prototype = {
     let reg = DOMApplicationRegistry;
     let id = reg._appIdForManifestURL(aManifestURL);
 
-    reg._readManifests([{ id: id }], function (aResults) {
+    reg._readManifests([{ id: id }]).then((aResults) => {
       deferred.resolve(aResults[0].manifest);
     });
 
@@ -671,7 +773,7 @@ WebappsActor.prototype = {
     let deferred = promise.defer();
 
     this._findManifestByURL(manifestURL).then(jsonManifest => {
-      let manifest = new ManifestHelper(jsonManifest, app.origin);
+      let manifest = new ManifestHelper(jsonManifest, app.origin, manifestURL);
       let iconURL = manifest.iconURLForSize(aRequest.size || 128);
       if (!iconURL) {
         deferred.resolve({
@@ -694,7 +796,7 @@ WebappsActor.prototype = {
       } catch(e) {
         deferred.resolve({
           error: "noIcon",
-          message: "The icon file '" + iconURL + "' doesn't exists"
+          message: "The icon file '" + iconURL + "' doesn't exist"
         });
         return;
       }
@@ -729,6 +831,12 @@ WebappsActor.prototype = {
     }
 
     let deferred = promise.defer();
+
+    if (Services.appinfo.ID &&
+        Services.appinfo.ID != "{3c2e2abc-06d4-11e1-ac3b-374f68613e61}") {
+      return { error: "notSupported",
+               message: "Not B2G. Can't launch app." };
+    }
 
     DOMApplicationRegistry.launch(
       aRequest.manifestURL,
@@ -766,22 +874,13 @@ WebappsActor.prototype = {
   },
 
   _appFrames: function () {
-    // For now, we only support app frames on b2g
-    if (Services.appinfo.ID != "{3c2e2abc-06d4-11e1-ac3b-374f68613e61}") {
-      return;
-    }
-    // Register the system app
-    let chromeWindow = Services.wm.getMostRecentWindow('navigator:browser');
-    let systemAppFrame = chromeWindow.shell.contentBrowser;
-    yield systemAppFrame;
-
-    // Register apps hosted in the system app. i.e. the homescreen, all regular
-    // apps and the keyboard.
-    // Bookmark apps and other system app internal frames like captive portal
-    // are also hosted in system app, but they are not using mozapp attribute.
-    let frames = systemAppFrame.contentDocument.querySelectorAll("iframe[mozapp]");
-    for (let i = 0; i < frames.length; i++) {
-      yield frames[i];
+    // Try to filter on b2g and mulet
+    if (Frames) {
+      return Frames.list().filter(frame => {
+        return frame.getAttribute('mozapp');
+      });
+    } else {
+      return [];
     }
   },
 
@@ -791,97 +890,41 @@ WebappsActor.prototype = {
     let appPromises = [];
     let apps = [];
 
-    for each (let frame in this._appFrames()) {
+    for (let frame of this._appFrames()) {
       let manifestURL = frame.getAttribute("mozapp");
 
-      appPromises.push(this._isAppAllowedForURL(manifestURL).then(allowed => {
-        if (allowed) {
-          apps.push(manifestURL);
-        }
-      }));
+      // _appFrames can return more than one frame with the same manifest url
+      if (apps.indexOf(manifestURL) != -1) {
+        continue;
+      }
+      if (this._isAppAllowedForURL(manifestURL)) {
+        apps.push(manifestURL);
+      }
     }
 
-    return promise.all(appPromises).then(() => {
-      return { apps: apps };
-    });
-  },
-
-  _connectToApp: function (aFrame) {
-    let deferred = Promise.defer();
-
-    let mm = aFrame.QueryInterface(Ci.nsIFrameLoaderOwner).frameLoader.messageManager;
-    mm.loadFrameScript("resource://gre/modules/devtools/server/child.js", false);
-
-    let childTransport, prefix;
-
-    let onActorCreated = makeInfallible(function (msg) {
-      mm.removeMessageListener("debug:actor", onActorCreated);
-
-      dump("***** Got debug:actor\n");
-      let { actor, appId } = msg.json;
-      prefix = msg.json.prefix;
-
-      // Pipe Debugger message from/to parent/child via the message manager
-      childTransport = new ChildDebuggerTransport(mm, prefix);
-      childTransport.hooks = {
-        onPacket: this.conn.send.bind(this.conn),
-        onClosed: function () {}
-      };
-      childTransport.ready();
-
-      this.conn.setForwarding(prefix, childTransport);
-
-      debug("establishing forwarding for app with prefix " + prefix);
-
-      this._appActorsMap.set(mm, actor);
-
-      deferred.resolve(actor);
-    }).bind(this);
-    mm.addMessageListener("debug:actor", onActorCreated);
-
-    let onMessageManagerDisconnect = makeInfallible(function (subject, topic, data) {
-      if (subject == mm) {
-        Services.obs.removeObserver(onMessageManagerDisconnect, topic);
-        if (childTransport) {
-          // If we have a child transport, the actor has already
-          // been created. We need to stop using this message manager.
-          childTransport.close();
-          this.conn.cancelForwarding(prefix);
-        } else {
-          // Otherwise, the app has been closed before the actor
-          // had a chance to be created, so we are not able to create
-          // the actor.
-          deferred.resolve(null);
-        }
-        let actor = this._appActorsMap.get(mm);
-        if (actor) {
-          // The ContentAppActor within the child process doesn't necessary
-          // have to time to uninitialize itself when the app is closed/killed.
-          // So ensure telling the client that the related actor is detached.
-          this.conn.send({ from: actor.actor,
-                           type: "tabDetached" });
-          this._appActorsMap.delete(mm);
-        }
-      }
-    }).bind(this);
-    Services.obs.addObserver(onMessageManagerDisconnect,
-                             "message-manager-disconnect", false);
-
-    let prefixStart = this.conn.prefix + "child";
-    mm.sendAsyncMessage("debug:connect", { prefix: prefixStart });
-
-    return deferred.promise;
+    return { apps: apps };
   },
 
   getAppActor: function ({ manifestURL }) {
     debug("getAppActor\n");
 
+    // Connects to the main app frame, whose `name` attribute
+    // is set to 'main' by gaia. If for any reason, gaia doesn't set any
+    // frame as main, no frame matches, then we connect arbitrary
+    // to the first app frame...
     let appFrame = null;
-    for each (let frame in this._appFrames()) {
+    let frames = [];
+    for (let frame of this._appFrames()) {
       if (frame.getAttribute("mozapp") == manifestURL) {
-        appFrame = frame;
-        break;
+        if (frame.name == "main") {
+          appFrame = frame;
+          break;
+        }
+        frames.push(frame);
       }
+    }
+    if (!appFrame && frames.length > 0) {
+      appFrame = frames[0];
     }
 
     let notFoundError = {
@@ -894,34 +937,36 @@ WebappsActor.prototype = {
       return notFoundError;
     }
 
-    return this._isAppAllowedForURL(manifestURL).then(allowed => {
-      if (!allowed) {
-        return notFoundError;
-      }
+    if (!this._isAppAllowedForURL(manifestURL)) {
+      return notFoundError;
+    }
 
-      // Only create a new actor, if we haven't already
-      // instanciated one for this connection.
-      let mm = appFrame.QueryInterface(Ci.nsIFrameLoaderOwner)
-                       .frameLoader
-                       .messageManager;
-      let actor = this._appActorsMap.get(mm);
-      if (!actor) {
-        return this._connectToApp(appFrame)
-                   .then(function (actor) ({ actor: actor }));
-      }
+    // Only create a new actor, if we haven't already
+    // instanciated one for this connection.
+    let map = this._appActorsMap;
+    let mm = appFrame.QueryInterface(Ci.nsIFrameLoaderOwner)
+                     .frameLoader
+                     .messageManager;
+    let actor = map.get(mm);
+    if (!actor) {
+      let onConnect = actor => {
+        map.set(mm, actor);
+        return { actor: actor };
+      };
+      let onDisconnect = mm => {
+        map.delete(mm);
+      };
+      return DebuggerServer.connectToChild(this.conn, appFrame, onDisconnect)
+                           .then(onConnect);
+    }
 
-      return { actor: actor };
-    });
+    return { actor: actor };
   },
 
   watchApps: function () {
-    this._openedApps = new Set();
     // For now, app open/close events are only implement on b2g
-    if (Services.appinfo.ID == "{3c2e2abc-06d4-11e1-ac3b-374f68613e61}") {
-      let chromeWindow = Services.wm.getMostRecentWindow('navigator:browser');
-      let systemAppFrame = chromeWindow.getContentWindow();
-      systemAppFrame.addEventListener("appwillopen", this);
-      systemAppFrame.addEventListener("appterminated", this);
+    if (Frames) {
+      Frames.addObserver(this);
     }
     Services.obs.addObserver(this, "webapps-installed", false);
     Services.obs.addObserver(this, "webapps-uninstall", false);
@@ -930,12 +975,8 @@ WebappsActor.prototype = {
   },
 
   unwatchApps: function () {
-    this._openedApps = null;
-    if (Services.appinfo.ID == "{3c2e2abc-06d4-11e1-ac3b-374f68613e61}") {
-      let chromeWindow = Services.wm.getMostRecentWindow('navigator:browser');
-      let systemAppFrame = chromeWindow.getContentWindow();
-      systemAppFrame.removeEventListener("appwillopen", this);
-      systemAppFrame.removeEventListener("appterminated", this);
+    if (Frames) {
+      Frames.removeObserver(this);
     }
     Services.obs.removeObserver(this, "webapps-installed", false);
     Services.obs.removeObserver(this, "webapps-uninstall", false);
@@ -943,46 +984,43 @@ WebappsActor.prototype = {
     return {};
   },
 
-  handleEvent: function (event) {
-    let manifestURL;
-    switch(event.type) {
-      case "appwillopen":
-        let frame = event.target;
-        manifestURL = frame.getAttribute("mozapp")
+  onFrameCreated: function (frame, isFirstAppFrame) {
+    let mozapp = frame.getAttribute('mozapp');
+    if (!mozapp || !isFirstAppFrame) {
+      return;
+    }
 
-        // Ignore the event if we already received an appwillopen for this app
-        // (appwillopen is also fired when the app has been moved to background
-        // and get back to foreground)
-        if (this._openedApps.has(manifestURL)) {
-          return;
-        }
-        this._openedApps.add(manifestURL);
+    let manifestURL = frame.appManifestURL;
+    // Only track app frames
+    if (!manifestURL) {
+      return;
+    }
 
-        this._isAppAllowedForURL(manifestURL).then(allowed => {
-          if (allowed) {
-            this.conn.send({ from: this.actorID,
-                             type: "appOpen",
-                             manifestURL: manifestURL
-                           });
-          }
-        });
+    if (this._isAppAllowedForURL(manifestURL)) {
+      this.conn.send({ from: this.actorID,
+                       type: "appOpen",
+                       manifestURL: manifestURL
+                     });
+    }
+  },
 
-        break;
+  onFrameDestroyed: function (frame, isLastAppFrame) {
+    let mozapp = frame.getAttribute('mozapp');
+    if (!mozapp || !isLastAppFrame) {
+      return;
+    }
 
-      case "appterminated":
-        manifestURL = event.detail.manifestURL;
-        this._openedApps.delete(manifestURL);
+    let manifestURL = frame.appManifestURL;
+    // Only track app frames
+    if (!manifestURL) {
+      return;
+    }
 
-        this._isAppAllowedForURL(manifestURL).then(allowed => {
-          if (allowed) {
-            this.conn.send({ from: this.actorID,
-                             type: "appClose",
-                             manifestURL: manifestURL
-                           });
-          }
-        });
-
-        break;
+    if (this._isAppAllowedForURL(manifestURL)) {
+      this.conn.send({ from: this.actorID,
+                       type: "appClose",
+                       manifestURL: manifestURL
+                     });
     }
   },
 
@@ -1006,24 +1044,18 @@ WebappsActor.prototype = {
  * The request types this actor can handle.
  */
 WebappsActor.prototype.requestTypes = {
-  "install": WebappsActor.prototype.install
+  "install": WebappsActor.prototype.install,
+  "uploadPackage": WebappsActor.prototype.uploadPackage,
+  "getAll": WebappsActor.prototype.getAll,
+  "getApp": WebappsActor.prototype.getApp,
+  "launch": WebappsActor.prototype.launch,
+  "close": WebappsActor.prototype.close,
+  "uninstall": WebappsActor.prototype.uninstall,
+  "listRunningApps": WebappsActor.prototype.listRunningApps,
+  "getAppActor": WebappsActor.prototype.getAppActor,
+  "watchApps": WebappsActor.prototype.watchApps,
+  "unwatchApps": WebappsActor.prototype.unwatchApps,
+  "getIconAsDataURL": WebappsActor.prototype.getIconAsDataURL
 };
 
-// Until we implement unix domain socket, we only enable app install
-// only on production devices
-if (Services.prefs.getBoolPref("devtools.debugger.enable-content-actors")) {
-  let requestTypes = WebappsActor.prototype.requestTypes;
-  requestTypes.uploadPackage = WebappsActor.prototype.uploadPackage;
-  requestTypes.getAll = WebappsActor.prototype.getAll;
-  requestTypes.getApp = WebappsActor.prototype.getApp;
-  requestTypes.launch = WebappsActor.prototype.launch;
-  requestTypes.close  = WebappsActor.prototype.close;
-  requestTypes.uninstall = WebappsActor.prototype.uninstall;
-  requestTypes.listRunningApps = WebappsActor.prototype.listRunningApps;
-  requestTypes.getAppActor = WebappsActor.prototype.getAppActor;
-  requestTypes.watchApps = WebappsActor.prototype.watchApps;
-  requestTypes.unwatchApps = WebappsActor.prototype.unwatchApps;
-  requestTypes.getIconAsDataURL = WebappsActor.prototype.getIconAsDataURL;
-}
-
-DebuggerServer.addGlobalActor(WebappsActor, "webappsActor");
+exports.WebappsActor = WebappsActor;

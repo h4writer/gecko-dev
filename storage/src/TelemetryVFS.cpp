@@ -78,7 +78,7 @@ public:
    * IOInterposer. Filename will be reported as NULL, and reference will be
    * either "sqlite-mainthread" or "sqlite-otherthread".
    */
-  IOThreadAutoTimer(Telemetry::ID id,
+  explicit IOThreadAutoTimer(Telemetry::ID id,
     IOInterposeObserver::Operation aOp = IOInterposeObserver::OpNone)
     : start(TimeStamp::Now()),
       id(id),
@@ -92,7 +92,7 @@ public:
    *
    * @param aOp IO Operation to report through the IOInterposer.
    */
-  IOThreadAutoTimer(IOInterposeObserver::Operation aOp)
+  explicit IOThreadAutoTimer(IOInterposeObserver::Operation aOp)
     : start(TimeStamp::Now()),
       id(Telemetry::HistogramCount),
       op(aOp)
@@ -107,7 +107,10 @@ public:
       Telemetry::AccumulateTimeDelta(static_cast<Telemetry::ID>(id + mainThread),
                                      start, end);
     }
-#ifdef MOZ_ENABLE_PROFILER_SPS
+    // We don't report SQLite I/O on Windows because we have a comprehensive
+    // mechanism for intercepting I/O on that platform that captures a superset
+    // of the data captured here.
+#if defined(MOZ_ENABLE_PROFILER_SPS) && !defined(XP_WIN)
     if (IOInterposer::IsObservedOperation(op)) {
       const char* main_ref  = "sqlite-mainthread";
       const char* other_ref = "sqlite-otherthread";
@@ -118,7 +121,7 @@ public:
       // Report observation
       IOInterposer::Report(ob);
     }
-#endif /* MOZ_ENABLE_PROFILER_SPS */
+#endif /* defined(MOZ_ENABLE_PROFILER_SPS) && !defined(XP_WIN) */
   }
 
 private:

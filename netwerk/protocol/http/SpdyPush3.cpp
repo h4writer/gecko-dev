@@ -7,6 +7,12 @@
 // HttpLog.h should generally be included first
 #include "HttpLog.h"
 
+// Log on level :5, instead of default :4.
+#undef LOG
+#define LOG(args) LOG5(args)
+#undef LOG_ENABLED
+#define LOG_ENABLED() LOG5_ENABLED()
+
 #include <algorithm>
 
 #include "SpdyPush3.h"
@@ -209,6 +215,19 @@ SpdyPush3TransactionBuffer::OnTransportStatus(nsITransport* transport,
 {
 }
 
+nsHttpConnectionInfo *
+SpdyPush3TransactionBuffer::ConnectionInfo()
+{
+  if (!mPushStream) {
+    return nullptr;
+  }
+  if (!mPushStream->Transaction()) {
+    return nullptr;
+  }
+  MOZ_ASSERT(mPushStream->Transaction() != this);
+  return mPushStream->Transaction()->ConnectionInfo();
+}
+
 bool
 SpdyPush3TransactionBuffer::IsDone()
 {
@@ -251,10 +270,8 @@ SpdyPush3TransactionBuffer::WriteSegments(nsAHttpSegmentWriter *writer,
                                          uint32_t count, uint32_t *countWritten)
 {
   if ((mBufferedHTTP1Size - mBufferedHTTP1Used) < 20480) {
-    SpdySession3::EnsureBuffer(mBufferedHTTP1,
-                               mBufferedHTTP1Size + kDefaultBufferSize,
-                               mBufferedHTTP1Used,
-                               mBufferedHTTP1Size);
+    EnsureBuffer(mBufferedHTTP1, mBufferedHTTP1Size + kDefaultBufferSize,
+                 mBufferedHTTP1Used, mBufferedHTTP1Size);
   }
 
   count = std::min(count, mBufferedHTTP1Size - mBufferedHTTP1Used);

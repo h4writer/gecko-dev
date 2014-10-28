@@ -49,12 +49,12 @@ function test() {
 
     is(firstScope._store.size, 3,
       "The first scope should have all the variables available.");
-    is(secondScope._store.size, 3,
-      "The second scope shoild have all the variables available.");
-    is(thirdScope._store.size, 3,
-      "The third scope shoild have all the variables available.");
+    is(secondScope._store.size, 0,
+      "The second scope should have no variables available yet.");
+    is(thirdScope._store.size, 0,
+      "The third scope should have no variables available yet.");
     is(globalScope._store.size, 0,
-      "The global scope shoild have no variables available.");
+      "The global scope should have no variables available yet.");
 
     // Test getOwnerScopeForVariableOrProperty with simple variables.
 
@@ -83,7 +83,7 @@ function test() {
     // Test getOwnerScopeForVariableOrProperty with second-degree properties.
 
     let protoVar1 = argsVar1.get("__proto__");
-    let fetched = waitForDebuggerEvents(panel, events.FETCHED_PROPERTIES);
+    fetched = waitForDebuggerEvents(panel, events.FETCHED_PROPERTIES);
     protoVar1.expand();
     yield fetched;
 
@@ -94,6 +94,15 @@ function test() {
 
     // Test getOwnerScopeForVariableOrProperty with a simple variable
     // from non-topmost scopes.
+
+    // Only need to wait for a single FETCHED_VARIABLES event, just for the
+    // global scope, because the other local scopes already have the
+    // arguments and variables available as evironment bindings.
+    fetched = waitForDebuggerEvents(panel, events.FETCHED_VARIABLES);
+    secondScope.expand();
+    thirdScope.expand();
+    globalScope.expand();
+    yield fetched;
 
     let someVar2 = secondScope.get("a");
     let someOwner2 = variables.getOwnerScopeForVariableOrProperty(someVar2);
@@ -109,7 +118,7 @@ function test() {
     // from non-topmost scopes.
 
     let argsVar2 = secondScope.get("arguments");
-    let fetched = waitForDebuggerEvents(panel, events.FETCHED_PROPERTIES);
+    fetched = waitForDebuggerEvents(panel, events.FETCHED_PROPERTIES);
     argsVar2.expand();
     yield fetched;
 
@@ -119,7 +128,7 @@ function test() {
       "The getOwnerScopeForVariableOrProperty method works properly (7).");
 
     let argsVar3 = thirdScope.get("arguments");
-    let fetched = waitForDebuggerEvents(panel, events.FETCHED_PROPERTIES);
+    fetched = waitForDebuggerEvents(panel, events.FETCHED_PROPERTIES);
     argsVar3.expand();
     yield fetched;
 
@@ -132,7 +141,7 @@ function test() {
     // from non-topmost scopes.
 
     let protoVar2 = argsVar2.get("__proto__");
-    let fetched = waitForDebuggerEvents(panel, events.FETCHED_PROPERTIES);
+    fetched = waitForDebuggerEvents(panel, events.FETCHED_PROPERTIES);
     protoVar2.expand();
     yield fetched;
 
@@ -142,7 +151,7 @@ function test() {
       "The getOwnerScopeForVariableOrProperty method works properly (9).");
 
     let protoVar3 = argsVar3.get("__proto__");
-    let fetched = waitForDebuggerEvents(panel, events.FETCHED_PROPERTIES);
+    fetched = waitForDebuggerEvents(panel, events.FETCHED_PROPERTIES);
     protoVar3.expand();
     yield fetched;
 

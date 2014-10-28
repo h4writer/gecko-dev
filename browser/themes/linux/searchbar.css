@@ -4,8 +4,6 @@
 
 .searchbar-textbox {
   min-height: 22px;
-  width: 6em;
-  min-width: 6em;
   background-color: -moz-field;
 }
 
@@ -59,7 +57,6 @@
 .search-go-button {
   padding: 1px;
   list-style-image: url(moz-icon://stock/gtk-find?size=menu);
-  cursor: pointer;
 }
 
 menuitem[cmd="cmd_clearhistory"] {

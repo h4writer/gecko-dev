@@ -44,8 +44,6 @@ public class SyncAccounts {
   private static final String MOTO_BLUR_SETTINGS_ACTIVITY = "com.motorola.blur.settings.AccountsAndServicesPreferenceActivity";
   private static final String MOTO_BLUR_PACKAGE           = "com.motorola.blur.setup";
 
-  public final static String DEFAULT_SERVER = "https://auth.services.mozilla.com/";
-
   /**
    * Return Sync accounts.
    *
@@ -249,10 +247,10 @@ public class SyncAccounts {
     final String syncKey   = syncAccount.syncKey;
     final String password  = syncAccount.password;
     final String serverURL = (syncAccount.serverURL == null) ?
-        DEFAULT_SERVER : syncAccount.serverURL;
+        SyncConstants.DEFAULT_AUTH_SERVER : syncAccount.serverURL;
 
     Logger.debug(LOG_TAG, "Using account manager " + accountManager);
-    if (!RepoUtils.stringsEqual(syncAccount.serverURL, DEFAULT_SERVER)) {
+    if (!RepoUtils.stringsEqual(syncAccount.serverURL, SyncConstants.DEFAULT_AUTH_SERVER)) {
       Logger.info(LOG_TAG, "Setting explicit server URL: " + serverURL);
     }
 
@@ -394,7 +392,7 @@ public class SyncAccounts {
    *
    * @param context
    *          current Android context.
-   * @return the <code>Intent</code> started.
+   * @return the <code>Intent</code> started, or null if we couldn't start settings.
    */
   public static Intent openSyncSettings(Context context) {
     // Bug 721760 - opening Sync settings takes user to Battery & Data Manager
@@ -408,7 +406,14 @@ public class SyncAccounts {
     // Open default Sync settings activity.
     intent = new Intent(Settings.ACTION_SYNC_SETTINGS);
     // Bug 774233: do not start activity as a new task (second run fails on some HTC devices).
-    context.startActivity(intent); // We should always find this Activity.
+    try {
+      context.startActivity(intent); // We should always find this Activity.
+    } catch (ActivityNotFoundException ex) {
+      // We're probably on a Kindle, and the user hasn't installed the Android
+      // settings app. See Bug 945341.
+      // We simply mute the error.
+      return null;
+    }
     return intent;
   }
 

@@ -13,30 +13,27 @@ function simulateIncoming() {
   telephony.oncallschanged = function oncallschanged(event) {
     log("Received 'callschanged' event.");
 
-    if (!event.call) {
-      log("Notifying calls array is loaded. No call information accompanies.");
-      return;
-    }
+    // Check whether the 'calls' array has changed
+    ok(event.call, "undesired callschanged event");
 
     telephony.oncallschanged = null;
 
     incoming = event.call;
     ok(incoming);
-    is(incoming.number, number);
+    is(incoming.id.number, number);
     is(incoming.state, "incoming");
 
     is(telephony.calls.length, 1);
     is(telephony.calls[0], incoming);
 
-    emulator.run("gsm list", function(result) {
+    emulator.runCmdWithCallback("gsm list", function(result) {
       log("Call list is now: " + result);
       is(result[0], "inbound from " + number + " : incoming");
-      is(result[1], "OK");
       answer();
     });
   };
 
-  emulator.run("gsm call " + number);
+  emulator.runCmdWithCallback("gsm call " + number);
 }
 
 function answer() {
@@ -61,10 +58,9 @@ function answer() {
 
     is(incoming, telephony.active);
 
-    emulator.run("gsm list", function(result) {
+    emulator.runCmdWithCallback("gsm list", function(result) {
       log("Call list is now: " + result);
       is(result[0], "inbound from " + number + " : active");
-      is(result[1], "OK");
       hangUp();
     });
   };
@@ -89,10 +85,8 @@ function hangUp() {
   telephony.oncallschanged = function oncallschanged(event) {
     log("Received 'callschanged' event.");
 
-    if (!event.call) {
-      log("Notifying calls array is loaded. No call information accompanies.");
-      return;
-    }
+    // Check whether the 'calls' array has changed
+    ok(event.call, "undesired callschanged event");
 
     is(incoming, event.call);
     is(incoming.state, "disconnected");
@@ -111,9 +105,8 @@ function hangUp() {
     is(telephony.active, null);
     is(telephony.calls.length, 0);
 
-    emulator.run("gsm list", function(result) {
+    emulator.runCmdWithCallback("gsm list", function(result) {
       log("Call list is now: " + result);
-      is(result[0], "OK");
       cleanUp();
     });
   };

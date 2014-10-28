@@ -26,8 +26,8 @@
 
 #include "mozilla/Likely.h"
 #include "mozilla/StaticPtr.h"
-#include "mozilla/layers/GeckoContentController.h"
 #include "mozilla/TimeStamp.h"
+#include "mozilla/Types.h"
 
 // Some debug #defines
 // #define DEBUG_ANDROID_EVENTS
@@ -36,9 +36,10 @@
 class nsWindow;
 class nsIDOMMozSmsMessage;
 class nsIObserver;
+class Task;
 
 /* See the comment in AndroidBridge about this function before using it */
-extern "C" JNIEnv * GetJNIForThread();
+extern "C" MOZ_EXPORT JNIEnv * GetJNIForThread();
 
 extern bool mozilla_AndroidBridge_SetMainThread(pthread_t);
 
@@ -47,8 +48,6 @@ class Thread;
 } // end namespace base
 
 typedef void* EGLSurface;
-
-using namespace mozilla::widget::android;
 
 namespace mozilla {
 
@@ -60,7 +59,6 @@ class NetworkInformation;
 namespace dom {
 namespace mobilemessage {
 struct SmsFilterData;
-struct SmsSegmentInfoData;
 } // namespace mobilemessage
 } // namespace dom
 
@@ -97,7 +95,7 @@ class DelayedTask {
 public:
     DelayedTask(Task* aTask, int aDelayMs) {
         mTask = aTask;
-        mRunTime = TimeStamp::Now() + TimeDuration::FromMilliseconds(aDelayMs);
+        mRunTime = mozilla::TimeStamp::Now() + mozilla::TimeDuration::FromMilliseconds(aDelayMs);
     }
 
     bool IsEarlierThan(DelayedTask *aOther) {
@@ -105,7 +103,7 @@ public:
     }
 
     int64_t MillisecondsToRunTime() {
-        TimeDuration timeLeft = mRunTime - TimeStamp::Now();
+        mozilla::TimeDuration timeLeft = mRunTime - mozilla::TimeStamp::Now();
         return (int64_t)timeLeft.ToMilliseconds();
     }
 
@@ -115,16 +113,15 @@ public:
 
 private:
     Task* mTask;
-    TimeStamp mRunTime;
+    mozilla::TimeStamp mRunTime;
 };
 
-
-class AndroidBridge MOZ_FINAL : public mozilla::layers::GeckoContentController
+class AndroidBridge MOZ_FINAL
 {
 public:
     enum {
         // Values for NotifyIME, in addition to values from the Gecko
-        // NotificationToIME enum; use negative values here to prevent conflict
+        // IMEMessage enum; use negative values here to prevent conflict
         NOTIFY_IME_OPEN_VKB = -2,
         NOTIFY_IME_REPLY_EVENT = -1,
     };
@@ -134,31 +131,64 @@ public:
         LAYER_CLIENT_TYPE_GL = 2            // AndroidGeckoGLLayerClient
     };
 
+    static void RegisterJavaUiThread() {
+        sJavaUiThread = pthread_self();
+    }
+
+    static bool IsJavaUiThread() {
+        return pthread_equal(pthread_self(), sJavaUiThread);
+    }
+
     static void ConstructBridge(JNIEnv *jEnv);
 
     static AndroidBridge *Bridge() {
-        return sBridge.get();
+        return sBridge;
     }
 
     static JavaVM *GetVM() {
-        if (MOZ_LIKELY(sBridge))
-            return sBridge->mJavaVM;
-        return nullptr;
+        MOZ_ASSERT(sBridge);
+        return sBridge->mJavaVM;
     }
 
-    static JNIEnv *GetJNIEnv() {
-        if (MOZ_LIKELY(sBridge)) {
-            if (!pthread_equal(pthread_self(), sBridge->mThread)) {
-                __android_log_print(ANDROID_LOG_INFO, "AndroidBridge",
-                                    "###!!!!!!! Something's grabbing the JNIEnv from the wrong thread! (thr %p should be %p)",
-                                    (void*)pthread_self(), (void*)sBridge->mThread);
-                MOZ_ASSERT(false, "###!!!!!!! Something's grabbing the JNIEnv from the wrong thread!");
-                return nullptr;
-            }
-            return sBridge->mJNIEnv;
 
+    static JNIEnv *GetJNIEnv() {
+        MOZ_ASSERT(sBridge);
+        if (MOZ_UNLIKELY(!pthread_equal(pthread_self(), sBridge->mThread))) {
+            MOZ_CRASH();
         }
-        return nullptr;
+        MOZ_ASSERT(sBridge->mJNIEnv);
+        return sBridge->mJNIEnv;
+    }
+
+    static bool HasEnv() {
+        return sBridge && sBridge->mJNIEnv;
+    }
+
+    static bool ThrowException(JNIEnv *aEnv, const char *aClass,
+                               const char *aMessage) {
+        MOZ_ASSERT(aEnv, "Invalid thread JNI env");
+        jclass cls = aEnv->FindClass(aClass);
+        MOZ_ASSERT(cls, "Cannot find exception class");
+        bool ret = !aEnv->ThrowNew(cls, aMessage);
+        aEnv->DeleteLocalRef(cls);
+        return ret;
+    }
+
+    static bool ThrowException(JNIEnv *aEnv, const char *aMessage) {
+        return ThrowException(aEnv, "java/lang/Exception", aMessage);
+    }
+
+    static void HandleUncaughtException(JNIEnv *aEnv) {
+        MOZ_ASSERT(aEnv);
+        if (!aEnv->ExceptionCheck()) {
+            return;
+        }
+        jthrowable e = aEnv->ExceptionOccurred();
+        MOZ_ASSERT(e);
+        aEnv->ExceptionClear();
+        mozilla::widget::android::GeckoAppShell::HandleUncaughtException(nullptr, e);
+        // Should be dead by now...
+        MOZ_CRASH("Failed to handle uncaught exception");
     }
 
     // The bridge needs to be constructed via ConstructBridge first,
@@ -172,15 +202,16 @@ public:
     bool GetThreadNameJavaProfiling(uint32_t aThreadId, nsCString & aResult);
     bool GetFrameNameJavaProfiling(uint32_t aThreadId, uint32_t aSampleId, uint32_t aFrameId, nsCString & aResult);
 
-    nsresult CaptureThumbnail(nsIDOMWindow *window, int32_t bufW, int32_t bufH, int32_t tabId, jobject buffer);
+    nsresult CaptureThumbnail(nsIDOMWindow *window, int32_t bufW, int32_t bufH, int32_t tabId, jobject buffer, bool &shouldStore);
     void GetDisplayPort(bool aPageSizeUpdate, bool aIsBrowserContentDisplayed, int32_t tabId, nsIAndroidViewport* metrics, nsIAndroidDisplayport** displayPort);
     void ContentDocumentChanged();
     bool IsContentDocumentDisplayed();
 
-    bool ProgressiveUpdateCallback(bool aHasPendingNewThebesContent, const LayerRect& aDisplayPort, float aDisplayResolution, bool aDrawingCritical, ScreenRect& aCompositionBounds, CSSToScreenScale& aZoom);
+    bool ProgressiveUpdateCallback(bool aHasPendingNewThebesContent, const LayerRect& aDisplayPort, float aDisplayResolution, bool aDrawingCritical,
+                                   mozilla::ScreenPoint& aScrollOffset, mozilla::CSSToScreenScale& aZoom);
 
     void SetLayerClient(JNIEnv* env, jobject jobj);
-    GeckoLayerClient* GetLayerClient() { return mLayerClient; }
+    mozilla::widget::android::GeckoLayerClient* GetLayerClient() { return mLayerClient; }
 
     bool GetHandlersForURL(const nsAString& aURL,
                            nsIMutableArray* handlersArray = nullptr,
@@ -206,10 +237,6 @@ public:
 
     int GetDPI();
     int GetScreenDepth();
-
-    void ShowFilePickerForExtensions(nsAString& aFilePath, const nsAString& aExtensions);
-    void ShowFilePickerForMimeType(nsAString& aFilePath, const nsAString& aMimeType);
-    void ShowFilePickerAsync(const nsAString& aMimeType, nsFilePickerCallback* callback);
 
     void Vibrate(const nsTArray<uint32_t>& aPattern);
 
@@ -256,8 +283,8 @@ public:
 
     bool LockWindow(void *window, unsigned char **bits, int *width, int *height, int *format, int *stride);
     bool UnlockWindow(void *window);
-    
-    void HandleGeckoMessage(const nsAString& message, nsAString &aRet);
+
+    void HandleGeckoMessage(JSContext* cx, JS::HandleObject message);
 
     bool InitCamera(const nsCString& contentType, uint32_t camera, uint32_t *width, uint32_t *height, uint32_t *fps);
 
@@ -305,12 +332,12 @@ public:
                             nsACString & aResult);
 
     // Utility methods.
-    static jstring NewJavaString(JNIEnv* env, const PRUnichar* string, uint32_t len);
+    static jstring NewJavaString(JNIEnv* env, const char16_t* string, uint32_t len);
     static jstring NewJavaString(JNIEnv* env, const nsAString& string);
     static jstring NewJavaString(JNIEnv* env, const char* string);
     static jstring NewJavaString(JNIEnv* env, const nsACString& string);
 
-    static jstring NewJavaString(AutoLocalJNIFrame* frame, const PRUnichar* string, uint32_t len);
+    static jstring NewJavaString(AutoLocalJNIFrame* frame, const char16_t* string, uint32_t len);
     static jstring NewJavaString(AutoLocalJNIFrame* frame, const nsAString& string);
     static jstring NewJavaString(AutoLocalJNIFrame* frame, const char* string);
     static jstring NewJavaString(AutoLocalJNIFrame* frame, const nsACString& string);
@@ -320,8 +347,18 @@ public:
     static jfieldID GetStaticFieldID(JNIEnv* env, jclass jClass, const char* fieldName, const char* fieldType);
     static jmethodID GetMethodID(JNIEnv* env, jclass jClass, const char* methodName, const char* methodType);
     static jmethodID GetStaticMethodID(JNIEnv* env, jclass jClass, const char* methodName, const char* methodType);
+
+    static jobject ChannelCreate(jobject);
+
+    static void InputStreamClose(jobject obj);
+    static uint32_t InputStreamAvailable(jobject obj);
+    static nsresult InputStreamRead(jobject obj, char *aBuf, uint32_t aCount, uint32_t *aRead);
+
+    static nsresult GetExternalPublicDirectory(const nsAString& aType, nsAString& aPath);
+
 protected:
-    static StaticRefPtr<AndroidBridge> sBridge;
+    static pthread_t sJavaUiThread;
+    static AndroidBridge* sBridge;
     nsTArray<nsCOMPtr<nsIMobileMessageCallback> > mSmsRequests;
 
     // the global JavaVM
@@ -331,7 +368,7 @@ protected:
     JNIEnv *mJNIEnv;
     pthread_t mThread;
 
-    GeckoLayerClient *mLayerClient;
+    mozilla::widget::android::GeckoLayerClient *mLayerClient;
 
     // the android.telephony.SmsMessage class
     jclass mAndroidSmsMessageClass;
@@ -354,6 +391,16 @@ protected:
 
     bool QueueSmsRequest(nsIMobileMessageCallback* aRequest, uint32_t* aRequestIdOut);
 
+    // intput stream
+    jclass jReadableByteChannel;
+    jclass jChannels;
+    jmethodID jChannelCreate;
+    jmethodID jByteBufferRead;
+
+    jclass jInputStream;
+    jmethodID jClose;
+    jmethodID jAvailable;
+
     // other things
     jmethodID jNotifyAppShellReady;
     jmethodID jGetOutstandingDrawEvents;
@@ -372,7 +419,7 @@ protected:
     jclass jLayerView;
 
     jfieldID jEGLSurfacePointerField;
-    GLController *mGLControllerObj;
+    mozilla::widget::android::GLController *mGLControllerObj;
 
     // some convinient types to have around
     jclass jStringClass;
@@ -396,25 +443,12 @@ protected:
     void (* Region_set)(void* region, void* rect);
 
 private:
-    NativePanZoomController* mNativePanZoomController;
-    // This will always be accessed from one thread (the APZC "controller"
-    // thread, which is the Java UI thread), so we don't need to do locking
-    // to touch it
+    // This will always be accessed from one thread (the Java UI thread),
+    // so we don't need to do locking to touch it.
     nsTArray<DelayedTask*> mDelayedTaskQueue;
-
 public:
-    NativePanZoomController* SetNativePanZoomController(jobject obj);
-    // GeckoContentController methods
-    void RequestContentRepaint(const mozilla::layers::FrameMetrics& aFrameMetrics) MOZ_OVERRIDE;
-    void HandleDoubleTap(const CSSIntPoint& aPoint, int32_t aModifiers) MOZ_OVERRIDE;
-    void HandleSingleTap(const CSSIntPoint& aPoint, int32_t aModifiers) MOZ_OVERRIDE;
-    void HandleLongTap(const CSSIntPoint& aPoint, int32_t aModifiers) MOZ_OVERRIDE;
-    void HandleLongTapUp(const CSSIntPoint& aPoint, int32_t aModifiers) MOZ_OVERRIDE;
-    void SendAsyncScrollDOMEvent(bool aIsRoot,
-                                 const CSSRect& aContentRect,
-                                 const CSSSize& aScrollableSize) MOZ_OVERRIDE;
-    void PostDelayedTask(Task* aTask, int aDelayMs) MOZ_OVERRIDE;
-    int64_t RunDelayedTasks();
+    void PostTaskToUiThread(Task* aTask, int aDelayMs);
+    int64_t RunDelayedUiThreadTasks();
 };
 
 class AutoJObject {
@@ -453,29 +487,27 @@ private:
 
 class AutoLocalJNIFrame {
 public:
-    AutoLocalJNIFrame(int nEntries = 128)
-        : mEntries(nEntries), mHasFrameBeenPushed(false)
+    AutoLocalJNIFrame(int nEntries = 15)
+        : mEntries(nEntries)
+        , mJNIEnv(AndroidBridge::GetJNIEnv())
+        , mHasFrameBeenPushed(false)
     {
-        mJNIEnv = AndroidBridge::GetJNIEnv();
+        MOZ_ASSERT(mJNIEnv);
         Push();
     }
 
-    AutoLocalJNIFrame(JNIEnv* aJNIEnv, int nEntries = 128)
-        : mEntries(nEntries), mHasFrameBeenPushed(false)
+    AutoLocalJNIFrame(JNIEnv* aJNIEnv, int nEntries = 15)
+        : mEntries(nEntries)
+        , mJNIEnv(aJNIEnv ? aJNIEnv : AndroidBridge::GetJNIEnv())
+        , mHasFrameBeenPushed(false)
     {
-        mJNIEnv = aJNIEnv ? aJNIEnv : AndroidBridge::GetJNIEnv();
-
+        MOZ_ASSERT(mJNIEnv);
         Push();
     }
 
-    // Note! Calling Purge makes all previous local refs created in
-    // the AutoLocalJNIFrame's scope INVALID; be sure that you locked down
-    // any local refs that you need to keep around in global refs!
-    void Purge() {
-        if (mJNIEnv) {
-            if (mHasFrameBeenPushed)
-                mJNIEnv->PopLocalFrame(nullptr);
-            Push();
+    ~AutoLocalJNIFrame() {
+        if (mHasFrameBeenPushed) {
+            Pop();
         }
     }
 
@@ -485,42 +517,43 @@ public:
 
     bool CheckForException() {
         if (mJNIEnv->ExceptionCheck()) {
-            mJNIEnv->ExceptionDescribe();
-            mJNIEnv->ExceptionClear();
+            AndroidBridge::HandleUncaughtException(mJNIEnv);
             return true;
         }
-
         return false;
     }
 
-    ~AutoLocalJNIFrame() {
-        if (!mJNIEnv)
-            return;
+    // Note! Calling Purge makes all previous local refs created in
+    // the AutoLocalJNIFrame's scope INVALID; be sure that you locked down
+    // any local refs that you need to keep around in global refs!
+    void Purge() {
+        Pop();
+        Push();
+    }
 
-        CheckForException();
-
-        if (mHasFrameBeenPushed)
-            mJNIEnv->PopLocalFrame(nullptr);
+    template <typename ReturnType = jobject>
+    ReturnType Pop(ReturnType aResult = nullptr) {
+        MOZ_ASSERT(mHasFrameBeenPushed);
+        mHasFrameBeenPushed = false;
+        return static_cast<ReturnType>(
+            mJNIEnv->PopLocalFrame(static_cast<jobject>(aResult)));
     }
 
 private:
     void Push() {
-        if (!mJNIEnv)
-            return;
-
+        MOZ_ASSERT(!mHasFrameBeenPushed);
         // Make sure there is enough space to store a local ref to the
         // exception.  I am not completely sure this is needed, but does
         // not hurt.
-        jint ret = mJNIEnv->PushLocalFrame(mEntries + 1);
-        NS_ABORT_IF_FALSE(ret == 0, "Failed to push local JNI frame");
-        if (ret < 0)
+        if (mJNIEnv->PushLocalFrame(mEntries + 1) != 0) {
             CheckForException();
-        else
-            mHasFrameBeenPushed = true;
+            return;
+        }
+        mHasFrameBeenPushed = true;
     }
 
-    int mEntries;
-    JNIEnv* mJNIEnv;
+    const int mEntries;
+    JNIEnv* const mJNIEnv;
     bool mHasFrameBeenPushed;
 };
 

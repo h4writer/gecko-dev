@@ -51,44 +51,83 @@
  */
 
 const {Cc, Ci, Cu, Cr} = require("chrome");
-
+const Services = require("Services");
 const protocol = require("devtools/server/protocol");
 const {Arg, Option, method, RetVal, types} = protocol;
 const {LongStringActor, ShortLongString} = require("devtools/server/actors/string");
-const promise = require("sdk/core/promise");
+const {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
 const object = require("sdk/util/object");
 const events = require("sdk/event/core");
-const {setTimeout, clearTimeout} = require('sdk/timers');
-const { Unknown } = require("sdk/platform/xpcom");
-const { Class } = require("sdk/core/heritage");
+const {Unknown} = require("sdk/platform/xpcom");
+const {Class} = require("sdk/core/heritage");
 const {PageStyleActor} = require("devtools/server/actors/styles");
+const {
+  HighlighterActor,
+  CustomHighlighterActor,
+  HIGHLIGHTER_CLASSES
+} = require("devtools/server/actors/highlighter");
+const {getLayoutChangesObserver, releaseLayoutChangesObserver} =
+  require("devtools/server/actors/layout");
 
+const {EventParsers} = require("devtools/toolkit/event-parsers");
+
+const FONT_FAMILY_PREVIEW_TEXT = "The quick brown fox jumps over the lazy dog";
+const FONT_FAMILY_PREVIEW_TEXT_SIZE = 20;
 const PSEUDO_CLASSES = [":hover", ":active", ":focus"];
-
 const HIDDEN_CLASS = "__fx-devtools-hide-shortcut__";
+const XHTML_NS = "http://www.w3.org/1999/xhtml";
+const XUL_NS = 'http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul';
+const IMAGE_FETCHING_TIMEOUT = 500;
+// The possible completions to a ':' with added score to give certain values
+// some preference.
+const PSEUDO_SELECTORS = [
+  [":active", 1],
+  [":hover", 1],
+  [":focus", 1],
+  [":visited", 0],
+  [":link", 0],
+  [":first-letter", 0],
+  [":first-child", 2],
+  [":before", 2],
+  [":after", 2],
+  [":lang(", 0],
+  [":not(", 3],
+  [":first-of-type", 0],
+  [":last-of-type", 0],
+  [":only-of-type", 0],
+  [":only-child", 2],
+  [":nth-child(", 3],
+  [":nth-last-child(", 0],
+  [":nth-of-type(", 0],
+  [":nth-last-of-type(", 0],
+  [":last-child", 2],
+  [":root", 0],
+  [":empty", 0],
+  [":target", 0],
+  [":enabled", 0],
+  [":disabled", 0],
+  [":checked", 1],
+  ["::selection", 0]
+];
 
-const HIGHLIGHTED_PSEUDO_CLASS = ":-moz-devtools-highlighted";
-const HIGHLIGHTED_TIMEOUT = 2000;
 
 let HELPER_SHEET = ".__fx-devtools-hide-shortcut__ { visibility: hidden !important } ";
 HELPER_SHEET += ":-moz-devtools-highlighted { outline: 2px dashed #F06!important; outline-offset: -2px!important } ";
 
-Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/devtools/LayoutHelpers.jsm");
 
+loader.lazyImporter(this, "gDevTools", "resource:///modules/devtools/gDevTools.jsm");
+
 loader.lazyGetter(this, "DOMParser", function() {
- return Cc["@mozilla.org/xmlextras/domparser;1"].createInstance(Ci.nsIDOMParser);
+  return Cc["@mozilla.org/xmlextras/domparser;1"].createInstance(Ci.nsIDOMParser);
 });
 
-exports.register = function(handle) {
-  handle.addGlobalActor(InspectorActor, "inspectorActor");
-  handle.addTabActor(InspectorActor, "inspectorActor");
-};
+loader.lazyGetter(this, "eventListenerService", function() {
+  return Cc["@mozilla.org/eventlistenerservice;1"]
+           .getService(Ci.nsIEventListenerService);
+});
 
-exports.unregister = function(handle) {
-  handle.removeGlobalActor(InspectorActor);
-  handle.removeTabActor(InspectorActor);
-};
+loader.lazyGetter(this, "CssLogic", () => require("devtools/styleinspector/css-logic").CssLogic);
 
 // XXX: A poor man's makeInfallible until we move it out of transport.js
 // Which should be very soon.
@@ -134,16 +173,35 @@ exports.setValueSummaryLength = function(val) {
   gValueSummaryLength = val;
 };
 
+// When the user selects a node to inspect in e10s, the parent process
+// has a CPOW that wraps the node being inspected.  It uses the
+// message manager to send this node to the child, which stores the
+// node in gInspectingNode. Then a findInspectingNode request is sent
+// over the remote debugging protocol, and gInspectingNode is returned
+// to the parent as a NodeFront.
+var gInspectingNode = null;
+
+// We expect this function to be called from the child.js frame script
+// when it receives the node to be inspected over the message manager.
+exports.setInspectingNode = function(val) {
+  gInspectingNode = val;
+};
+
 /**
  * Server side of the node actor.
  */
-var NodeActor = protocol.ActorClass({
+var NodeActor = exports.NodeActor = protocol.ActorClass({
   typeName: "domnode",
 
   initialize: function(walker, node) {
     protocol.Actor.prototype.initialize.call(this, null);
     this.walker = walker;
     this.rawNode = node;
+    this._eventParsers = new EventParsers().parsers;
+
+    // Storing the original display of the node, to track changes when reflows
+    // occur
+    this.wasDisplayed = this.isDisplayed;
   },
 
   toString: function() {
@@ -169,14 +227,6 @@ var NodeActor = protocol.ActorClass({
 
     let parentNode = this.walker.parentNode(this);
 
-    // Estimate the number of children.
-    let numChildren = this.rawNode.childNodes.length;
-    if (numChildren === 0 &&
-        (this.rawNode.contentDocument || this.rawNode.getSVGDocument)) {
-      // This might be an iframe with virtual children.
-      numChildren = 1;
-    }
-
     let form = {
       actor: this.actorID,
       baseURI: this.rawNode.baseURI,
@@ -184,7 +234,7 @@ var NodeActor = protocol.ActorClass({
       nodeType: this.rawNode.nodeType,
       namespaceURI: this.rawNode.namespaceURI,
       nodeName: this.rawNode.nodeName,
-      numChildren: numChildren,
+      numChildren: this.numChildren,
 
       // doctype attributes
       name: this.rawNode.name,
@@ -192,8 +242,17 @@ var NodeActor = protocol.ActorClass({
       systemId: this.rawNode.systemId,
 
       attrs: this.writeAttrs(),
-
+      isBeforePseudoElement: this.isBeforePseudoElement,
+      isAfterPseudoElement: this.isAfterPseudoElement,
+      isAnonymous: LayoutHelpers.isAnonymous(this.rawNode),
+      isNativeAnonymous: LayoutHelpers.isNativeAnonymous(this.rawNode),
+      isXBLAnonymous: LayoutHelpers.isXBLAnonymous(this.rawNode),
+      isShadowAnonymous: LayoutHelpers.isShadowAnonymous(this.rawNode),
       pseudoClassLocks: this.writePseudoClassLocks(),
+
+      isDisplayed: this.isDisplayed,
+
+      hasEventListeners: this._hasEventListeners,
     };
 
     if (this.isDocumentElement()) {
@@ -212,6 +271,85 @@ var NodeActor = protocol.ActorClass({
     }
 
     return form;
+  },
+
+  get isBeforePseudoElement() {
+    return this.rawNode.nodeName === "_moz_generated_content_before"
+  },
+
+  get isAfterPseudoElement() {
+    return this.rawNode.nodeName === "_moz_generated_content_after"
+  },
+
+  // Estimate the number of children that the walker will return without making
+  // a call to children() if possible.
+  get numChildren() {
+
+    // For pseudo elements, childNodes.length returns 1, but the walker
+    // will return 0.
+    if (this.isBeforePseudoElement || this.isAfterPseudoElement) {
+      return 0;
+    }
+
+    let numChildren = this.rawNode.childNodes.length;
+    if (numChildren === 0 &&
+        (this.rawNode.contentDocument || this.rawNode.getSVGDocument)) {
+      // This might be an iframe with virtual children.
+      numChildren = 1;
+    }
+
+    // Count any anonymous children
+    if (this.rawNode.nodeType === Ci.nsIDOMNode.ELEMENT_NODE) {
+      let anonChildren = this.rawNode.ownerDocument.getAnonymousNodes(this.rawNode);
+      if (anonChildren) {
+        numChildren += anonChildren.length;
+      }
+    }
+
+    // Normal counting misses ::before/::after, so we have to check to make sure
+    // we aren't missing anything
+    if (numChildren === 0) {
+      numChildren = this.walker.children(this).nodes.length;
+    }
+
+    return numChildren;
+  },
+
+  get computedStyle() {
+    return CssLogic.getComputedStyle(this.rawNode);
+  },
+
+  /**
+   * Is the node's display computed style value other than "none"
+   */
+  get isDisplayed() {
+    let style = this.computedStyle;
+    if (!style) {
+      // Consider all non-element nodes as displayed
+      return true;
+    } else {
+      return style.display !== "none";
+    }
+  },
+
+  /**
+   * Are there event listeners that are listening on this node? This method
+   * uses all parsers registered via event-parsers.js.registerEventParser() to
+   * check if there are any event listeners.
+   */
+  get _hasEventListeners() {
+    let parsers = this._eventParsers;
+    for (let [,{hasListeners}] of parsers) {
+      try {
+        if (hasListeners && hasListeners(this.rawNode)) {
+          return true;
+        }
+      } catch(e) {
+        // An object attached to the node looked like a listener but wasn't...
+        // do nothing.
+      }
+    }
+    return false;
   },
 
   writeAttrs: function() {
@@ -237,6 +375,172 @@ var NodeActor = protocol.ActorClass({
   },
 
   /**
+   * Gets event listeners and adds their information to the events array.
+   *
+   * @param  {Node} node
+   *         Node for which we are to get listeners.
+   */
+  getEventListeners: function(node) {
+    let parsers = this._eventParsers;
+    let dbg = this.parent().tabActor.makeDebugger();
+    let events = [];
+
+    for (let [,{getListeners, normalizeHandler}] of parsers) {
+      try {
+        let eventInfos = getListeners(node);
+
+        if (!eventInfos) {
+          continue;
+        }
+
+        for (let eventInfo of eventInfos) {
+          if (normalizeHandler) {
+            eventInfo.normalizeHandler = normalizeHandler;
+          }
+
+          this.processHandlerForEvent(node, events, dbg, eventInfo);
+        }
+      } catch(e) {
+        // An object attached to the node looked like a listener but wasn't...
+        // do nothing.
+      }
+    }
+
+    return events;
+  },
+
+  /**
+   * Process a handler
+   *
+   * @param  {Node} node
+   *         The node for which we want information.
+   * @param  {Array} events
+   *         The events array contains all event objects that we have gathered
+   *         so far.
+   * @param  {Debugger} dbg
+   *         JSDebugger instance.
+   * @param  {Object} eventInfo
+   *         See event-parsers.js.registerEventParser() for a description of the
+   *         eventInfo object.
+   *
+   * @return {Array}
+   *         An array of objects where a typical object looks like this:
+   *           {
+   *             type: "click",
+   *             handler: function() { doSomething() },
+   *             origin: "http://www.mozilla.com",
+   *             searchString: 'onclick="doSomething()"',
+   *             tags: tags,
+   *             DOM0: true,
+   *             capturing: true,
+   *             hide: {
+   *               dom0: true
+   *             }
+   *           }
+   */
+  processHandlerForEvent: function(node, events, dbg, eventInfo) {
+    let type = eventInfo.type || "";
+    let handler = eventInfo.handler;
+    let tags = eventInfo.tags || "";
+    let hide = eventInfo.hide || {};
+    let override = eventInfo.override || {};
+    let global = Cu.getGlobalForObject(handler);
+    let globalDO = dbg.addDebuggee(global);
+    let listenerDO = globalDO.makeDebuggeeValue(handler);
+
+    if (eventInfo.normalizeHandler) {
+      listenerDO = eventInfo.normalizeHandler(listenerDO);
+    }
+
+    // If the listener is an object with a 'handleEvent' method, use that.
+    if (listenerDO.class === "Object" || listenerDO.class === "XULElement") {
+      let desc;
+
+      while (!desc && listenerDO) {
+        desc = listenerDO.getOwnPropertyDescriptor("handleEvent");
+        listenerDO = listenerDO.proto;
+      }
+
+      if (desc && desc.value) {
+        listenerDO = desc.value;
+      }
+    }
+
+    if (listenerDO.isBoundFunction) {
+      listenerDO = listenerDO.boundTargetFunction;
+    }
+
+    let script = listenerDO.script;
+    let scriptSource = script.source.text;
+    let functionSource =
+      scriptSource.substr(script.sourceStart, script.sourceLength);
+
+    /*
+    The script returned is the whole script and
+    scriptSource.substr(script.sourceStart, script.sourceLength) returns
+    something like:
+      () { doSomething(); }
+
+    So we need to work back to the preceeding \n, ; or } so we can get the
+      appropriate function info e.g.:
+      () => { doSomething(); }
+      function doit() { doSomething(); }
+      doit: function() { doSomething(); }
+    */
+    let scriptBeforeFunc = scriptSource.substr(0, script.sourceStart);
+    let lastEnding = Math.max(
+      scriptBeforeFunc.lastIndexOf(";"),
+      scriptBeforeFunc.lastIndexOf("}"),
+      scriptBeforeFunc.lastIndexOf("{"),
+      scriptBeforeFunc.lastIndexOf("("),
+      scriptBeforeFunc.lastIndexOf(","),
+      scriptBeforeFunc.lastIndexOf("!")
+    );
+
+    if (lastEnding !== -1) {
+      let functionPrefix = scriptBeforeFunc.substr(lastEnding + 1);
+      functionSource = functionPrefix + functionSource;
+    }
+
+    let dom0 = false;
+
+    if (typeof node.hasAttribute !== "undefined") {
+      dom0 = !!node.hasAttribute("on" + type);
+    } else {
+      dom0 = !!node["on" + type];
+    }
+
+    let line = script.startLine;
+    let url = script.url;
+    let origin = url + (dom0 ? "" : ":" + line);
+    let searchString;
+
+    if (dom0) {
+      searchString = "on" + type + "=\"" + script.source.text + "\"";
+    } else {
+      scriptSource = "    " + scriptSource;
+    }
+
+    let eventObj = {
+      type: typeof override.type !== "undefined" ? override.type : type,
+      handler: functionSource.trim(),
+      origin: typeof override.origin !== "undefined" ?
+                     override.origin : origin,
+      searchString: typeof override.searchString !== "undefined" ?
+                           override.searchString : searchString,
+      tags: tags,
+      DOM0: typeof override.dom0 !== "undefined" ? override.dom0 : dom0,
+      capturing: typeof override.capturing !== "undefined" ?
+                        override.capturing : eventInfo.capturing,
+      hide: hide
+    };
+
+    events.push(eventObj);
+
+    dbg.removeDebuggee(globalDO);
+  },
+
+  /**
    * Returns a LongStringActor with the node's value.
    */
   getNodeValue: method(function() {
@@ -259,63 +563,57 @@ var NodeActor = protocol.ActorClass({
   }),
 
   /**
+   * Get a unique selector string for this node.
+   */
+  getUniqueSelector: method(function() {
+    return CssLogic.findCssSelector(this.rawNode);
+  }, {
+    request: {},
+    response: {
+      value: RetVal("string")
+    }
+  }),
+
+  /**
    * Get the node's image data if any (for canvas and img nodes).
-   * Returns a LongStringActor with the image or canvas' image data as png
-   * a data:image/png;base64,.... string
-   * A null return value means the node isn't an image
-   * An empty string return value means the node is an image but image data
-   * could not be retrieved (missing/broken image).
+   * Returns an imageData object with the actual data being a LongStringActor
+   * and a size json object.
+   * The image data is transmitted as a base64 encoded png data-uri.
+   * The method rejects if the node isn't an image or if the image is missing
    *
    * Accepts a maxDim request parameter to resize images that are larger. This
    * is important as the resizing occurs server-side so that image-data being
    * transfered in the longstring back to the client will be that much smaller
    */
   getImageData: method(function(maxDim) {
-    let isImg = this.rawNode.tagName.toLowerCase() === "img";
-    let isCanvas = this.rawNode.tagName.toLowerCase() === "canvas";
-
-    if (!isImg && !isCanvas) {
-      return null;
-    }
-
-    // Get the image resize ratio if a maxDim was provided
-    let resizeRatio = 1;
-    let imgWidth = isImg ? this.rawNode.naturalWidth : this.rawNode.width;
-    let imgHeight = isImg ? this.rawNode.naturalHeight : this.rawNode.height;
-    let imgMax = Math.max(imgWidth, imgHeight);
-    if (maxDim && imgMax > maxDim) {
-      resizeRatio = maxDim / imgMax;
-    }
-
-    // Create a canvas to copy the rawNode into and get the imageData from
-    let canvas = this.rawNode.ownerDocument.createElement("canvas");
-    canvas.width = imgWidth * resizeRatio;
-    canvas.height = imgHeight * resizeRatio;
-    let ctx = canvas.getContext("2d");
-
-    // Copy the rawNode image or canvas in the new canvas and extract data
-    let imageData;
-    // This may fail if the image is missing
+    // imageToImageData may fail if the node isn't an image
     try {
-      ctx.drawImage(this.rawNode, 0, 0, canvas.width, canvas.height);
-      imageData = canvas.toDataURL("image/png");
-    } catch (e) {
-      imageData = "";
-    }
-
-    return {
-      data: LongStringActor(this.conn, imageData),
-      size: {
-        naturalWidth: imgWidth,
-        naturalHeight: imgHeight,
-        width: canvas.width,
-        height: canvas.height,
-        resized: resizeRatio !== 1
-      }
+      let imageData = imageToImageData(this.rawNode, maxDim);
+      return promise.resolve({
+        data: LongStringActor(this.conn, imageData.data),
+        size: imageData.size
+      });
+    } catch(e) {
+      return promise.reject(new Error("Image not available"));
     }
   }, {
     request: {maxDim: Arg(0, "nullable:number")},
     response: RetVal("imageData")
+  }),
+
+  /**
+   * Get all event listeners that are listening on this node.
+   */
+  getEventListenerInfo: method(function() {
+    if (this.rawNode.nodeName.toLowerCase() === "html") {
+      return this.getEventListeners(this.rawNode.ownerGlobal);
+    }
+    return this.getEventListeners(this.rawNode);
+  }, {
+    request: {},
+    response: {
+      events: RetVal("json")
+    }
   }),
 
   /**
@@ -353,6 +651,42 @@ var NodeActor = protocol.ActorClass({
       modifications: Arg(0, "array:json")
     },
     response: {}
+  }),
+
+  /**
+   * Given the font and fill style, get the image data of a canvas with the
+   * preview text and font.
+   * Returns an imageData object with the actual data being a LongStringActor
+   * and the width of the text as a string.
+   * The image data is transmitted as a base64 encoded png data-uri.
+   */
+  getFontFamilyDataURL: method(function(font, fillStyle="black") {
+    let doc = this.rawNode.ownerDocument;
+    let canvas = doc.createElementNS(XHTML_NS, "canvas");
+    let ctx = canvas.getContext("2d");
+    let fontValue = FONT_FAMILY_PREVIEW_TEXT_SIZE + "px " + font + ", serif";
+
+    // Get the correct preview text measurements and set the canvas dimensions
+    ctx.font = fontValue;
+    let textWidth = ctx.measureText(FONT_FAMILY_PREVIEW_TEXT).width;
+    canvas.width = textWidth * 2;
+    canvas.height = FONT_FAMILY_PREVIEW_TEXT_SIZE * 3;
+
+    ctx.font = fontValue;
+    ctx.fillStyle = fillStyle;
+
+    // Align the text to be vertically center in the tooltip and
+    // oversample the canvas for better text quality
+    ctx.textBaseline = "top";
+    ctx.scale(2, 2);
+    ctx.fillText(FONT_FAMILY_PREVIEW_TEXT, 0, Math.round(FONT_FAMILY_PREVIEW_TEXT_SIZE / 3));
+
+    let dataURL = canvas.toDataURL("image/png");
+
+    return { data: LongStringActor(this.conn, dataURL), size: textWidth };
+  }, {
+    request: {font: Arg(0, "string"), fillStyle: Arg(1, "nullable:string")},
+    response: RetVal("imageData")
   })
 });
 
@@ -387,8 +721,8 @@ let NodeFront = protocol.FrontClass(NodeActor, {
   destroy: function() {
     // If an observer was added on this node, shut it down.
     if (this.observer) {
-      this._observer.disconnect();
-      this._observer = null;
+      this.observer.disconnect();
+      this.observer = null;
     }
 
     protocol.Front.prototype.destroy.call(this);
@@ -479,6 +813,12 @@ let NodeFront = protocol.FrontClass(NodeActor, {
 
   get hasChildren() this._form.numChildren > 0,
   get numChildren() this._form.numChildren,
+  get hasEventListeners() this._form.hasEventListeners,
+
+  get isBeforePseudoElement() this._form.isBeforePseudoElement,
+  get isAfterPseudoElement() this._form.isAfterPseudoElement,
+  get isPseudoElement() this.isBeforePseudoElement || this.isAfterPseudoElement,
+  get isAnonymous() this._form.isAnonymous,
 
   get tagName() this.nodeType === Ci.nsIDOMNode.ELEMENT_NODE ? this.nodeName : null,
   get shortValue() this._form.shortValue,
@@ -510,6 +850,12 @@ let NodeFront = protocol.FrontClass(NodeActor, {
   get pseudoClassLocks() this._form.pseudoClassLocks || [],
   hasPseudoClassLock: function(pseudo) {
     return this.pseudoClassLocks.some(locked => locked === pseudo);
+  },
+
+  get isDisplayed() {
+    // The NodeActor's form contains the isDisplayed information as a boolean
+    // starting from FF32. Before that, the property is missing
+    return "isDisplayed" in this._form ? this._form.isDisplayed : true;
   },
 
   getNodeValue: protocol.custom(function() {
@@ -650,7 +996,7 @@ var NodeListActor = exports.NodeListActor = protocol.ActorClass({
   initialize: function(walker, nodeList) {
     protocol.Actor.prototype.initialize.call(this);
     this.walker = walker;
-    this.nodeList = nodeList;
+    this.nodeList = nodeList || [];
   },
 
   destroy: function() {
@@ -684,12 +1030,7 @@ var NodeListActor = exports.NodeListActor = protocol.ActorClass({
    * Get a single node from the node list.
    */
   item: method(function(index) {
-    let node = this.walker._ref(this.nodeList[index]);
-    let newParents = [node for (node of this.walker.ensurePathToRoot(node))];
-    return {
-      node: node,
-      newParents: newParents
-    }
+    return this.walker.attachElement(this.nodeList[index]);
   }, {
     request: { item: Arg(0) },
     response: RetVal("disconnectedNode")
@@ -783,64 +1124,6 @@ let traversalMethod = {
 }
 
 /**
- * We need to know when a document is navigating away so that we can kill
- * the nodes underneath it.  We also need to know when a document is
- * navigated to so that we can send a mutation event for the iframe node.
- *
- * The nsIWebProgressListener is the easiest/best way to watch these
- * loads that works correctly with the bfcache.
- *
- * See nsIWebProgressListener for details
- * https://developer.mozilla.org/en-US/docs/XPCOM_Interface_Reference/nsIWebProgressListener
- */
-var ProgressListener = Class({
-  extends: Unknown,
-  interfaces: ["nsIWebProgressListener", "nsISupportsWeakReference"],
-
-  initialize: function(tabActor) {
-    Unknown.prototype.initialize.call(this);
-    this.webProgress = tabActor.webProgress;
-    this.webProgress.addProgressListener(
-      this, Ci.nsIWebProgress.NOTIFY_ALL
-    );
-  },
-
-  destroy: function() {
-    try {
-      this.webProgress.removeProgressListener(this);
-    } catch(ex) {
-      // This can throw during browser shutdown.
-    }
-    this.webProgress = null;
-  },
-
-  onStateChange: makeInfallible(function stateChange(progress, request, flags, status) {
-    if (!this.webProgress) {
-      console.warn("got an onStateChange after destruction");
-      return;
-    }
-
-    let isWindow = flags & Ci.nsIWebProgressListener.STATE_IS_WINDOW;
-    let isDocument = flags & Ci.nsIWebProgressListener.STATE_IS_DOCUMENT;
-    if (!(isWindow || isDocument)) {
-      return;
-    }
-
-    if (isDocument && (flags & Ci.nsIWebProgressListener.STATE_START)) {
-      events.emit(this, "windowchange-start", progress.DOMWindow);
-    }
-    if (isWindow && (flags & Ci.nsIWebProgressListener.STATE_STOP)) {
-      events.emit(this, "windowchange-stop", progress.DOMWindow);
-    }
-  }),
-
-  onProgressChange: function() {},
-  onSecurityChange: function() {},
-  onStatusChange: function() {},
-  onLocationChange: function() {},
-});
-
-/**
  * Server side of the DOM walker.
  */
 var WalkerActor = protocol.ActorClass({
@@ -849,6 +1132,24 @@ var WalkerActor = protocol.ActorClass({
   events: {
     "new-mutations" : {
       type: "newMutations"
+    },
+    "picker-node-picked" : {
+      type: "pickerNodePicked",
+      node: Arg(0, "disconnectedNode")
+    },
+    "picker-node-hovered" : {
+      type: "pickerNodeHovered",
+      node: Arg(0, "disconnectedNode")
+    },
+    "highlighter-ready" : {
+      type: "highlighter-ready"
+    },
+    "highlighter-hide" : {
+      type: "highlighter-hide"
+    },
+    "display-change" : {
+      type: "display-change",
+      nodes: Arg(0, "array:domnode")
     }
   },
 
@@ -859,6 +1160,7 @@ var WalkerActor = protocol.ActorClass({
    */
   initialize: function(conn, tabActor, options) {
     protocol.Actor.prototype.initialize.call(this, conn);
+    this.tabActor = tabActor;
     this.rootWin = tabActor.window;
     this.rootDoc = this.rootWin.document;
     this._refMap = new Map();
@@ -881,14 +1183,16 @@ var WalkerActor = protocol.ActorClass({
     this.onFrameLoad = this.onFrameLoad.bind(this);
     this.onFrameUnload = this.onFrameUnload.bind(this);
 
-    this.progressListener = ProgressListener(tabActor);
-
-    events.on(this.progressListener, "windowchange-start", this.onFrameUnload);
-    events.on(this.progressListener, "windowchange-stop", this.onFrameLoad);
+    events.on(tabActor, "will-navigate", this.onFrameUnload);
+    events.on(tabActor, "navigate", this.onFrameLoad);
 
     // Ensure that the root document node actor is ready and
     // managed.
     this.rootNode = this.document();
+
+    this.reflowObserver = getLayoutChangesObserver(this.tabActor);
+    this._onReflows = this._onReflows.bind(this);
+    this.reflowObserver.on("reflows", this._onReflows);
   },
 
   // Returns the JSON representation of this object over the wire.
@@ -904,10 +1208,18 @@ var WalkerActor = protocol.ActorClass({
   },
 
   destroy: function() {
+    this._destroyed = true;
+
     this.clearPseudoClassLocks();
     this._activePseudoClassLocks = null;
-    this.progressListener.destroy();
+
+    this._hoveredNode = null;
     this.rootDoc = null;
+
+    this.reflowObserver.off("reflows", this._onReflows);
+    this.reflowObserver = null;
+    releaseLayoutChangesObserver(this.tabActor);
+
     events.emit(this, "destroyed");
     protocol.Actor.prototype.destroy.call(this);
   },
@@ -918,7 +1230,7 @@ var WalkerActor = protocol.ActorClass({
     if (actor instanceof NodeActor) {
       if (this._activePseudoClassLocks &&
           this._activePseudoClassLocks.has(actor)) {
-        this.clearPsuedoClassLocks(actor);
+        this.clearPseudoClassLocks(actor);
       }
       this._refMap.delete(actor.rawNode);
     }
@@ -942,92 +1254,58 @@ var WalkerActor = protocol.ActorClass({
     return actor;
   },
 
-  /**
-   * Pick a node on click.
-   */
-  _pickDeferred: null,
-  pick: method(function() {
-    if (this._pickDeferred) {
-      return this._pickDeferred.promise;
-    }
-
-    this._pickDeferred = promise.defer();
-
-    let window = this.rootDoc.defaultView;
-    let isTouch = 'ontouchstart' in window;
-    let event = isTouch ? 'touchstart' : 'click';
-
-    this._onPick = function(e) {
-      e.stopImmediatePropagation();
-      e.preventDefault();
-      window.removeEventListener(event, this._onPick, true);
-      let u = window.QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIDOMWindowUtils);
-
-      let x, y;
-      if (isTouch) {
-        x = e.touches[0].clientX;
-        y = e.touches[0].clientY;
-      } else {
-        x = e.clientX;
-        y = e.clientY;
+  _onReflows: function(reflows) {
+    // Going through the nodes the walker knows about, see which ones have
+    // had their display changed and send a display-change event if any
+    let changes = [];
+    for (let [node, actor] of this._refMap) {
+      if (Cu.isDeadWrapper(node)) {
+        continue;
       }
 
-      let node = u.elementFromPoint(x, y, false, false);
-      node = this._ref(node);
-      let newParents = this.ensurePathToRoot(node);
-
-      this._pickDeferred.resolve({
-        node: node,
-        newParents: [parent for (parent of newParents)]
-      });
-      this._pickDeferred = null;
-
-    }.bind(this);
-
-    window.addEventListener(event, this._onPick, true);
-
-    return this._pickDeferred.promise;
-  }, { request: { }, response: RetVal("disconnectedNode") }),
-
-  cancelPick: method(function() {
-    if (this._pickDeferred) {
-      let window = this.rootDoc.defaultView;
-      let isTouch = 'ontouchstart' in window;
-      let event = isTouch ? 'touchstart' : 'click';
-      window.removeEventListener(event, this._onPick, true);
-      this._pickDeferred.resolve(null);
-      this._pickDeferred = null;
+      let isDisplayed = actor.isDisplayed;
+      if (isDisplayed !== actor.wasDisplayed) {
+        changes.push(actor);
+        // Updating the original value
+        actor.wasDisplayed = isDisplayed;
+      }
     }
-  }),
 
-  /**
-   * Simple highlight mechanism.
-   */
-  _unhighlight: function() {
-    clearTimeout(this._highlightTimeout);
-    if (!this.rootDoc) {
-      return;
-    }
-    let nodes = this.rootDoc.querySelectorAll(HIGHLIGHTED_PSEUDO_CLASS);
-    for (let node of nodes) {
-      DOMUtils.removePseudoClassLock(node, HIGHLIGHTED_PSEUDO_CLASS);
+    if (changes.length) {
+      events.emit(this, "display-change", changes);
     }
   },
 
-  highlight: method(function(node) {
-    this._unhighlight();
+  /**
+   * This is kept for backward-compatibility reasons with older remote targets.
+   * Targets prior to bug 916443.
+   *
+   * pick/cancelPick are used to pick a node on click on the content
+   * document. But in their implementation prior to bug 916443, they don't allow
+   * highlighting on hover.
+   * The client-side now uses the highlighter actor's pick and cancelPick
+   * methods instead. The client-side uses the the highlightable trait found in
+   * the root actor to determine which version of pick to use.
+   *
+   * As for highlight, the new highlighter actor is used instead of the walker's
+   * highlight method. Same here though, the client-side uses the highlightable
+   * trait to dertermine which to use.
+   *
+   * Keeping these actor methods for now allows newer client-side debuggers to
+   * inspect fxos 1.2 remote targets or older firefox desktop remote targets.
+   */
+  pick: method(function() {}, {request: {}, response: RetVal("disconnectedNode")}),
+  cancelPick: method(function() {}),
+  highlight: method(function(node) {}, {request: {node: Arg(0, "nullable:domnode")}}),
 
-    if (!node ||
-        !node.rawNode ||
-         node.rawNode.nodeType !== Ci.nsIDOMNode.ELEMENT_NODE) {
-      return;
-    }
-
-    this._installHelperSheet(node);
-    DOMUtils.addPseudoClassLock(node.rawNode, HIGHLIGHTED_PSEUDO_CLASS);
-    this._highlightTimeout = setTimeout(this._unhighlight.bind(this), HIGHLIGHTED_TIMEOUT);
-
-  }, { request: { node: Arg(0, "nullable:domnode") }}),
+  attachElement: function(node) {
+    node = this._ref(node);
+    let newParents = this.ensurePathToRoot(node);
+    return {
+      node: node,
+      newParents: [parent for (parent of newParents)]
+    };
+  },
 
   /**
    * Watch the given document node for mutations using the DOM observer
@@ -1037,7 +1315,7 @@ var WalkerActor = protocol.ActorClass({
     let node = actor.rawNode;
     // Create the observer on the node's actor.  The node will make sure
     // the observer is cleaned up when the actor is released.
-    actor.observer = actor.rawNode.defaultView.MutationObserver(this.onMutations);
+    actor.observer = new actor.rawNode.defaultView.MutationObserver(this.onMutations);
     actor.observer.observe(node, {
       attributes: true,
       characterData: true,
@@ -1087,7 +1365,7 @@ var WalkerActor = protocol.ActorClass({
    *      document as the node.
    */
   parents: method(function(node, options={}) {
-    let walker = documentWalker(node.rawNode, this.rootWin);
+    let walker = DocumentWalker(node.rawNode, this.rootWin);
     let parents = [];
     let cur;
     while((cur = walker.parentNode())) {
@@ -1108,7 +1386,7 @@ var WalkerActor = protocol.ActorClass({
   }),
 
   parentNode: function(node) {
-    let walker = documentWalker(node.rawNode, this.rootWin);
+    let walker = DocumentWalker(node.rawNode, this.rootWin);
     let parent = walker.parentNode();
     if (parent) {
       return this._ref(parent);
@@ -1169,7 +1447,7 @@ var WalkerActor = protocol.ActorClass({
       this._retainedOrphans.delete(node);
     }
 
-    let walker = documentWalker(node.rawNode, this.rootWin);
+    let walker = DocumentWalker(node.rawNode, this.rootWin);
 
     let child = walker.firstChild();
     while (child) {
@@ -1196,7 +1474,7 @@ var WalkerActor = protocol.ActorClass({
     if (!node) {
       return newParents;
     }
-    let walker = documentWalker(node.rawNode, this.rootWin);
+    let walker = DocumentWalker(node.rawNode, this.rootWin);
     let cur;
     while ((cur = walker.parentNode())) {
       let parent = this._refMap.get(cur);
@@ -1246,14 +1524,14 @@ var WalkerActor = protocol.ActorClass({
 
     // We're going to create a few document walkers with the same filter,
     // make it easier.
-    let filteredWalker = (node) => {
-      return documentWalker(node, this.rootWin, options.whatToShow);
+    let getFilteredWalker = (node) => {
+      return new DocumentWalker(node, this.rootWin, options.whatToShow);
     }
 
     // Need to know the first and last child.
     let rawNode = node.rawNode;
-    let firstChild = filteredWalker(rawNode).firstChild();
-    let lastChild = filteredWalker(rawNode).lastChild();
+    let firstChild = getFilteredWalker(rawNode).firstChild();
+    let lastChild = getFilteredWalker(rawNode).lastChild();
 
     if (!firstChild) {
       // No children, we're done.
@@ -1272,7 +1550,7 @@ var WalkerActor = protocol.ActorClass({
     let nodes = [];
 
     // Start by reading backward from the starting point if we're centering...
-    let backwardWalker = filteredWalker(start);
+    let backwardWalker = getFilteredWalker(start);
     if (start != firstChild && options.center) {
       backwardWalker.previousSibling();
       let backwardCount = Math.floor(maxNodes / 2);
@@ -1281,7 +1559,7 @@ var WalkerActor = protocol.ActorClass({
     }
 
     // Then read forward by any slack left in the max children...
-    let forwardWalker = filteredWalker(start);
+    let forwardWalker = getFilteredWalker(start);
     let forwardCount = maxNodes - nodes.length;
     nodes = nodes.concat(this._readForward(forwardWalker, forwardCount));
 
@@ -1330,7 +1608,7 @@ var WalkerActor = protocol.ActorClass({
    *    nodes: Child nodes returned by the request.
    */
   siblings: method(function(node, options={}) {
-    let parentNode = documentWalker(node.rawNode, this.rootWin).parentNode();
+    let parentNode = DocumentWalker(node.rawNode, this.rootWin).parentNode();
     if (!parentNode) {
       return {
         hasFirst: true,
@@ -1356,7 +1634,7 @@ var WalkerActor = protocol.ActorClass({
    *       https://developer.mozilla.org/en-US/docs/Web/API/NodeFilter.
    */
   nextSibling: method(function(node, options={}) {
-    let walker = documentWalker(node.rawNode, this.rootWin, options.whatToShow || Ci.nsIDOMNodeFilter.SHOW_ALL);
+    let walker = DocumentWalker(node.rawNode, this.rootWin, options.whatToShow || Ci.nsIDOMNodeFilter.SHOW_ALL);
     let sibling = walker.nextSibling();
     return sibling ? this._ref(sibling) : null;
   }, traversalMethod),
@@ -1371,7 +1649,7 @@ var WalkerActor = protocol.ActorClass({
    *       https://developer.mozilla.org/en-US/docs/Web/API/NodeFilter.
    */
   previousSibling: method(function(node, options={}) {
-    let walker = documentWalker(node.rawNode, this.rootWin, options.whatToShow || Ci.nsIDOMNodeFilter.SHOW_ALL);
+    let walker = DocumentWalker(node.rawNode, this.rootWin, options.whatToShow || Ci.nsIDOMNodeFilter.SHOW_ALL);
     let sibling = walker.previousSibling();
     return sibling ? this._ref(sibling) : null;
   }, traversalMethod),
@@ -1380,8 +1658,7 @@ var WalkerActor = protocol.ActorClass({
    * Helper function for the `children` method: Read forward in the sibling
    * list into an array with `count` items, including the current node.
    */
-  _readForward: function(walker, count)
-  {
+  _readForward: function(walker, count) {
     let ret = [];
     let node = walker.currentNode;
     do {
@@ -1395,8 +1672,7 @@ var WalkerActor = protocol.ActorClass({
    * Helper function for the `children` method: Read backward in the sibling
    * list into an array with `count` items, including the current node.
    */
-  _readBackward: function(walker, count)
-  {
+  _readBackward: function(walker, count) {
     let ret = [];
     let node = walker.currentNode;
     do {
@@ -1406,6 +1682,25 @@ var WalkerActor = protocol.ActorClass({
     ret.reverse();
     return ret;
   },
+
+  /**
+   * Return the node that the parent process has asked to
+   * inspect. This node is expected to be stored in gInspectingNode
+   * (which is set by a message manager message to the child.js frame
+   * script). The node is returned over the remote debugging protocol
+   * as a NodeFront.
+   */
+  findInspectingNode: method(function() {
+    let node = gInspectingNode;
+    if (!node) {
+      return {}
+    };
+
+    return this.attachElement(node);
+  }, {
+    request: {},
+    response: RetVal("disconnectedNode")
+  }),
 
   /**
    * Return the first node in the document that matches the given selector.
@@ -1424,12 +1719,7 @@ var WalkerActor = protocol.ActorClass({
       return {}
     };
 
-    let node = this._ref(node);
-    let newParents = this.ensurePathToRoot(node);
-    return {
-      node: node,
-      newParents: [parent for (parent of newParents)]
-    }
+    return this.attachElement(node);
   }, {
     request: {
       node: Arg(0, "domnode"),
@@ -1446,7 +1736,15 @@ var WalkerActor = protocol.ActorClass({
    * @param string selector
    */
   querySelectorAll: method(function(baseNode, selector) {
-    return new NodeListActor(this, baseNode.rawNode.querySelectorAll(selector));
+    let nodeList = null;
+
+    try {
+      nodeList = baseNode.rawNode.querySelectorAll(selector);
+    } catch(e) {
+      // Bad selector. Do nothing as the selector can come from a searchbox.
+    }
+
+    return new NodeListActor(this, nodeList);
   }, {
     request: {
       node: Arg(0, "domnode"),
@@ -1454,6 +1752,136 @@ var WalkerActor = protocol.ActorClass({
     },
     response: {
       list: RetVal("domnodelist")
+    }
+  }),
+
+  /**
+   * Returns a list of matching results for CSS selector autocompletion.
+   *
+   * @param string query
+   *        The selector query being completed
+   * @param string completing
+   *        The exact token being completed out of the query
+   * @param string selectorState
+   *        One of "pseudo", "id", "tag", "class", "null"
+   */
+  getSuggestionsForQuery: method(function(query, completing, selectorState) {
+    let sugs = {
+      classes: new Map,
+      tags: new Map
+    };
+    let result = [];
+    let nodes = null;
+    // Filtering and sorting the results so that protocol transfer is miminal.
+    switch (selectorState) {
+      case "pseudo":
+        result = PSEUDO_SELECTORS.filter(item => {
+          return item[0].startsWith(":" + completing);
+        });
+        break;
+
+      case "class":
+        if (!query) {
+          nodes = this.rootDoc.querySelectorAll("[class]");
+        }
+        else {
+          nodes = this.rootDoc.querySelectorAll(query);
+        }
+        for (let node of nodes) {
+          for (let className of node.className.split(" ")) {
+            sugs.classes.set(className, (sugs.classes.get(className)|0) + 1);
+          }
+        }
+        sugs.classes.delete("");
+        // Editing the style editor may make the stylesheet have errors and
+        // thus the page's elements' styles start changing with a transition.
+        // That transition comes from the `moz-styleeditor-transitioning` class.
+        sugs.classes.delete("moz-styleeditor-transitioning");
+        sugs.classes.delete(HIDDEN_CLASS);
+        for (let [className, count] of sugs.classes) {
+          if (className.startsWith(completing)) {
+            result.push(["." + className, count]);
+          }
+        }
+        break;
+
+      case "id":
+        if (!query) {
+          nodes = this.rootDoc.querySelectorAll("[id]");
+        }
+        else {
+          nodes = this.rootDoc.querySelectorAll(query);
+        }
+        for (let node of nodes) {
+          if (node.id.startsWith(completing)) {
+            result.push(["#" + node.id, 1]);
+          }
+        }
+        break;
+
+      case "tag":
+        if (!query) {
+          nodes = this.rootDoc.getElementsByTagName("*");
+        }
+        else {
+          nodes = this.rootDoc.querySelectorAll(query);
+        }
+        for (let node of nodes) {
+          let tag = node.tagName.toLowerCase();
+          sugs.tags.set(tag, (sugs.tags.get(tag)|0) + 1);
+        }
+        for (let [tag, count] of sugs.tags) {
+          if ((new RegExp("^" + completing + ".*", "i")).test(tag)) {
+            result.push([tag, count]);
+          }
+        }
+        break;
+
+      case "null":
+        nodes = this.rootDoc.querySelectorAll(query);
+        for (let node of nodes) {
+          node.id && result.push(["#" + node.id, 1]);
+          let tag = node.tagName.toLowerCase();
+          sugs.tags.set(tag, (sugs.tags.get(tag)|0) + 1);
+          for (let className of node.className.split(" ")) {
+            sugs.classes.set(className, (sugs.classes.get(className)|0) + 1);
+          }
+        }
+        for (let [tag, count] of sugs.tags) {
+          tag && result.push([tag, count]);
+        }
+        sugs.classes.delete("");
+        // Editing the style editor may make the stylesheet have errors and
+        // thus the page's elements' styles start changing with a transition.
+        // That transition comes from the `moz-styleeditor-transitioning` class.
+        sugs.classes.delete("moz-styleeditor-transitioning");
+        sugs.classes.delete(HIDDEN_CLASS);
+        for (let [className, count] of sugs.classes) {
+          className && result.push(["." + className, count]);
+        }
+    }
+
+    // Sort alphabetically in increaseing order.
+    result = result.sort();
+    // Sort based on count in decreasing order.
+    result = result.sort(function(a, b) {
+      return b[1] - a[1];
+    });
+
+    result.slice(0, 25);
+
+    return {
+      query: query,
+      suggestions: result
+    };
+  }, {
+    request: {
+      query: Arg(0),
+      completing: Arg(1),
+      selectorState: Arg(2)
+    },
+    response: {
+      list: RetVal("array:array:string")
     }
   }),
 
@@ -1478,7 +1906,7 @@ var WalkerActor = protocol.ActorClass({
       return;
     }
 
-    let walker = documentWalker(node.rawNode, this.rootWin);
+    let walker = DocumentWalker(node.rawNode, this.rootWin);
     let cur;
     while ((cur = walker.parentNode())) {
       let curNode = this._ref(cur);
@@ -1559,7 +1987,7 @@ var WalkerActor = protocol.ActorClass({
       return;
     }
 
-    let walker = documentWalker(node.rawNode, this.rootWin);
+    let walker = DocumentWalker(node.rawNode, this.rootWin);
     let cur;
     while ((cur = walker.parentNode())) {
       let curNode = this._ref(cur);
@@ -1582,13 +2010,14 @@ var WalkerActor = protocol.ActorClass({
     if (!node.writePseudoClassLocks()) {
       this._activePseudoClassLocks.delete(node);
     }
+
     this._queuePseudoClassMutation(node);
     return true;
   },
 
   /**
-   * Clear all the pseudo-classes on a given node
-   * or all nodes.
+   * Clear all the pseudo-classes on a given node or all nodes.
+   * @param {NodeActor} node Optional node to clear pseudo-classes on
    */
   clearPseudoClassLocks: method(function(node) {
     if (node) {
@@ -1689,8 +2118,7 @@ var WalkerActor = protocol.ActorClass({
       node: Arg(0, "domnode"),
       value: Arg(1),
     },
-    response: {
-    }
+    response: {}
   }),
 
   /**
@@ -1729,6 +2157,46 @@ var WalkerActor = protocol.ActorClass({
       node: Arg(0, "domnode"),
       parent: Arg(1, "domnode"),
       sibling: Arg(2, "nullable:domnode")
+    },
+    response: {}
+  }),
+
+  /**
+   * Editing a node's tagname actually means creating a new node with the same
+   * attributes, removing the node and inserting the new one instead.
+   * This method does not return anything as mutation events are taking care of
+   * informing the consumers about changes.
+   */
+  editTagName: method(function(node, tagName) {
+    let oldNode = node.rawNode;
+
+    // Create a new element with the same attributes as the current element and
+    // prepare to replace the current node with it.
+    let newNode;
+    try {
+      newNode = nodeDocument(oldNode).createElement(tagName);
+    } catch(x) {
+      // Failed to create a new element with that tag name, ignore the change,
+      // and signal the error to the front.
+      return Promise.reject(new Error("Could not change node's tagName to " + tagName));
+    }
+
+    let attrs = oldNode.attributes;
+    for (let i = 0; i < attrs.length; i ++) {
+      newNode.setAttribute(attrs[i].name, attrs[i].value);
+    }
+
+    // Insert the new node, and transfer the old node's children.
+    oldNode.parentNode.insertBefore(newNode, oldNode);
+    while (oldNode.firstChild) {
+      newNode.appendChild(oldNode.firstChild);
+    }
+
+    oldNode.remove();
+  }, {
+    request: {
+      node: Arg(0, "domnode"),
+      tagName: Arg(1, "string")
     },
     response: {}
   }),
@@ -1800,7 +2268,7 @@ var WalkerActor = protocol.ActorClass({
   }),
 
   queueMutation: function(mutation) {
-    if (!this.actorID) {
+    if (!this.actorID || this._destroyed) {
       // We've been destroyed, don't bother queueing this mutation.
       return;
     }
@@ -1831,7 +2299,8 @@ var WalkerActor = protocol.ActorClass({
       let mutation = {
         type: change.type,
         target: targetActor.actorID,
-      }
+        numChildren: targetActor.numChildren
+      };
 
       if (mutation.type === "attributes") {
         mutation.attributeName = change.attributeName;
@@ -1874,7 +2343,7 @@ var WalkerActor = protocol.ActorClass({
           this._orphaned.delete(addedActor);
           addedActors.push(addedActor.actorID);
         }
-        mutation.numChildren = change.target.childNodes.length;
+
         mutation.removed = removedActors;
         mutation.added = addedActors;
       }
@@ -1882,17 +2351,17 @@ var WalkerActor = protocol.ActorClass({
     }
   },
 
-  onFrameLoad: function(window) {
-    let frame = this.layoutHelpers.getFrameElement(window);
-    let isTopLevel = this.layoutHelpers.isTopLevelWindow(window);
-    if (!frame && !this.rootDoc && isTopLevel) {
+  onFrameLoad: function({ window, isTopLevel }) {
+    if (!this.rootDoc && isTopLevel) {
       this.rootDoc = window.document;
       this.rootNode = this.document();
       this.queueMutation({
         type: "newRoot",
         target: this.rootNode.form()
       });
+      return;
     }
+    let frame = this.layoutHelpers.getFrameElement(window);
     let frameActor = this._refMap.get(frame);
     if (!frameActor) {
       return;
@@ -1924,7 +2393,7 @@ var WalkerActor = protocol.ActorClass({
     return false;
   },
 
-  onFrameUnload: function(window) {
+  onFrameUnload: function({ window }) {
     // Any retained orphans that belong to this document
     // or its children need to be released, and a mutation sent
     // to notify of that.
@@ -1963,7 +2432,7 @@ var WalkerActor = protocol.ActorClass({
       target: documentActor.actorID
     });
 
-    let walker = documentWalker(doc, this.rootWin);
+    let walker = DocumentWalker(doc, this.rootWin);
     let parentNode = walker.parentNode();
     if (parentNode) {
       // Send a childList mutation on the frame so that clients know
@@ -1979,7 +2448,94 @@ var WalkerActor = protocol.ActorClass({
     // Need to force a release of this node, because those nodes can't
     // be accessed anymore.
     this.releaseNode(documentActor, { force: true });
-  }
+  },
+
+  /**
+   * Check if a node is attached to the DOM tree of the current page.
+   * @param {nsIDomNode} rawNode
+   * @return {Boolean} false if the node is removed from the tree or within a
+   * document fragment
+   */
+  _isInDOMTree: function(rawNode) {
+    let walker = DocumentWalker(rawNode, this.rootWin);
+    let current = walker.currentNode;
+
+    // Reaching the top of tree
+    while (walker.parentNode()) {
+      current = walker.currentNode;
+    }
+
+    // The top of the tree is a fragment or is not rootDoc, hence rawNode isn't
+    // attached
+    if (current.nodeType === Ci.nsIDOMNode.DOCUMENT_FRAGMENT_NODE ||
+        current !== this.rootDoc) {
+      return false;
+    }
+
+    // Otherwise the top of the tree is rootDoc, hence rawNode is in rootDoc
+    return true;
+  },
+
+  /**
+   * @see _isInDomTree
+   */
+  isInDOMTree: method(function(node) {
+    return node ? this._isInDOMTree(node.rawNode) : false;
+  }, {
+    request: { node: Arg(0, "domnode") },
+    response: { attached: RetVal("boolean") }
+  }),
+
+  /**
+   * Given an ObjectActor (identified by its ID), commonly used in the debugger,
+   * webconsole and variablesView, return the corresponding inspector's NodeActor
+   */
+  getNodeActorFromObjectActor: method(function(objectActorID) {
+    let debuggerObject = this.conn.getActor(objectActorID).obj;
+    let rawNode = debuggerObject.unsafeDereference();
+
+    if (!this._isInDOMTree(rawNode)) {
+      return null;
+    }
+
+    // This is a special case for the document object whereby it is considered
+    // as document.documentElement (the <html> node)
+    if (rawNode.defaultView && rawNode === rawNode.defaultView.document) {
+      rawNode = rawNode.documentElement;
+    }
+
+    return this.attachElement(rawNode);
+  }, {
+    request: {
+      objectActorID: Arg(0, "string")
+    },
+    response: {
+      nodeFront: RetVal("nullable:disconnectedNode")
+    }
+  }),
+
+  /**
+   * Given an StyleSheetActor (identified by its ID), commonly used in the
+   * style-editor, get its ownerNode and return the corresponding walker's
+   * NodeActor
+   */
+  getStyleSheetOwnerNode: method(function(styleSheetActorID) {
+    let styleSheetActor = this.conn.getActor(styleSheetActorID);
+    let ownerNode = styleSheetActor.ownerNode;
+
+    if (!styleSheetActor || !ownerNode) {
+      return null;
+    }
+
+    return this.attachElement(ownerNode);
+  }, {
+    request: {
+      styleSheetActorID: Arg(0, "string")
+    },
+    response: {
+      ownerNode: RetVal("nullable:disconnectedNode")
+    }
+  }),
 });
 
 /**
@@ -1989,13 +2545,15 @@ var WalkerFront = exports.WalkerFront = protocol.FrontClass(WalkerActor, {
   // Set to true if cleanup should be requested after every mutation list.
   autoCleanup: true,
 
+  /**
+   * This is kept for backward-compatibility reasons with older remote target.
+   * Targets previous to bug 916443
+   */
   pick: protocol.custom(function() {
     return this._pick().then(response => {
       return response.node;
     });
-  }, {
-    impl: "_pick"
-  }),
+  }, {impl: "_pick"}),
 
   initialize: function(client, form) {
     this._createRootNodePromise();
@@ -2103,12 +2661,36 @@ var WalkerFront = exports.WalkerFront = protocol.FrontClass(WalkerActor, {
     impl: "_releaseNode"
   }),
 
+  findInspectingNode: protocol.custom(function() {
+    return this._findInspectingNode().then(response => {
+      return response.node;
+    });
+  }, {
+    impl: "_findInspectingNode"
+  }),
+
   querySelector: protocol.custom(function(queryNode, selector) {
     return this._querySelector(queryNode, selector).then(response => {
       return response.node;
     });
   }, {
     impl: "_querySelector"
+  }),
+
+  getNodeActorFromObjectActor: protocol.custom(function(objectActorID) {
+    return this._getNodeActorFromObjectActor(objectActorID).then(response => {
+      return response ? response.node : null;
+    });
+  }, {
+    impl: "_getNodeActorFromObjectActor"
+  }),
+
+  getStyleSheetOwnerNode: protocol.custom(function(styleSheetActorID) {
+    return this._getStyleSheetOwnerNode(styleSheetActorID).then(response => {
+      return response ? response.node : null;
+    });
+  }, {
+    impl: "_getStyleSheetOwnerNode"
   }),
 
   _releaseFront: function(node, force) {
@@ -2196,7 +2778,13 @@ var WalkerFront = exports.WalkerFront = protocol.FrontClass(WalkerActor, {
           // ids with front in the mutation record.
           emittedMutation.added = addedFronts;
           emittedMutation.removed = removedFronts;
-          targetFront._form.numChildren = change.numChildren;
+
+          // If this is coming from a DOM mutation, the actor's numChildren
+          // was passed in. Otherwise, it is simulated from a frame load or
+          // unload, so don't change the front's form.
+          if ('numChildren' in change) {
+            targetFront._form.numChildren = change.numChildren;
+          }
         } else if (change.type === "frameLoad") {
           // Nothing we need to do here, except verify that we don't have any
           // document children, because we should have gotten a documentUnload
@@ -2262,7 +2850,7 @@ var WalkerFront = exports.WalkerFront = protocol.FrontClass(WalkerActor, {
 
   // XXX hack during transition to remote inspector: get a proper NodeFront
   // for a given local node.  Only works locally.
-  frontForRawNode: function(rawNode){
+  frontForRawNode: function(rawNode) {
     if (!this.isLocal()) {
       console.warn("Tried to use frontForRawNode on a remote connection.");
       return null;
@@ -2336,7 +2924,7 @@ var AttributeModificationList = Class({
  * Server side of the inspector actor, which is used to create
  * inspector-related actors, including the walker.
  */
-var InspectorActor = protocol.ActorClass({
+var InspectorActor = exports.InspectorActor = protocol.ActorClass({
   typeName: "inspector",
   initialize: function(conn, tabActor) {
     protocol.Actor.prototype.initialize.call(this, conn);
@@ -2390,7 +2978,116 @@ var InspectorActor = protocol.ActorClass({
     return this._pageStylePromise;
   }, {
     request: {},
-    response: { pageStyle: RetVal("pagestyle") }
+    response: {
+      pageStyle: RetVal("pagestyle")
+    }
+  }),
+
+  /**
+   * The most used highlighter actor is the HighlighterActor which can be
+   * conveniently retrieved by this method.
+   * The same instance will always be returned by this method when called
+   * several times.
+   * The highlighter actor returned here is used to highlighter elements's
+   * box-models from the markup-view, layout-view, console, debugger, ... as
+   * well as select elements with the pointer (pick).
+   *
+   * @param {Boolean} autohide Optionally autohide the highlighter after an
+   * element has been picked
+   * @return {HighlighterActor}
+   */
+  getHighlighter: method(function (autohide) {
+    if (this._highlighterPromise) {
+      return this._highlighterPromise;
+    }
+
+    this._highlighterPromise = this.getWalker().then(walker => {
+      return HighlighterActor(this, autohide);
+    });
+    return this._highlighterPromise;
+  }, {
+    request: {
+      autohide: Arg(0, "boolean")
+    },
+    response: {
+      highligter: RetVal("highlighter")
+    }
+  }),
+
+  /**
+   * If consumers need to display several highlighters at the same time or
+   * different types of highlighters, then this method should be used, passing
+   * the type name of the highlighter needed as argument.
+   * A new instance will be created everytime the method is called, so it's up
+   * to the consumer to release it when it is not needed anymore
+   *
+   * @param {String} type The type of highlighter to create
+   * @return {Highlighter} The highlighter actor instance or null if the
+   * typeName passed doesn't match any available highlighter
+   */
+  getHighlighterByType: method(function (typeName) {
+    if (HIGHLIGHTER_CLASSES[typeName]) {
+      return CustomHighlighterActor(this, typeName);
+    } else {
+      return null;
+    }
+  }, {
+    request: {
+      typeName: Arg(0)
+    },
+    response: {
+      highlighter: RetVal("nullable:customhighlighter")
+    }
+  }),
+
+  /**
+   * Get the node's image data if any (for canvas and img nodes).
+   * Returns an imageData object with the actual data being a LongStringActor
+   * and a size json object.
+   * The image data is transmitted as a base64 encoded png data-uri.
+   * The method rejects if the node isn't an image or if the image is missing
+   *
+   * Accepts a maxDim request parameter to resize images that are larger. This
+   * is important as the resizing occurs server-side so that image-data being
+   * transfered in the longstring back to the client will be that much smaller
+   */
+  getImageDataFromURL: method(function(url, maxDim) {
+    let deferred = promise.defer();
+    let img = new this.window.Image();
+
+    // On load, get the image data and send the response
+    img.onload = () => {
+      // imageToImageData throws an error if the image is missing
+      try {
+        let imageData = imageToImageData(img, maxDim);
+        deferred.resolve({
+          data: LongStringActor(this.conn, imageData.data),
+          size: imageData.size
+        });
+      } catch (e) {
+        deferred.reject(new Error("Image " + url+ " not available"));
+      }
+    }
+
+    // If the URL doesn't point to a resource, reject
+    img.onerror = () => {
+      deferred.reject(new Error("Image " + url+ " not available"));
+    }
+
+    // If the request hangs for too long, kill it to avoid queuing up other requests
+    // to the same actor, except if we're running tests
+    if (!gDevTools.testing) {
+      this.window.setTimeout(() => {
+        deferred.reject(new Error("Image " + url + " could not be retrieved in time"));
+      }, IMAGE_FETCHING_TIMEOUT);
+    }
+
+    img.src = url;
+
+    return deferred.promise;
+  }, {
+    request: {url: Arg(0), maxDim: Arg(1, "nullable:number")},
+    response: RetVal("imageData")
   })
 });
 
@@ -2405,7 +3102,6 @@ var InspectorFront = exports.InspectorFront = protocol.FrontClass(InspectorActor
 
     // XXX: This is the first actor type in its hierarchy to use the protocol
     // library, so we're going to self-own on the client side for now.
-    client.addActorPool(this);
     this.manage(this);
   },
 
@@ -2439,29 +3135,38 @@ var InspectorFront = exports.InspectorFront = protocol.FrontClass(InspectorActor
   })
 });
 
-function documentWalker(node, rootWin, whatToShow=Ci.nsIDOMNodeFilter.SHOW_ALL) {
-  return new DocumentWalker(node, rootWin, whatToShow, whitespaceTextFilter, false);
-}
-
 // Exported for test purposes.
-exports._documentWalker = documentWalker;
+exports._documentWalker = DocumentWalker;
 
 function nodeDocument(node) {
   return node.ownerDocument || (node.nodeType == Ci.nsIDOMNode.DOCUMENT_NODE ? node : null);
 }
 
 /**
- * Similar to a TreeWalker, except will dig in to iframes and it doesn't
- * implement the good methods like previousNode and nextNode.
+ * Wrapper for inDeepTreeWalker.  Adds filtering to the traversal methods.
+ * See inDeepTreeWalker for more information about the methods.
  *
- * See TreeWalker documentation for explanations of the methods.
+ * @param {DOMNode} aNode
+ * @param {Window} aRootWin
+ * @param {Int} aShow See Ci.nsIDOMNodeFilter / inIDeepTreeWalker for options.
+ * @param {Function} aFilter A custom filter function Taking in a DOMNode
+ *        and returning an Int. See nodeFilter for an example.
  */
-function DocumentWalker(aNode, aRootWin, aShow, aFilter, aExpandEntityReferences)
-{
-  let doc = nodeDocument(aNode);
-  this.layoutHelpers = new LayoutHelpers(aRootWin);
-  this.walker = doc.createTreeWalker(doc,
-    aShow, aFilter, aExpandEntityReferences);
+function DocumentWalker(aNode, aRootWin, aShow=Ci.nsIDOMNodeFilter.SHOW_ALL,
+                        aFilter=nodeFilter) {
+  if (!(this instanceof DocumentWalker)) {
+    return new DocumentWalker(aNode, aRootWin, aShow, aFilter);
+  }
+
+  if (!aRootWin.location) {
+    throw new Error("Got an invalid root window in DocumentWalker");
+  }
+
+  this.walker = Cc["@mozilla.org/inspector/deep-tree-walker;1"].createInstance(Ci.inIDeepTreeWalker);
+  this.walker.showAnonymousContent = true;
+  this.walker.showSubDocuments = true;
+  this.walker.showDocumentsAsNodes = true;
+  this.walker.init(aRootWin.document, aShow);
   this.walker.currentNode = aNode;
   this.filter = aFilter;
 }
@@ -2469,89 +3174,142 @@ function DocumentWalker(aNode, aRootWin, aShow, aFilter, aExpandEntityReferences
 DocumentWalker.prototype = {
   get node() this.walker.node,
   get whatToShow() this.walker.whatToShow,
-  get expandEntityReferences() this.walker.expandEntityReferences,
   get currentNode() this.walker.currentNode,
   set currentNode(aVal) this.walker.currentNode = aVal,
 
-  /**
-   * Called when the new node is in a different document than
-   * the current node, creates a new treewalker for the document we've
-   * run in to.
-   */
-  _reparentWalker: function DW_reparentWalker(aNewNode) {
-    if (!aNewNode) {
-      return null;
-    }
-    let doc = nodeDocument(aNewNode);
-    let walker = doc.createTreeWalker(doc,
-      this.whatToShow, this.filter, this.expandEntityReferences);
-    walker.currentNode = aNewNode;
-    this.walker = walker;
-    return aNewNode;
+  parentNode: function() {
+    return this.walker.parentNode();
   },
 
-  parentNode: function DW_parentNode()
-  {
-    let currentNode = this.walker.currentNode;
-    let parentNode = this.walker.parentNode();
-
-    if (!parentNode) {
-      if (currentNode && currentNode.nodeType == Ci.nsIDOMNode.DOCUMENT_NODE
-          && currentNode.defaultView) {
-
-        let window = currentNode.defaultView;
-        let frame = this.layoutHelpers.getFrameElement(window);
-        if (frame) {
-          return this._reparentWalker(frame);
-        }
-      }
-      return null;
-    }
-
-    return parentNode;
-  },
-
-  firstChild: function DW_firstChild()
-  {
+  firstChild: function() {
     let node = this.walker.currentNode;
     if (!node)
       return null;
-    if (node.contentDocument) {
-      return this._reparentWalker(node.contentDocument);
-    } else if (node.getSVGDocument) {
-      return this._reparentWalker(node.getSVGDocument());
+
+    let firstChild = this.walker.firstChild();
+    while (firstChild && this.filter(firstChild) === Ci.nsIDOMNodeFilter.FILTER_SKIP) {
+      firstChild = this.walker.nextSibling();
     }
-    return this.walker.firstChild();
+
+    return firstChild;
   },
 
-  lastChild: function DW_lastChild()
-  {
+  lastChild: function() {
     let node = this.walker.currentNode;
     if (!node)
       return null;
-    if (node.contentDocument) {
-      return this._reparentWalker(node.contentDocument);
-    } else if (node.getSVGDocument) {
-      return this._reparentWalker(node.getSVGDocument());
+
+    let lastChild = this.walker.lastChild();
+    while (lastChild && this.filter(lastChild) === Ci.nsIDOMNodeFilter.FILTER_SKIP) {
+      lastChild = this.walker.previousSibling();
     }
-    return this.walker.lastChild();
+
+    return lastChild;
   },
 
-  previousSibling: function DW_previousSibling() this.walker.previousSibling(),
-  nextSibling: function DW_nextSibling() this.walker.nextSibling()
+  previousSibling: function() {
+    let node = this.walker.previousSibling();
+    while (node && this.filter(node) === Ci.nsIDOMNodeFilter.FILTER_SKIP) {
+      node = this.walker.previousSibling();
+    }
+    return node;
+  },
+
+  nextSibling: function() {
+    let node = this.walker.nextSibling();
+    while (node && this.filter(node) === Ci.nsIDOMNodeFilter.FILTER_SKIP) {
+      node = this.walker.nextSibling();
+    }
+    return node;
+  }
+};
+
+function isXULDocument(doc) {
+  return doc &&
+         doc.documentElement &&
+         doc.documentElement.namespaceURI === XUL_NS;
 }
 
 /**
  * A tree walker filter for avoiding empty whitespace text nodes.
  */
-function whitespaceTextFilter(aNode)
-{
-    if (aNode.nodeType == Ci.nsIDOMNode.TEXT_NODE &&
-        !/[^\s]/.exec(aNode.nodeValue)) {
-      return Ci.nsIDOMNodeFilter.FILTER_SKIP;
-    } else {
-      return Ci.nsIDOMNodeFilter.FILTER_ACCEPT;
+function nodeFilter(aNode) {
+  // Ignore empty whitespace text nodes.
+  if (aNode.nodeType == Ci.nsIDOMNode.TEXT_NODE &&
+      !/[^\s]/.exec(aNode.nodeValue)) {
+    return Ci.nsIDOMNodeFilter.FILTER_SKIP;
+  }
+
+  // Ignore all native anonymous content (like internals for form
+  // controls).  Except for:
+  //   1) Anonymous content in a XUL document. This is needed for all
+  //      elements within the Browser Toolbox to properly show up.
+  //   2) ::before/::after - we do want this to show in the walker so
+  //      they can be inspected.
+  if (LayoutHelpers.isNativeAnonymous(aNode) &&
+      !isXULDocument(aNode.ownerDocument) &&
+      (
+        aNode.nodeName !== "_moz_generated_content_before" &&
+        aNode.nodeName !== "_moz_generated_content_after")
+      ) {
+    return Ci.nsIDOMNodeFilter.FILTER_SKIP;
+  }
+
+  return Ci.nsIDOMNodeFilter.FILTER_ACCEPT;
+}
+
+/**
+ * Given an image DOMNode, return the image data-uri.
+ * @param {DOMNode} node The image node
+ * @param {Number} maxDim Optionally pass a maximum size you want the longest
+ * side of the image to be resized to before getting the image data.
+ * @return {Object} An object containing the data-uri and size-related information
+ * {data: "...", size: {naturalWidth: 400, naturalHeight: 300, resized: true}}
+ * @throws an error if the node isn't an image or if the image is missing
+ */
+function imageToImageData(node, maxDim) {
+  let isImg = node.tagName.toLowerCase() === "img";
+  let isCanvas = node.tagName.toLowerCase() === "canvas";
+
+  if (!isImg && !isCanvas) {
+    return null;
+  }
+
+  // Get the image resize ratio if a maxDim was provided
+  let resizeRatio = 1;
+  let imgWidth = node.naturalWidth || node.width;
+  let imgHeight = node.naturalHeight || node.height;
+  let imgMax = Math.max(imgWidth, imgHeight);
+  if (maxDim && imgMax > maxDim) {
+    resizeRatio = maxDim / imgMax;
+  }
+
+  // Extract the image data
+  let imageData;
+  // The image may already be a data-uri, in which case, save ourselves the
+  // trouble of converting via the canvas.drawImage.toDataURL method
+  if (isImg && node.src.startsWith("data:")) {
+    imageData = node.src;
+  } else {
+    // Create a canvas to copy the rawNode into and get the imageData from
+    let canvas = node.ownerDocument.createElementNS(XHTML_NS, "canvas");
+    canvas.width = imgWidth * resizeRatio;
+    canvas.height = imgHeight * resizeRatio;
+    let ctx = canvas.getContext("2d");
+
+    // Copy the rawNode image or canvas in the new canvas and extract data
+    ctx.drawImage(node, 0, 0, canvas.width, canvas.height);
+    imageData = canvas.toDataURL("image/png");
+  }
+
+  return {
+    data: imageData,
+    size: {
+      naturalWidth: imgWidth,
+      naturalHeight: imgHeight,
+      resized: resizeRatio !== 1
     }
+  }
 }
 
 loader.lazyGetter(this, "DOMUtils", function () {

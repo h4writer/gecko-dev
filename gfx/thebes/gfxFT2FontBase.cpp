@@ -8,6 +8,7 @@
 #include "harfbuzz/hb.h"
 #include "mozilla/Likely.h"
 #include "gfxFontConstants.h"
+#include "gfxFontUtils.h"
 
 using namespace mozilla::gfx;
 
@@ -107,7 +108,7 @@ gfxFT2FontBase::GetGlyphExtents(uint32_t aGlyph, cairo_text_extents_t* aExtents)
 }
 
 const gfxFont::Metrics&
-gfxFT2FontBase::GetMetrics()
+gfxFT2FontBase::GetHorizontalMetrics()
 {
     if (mHasMetrics)
         return mMetrics;
@@ -116,7 +117,9 @@ gfxFT2FontBase::GetMetrics()
         new(&mMetrics) gfxFont::Metrics(); // zero initialize
         mSpaceGlyph = 0;
     } else {
-        gfxFT2LockedFace(this).GetMetrics(&mMetrics, &mSpaceGlyph);
+        gfxFT2LockedFace face(this);
+        mFUnitsConvFactor = face.XScale();
+        face.GetMetrics(&mMetrics, &mSpaceGlyph);
     }
 
     SanitizeMetrics(&mMetrics, false);
@@ -130,7 +133,7 @@ gfxFT2FontBase::GetMetrics()
     fprintf (stderr, "    maxAscent: %f maxDescent: %f\n", mMetrics.maxAscent, mMetrics.maxDescent);
     fprintf (stderr, "    internalLeading: %f externalLeading: %f\n", mMetrics.externalLeading, mMetrics.internalLeading);
     fprintf (stderr, "    spaceWidth: %f aveCharWidth: %f xHeight: %f\n", mMetrics.spaceWidth, mMetrics.aveCharWidth, mMetrics.xHeight);
-    fprintf (stderr, "    uOff: %f uSize: %f stOff: %f stSize: %f suOff: %f suSize: %f\n", mMetrics.underlineOffset, mMetrics.underlineSize, mMetrics.strikeoutOffset, mMetrics.strikeoutSize, mMetrics.superscriptOffset, mMetrics.subscriptOffset);
+    fprintf (stderr, "    uOff: %f uSize: %f stOff: %f stSize: %f\n", mMetrics.underlineOffset, mMetrics.underlineSize, mMetrics.strikeoutOffset, mMetrics.strikeoutSize);
 #endif
 
     mHasMetrics = true;
@@ -143,7 +146,7 @@ gfxFT2FontBase::GetSpaceGlyph()
 {
     NS_ASSERTION(GetStyle()->size != 0,
                  "forgot to short-circuit a text run with zero-sized font?");
-    GetMetrics();
+    GetHorizontalMetrics();
     return mSpaceGlyph;
 }
 
@@ -155,6 +158,10 @@ gfxFT2FontBase::GetGlyph(uint32_t unicode, uint32_t variation_selector)
             gfxFT2LockedFace(this).GetUVSGlyph(unicode, variation_selector);
         if (id)
             return id;
+        id = gfxFontUtils::GetUVSFallback(unicode, variation_selector);
+        if (id) {
+            unicode = id;
+        }
     }
 
     return GetGlyph(unicode);
@@ -219,15 +226,15 @@ gfxFT2FontBase::ConstructFontOptions()
   const gfxFontStyle* style = this->GetStyle();
   if (style->style == NS_FONT_STYLE_ITALIC) {
     if (style->weight == NS_FONT_WEIGHT_BOLD) {
-      mFontOptions.mStyle = FONT_STYLE_BOLD_ITALIC;
+      mFontOptions.mStyle = FontStyle::BOLD_ITALIC;
     } else {
-      mFontOptions.mStyle = FONT_STYLE_ITALIC;
+      mFontOptions.mStyle = FontStyle::ITALIC;
     }
   } else {
     if (style->weight == NS_FONT_WEIGHT_BOLD) {
-      mFontOptions.mStyle = FONT_STYLE_BOLD;
+      mFontOptions.mStyle = FontStyle::BOLD;
     } else {
-      mFontOptions.mStyle = FONT_STYLE_NORMAL;
+      mFontOptions.mStyle = FontStyle::NORMAL;
     }
   }
 }

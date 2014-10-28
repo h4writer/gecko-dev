@@ -1,4 +1,4 @@
-/* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -63,10 +63,9 @@ let (XULAppInfo = {
 }
 
 // Smart bookmarks constants.
-let isWin8OrHigher = Services.sysinfo.getProperty("hasWindowsTouchInterface");
-const SMART_BOOKMARKS_VERSION = 6
+const SMART_BOOKMARKS_VERSION = 7;
 const SMART_BOOKMARKS_ON_TOOLBAR = 1;
-const SMART_BOOKMARKS_ON_MENU = isWin8OrHigher ? 4 : 3; // Takes in count the additional separator.
+const SMART_BOOKMARKS_ON_MENU =  3; // Takes into account the additional separator.
 
 // Default bookmarks constants.
 const DEFAULT_BOOKMARKS_ON_TOOLBAR = 1;

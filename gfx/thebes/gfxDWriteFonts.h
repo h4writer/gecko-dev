@@ -30,8 +30,6 @@ public:
 
     virtual gfxFont* CopyWithAntialiasOption(AntialiasOption anAAOption);
 
-    virtual const gfxFont::Metrics& GetMetrics();
-
     virtual uint32_t GetSpaceGlyph();
 
     virtual bool SetupCairoFont(gfxContext *aContext);
@@ -51,13 +49,15 @@ public:
                                uint32_t aStart, uint32_t aEnd,
                                BoundingBoxType aBoundingBoxType,
                                gfxContext *aContextForTightBoundingBox,
-                               Spacing *aSpacing);
+                               Spacing *aSpacing,
+                               uint16_t aOrientation);
 
-    virtual bool ProvidesGlyphWidths();
+    virtual bool ProvidesGlyphWidths() const;
 
     virtual int32_t GetGlyphWidth(gfxContext *aCtx, uint16_t aGID);
 
-    virtual mozilla::TemporaryRef<mozilla::gfx::GlyphRenderingOptions> GetGlyphRenderingOptions();
+    virtual mozilla::TemporaryRef<mozilla::gfx::GlyphRenderingOptions>
+        GetGlyphRenderingOptions(const TextRunDrawParams* aRunParams = nullptr) MOZ_OVERRIDE;
 
     virtual void AddSizeOfExcludingThis(mozilla::MallocSizeOf aMallocSizeOf,
                                         FontCacheSizes* aSizes) const;
@@ -71,9 +71,7 @@ public:
     virtual cairo_scaled_font_t *GetCairoScaledFont();
 
 protected:
-    friend class gfxDWriteShaper;
-
-    virtual void CreatePlatformShaper();
+    virtual const Metrics& GetHorizontalMetrics();
 
     bool GetFakeMetricsForArialBlack(DWRITE_FONT_METRICS *aFontMetrics);
 
@@ -91,7 +89,7 @@ protected:
     nsRefPtr<IDWriteFontFace> mFontFace;
     cairo_font_face_t *mCairoFontFace;
 
-    gfxFont::Metrics          *mMetrics;
+    Metrics *mMetrics;
 
     // cache of glyph widths in 16.16 fixed-point pixels
     nsAutoPtr<nsDataHashtable<nsUint32HashKey,int32_t> > mGlyphWidths;

@@ -15,7 +15,7 @@
 #include "nsPresContext.h"
 #include "nsIContent.h"
 #include "nsCOMPtr.h"
-#include "nsINameSpaceManager.h"
+#include "nsNameSpaceManager.h"
 #include "nsGkAtoms.h"
 #include "nsHTMLParts.h"
 #include "nsIPresShell.h"
@@ -25,6 +25,7 @@
 #include "nsStackLayout.h"
 #include "nsDisplayList.h"
 #include "nsContainerFrame.h"
+#include "nsContentUtils.h"
 
 #ifdef ACCESSIBILITY
 #include "nsAccessibilityService.h"
@@ -57,7 +58,7 @@ nsDeckFrame::GetType() const
   return nsGkAtoms::deckFrame;
 }
 
-NS_IMETHODIMP
+nsresult
 nsDeckFrame::AttributeChanged(int32_t         aNameSpaceID,
                               nsIAtom*        aAttribute,
                               int32_t         aModType)
@@ -75,9 +76,9 @@ nsDeckFrame::AttributeChanged(int32_t         aNameSpaceID,
 }
 
 void
-nsDeckFrame::Init(nsIContent*     aContent,
-                  nsIFrame*       aParent,
-                  nsIFrame*       aPrevInFlow)
+nsDeckFrame::Init(nsIContent*       aContent,
+                  nsContainerFrame* aParent,
+                  nsIFrame*         aPrevInFlow)
 {
   nsBoxFrame::Init(aContent, aParent, aPrevInFlow);
 
@@ -155,6 +156,34 @@ nsDeckFrame::BuildDisplayList(nsDisplayListBuilder*   aBuilder,
 }
 
 void
+nsDeckFrame::RemoveFrame(ChildListID aListID,
+                         nsIFrame* aOldFrame)
+{
+  nsIFrame* currentFrame = GetSelectedBox();
+  if (currentFrame &&
+      aOldFrame &&
+      currentFrame != aOldFrame) {
+    // If the frame we're removing is at an index that's less
+    // than mIndex, that means we're going to be shifting indexes
+    // by 1.
+    //
+    // We attempt to keep the same child displayed by automatically
+    // updating our internal notion of the current index.
+    int32_t removedIndex = mFrames.IndexOf(aOldFrame);
+    MOZ_ASSERT(removedIndex >= 0,
+               "A deck child was removed that was not in mFrames.");
+    if (removedIndex < mIndex) {
+      mIndex--;
+      // This is going to cause us to handle the index change in IndexedChanged,
+      // but since the new index will match mIndex, it's essentially a noop.
+      nsContentUtils::AddScriptRunner(new nsSetAttrRunnable(
+        mContent, nsGkAtoms::selectedIndex, mIndex));
+    }
+  }
+  nsBoxFrame::RemoveFrame(aListID, aOldFrame);
+}
+
+void
 nsDeckFrame::BuildDisplayListForChildren(nsDisplayListBuilder*   aBuilder,
                                          const nsRect&           aDirtyRect,
                                          const nsDisplayListSet& aLists)
@@ -182,7 +211,7 @@ nsDeckFrame::DoLayout(nsBoxLayoutState& aState)
   nsresult rv = nsBoxFrame::DoLayout(aState);
 
   // run though each child. Hide all but the selected one
-  nsIFrame* box = GetChildBox();
+  nsIFrame* box = nsBox::GetChildBox(this);
 
   nscoord count = 0;
   while (box) 
@@ -191,7 +220,7 @@ nsDeckFrame::DoLayout(nsBoxLayoutState& aState)
     if (count != mIndex) 
       HideBox(box);
 
-    box = box->GetNextBox();
+    box = GetNextBox(box);
     count++;
   }
 

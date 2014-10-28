@@ -4,64 +4,68 @@
 
 "use strict";
 
+let { TabActor } = require("devtools/server/actors/webbrowser");
+
 /**
  * Tab actor for documents living in a child process.
  *
- * Depends on BrowserTabActor, defined in webbrowser.js actor.
+ * Depends on TabActor, defined in webbrowser.js.
  */
 
 /**
  * Creates a tab actor for handling requests to the single tab, like
- * attaching and detaching. ContentAppActor respects the actor factories
+ * attaching and detaching. ContentActor respects the actor factories
  * registered with DebuggerServer.addTabActor.
  *
  * @param connection DebuggerServerConnection
  *        The conection to the client.
- * @param browser browser
- *        The browser instance that contains this tab.
+ * @param chromeGlobal
+ *        The content script global holding |content| and |docShell| properties for a tab.
  */
-function ContentAppActor(connection, browser)
+function ContentActor(connection, chromeGlobal)
 {
-  BrowserTabActor.call(this, connection, browser);
+  this._chromeGlobal = chromeGlobal;
+  TabActor.call(this, connection, chromeGlobal);
+  this.traits.reconfigure = false;
+  this._sendForm = this._sendForm.bind(this);
+  this._chromeGlobal.addMessageListener("debug:form", this._sendForm);
 }
 
-ContentAppActor.prototype = Object.create(BrowserTabActor.prototype);
+ContentActor.prototype = Object.create(TabActor.prototype);
 
-ContentAppActor.prototype.constructor = ContentAppActor;
+ContentActor.prototype.constructor = ContentActor;
 
-Object.defineProperty(ContentAppActor.prototype, "title", {
+Object.defineProperty(ContentActor.prototype, "docShell", {
   get: function() {
-    return this.browser.title;
+    return this._chromeGlobal.docShell;
   },
   enumerable: true,
-  configurable: false
+  configurable: true
 });
 
-Object.defineProperty(ContentAppActor.prototype, "url", {
+Object.defineProperty(ContentActor.prototype, "title", {
   get: function() {
-    return this.browser.document.documentURI;
+    return this.window.document.title;
   },
   enumerable: true,
-  configurable: false
+  configurable: true
 });
 
-Object.defineProperty(ContentAppActor.prototype, "window", {
-  get: function() {
-    return this.browser;
-  },
-  enumerable: true,
-  configurable: false
-});
+ContentActor.prototype.exit = function() {
+  this._chromeGlobal.removeMessageListener("debug:form", this._sendForm);
+  this._sendForm = null;
+  TabActor.prototype.exit.call(this);
+};
 
-// Override grip just to rename this._tabActorPool to this._tabActorPool2
+// Override form just to rename this._tabActorPool to this._tabActorPool2
 // in order to prevent it to be cleaned on detach.
-// We have to keep tab actors alive as we keep the ContentAppActor
+// We have to keep tab actors alive as we keep the ContentActor
 // alive after detach and reuse it for multiple debug sessions.
-ContentAppActor.prototype.grip = function () {
+ContentActor.prototype.form = function () {
   let response = {
-    'actor': this.actorID,
-    'title': this.title,
-    'url': this.url
+    "actor": this.actorID,
+    "title": this.title,
+    "url": this.url
   };
 
   // Walk over tab actors added by extensions and add them to a new ActorPool.
@@ -76,3 +80,10 @@ ContentAppActor.prototype.grip = function () {
   return response;
 };
 
+/**
+ * On navigation events, our URL and/or title may change, so we update our
+ * counterpart in the parent process that participates in the tab list.
+ */
+ContentActor.prototype._sendForm = function() {
+  this._chromeGlobal.sendAsyncMessage("debug:form", this.form());
+};

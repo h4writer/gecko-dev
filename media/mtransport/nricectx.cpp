@@ -44,10 +44,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 #include <vector>
 
+#include "mozilla/UniquePtr.h"
+
 #include "logging.h"
 #include "nspr.h"
 #include "nss.h"
 #include "pk11pub.h"
+#include "plbase64.h"
 
 #include "nsCOMPtr.h"
 #include "nsComponentManagerUtils.h"
@@ -65,12 +68,14 @@ extern "C" {
 #include "async_timer.h"
 #include "r_crc32.h"
 #include "r_memory.h"
+#include "ice_reg.h"
 #include "ice_util.h"
 #include "transport_addr.h"
 #include "nr_crypto.h"
 #include "nr_socket.h"
 #include "nr_socket_local.h"
 #include "stun_client_ctx.h"
+#include "stun_reg.h"
 #include "stun_server_ctx.h"
 #include "ice_codeword.h"
 #include "ice_ctx.h"
@@ -87,7 +92,18 @@ extern "C" {
 
 namespace mozilla {
 
+TimeStamp nr_socket_short_term_violation_time() {
+  return NrSocketBase::short_term_violation_time();
+}
+
+TimeStamp nr_socket_long_term_violation_time() {
+  return NrSocketBase::long_term_violation_time();
+}
+
 MOZ_MTLOG_MODULE("mtransport")
+
+const char kNrIceTransportUdp[] = "udp";
+const char kNrIceTransportTcp[] = "tcp";
 
 static bool initialized = false;
 
@@ -129,6 +145,8 @@ static int nr_crypto_nss_hmac(UCHAR *key, int keyl, UCHAR *buf, int bufl,
 
   hmac_ctx = PK11_CreateContextBySymKey(mech, CKA_SIGN,
                                         skey, &param);
+  if (!hmac_ctx)
+    goto abort;
 
   status = PK11_DigestBegin(hmac_ctx);
   if (status != SECSuccess)
@@ -184,7 +202,7 @@ static nr_ice_crypto_vtbl nr_ice_crypto_nss_vtbl = {
 
 
 nsresult NrIceStunServer::ToNicerStunStruct(nr_ice_stun_server *server,
-                                            std::string transport) const {
+                                            const std::string &transport) const {
   int r;
   int transport_int;
 
@@ -301,13 +319,27 @@ int NrIceCtx::stream_failed(void *obj, nr_ice_media_stream *stream) {
   return 0;
 }
 
+int NrIceCtx::ice_checking(void *obj, nr_ice_peer_ctx *pctx) {
+  MOZ_MTLOG(ML_DEBUG, "ice_checking called");
+
+  // Get the ICE ctx
+  NrIceCtx *ctx = static_cast<NrIceCtx *>(obj);
+
+  ctx->SetConnectionState(ICE_CTX_CHECKING);
+
+  return 0;
+}
+
 int NrIceCtx::ice_completed(void *obj, nr_ice_peer_ctx *pctx) {
   MOZ_MTLOG(ML_DEBUG, "ice_completed called");
 
   // Get the ICE ctx
   NrIceCtx *ctx = static_cast<NrIceCtx *>(obj);
 
-  ctx->SetConnectionState(ICE_CTX_OPEN);
+  // This is called even on failed contexts.
+  if (ctx->connection_state() != ICE_CTX_FAILED) {
+    ctx->SetConnectionState(ICE_CTX_OPEN);
+  }
 
   return 0;
 }
@@ -354,7 +386,8 @@ void NrIceCtx::trickle_cb(void *arg, nr_ice_ctx *ice_ctx,
 
 RefPtr<NrIceCtx> NrIceCtx::Create(const std::string& name,
                                   bool offerer,
-                                  bool set_interface_priorities) {
+                                  bool set_interface_priorities,
+                                  bool allow_loopback) {
 
   RefPtr<NrIceCtx> ctx = new NrIceCtx(name, offerer);
 
@@ -367,10 +400,11 @@ RefPtr<NrIceCtx> NrIceCtx::Create(const std::string& name,
 
     // Set the priorites for candidate type preferences.
     // These numbers come from RFC 5245 S. 4.1.2.2
-    NR_reg_set_uchar((char *)"ice.pref.type.srv_rflx", 100);
-    NR_reg_set_uchar((char *)"ice.pref.type.peer_rflx", 110);
-    NR_reg_set_uchar((char *)"ice.pref.type.host", 126);
-    NR_reg_set_uchar((char *)"ice.pref.type.relayed", 0);
+    NR_reg_set_uchar((char *)NR_ICE_REG_PREF_TYPE_SRV_RFLX, 100);
+    NR_reg_set_uchar((char *)NR_ICE_REG_PREF_TYPE_PEER_RFLX, 110);
+    NR_reg_set_uchar((char *)NR_ICE_REG_PREF_TYPE_HOST, 126);
+    NR_reg_set_uchar((char *)NR_ICE_REG_PREF_TYPE_RELAYED, 5);
+    NR_reg_set_uchar((char *)NR_ICE_REG_PREF_TYPE_RELAYED_TCP, 0);
 
     if (set_interface_priorities) {
       NR_reg_set_uchar((char *)"ice.pref.interface.rl0", 255);
@@ -399,7 +433,12 @@ RefPtr<NrIceCtx> NrIceCtx::Create(const std::string& name,
       NR_reg_set_uchar((char *)"ice.pref.interface.wlan0", 232);
     }
 
-    NR_reg_set_uint4((char *)"stun.client.maximum_transmits",4);
+    NR_reg_set_uint4((char *)"stun.client.maximum_transmits",7);
+    NR_reg_set_uint4((char *)NR_ICE_REG_TRICKLE_GRACE_PERIOD, 5000);
+
+    if (allow_loopback) {
+      NR_reg_set_char((char *)NR_STUN_REG_PREF_ALLOW_LOOPBACK_ADDRS, 1);
+    }
   }
 
   // Create the ICE context
@@ -445,6 +484,7 @@ RefPtr<NrIceCtx> NrIceCtx::Create(const std::string& name,
   ctx->ice_handler_vtbl_->stream_failed = &NrIceCtx::stream_failed;
   ctx->ice_handler_vtbl_->ice_completed = &NrIceCtx::ice_completed;
   ctx->ice_handler_vtbl_->msg_recvd = &NrIceCtx::msg_recvd;
+  ctx->ice_handler_vtbl_->ice_checking = &NrIceCtx::ice_checking;
 
   ctx->ice_handler_ = new nr_ice_handler();
   ctx->ice_handler_->vtbl = ctx->ice_handler_vtbl_;
@@ -470,6 +510,15 @@ RefPtr<NrIceCtx> NrIceCtx::Create(const std::string& name,
   return ctx;
 }
 
+// ONLY USE THIS FOR TESTING. Will cause totally unpredictable and possibly very
+// bad effects if ICE is still live.
+void NrIceCtx::internal_DeinitializeGlobal() {
+  NR_reg_del((char *)"stun");
+  NR_reg_del((char *)"ice");
+  RLogRingBuffer::DestroyInstance();
+  nr_crypto_vtbl = nullptr;
+  initialized = false;
+}
 
 NrIceCtx::~NrIceCtx() {
   MOZ_MTLOG(ML_DEBUG, "Destroying ICE ctx '" << name_ <<"'");
@@ -501,13 +550,16 @@ nsresult NrIceCtx::SetControlling(Controlling controlling) {
   return NS_OK;
 }
 
+NrIceCtx::Controlling NrIceCtx::GetControlling() {
+  return (peer_->controlling) ? ICE_CONTROLLING : ICE_CONTROLLED;
+}
+
 nsresult NrIceCtx::SetStunServers(const std::vector<NrIceStunServer>&
                                   stun_servers) {
   if (stun_servers.empty())
     return NS_OK;
 
-  ScopedDeleteArray<nr_ice_stun_server> servers(
-      new nr_ice_stun_server[stun_servers.size()]);
+  auto servers = MakeUnique<nr_ice_stun_server[]>(stun_servers.size());
 
   for (size_t i=0; i < stun_servers.size(); ++i) {
     nsresult rv = stun_servers[i].ToNicerStunStruct(&servers[i]);
@@ -517,7 +569,7 @@ nsresult NrIceCtx::SetStunServers(const std::vector<NrIceStunServer>&
     }
   }
 
-  int r = nr_ice_ctx_set_stun_servers(ctx_, servers, stun_servers.size());
+  int r = nr_ice_ctx_set_stun_servers(ctx_, servers.get(), stun_servers.size());
   if (r) {
     MOZ_MTLOG(ML_ERROR, "Couldn't set STUN server for '" << name_ << "'");
     return NS_ERROR_FAILURE;
@@ -533,8 +585,7 @@ nsresult NrIceCtx::SetTurnServers(const std::vector<NrIceTurnServer>&
   if (turn_servers.empty())
     return NS_OK;
 
-  ScopedDeleteArray<nr_ice_turn_server> servers(
-      new nr_ice_turn_server[turn_servers.size()]);
+  auto servers = MakeUnique<nr_ice_turn_server[]>(turn_servers.size());
 
   for (size_t i=0; i < turn_servers.size(); ++i) {
     nsresult rv = turn_servers[i].ToNicerTurnStruct(&servers[i]);
@@ -544,7 +595,7 @@ nsresult NrIceCtx::SetTurnServers(const std::vector<NrIceTurnServer>&
     }
   }
 
-  int r = nr_ice_ctx_set_turn_servers(ctx_, servers, turn_servers.size());
+  int r = nr_ice_ctx_set_turn_servers(ctx_, servers.get(), turn_servers.size());
   if (r) {
     MOZ_MTLOG(ML_ERROR, "Couldn't set TURN server for '" << name_ << "'");
     return NS_ERROR_FAILURE;
@@ -665,8 +716,6 @@ nsresult NrIceCtx::StartChecks() {
       SetConnectionState(ICE_CTX_FAILED);
       return NS_ERROR_FAILURE;
     }
-  } else {
-    SetConnectionState(ICE_CTX_CHECKING);
   }
 
   return NS_OK;
@@ -699,6 +748,15 @@ void NrIceCtx::SetConnectionState(ConnectionState state) {
             connection_state_ << "->" << state);
   connection_state_ = state;
 
+  if (connection_state_ == ICE_CTX_FAILED) {
+    MOZ_MTLOG(ML_INFO, "NrIceCtx(" << name_ << "): dumping r_log ringbuffer... ");
+    std::deque<std::string> logs;
+    RLogRingBuffer::GetInstance()->GetAny(0, &logs);
+    for (auto l = logs.begin(); l != logs.end(); ++l) {
+      MOZ_MTLOG(ML_INFO, *l);
+    }
+  }
+
   SignalConnectionStateChange(this, state);
 }
 
@@ -715,23 +773,14 @@ void NrIceCtx::SetGatheringState(GatheringState state) {
 
 }  // close namespace
 
-
-extern "C" {
-int nr_bin2hex(UCHAR *in,int len,UCHAR *out);
-}
-
 // Reimplement nr_ice_compute_codeword to avoid copyright issues
 void nr_ice_compute_codeword(char *buf, int len,char *codeword) {
     UINT4 c;
-    UCHAR cc[2];
 
     r_crc32(buf,len,&c);
-    c %= 2048;
 
-    cc[0] = (c >> 8) & 0xff;
-    cc[1] = c & 0xff;
-
-    nr_bin2hex(cc, 2, reinterpret_cast<UCHAR *>(codeword));
+    PL_Base64Encode(reinterpret_cast<char*>(&c), 3, codeword);
+    codeword[4] = 0;
 
     return;
 }

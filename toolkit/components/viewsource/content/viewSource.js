@@ -1,10 +1,11 @@
-// -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+// -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 Components.utils.import("resource://gre/modules/Services.jsm");
+Components.utils.import("resource://gre/modules/CharsetMenu.jsm");
 
 const Cc = Components.classes;
 const Ci = Components.interfaces;
@@ -322,7 +323,7 @@ function ViewSourceReload()
 // Strips the |view-source:| for internalSave()
 function ViewSourceSavePage()
 {
-  internalSave(window.content.location.href.substring(12), 
+  internalSave(window.content.location.href.replace(/^view-source:/i, ""),
                null, null, null, null, null, "SaveLinkTitle",
                null, null, window.content.document, null, gPageLoader);
 }
@@ -656,9 +657,10 @@ function BrowserCharsetReload()
   }
 }
 
-function BrowserSetForcedCharacterSet(aCharset)
+function BrowserSetCharacterSet(aEvent)
 {
-  gBrowser.docShell.charset = aCharset;
+  if (aEvent.target.hasAttribute("charset"))
+    gBrowser.docShell.charset = aEvent.target.getAttribute("charset");
   BrowserCharsetReload();
 }
 

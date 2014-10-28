@@ -23,7 +23,7 @@ StatementRow::StatementRow(Statement *aStatement)
 {
 }
 
-NS_IMPL_ISUPPORTS2(
+NS_IMPL_ISUPPORTS(
   StatementRow,
   mozIStorageStatementRow,
   nsIXPCScriptable
@@ -71,7 +71,7 @@ StatementRow::GetProperty(nsIXPConnectWrappedNative *aWrapper,
     }
     else if (type == mozIStorageValueArray::VALUE_TYPE_TEXT) {
       uint32_t bytes;
-      const jschar *sval = reinterpret_cast<const jschar *>(
+      const char16_t *sval = reinterpret_cast<const char16_t *>(
         static_cast<mozIStorageStatement *>(mStatement)->
           AsSharedWString(idx, &bytes)
       );
@@ -86,7 +86,7 @@ StatementRow::GetProperty(nsIXPConnectWrappedNative *aWrapper,
       uint32_t length;
       const uint8_t *blob = static_cast<mozIStorageStatement *>(mStatement)->
         AsSharedBlob(idx, &length);
-      JSObject *obj = ::JS_NewArrayObject(aCtx, length, nullptr);
+      JSObject *obj = ::JS_NewArrayObject(aCtx, length);
       if (!obj) {
         *_retval = false;
         return NS_OK;
@@ -94,10 +94,8 @@ StatementRow::GetProperty(nsIXPConnectWrappedNative *aWrapper,
       *_vp = OBJECT_TO_JSVAL(obj);
 
       // Copy the blob over to the JS array.
-      JS::Rooted<JS::Value> val(aCtx);
       for (uint32_t i = 0; i < length; i++) {
-        val.setInt32(blob[i]);
-        if (!::JS_SetElement(aCtx, scope, i, &val)) {
+        if (!::JS_SetElement(aCtx, scope, i, blob[i])) {
           *_retval = false;
           return NS_OK;
         }
@@ -119,10 +117,11 @@ StatementRow::NewResolve(nsIXPConnectWrappedNative *aWrapper,
                          JSContext *aCtx,
                          JSObject *aScopeObj,
                          jsid aId,
-                         uint32_t aFlags,
                          JSObject **_objp,
                          bool *_retval)
 {
+  JS::Rooted<JSObject*> scopeObj(aCtx, aScopeObj);
+
   NS_ENSURE_TRUE(mStatement, NS_ERROR_NOT_INITIALIZED);
   // We do not throw at any point after this because we want to allow the
   // prototype chain to be checked for the property.
@@ -142,9 +141,9 @@ StatementRow::NewResolve(nsIXPConnectWrappedNative *aWrapper,
       return NS_OK;
     }
 
-    *_retval = ::JS_DefinePropertyById(aCtx, aScopeObj, aId, JSVAL_VOID,
-                                     nullptr, nullptr, 0);
-    *_objp = aScopeObj;
+    JS::Rooted<jsid> id(aCtx, aId);
+    *_retval = ::JS_DefinePropertyById(aCtx, scopeObj, id, JS::UndefinedHandleValue, 0);
+    *_objp = scopeObj;
     return NS_OK;
   }
 

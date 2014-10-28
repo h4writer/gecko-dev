@@ -8,6 +8,8 @@ XPCOMUtils.defineLazyModuleGetter(this, "ScrollbarSampler",
                                   "resource:///modules/ScrollbarSampler.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "Promise",
                                   "resource://gre/modules/Promise.jsm");
+XPCOMUtils.defineLazyModuleGetter(this, "ShortcutUtils",
+                                  "resource://gre/modules/ShortcutUtils.jsm");
 /**
  * Maintains the state and dispatches events for the main menu panel.
  */
@@ -31,6 +33,7 @@ const PanelUI = {
     };
   },
 
+  _initialized: false,
   init: function() {
     for (let [k, v] of Iterator(this.kElements)) {
       // Need to do fresh let-bindings per iteration
@@ -44,6 +47,10 @@ const PanelUI = {
 
     this.menuButton.addEventListener("mousedown", this);
     this.menuButton.addEventListener("keypress", this);
+    this._overlayScrollListenerBoundFn = this._overlayScrollListener.bind(this);
+    window.matchMedia("(-moz-overlay-scrollbars)").addListener(this._overlayScrollListenerBoundFn);
+    CustomizableUI.addListener(this);
+    this._initialized = true;
   },
 
   _eventListenersAdded: false,
@@ -59,22 +66,19 @@ const PanelUI = {
     }
 
     this.helpView.addEventListener("ViewShowing", this._onHelpViewShow, false);
-    this.helpView.addEventListener("ViewHiding", this._onHelpViewHide, false);
     this._eventListenersAdded = true;
   },
 
   uninit: function() {
-    if (!this._eventListenersAdded) {
-      return;
-    }
-
     for (let event of this.kEvents) {
       this.panel.removeEventListener(event, this);
     }
     this.helpView.removeEventListener("ViewShowing", this._onHelpViewShow);
-    this.helpView.removeEventListener("ViewHiding", this._onHelpViewHide);
     this.menuButton.removeEventListener("mousedown", this);
     this.menuButton.removeEventListener("keypress", this);
+    window.matchMedia("(-moz-overlay-scrollbars)").removeListener(this._overlayScrollListenerBoundFn);
+    CustomizableUI.removeListener(this);
+    this._overlayScrollListenerBoundFn = null;
   },
 
   /**
@@ -119,16 +123,23 @@ const PanelUI = {
    */
   show: function(aEvent) {
     let deferred = Promise.defer();
-    if (this.panel.state == "open" ||
-        document.documentElement.hasAttribute("customizing")) {
-      deferred.resolve();
-      return deferred.promise;
-    }
 
     this.ensureReady().then(() => {
+      if (this.panel.state == "open" ||
+          document.documentElement.hasAttribute("customizing")) {
+        deferred.resolve();
+        return;
+      }
+
       let editControlPlacement = CustomizableUI.getPlacementOfWidget("edit-controls");
       if (editControlPlacement && editControlPlacement.area == CustomizableUI.AREA_PANEL) {
         updateEditUIVisibility();
+      }
+
+      let personalBookmarksPlacement = CustomizableUI.getPlacementOfWidget("personal-bookmarks");
+      if (personalBookmarksPlacement &&
+          personalBookmarksPlacement.area == CustomizableUI.AREA_PANEL) {
+        PlacesToolbarHelper.customizeChange();
       }
 
       let anchor;
@@ -138,21 +149,20 @@ const PanelUI = {
       } else {
         anchor = aEvent.target;
       }
-      let iconAnchor =
-        document.getAnonymousElementByAttribute(anchor, "class",
-                                                "toolbarbutton-icon");
-
-      // Only focus the panel if it's opened using the keyboard, so that
-      // cut/copy/paste buttons will work for mouse users.
-      let keyboardOpened = aEvent && aEvent.sourceEvent &&
-                           aEvent.sourceEvent.target.localName == "key";
-      this.panel.setAttribute("noautofocus", !keyboardOpened);
-      this.panel.openPopup(iconAnchor || anchor, "bottomcenter topright");
 
       this.panel.addEventListener("popupshown", function onPopupShown() {
         this.removeEventListener("popupshown", onPopupShown);
+        // As an optimization for the customize mode transition, we preload
+        // about:customizing in the background once the menu panel is first
+        // shown.
+        gCustomizationTabPreloader.ensurePreloading();
         deferred.resolve();
       });
+
+      let iconAnchor =
+        document.getAnonymousElementByAttribute(anchor, "class",
+                                                "toolbarbutton-icon");
+      this.panel.openPopup(iconAnchor || anchor);
     });
 
     return deferred.promise;
@@ -172,6 +182,7 @@ const PanelUI = {
   handleEvent: function(aEvent) {
     switch (aEvent.type) {
       case "popupshowing":
+        this._adjustLabelsForAutoHyphens();
         // Fall through
       case "popupshown":
         // Fall through
@@ -188,6 +199,10 @@ const PanelUI = {
         this.toggle(aEvent);
         break;
     }
+  },
+
+  get isReady() {
+    return !!this._isReady;
   },
 
   /**
@@ -207,6 +222,20 @@ const PanelUI = {
       return this._readyPromise;
     }
     this._readyPromise = Task.spawn(function() {
+      if (!this._initialized) {
+        let delayedStartupDeferred = Promise.defer();
+        let delayedStartupObserver = (aSubject, aTopic, aData) => {
+          if (aSubject == window) {
+            Services.obs.removeObserver(delayedStartupObserver, "browser-delayed-startup-finished");
+            delayedStartupDeferred.resolve();
+          }
+        };
+        Services.obs.addObserver(delayedStartupObserver, "browser-delayed-startup-finished", false);
+        yield delayedStartupDeferred.promise;
+      }
+
+      this.contents.setAttributeNS("http://www.w3.org/XML/1998/namespace", "lang",
+                                   getLocale());
       if (!this._scrollWidth) {
         // In order to properly center the contents of the panel, while ensuring
         // that we have enough space on either side to show a scrollbar, we have to
@@ -237,7 +266,9 @@ const PanelUI = {
           this.endBatchUpdate();
         }
       }
+      this._updateQuitTooltip();
       this.panel.hidden = false;
+      this._isReady = true;
     }.bind(this)).then(null, Cu.reportError);
 
     return this._readyPromise;
@@ -297,16 +328,28 @@ const PanelUI = {
       let tempPanel = document.createElement("panel");
       tempPanel.setAttribute("type", "arrow");
       tempPanel.setAttribute("id", "customizationui-widget-panel");
-      tempPanel.setAttribute("level", "top");
+      tempPanel.setAttribute("class", "cui-widget-panel");
+      if (this._disableAnimations) {
+        tempPanel.setAttribute("animate", "false");
+      }
+      tempPanel.setAttribute("context", "");
       document.getElementById(CustomizableUI.AREA_NAVBAR).appendChild(tempPanel);
+      // If the view has a footer, set a convenience class on the panel.
+      tempPanel.classList.toggle("cui-widget-panelWithFooter",
+                                 viewNode.querySelector(".panel-subview-footer"));
 
       let multiView = document.createElement("panelmultiview");
+      multiView.setAttribute("id", "customizationui-widget-multiview");
+      multiView.setAttribute("nosubviews", "true");
       tempPanel.appendChild(multiView);
+      multiView.setAttribute("mainViewIsSubView", "true");
       multiView.setMainView(viewNode);
+      viewNode.classList.add("cui-widget-panelview");
       CustomizableUI.addPanelCloseListeners(tempPanel);
 
       let panelRemover = function() {
         tempPanel.removeEventListener("popuphidden", panelRemover);
+        viewNode.classList.remove("cui-widget-panelview");
         CustomizableUI.removePanelCloseListeners(tempPanel);
         let evt = new CustomEvent("ViewHiding", {detail: viewNode});
         viewNode.dispatchEvent(evt);
@@ -321,29 +364,44 @@ const PanelUI = {
         document.getAnonymousElementByAttribute(aAnchor, "class",
                                                 "toolbarbutton-icon");
 
+      if (iconAnchor && aAnchor.id) {
+        iconAnchor.setAttribute("consumeanchor", aAnchor.id);
+      }
       tempPanel.openPopup(iconAnchor || aAnchor, "bottomcenter topright");
     }
   },
 
   /**
-   * This function can be used as a command event listener for subviews
-   * so that the panel knows if and when to close itself.
+   * NB: The enable- and disableSingleSubviewPanelAnimations methods only
+   * affect the hiding/showing animations of single-subview panels (tempPanel
+   * in the showSubView method).
    */
-  onCommandHandler: function(aEvent) {
-    if (!aEvent.originalTarget.hasAttribute("noautoclose")) {
-      PanelUI.hide();
+  disableSingleSubviewPanelAnimations: function() {
+    this._disableAnimations = true;
+  },
+
+  enableSingleSubviewPanelAnimations: function() {
+    this._disableAnimations = false;
+  },
+
+  onWidgetAfterDOMChange: function(aNode, aNextNode, aContainer, aWasRemoval) {
+    if (aContainer != this.contents) {
+      return;
+    }
+    if (aWasRemoval) {
+      aNode.removeAttribute("auto-hyphens");
     }
   },
 
-  /**
-   * Open a dialog window that allow the user to customize listed character sets.
-   */
-  onCharsetCustomizeCommand: function() {
-    this.hide();
-    window.openDialog("chrome://global/content/customizeCharset.xul",
-                      "PrefWindow",
-                      "chrome,modal=yes,resizable=yes",
-                      "browser");
+  onWidgetBeforeDOMChange: function(aNode, aNextNode, aContainer, aIsRemoval) {
+    if (aContainer != this.contents) {
+      return;
+    }
+    if (!aIsRemoval &&
+        (this.panel.state == "open" ||
+         document.documentElement.hasAttribute("customizing"))) {
+      this._adjustLabelsForAutoHyphens(aNode);
+    }
   },
 
   /** 
@@ -363,6 +421,22 @@ const PanelUI = {
   endBatchUpdate: function(aReason) {
     this._ensureEventListenersAdded();
     this.multiView.ignoreMutations = false;
+  },
+
+  _adjustLabelsForAutoHyphens: function(aNode) {
+    let toolbarButtons = aNode ? [aNode] :
+                                 this.contents.querySelectorAll(".toolbarbutton-1");
+    for (let node of toolbarButtons) {
+      let label = node.getAttribute("label");
+      if (!label) {
+        continue;
+      }
+      if (label.contains("\u00ad")) {
+        node.setAttribute("auto-hyphens", "off");
+      } else {
+        node.removeAttribute("auto-hyphens");
+      }
+    }
   },
 
   /**
@@ -401,14 +475,56 @@ const PanelUI = {
           continue;
         button.setAttribute(attrName, node.getAttribute(attrName));
       }
+      button.setAttribute("class", "subviewbutton");
       fragment.appendChild(button);
     }
     items.appendChild(fragment);
-
-    this.addEventListener("command", PanelUI.onCommandHandler);
   },
 
-  _onHelpViewHide: function(aEvent) {
-    this.removeEventListener("command", PanelUI.onCommandHandler);
-  }
+  _updateQuitTooltip: function() {
+#ifndef XP_WIN
+#ifdef XP_MACOSX
+    let tooltipId = "quit-button.tooltiptext.mac";
+#else
+    let tooltipId = "quit-button.tooltiptext.linux2";
+#endif
+    let brands = Services.strings.createBundle("chrome://branding/locale/brand.properties");
+    let stringArgs = [brands.GetStringFromName("brandShortName")];
+
+    let key = document.getElementById("key_quitApplication");
+    stringArgs.push(ShortcutUtils.prettifyShortcut(key));
+    let tooltipString = CustomizableUI.getLocalizedProperty({x: tooltipId}, "x", stringArgs);
+    let quitButton = document.getElementById("PanelUI-quit");
+    quitButton.setAttribute("tooltiptext", tooltipString);
+#endif
+  },
+
+  _overlayScrollListenerBoundFn: null,
+  _overlayScrollListener: function(aMQL) {
+    ScrollbarSampler.resetSystemScrollbarWidth();
+    this._scrollWidth = null;
+  },
 };
+
+/**
+ * Gets the currently selected locale for display.
+ * @return  the selected locale or "en-US" if none is selected
+ */
+function getLocale() {
+  const PREF_SELECTED_LOCALE = "general.useragent.locale";
+  try {
+    let locale = Services.prefs.getComplexValue(PREF_SELECTED_LOCALE,
+                                                Ci.nsIPrefLocalizedString);
+    if (locale)
+      return locale;
+  }
+  catch (e) { }
+
+  try {
+    return Services.prefs.getCharPref(PREF_SELECTED_LOCALE);
+  }
+  catch (e) { }
+
+  return "en-US";
+}
+

@@ -49,18 +49,18 @@ typedef Value ValueRecord[VAR];
 struct ValueFormat : USHORT
 {
   enum Flags {
-    xPlacement	= 0x0001,	/* Includes horizontal adjustment for placement */
-    yPlacement	= 0x0002,	/* Includes vertical adjustment for placement */
-    xAdvance	= 0x0004,	/* Includes horizontal adjustment for advance */
-    yAdvance	= 0x0008,	/* Includes vertical adjustment for advance */
-    xPlaDevice	= 0x0010,	/* Includes horizontal Device table for placement */
-    yPlaDevice	= 0x0020,	/* Includes vertical Device table for placement */
-    xAdvDevice	= 0x0040,	/* Includes horizontal Device table for advance */
-    yAdvDevice	= 0x0080,	/* Includes vertical Device table for advance */
-    ignored	= 0x0F00,	/* Was used in TrueType Open for MM fonts */
-    reserved	= 0xF000,	/* For future use */
+    xPlacement	= 0x0001u,	/* Includes horizontal adjustment for placement */
+    yPlacement	= 0x0002u,	/* Includes vertical adjustment for placement */
+    xAdvance	= 0x0004u,	/* Includes horizontal adjustment for advance */
+    yAdvance	= 0x0008u,	/* Includes vertical adjustment for advance */
+    xPlaDevice	= 0x0010u,	/* Includes horizontal Device table for placement */
+    yPlaDevice	= 0x0020u,	/* Includes vertical Device table for placement */
+    xAdvDevice	= 0x0040u,	/* Includes horizontal Device table for advance */
+    yAdvDevice	= 0x0080u,	/* Includes vertical Device table for advance */
+    ignored	= 0x0F00u,	/* Was used in TrueType Open for MM fonts */
+    reserved	= 0xF000u,	/* For future use */
 
-    devices	= 0x00F0	/* Mask for having any Device table */
+    devices	= 0x00F0u	/* Mask for having any Device table */
   };
 
 /* All fields are options.  Only those available advance the value pointer. */
@@ -109,11 +109,13 @@ struct ValueFormat : USHORT
     if (format & xPlacement) glyph_pos.x_offset  += font->em_scale_x (get_short (values++));
     if (format & yPlacement) glyph_pos.y_offset  += font->em_scale_y (get_short (values++));
     if (format & xAdvance) {
-      if (likely (horizontal)) glyph_pos.x_advance += font->em_scale_x (get_short (values++)); else values++;
+      if (likely (horizontal)) glyph_pos.x_advance += font->em_scale_x (get_short (values));
+      values++;
     }
     /* y_advance values grow downward but font-space grows upward, hence negation */
     if (format & yAdvance) {
-      if (unlikely (!horizontal)) glyph_pos.y_advance -= font->em_scale_y (get_short (values++)); else values++;
+      if (unlikely (!horizontal)) glyph_pos.y_advance -= font->em_scale_y (get_short (values));
+      values++;
     }
 
     if (!has_device ()) return;
@@ -125,17 +127,21 @@ struct ValueFormat : USHORT
 
     /* pixel -> fractional pixel */
     if (format & xPlaDevice) {
-      if (x_ppem) glyph_pos.x_offset  += (base + get_device (values++)).get_x_delta (font); else values++;
+      if (x_ppem) glyph_pos.x_offset  += (base + get_device (values)).get_x_delta (font);
+      values++;
     }
     if (format & yPlaDevice) {
-      if (y_ppem) glyph_pos.y_offset  += (base + get_device (values++)).get_y_delta (font); else values++;
+      if (y_ppem) glyph_pos.y_offset  += (base + get_device (values)).get_y_delta (font);
+      values++;
     }
     if (format & xAdvDevice) {
-      if (horizontal && x_ppem) glyph_pos.x_advance += (base + get_device (values++)).get_x_delta (font); else values++;
+      if (horizontal && x_ppem) glyph_pos.x_advance += (base + get_device (values)).get_x_delta (font);
+      values++;
     }
     if (format & yAdvDevice) {
       /* y_advance values grow downward but font-space grows upward, hence negation */
-      if (!horizontal && y_ppem) glyph_pos.y_advance -= (base + get_device (values++)).get_y_delta (font); else values++;
+      if (!horizontal && y_ppem) glyph_pos.y_advance -= (base + get_device (values)).get_y_delta (font);
+      values++;
     }
   }
 
@@ -240,12 +246,12 @@ struct AnchorFormat2
       unsigned int x_ppem = font->x_ppem;
       unsigned int y_ppem = font->y_ppem;
       hb_position_t cx, cy;
-      hb_bool_t ret = false;
+      hb_bool_t ret;
 
-      if (x_ppem || y_ppem)
-	ret = font->get_glyph_contour_point_for_origin (glyph_id, anchorPoint, HB_DIRECTION_LTR, &cx, &cy);
-      *x = x_ppem && ret ? cx : font->em_scale_x (xCoordinate);
-      *y = y_ppem && ret ? cy : font->em_scale_y (yCoordinate);
+      ret = (x_ppem || y_ppem) &&
+             font->get_glyph_contour_point_for_origin (glyph_id, anchorPoint, HB_DIRECTION_LTR, &cx, &cy);
+      *x = ret && x_ppem ? cx : font->em_scale_x (xCoordinate);
+      *y = ret && y_ppem ? cy : font->em_scale_y (yCoordinate);
   }
 
   inline bool sanitize (hb_sanitize_context_t *c) {
@@ -1583,6 +1589,8 @@ GPOS::position_start (hb_font_t *font HB_UNUSED, hb_buffer_t *buffer)
 void
 GPOS::position_finish (hb_font_t *font HB_UNUSED, hb_buffer_t *buffer)
 {
+  _hb_buffer_assert_gsubgpos_vars (buffer);
+
   unsigned int len;
   hb_glyph_position_t *pos = hb_buffer_get_glyph_positions (buffer, &len);
   hb_direction_t direction = buffer->props.direction;
@@ -1594,22 +1602,20 @@ GPOS::position_finish (hb_font_t *font HB_UNUSED, hb_buffer_t *buffer)
   /* Handle attachments */
   for (unsigned int i = 0; i < len; i++)
     fix_mark_attachment (pos, i, direction);
-
-  _hb_buffer_deallocate_gsubgpos_vars (buffer);
 }
 
 
 /* Out-of-class implementation for methods recursing */
 
 template <typename context_t>
-inline typename context_t::return_t PosLookup::dispatch_recurse_func (context_t *c, unsigned int lookup_index)
+/*static*/ inline typename context_t::return_t PosLookup::dispatch_recurse_func (context_t *c, unsigned int lookup_index)
 {
   const GPOS &gpos = *(hb_ot_layout_from_face (c->face)->gpos);
   const PosLookup &l = gpos.get_lookup (lookup_index);
   return l.dispatch (c);
 }
 
-inline bool PosLookup::apply_recurse_func (hb_apply_context_t *c, unsigned int lookup_index)
+/*static*/ inline bool PosLookup::apply_recurse_func (hb_apply_context_t *c, unsigned int lookup_index)
 {
   const GPOS &gpos = *(hb_ot_layout_from_face (c->face)->gpos);
   const PosLookup &l = gpos.get_lookup (lookup_index);

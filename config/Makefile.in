@@ -4,10 +4,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-# STDCXX_COMPAT is not needed here, and will actually fail because
-# libstdc++-compat is not built yet.
-MOZ_LIBSTDCXX_HOST_VERSION =
-
 # IMPORTANT: Disable NSBUILDROOT for this directory only, otherwise we have
 # a recursive rule for finding nsinstall and the Perl scripts.
 ifdef NSBUILDROOT
@@ -20,6 +16,10 @@ endif
 
 include $(topsrcdir)/config/config.mk
 
+# L10n jobs are doing make -C config manually before anything else,
+# and need nsinstall to be built as a consequence.
+export:: host
+
 ifneq (WINNT,$(HOST_OS_ARCH))
 ifdef COMPILE_ENVIRONMENT
 # Ensure nsinstall is atomically created
@@ -27,26 +27,27 @@ nsinstall$(HOST_BIN_SUFFIX): $(HOST_PROGRAM)
 	cp $^ $@.tmp
 	mv $@.tmp $@
 
-NSINSTALL_FILES := nsinstall$(HOST_BIN_SUFFIX)
+NSINSTALL_EXECUTABLES := nsinstall$(HOST_BIN_SUFFIX)
 NSINSTALL_DEST := $(DIST)/bin
-NSINSTALL_TARGET := export
+NSINSTALL_TARGET := host
 INSTALL_TARGETS += NSINSTALL
 endif
 endif
 
+ifndef JS_STANDALONE
 HEADERS_FILES = \
 	$(DEPTH)/mozilla-config.h \
 	$(NULL)
 HEADERS_DEST := $(DIST)/include
 HEADERS_TARGET := export
 INSTALL_TARGETS += HEADERS
-
-PYTHON_UNIT_TESTS := $(wildcard $(srcdir)/tests/unit-*.py)
+endif
 
 include $(topsrcdir)/config/rules.mk
 
 HOST_CFLAGS += -DUNICODE -D_UNICODE
 
+ifndef JS_STANDALONE
 # Generate a new buildid every time we "export" in config... that's only
 # supposed to be once per-build!
 export::
@@ -54,6 +55,7 @@ ifdef MOZ_BUILD_DATE
 	printf '%s' $(MOZ_BUILD_DATE) > buildid
 else
 	$(PYTHON) $(topsrcdir)/toolkit/xre/make-platformini.py --print-buildid > buildid
+endif
 endif
 
 ifdef WRAP_SYSTEM_INCLUDES
@@ -108,10 +110,10 @@ GARBAGE += \
 
 FORCE:
 
-check-preqs = \
-  check-jar-mn \
-  check-makefiles \
-  $(NULL)
+ifndef JS_STANDALONE
+check-preqs += check-jar-mn
+endif
+check-preqs += check-makefiles
 
 check:: $(check-preqs)
 
@@ -119,7 +121,7 @@ check-jar-mn::
 	$(MAKE) -C tests/src-simple check-jar
 	$(MAKE) -C tests/src-simple check-flat
 	$(MAKE) -C tests/src-simple check-flat USE_EXTENSION_MANIFEST=1
-ifneq (,$(filter-out WINNT OS2,$(OS_ARCH)))
+ifneq (,$(filter-out WINNT,$(OS_ARCH)))
 	$(MAKE) -C tests/src-simple check-symlink
 endif
 

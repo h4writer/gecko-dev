@@ -29,6 +29,7 @@
 // Boilerplate used to be able to import this module both from the main
 // thread and from worker threads.
 if (typeof Components != "undefined") {
+  Components.utils.importGlobalProperties(["URL"]);
   // Global definition of |exports|, to keep everybody happy.
   // In non-main thread, |exports| is provided by the module
   // loader.
@@ -44,7 +45,9 @@ let EXPORTED_SYMBOLS = [
   "normalize",
   "split",
   "winGetDrive",
-  "winIsAbsolute"
+  "winIsAbsolute",
+  "toFileURI",
+  "fromFileURI",
 ];
 
 /**
@@ -132,14 +135,22 @@ exports.dirname = dirname;
  *  var path = OS.Path.join(tmpDir, "foo", "bar");
  *
  * Under Windows, this will return "$TMP\foo\bar".
+ *
+ * Empty components are ignored, i.e. `OS.Path.join("foo", "", "bar)` is the
+ * same as `OS.Path.join("foo", "bar")`.
  */
 let join = function(...path) {
   let paths = [];
   let root;
   let absolute = false;
-  for each(let subpath in path) {
+  for (let subpath of path) {
+    if (subpath == null) {
+      throw new TypeError("invalid path component");
+    }
+    if (subpath == "") {
+      continue;
+    }
     let drive = this.winGetDrive(subpath);
-    let abs   = this.winIsAbsolute(subpath);
     if (drive) {
       root = drive;
       let component = trimBackslashes(subpath.slice(drive.length));
@@ -148,8 +159,8 @@ let join = function(...path) {
       } else {
         paths = [];
       }
-      absolute = abs;
-    } else if (abs) {
+      absolute = true;
+    } else if (this.winIsAbsolute(subpath)) {
       paths = [trimBackslashes(subpath)];
       absolute = true;
     } else {
@@ -177,6 +188,10 @@ exports.join = join;
  * includes "\\\\").
  */
 let winGetDrive = function(path) {
+  if (path == null) {
+    throw new TypeError("path is invalid");
+  }
+
   if (path.startsWith("\\\\")) {
     // UNC path
     if (path.length == 2) {
@@ -256,7 +271,7 @@ let normalize = function(path) {
 
   // Put everything back together
   let result = stack.join("\\");
-  if (absolute) {
+  if (absolute || root) {
     result = "\\" + result;
   }
   if (root) {
@@ -286,6 +301,57 @@ let split = function(path) {
   };
 };
 exports.split = split;
+
+/**
+ * Return the file:// URI file path of the given local file path.
+ */
+// The case of %3b is designed to match Services.io, but fundamentally doesn't matter.
+let toFileURIExtraEncodings = {';': '%3b', '?': '%3F', "'": '%27', '#': '%23'};
+let toFileURI = function toFileURI(path) {
+  // URI-escape forward slashes and convert backward slashes to forward
+  path = this.normalize(path).replace(/[\\\/]/g, m => (m=='\\')? '/' : '%2F');
+  let uri = encodeURI(path);
+
+  // add a prefix, and encodeURI doesn't escape a few characters that we do
+  // want to escape, so fix that up
+  let prefix = "file:///";
+  uri = prefix + uri.replace(/[;?'#]/g, match => toFileURIExtraEncodings[match]);
+
+  // turn e.g., file:///C: into file:///C:/
+  if (uri.charAt(uri.length - 1) === ':') {
+    uri += "/"
+  }
+
+  return uri;
+};
+exports.toFileURI = toFileURI;
+
+/**
+ * Returns the local file path from a given file URI.
+ */
+let fromFileURI = function fromFileURI(uri) {
+  let url = new URL(uri);
+  if (url.protocol != 'file:') {
+    throw new Error("fromFileURI expects a file URI");
+  }
+
+  // strip leading slash, since Windows paths don't start with one
+  uri = url.pathname.substr(1);
+
+  let path = decodeURI(uri);
+  // decode a few characters where URL's parsing is overzealous
+  path = path.replace(/%(3b|3f|23)/gi,
+        match => decodeURIComponent(match));
+  path = this.normalize(path);
+
+  // this.normalize() does not remove the trailing slash if the path
+  // component is a drive letter. eg. 'C:\'' will not get normalized.
+  if (path.endsWith(":\\")) {
+    path = path.substr(0, path.length - 1);
+  }
+  return this.normalize(path);
+};
+exports.fromFileURI = fromFileURI;
 
 /**
 * Utility function: Remove any leading/trailing backslashes

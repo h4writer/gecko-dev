@@ -1,4 +1,4 @@
-// -*- Mode: js2; tab-width: 2; indent-tabs-mode: nil; js2-basic-offset: 2; js2-skip-preprocessor-directives: t; -*-
+// -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -22,6 +22,16 @@ PromptService.prototype = {
   /* ----------  nsIPromptFactory  ---------- */
 
   getPrompt: function getPrompt(domWin, iid) {
+    if (!domWin) {
+      let chromeWin = Services.wm.getMostRecentWindow("navigator:browser");
+      if (!chromeWin) {
+        let msg = "PromptService.js: Attempted create a prompt but no DOM Window specified and failed to find one";
+        Cu.reportError(msg);
+        throw(msg);
+      }
+      domWin = chromeWin.getBrowser().contentWindow;
+    }
+
     let factory =
           Components.classesByID["{1c978d25-b37f-43a8-a2d6-0c7a239ead87}"]
                     .createInstance(Ci.nsIPromptFactory);
@@ -39,16 +49,6 @@ PromptService.prototype = {
 
   callProxy: function(aName, aArgs) {
     let domWin = aArgs[0];
-    if (!domWin) {
-      let chromeWin = Services.wm.getMostRecentWindow("navigator:browser");
-      if (!chromeWin) {
-        let msg = "PromptService.js: Attempted create a prompt but no DOM Window specified and failed to find one";
-        Cu.reportError(msg);
-        throw(msg);
-      }
-      domWin = chromeWin.getBrowser().contentWindow;
-    }
-
     let prompt = this.getPrompt(domWin, Ci.nsIPrompt);
     if (aName == 'promptAuth' || aName == 'promptAuthAsync') {
       let adapterFactory =

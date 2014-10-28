@@ -12,6 +12,9 @@ Components.utils.import("resource://gre/modules/FileUtils.jsm");
 Components.utils.import("resource://gre/modules/AddonManager.jsm");
 Components.utils.import("resource://gre/modules/Services.jsm");
 Components.utils.import("resource://gre/modules/ctypes.jsm");
+#ifdef MOZ_SERVICES_HEALTHREPORT
+Components.utils.import("resource://gre/modules/UpdaterHealthProvider.jsm");
+#endif
 
 const Cc = Components.classes;
 const Ci = Components.interfaces;
@@ -31,6 +34,7 @@ const PREF_APP_UPDATE_CERT_CHECKATTRS     = "app.update.cert.checkAttributes";
 const PREF_APP_UPDATE_CERT_ERRORS         = "app.update.cert.errors";
 const PREF_APP_UPDATE_CERT_MAXERRORS      = "app.update.cert.maxErrors";
 const PREF_APP_UPDATE_CERT_REQUIREBUILTIN = "app.update.cert.requireBuiltIn";
+const PREF_APP_UPDATE_CUSTOM              = "app.update.custom";
 const PREF_APP_UPDATE_ENABLED             = "app.update.enabled";
 const PREF_APP_UPDATE_METRO_ENABLED       = "app.update.metro.enabled";
 const PREF_APP_UPDATE_IDLETIME            = "app.update.idletime";
@@ -40,12 +44,12 @@ const PREF_APP_UPDATE_LASTUPDATETIME      = "app.update.lastUpdateTime.backgroun
 const PREF_APP_UPDATE_LOG                 = "app.update.log";
 const PREF_APP_UPDATE_MODE                = "app.update.mode";
 const PREF_APP_UPDATE_NEVER_BRANCH        = "app.update.never.";
+const PREF_APP_UPDATE_NOTIFIEDUNSUPPORTED = "app.update.notifiedUnsupported";
 const PREF_APP_UPDATE_POSTUPDATE          = "app.update.postupdate";
 const PREF_APP_UPDATE_PROMPTWAITTIME      = "app.update.promptWaitTime";
 const PREF_APP_UPDATE_SHOW_INSTALLED_UI   = "app.update.showInstalledUI";
 const PREF_APP_UPDATE_SILENT              = "app.update.silent";
 const PREF_APP_UPDATE_STAGING_ENABLED     = "app.update.staging.enabled";
-const PREF_APP_UPDATE_NOTIFIEDUNSUPPORTED = "app.update.notifiedUnsupported";
 const PREF_APP_UPDATE_URL                 = "app.update.url";
 const PREF_APP_UPDATE_URL_DETAILS         = "app.update.url.details";
 const PREF_APP_UPDATE_URL_OVERRIDE        = "app.update.url.override";
@@ -195,7 +199,8 @@ const PING_BGUC_INVALID_DEFAULT_URL          = 2;
 const PING_BGUC_INVALID_CUSTOM_URL           = 3;
 // Invalid url for app.update.url.override user preference (no notification)
 const PING_BGUC_INVALID_OVERRIDE_URL         = 4;
-// Unable to check for updates per gCanCheckForUpdates (no notification)
+// Unable to check for updates per gCanCheckForUpdates and hasUpdateMutex()
+// (no notification)
 const PING_BGUC_UNABLE_TO_CHECK              = 5;
 // Already has an active update in progress (no notification)
 const PING_BGUC_HAS_ACTIVEUPDATE             = 6;
@@ -256,15 +261,27 @@ const PING_BGUC_ADDON_UPDATES_FOR_INCOMPAT   = 29;
 // Incompatible add-ons found (update notification)
 const PING_BGUC_ADDON_HAVE_INCOMPAT          = 30;
 
-var gLocale     = null;
+// Health report field names
+const UpdaterHealthReportFields = {
+  CHECK_START: "updateCheckStart",
+  CHECK_SUCCESS: "updateCheckSuccess",
+  CHECK_FAILED: "updateCheckFailed",
+  COMPLETE_START: "completeUpdateStart",
+  PARTIAL_START: "partialUpdateStart",
+  COMPLETE_SUCCESS: "completeUpdateSuccess",
+  PARTIAL_SUCCESS: "partialUpdateSuccess",
+  FAILED: "updateFailed"
+};
 
-#ifdef MOZ_B2G
-var gVolumeMountLock = null;
+var gLocale = null;
+var gUpdateMutexHandle = null;
+
+#ifdef MOZ_WIDGET_GONK
+var gSDCardMountLock = null;
+
 XPCOMUtils.defineLazyGetter(this, "gExtStorage", function aus_gExtStorage() {
     return Services.env.get("EXTERNAL_STORAGE");
 });
-
-var gSDCardMountLock = null;
 #endif
 
 XPCOMUtils.defineLazyModuleGetter(this, "UpdateChannel",
@@ -314,6 +331,10 @@ XPCOMUtils.defineLazyGetter(this, "gProductModel", function aus_gProductModel() 
   Cu.import("resource://gre/modules/systemlibs.js");
   return libcutils.property_get("ro.product.model");
 });
+XPCOMUtils.defineLazyGetter(this, "gProductDevice", function aus_gProductDevice() {
+  Cu.import("resource://gre/modules/systemlibs.js");
+  return libcutils.property_get("ro.product.device");
+});
 #endif
 
 XPCOMUtils.defineLazyGetter(this, "gOSVersion", function aus_gOSVersion() {
@@ -332,7 +353,7 @@ XPCOMUtils.defineLazyGetter(this, "gOSVersion", function aus_gOSVersion() {
     const BYTE = ctypes.uint8_t;
     const WORD = ctypes.uint16_t;
     const DWORD = ctypes.uint32_t;
-    const WCHAR = ctypes.jschar;
+    const WCHAR = ctypes.char16_t;
     const BOOL = ctypes.int;
 
     // This structure is described at:
@@ -483,10 +504,13 @@ function closeHandle(handle) {
 /**
  * Creates a mutex.
  *
- * @param aAllowExisting false if the function should fail if the mutex exists
- * @return The Win32 handle to the mutex
+ * @param  aName
+ *         The name for the mutex.
+ * @param  aAllowExisting
+ *         If false the function will close the handle and return null.
+ * @return The Win32 handle to the mutex.
  */
-function createMutex(name, aAllowExisting) {
+function createMutex(aName, aAllowExisting) {
   if (aAllowExisting === undefined) {
     aAllowExisting = true;
   }
@@ -499,9 +523,9 @@ function createMutex(name, aAllowExisting) {
                                  ctypes.void_t.ptr, /* return handle */
                                  ctypes.void_t.ptr, /* security attributes */
                                  ctypes.int32_t, /* initial owner */
-                                 ctypes.jschar.ptr); /* name */
+                                 ctypes.char16_t.ptr); /* name */
 
-  var handle = CreateMutexW(null, INITIAL_OWN, name);
+  var handle = CreateMutexW(null, INITIAL_OWN, aName);
   var alreadyExists = ctypes.winLastError == ERROR_ALREADY_EXISTS;
   if (handle && !handle.isNull() && !aAllowExisting && alreadyExists) {
     closeHandle(handle);
@@ -554,11 +578,11 @@ function getPerInstallationMutexName(aGlobal) {
  */
 function hasUpdateMutex() {
 #ifdef XP_WIN
-  if (!this._updateMutexHandle) {
-    this._updateMutexHandle = createMutex(getPerInstallationMutexName(true), false);
+  if (!gUpdateMutexHandle) {
+    gUpdateMutexHandle = createMutex(getPerInstallationMutexName(true), false);
   }
 
-  return !!this._updateMutexHandle;
+  return !!gUpdateMutexHandle;
 #else
   return true;
 #endif // XP_WIN
@@ -588,7 +612,17 @@ XPCOMUtils.defineLazyGetter(this, "gCanApplyUpdates", function aus_gCanApplyUpda
       var updateTestFile = getUpdateFile([FILE_PERMS_TEST]);
       LOG("gCanApplyUpdates - testing write access " + updateTestFile.path);
       testWriteAccess(updateTestFile, false);
-#ifdef XP_WIN
+#ifdef XP_MACOSX
+      // Check that the application bundle can be written to.
+      var appDirTestFile = getAppBaseDir();
+      appDirTestFile.append(FILE_PERMS_TEST);
+      LOG("gCanApplyUpdates - testing write access " + appDirTestFile.path);
+      if (appDirTestFile.exists()) {
+        appDirTestFile.remove(false)
+      }
+      appDirTestFile.create(Ci.nsILocalFile.NORMAL_FILE_TYPE, FileUtils.PERMS_FILE);
+      appDirTestFile.remove(false);
+#elifdef XP_WIN
       var sysInfo = Cc["@mozilla.org/system-info;1"].
                     getService(Ci.nsIPropertyBag2);
 
@@ -668,13 +702,6 @@ XPCOMUtils.defineLazyGetter(this, "gCanApplyUpdates", function aus_gCanApplyUpda
       return false;
     }
   } // if (!useService)
-
-  if (!hasUpdateMutex()) {
-    LOG("gCanApplyUpdates - unable to apply updates because another instance" +
-        "of the application is already handling updates for this " +
-        "installation.");
-    return false;
-  }
 
   LOG("gCanApplyUpdates - able to apply updates");
   submitHasPermissionsTelemetryPing(true);
@@ -792,13 +819,6 @@ XPCOMUtils.defineLazyGetter(this, "gCanCheckForUpdates", function aus_gCanCheckF
   if (!gOSVersion) {
     LOG("gCanCheckForUpdates - unable to check for updates, unknown OS " +
         "version");
-    return false;
-  }
-
-  if (!hasUpdateMutex()) {
-    LOG("gCanCheckForUpdates - unable to apply updates because another " +
-        "instance of the application is already handling updates for this " +
-        "installation.");
     return false;
   }
 
@@ -945,6 +965,37 @@ function getStatusTextFromCode(code, defaultCode) {
 }
 
 /**
+ * Record count in the health report.
+ * @param field
+ *        The field name to record
+ * @param status
+ *        Status code for errors, 0 otherwise
+ */
+function recordInHealthReport(field, status) {
+#ifdef MOZ_SERVICES_HEALTHREPORT
+  try {
+    LOG("recordInHealthReport - " + field + " - " + status);
+
+    let reporter = Cc["@mozilla.org/datareporting/service;1"]
+                      .getService().wrappedJSObject.healthReporter;
+
+    if (reporter) {
+      reporter.onInit().then(function recordUpdateInHealthReport() {
+        try {
+          reporter.getProvider("org.mozilla.update").recordUpdate(field, status);
+        } catch (ex) {
+          Cu.reportError(ex);
+        }
+      });
+    }
+  // If getting the heath reporter service fails, don't fail updating.
+  } catch (ex) {
+    LOG("recordInHealthReport - could not initialize health reporter");
+  }
+#endif
+}
+
+/**
  * Get the Active Updates directory
  * @return The active updates directory, as a nsIFile object
  */
@@ -956,7 +1007,7 @@ function getUpdatesDir() {
 
 /**
  * Get the Active Updates directory inside the directory where we apply the
- * background updates.
+ * staged update.
  * @return The active updates directory inside the updated directory, as a
  *         nsIFile object.
  */
@@ -1222,75 +1273,60 @@ function cleanUpUpdatesDir(aBackgroundUpdate) {
   // Bail out if we don't have appropriate permissions
   try {
     var updateDir = getUpdatesDir();
-  }
-  catch (e) {
+  } catch (e) {
     return;
   }
 
-  var e = updateDir.directoryEntries;
-  while (e.hasMoreElements()) {
-    var f = e.getNext().QueryInterface(Ci.nsIFile);
-    // Preserve the last update log file for debugging purposes
-    if (f.leafName == FILE_UPDATE_LOG) {
-      var dir;
+  // Preserve the last update log file for debugging purposes.
+  let file = updateDir.clone();
+  file.append(FILE_UPDATE_LOG);
+  if (file.exists()) {
+    let dir;
+    if (aBackgroundUpdate && getUpdateDirNoCreate([]).equals(getAppBaseDir())) {
+      dir = getUpdatesDirInApplyToDir();
+    } else {
+      dir = updateDir.parent;
+    }
+    let logFile = dir.clone();
+    logFile.append(FILE_LAST_LOG);
+    if (logFile.exists()) {
       try {
-        // If we don't use the update root directory, the log files are written
-        // inside the application directory.  In that case, we want to write
-        // the log files to the updated directory in the case of background
-        // updates, so that they would be available when we replace that
-        // directory with the application directory later on.
-        if (aBackgroundUpdate && getUpdateDirNoCreate([]).equals(getAppBaseDir())) {
-          dir = getUpdatesDirInApplyToDir();
-        } else {
-          dir = f.parent.parent;
-        }
-        var logFile = dir.clone();
-        logFile.append(FILE_LAST_LOG);
-        if (logFile.exists()) {
-          try {
-            logFile.moveTo(dir, FILE_BACKUP_LOG);
-          }
-          catch (e) {
-            LOG("cleanUpUpdatesDir - failed to rename file " + logFile.path +
-                " to " + FILE_BACKUP_LOG);
-          }
-        }
-        f.moveTo(dir, FILE_LAST_LOG);
-        if (aBackgroundUpdate) {
-          // We're not going to delete any files, so we can just
-          // bail out of the loop right now.
-          break;
-        } else {
-          continue;
-        }
+        logFile.moveTo(dir, FILE_BACKUP_LOG);
+      } catch (e) {
+        LOG("cleanUpUpdatesDir - failed to rename file " + logFile.path +
+            " to " + FILE_BACKUP_LOG);
       }
-      catch (e) {
-        LOG("cleanUpUpdatesDir - failed to move file " + f.path + " to " +
-            dir.path + " and rename it to " + FILE_LAST_LOG);
-      }
-    } else if (aBackgroundUpdate) {
-      // Don't delete any files when an update has been staged, as
-      // we need to keep them around in case we would have to fall
-      // back to applying the update on application restart.
-      continue;
     }
+
+    try {
+      file.moveTo(dir, FILE_LAST_LOG);
+    } catch (e) {
+      LOG("cleanUpUpdatesDir - failed to rename file " + file.path +
+          " to " + FILE_LAST_LOG);
+    }
+  }
+
+  if (!aBackgroundUpdate) {
+    let e = updateDir.directoryEntries;
+    while (e.hasMoreElements()) {
+      let f = e.getNext().QueryInterface(Ci.nsIFile);
 #ifdef MOZ_WIDGET_GONK
-    if (f.leafName == FILE_UPDATE_LINK) {
-      let linkedFile = getFileFromUpdateLink(updateDir);
-      if (linkedFile && linkedFile.exists()) {
-        linkedFile.remove(false);
+      if (f.leafName == FILE_UPDATE_LINK) {
+        let linkedFile = getFileFromUpdateLink(updateDir);
+        if (linkedFile && linkedFile.exists()) {
+          linkedFile.remove(false);
+        }
       }
-    }
 #endif
 
-    // Now, recursively remove this file.  The recursive removal is really
-    // only needed on Mac OSX because this directory will contain a copy of
-    // updater.app, which is itself a directory.
-    try {
-      f.remove(true);
-    }
-    catch (e) {
-      LOG("cleanUpUpdatesDir - failed to remove file " + f.path);
+      // Now, recursively remove this file.  The recursive removal is needed for
+      // Mac OSX because this directory will contain a copy of updater.app,
+      // which is itself a directory.
+      try {
+        f.remove(true);
+      } catch (e) {
+        LOG("cleanUpUpdatesDir - failed to remove file " + f.path);
+      }
     }
   }
   releaseSDCardMountLock();
@@ -1320,7 +1356,7 @@ function getLocale() {
   if (gLocale)
     return gLocale;
 
-  for each (res in ['app', 'gre']) {
+  for (let res of ['app', 'gre']) {
     var channel = Services.io.newChannel("resource://" + res + "/" + FILE_UPDATE_LOCALE, null, null);
     try {
       var inputStream = channel.open();
@@ -1980,7 +2016,7 @@ const UpdateServiceFactory = {
 function UpdateService() {
   LOG("Creating UpdateService");
   Services.obs.addObserver(this, "xpcom-shutdown", false);
-  Services.prefs.addObserver("app.update.log", this, false);
+  Services.prefs.addObserver(PREF_APP_UPDATE_LOG, this, false);
 #ifdef MOZ_WIDGET_GONK
   // PowerManagerService::SyncProfile (which is called for Reboot, PowerOff
   // and Restart) sends the profile-change-net-teardown event. We can then
@@ -2050,8 +2086,16 @@ UpdateService.prototype = {
 #endif
     case "xpcom-shutdown":
       Services.obs.removeObserver(this, topic);
-      Services.prefs.removeObserver("app.update.log", this);
+      Services.prefs.removeObserver(PREF_APP_UPDATE_LOG, this);
 
+#ifdef XP_WIN
+      // If we hold the update mutex, let it go!
+      // The OS would clean this up sometime after shutdown,
+      // but that would have no guarantee on timing.
+      if (gUpdateMutexHandle) {
+        closeHandle(gUpdateMutexHandle);
+      }
+#endif
       if (this._retryTimer) {
         this._retryTimer.cancel();
       }
@@ -2626,7 +2670,7 @@ UpdateService.prototype = {
       else if (!getPref("getBoolPref", PREF_APP_UPDATE_ENABLED, true)) {
         this._backgroundUpdateCheckCodePing(PING_BGUC_PREF_DISABLED);
       }
-      else if (!gCanCheckForUpdates) {
+      else if (!(gCanCheckForUpdates && hasUpdateMutex())) {
         this._backgroundUpdateCheckCodePing(PING_BGUC_UNABLE_TO_CHECK);
       }
       else if (!this.backgroundChecker._enabled) {
@@ -2774,7 +2818,7 @@ UpdateService.prototype = {
       return;
     }
 
-    if (!gCanApplyUpdates) {
+    if (!(gCanApplyUpdates && hasUpdateMutex())) {
       LOG("UpdateService:_selectAndInstallUpdate - the user is unable to " +
           "apply updates... prompting");
       this._showPrompt(update);
@@ -2956,8 +3000,8 @@ UpdateService.prototype = {
     // with the new version of the application.
     for (var i = 0; i < this._incompatibleAddons.length; ++i) {
       if (this._incompatibleAddons[i].id == addon.id) {
-        LOG("UpdateService:onAddonUpdateEnded - found update for add-on ID: " +
-            addon.id);
+        LOG("UpdateService:onCompatibilityUpdateAvailable - found update for " +
+            "add-on ID: " + addon.id);
         this._incompatibleAddons.splice(i, 1);
       }
     }
@@ -2972,7 +3016,7 @@ UpdateService.prototype = {
     // the add-on will become incompatible.
     let bs = Cc["@mozilla.org/extensions/blocklist;1"].
              getService(Ci.nsIBlocklistService);
-    if (bs.isAddonBlocklisted(addon.id, install.version,
+    if (bs.isAddonBlocklisted(addon,
                               gUpdates.update.appVersion,
                               gUpdates.update.platformVersion))
       return;
@@ -2985,7 +3029,8 @@ UpdateService.prototype = {
     if (--this._updateCheckCount > 0)
       return;
 
-    if (this._incompatibleAddons.length > 0 || !gCanApplyUpdates) {
+    if (this._incompatibleAddons.length > 0 ||
+        !(gCanApplyUpdates && hasUpdateMutex())) {
       LOG("UpdateService:onUpdateEnded - prompting because there are " +
           "incompatible add-ons");
       this._showPrompt(this._update);
@@ -3020,14 +3065,14 @@ UpdateService.prototype = {
    * See nsIUpdateService.idl
    */
   get canCheckForUpdates() {
-    return gCanCheckForUpdates;
+    return gCanCheckForUpdates && hasUpdateMutex();
   },
 
   /**
    * See nsIUpdateService.idl
    */
   get canApplyUpdates() {
-    return gCanApplyUpdates;
+    return gCanApplyUpdates && hasUpdateMutex();
   },
 
   /**
@@ -3207,7 +3252,6 @@ UpdateService.prototype = {
   _xpcom_factory: UpdateServiceFactory,
   QueryInterface: XPCOMUtils.generateQI([Ci.nsIApplicationUpdateService,
                                          Ci.nsIUpdateCheckListener,
-                                         Ci.nsIAddonUpdateCheckListener,
                                          Ci.nsITimerCallback,
                                          Ci.nsIObserver])
 };
@@ -3595,10 +3639,12 @@ Checker.prototype = {
                       getDistributionPrefValue(PREF_APP_DISTRIBUTION));
     url = url.replace(/%DISTRIBUTION_VERSION%/g,
                       getDistributionPrefValue(PREF_APP_DISTRIBUTION_VERSION));
+    url = url.replace(/%CUSTOM%/g, getPref("getCharPref", PREF_APP_UPDATE_CUSTOM, ""));
     url = url.replace(/\+/g, "%2B");
 
 #ifdef MOZ_WIDGET_GONK
     url = url.replace(/%PRODUCT_MODEL%/g, gProductModel);
+    url = url.replace(/%PRODUCT_DEVICE%/g, gProductDevice);
     url = url.replace(/%B2G_VERSION%/g, getPref("getCharPref", PREF_APP_B2G_VERSION, null));
 #endif
 
@@ -3622,6 +3668,8 @@ Checker.prototype = {
     var url = this.getUpdateURL(force);
     if (!url || (!this.enabled && !force))
       return;
+
+    recordInHealthReport(UpdaterHealthReportFields.CHECK_START, 0);
 
     this._request = Cc["@mozilla.org/xmlextras/xmlhttprequest;1"].
                     createInstance(Ci.nsISupports);
@@ -3746,6 +3794,8 @@ Checker.prototype = {
       if (Services.prefs.prefHasUserValue(PREF_APP_UPDATE_BACKGROUNDERRORS))
         Services.prefs.clearUserPref(PREF_APP_UPDATE_BACKGROUNDERRORS);
 
+      recordInHealthReport(UpdaterHealthReportFields.CHECK_SUCCESS, 0);
+
       // Tell the callback about the updates
       this._callback.onCheckComplete(event.target, updates, updates.length);
     }
@@ -3766,6 +3816,9 @@ Checker.prototype = {
         update.errorCode = updates[0] ? CERT_ATTR_CHECK_FAILED_HAS_UPDATE
                                       : CERT_ATTR_CHECK_FAILED_NO_UPDATE;
       }
+
+      recordInHealthReport(UpdaterHealthReportFields.CHECK_FAILED, update.errorCode);
+
       this._callback.onError(request, update);
     }
 
@@ -3797,6 +3850,8 @@ Checker.prototype = {
       update.errorCode = HTTP_ERROR_OFFSET + status;
     }
 
+    recordInHealthReport(UpdaterHealthReportFields.CHECK_FAILED, update.errorCode);
+
     this._callback.onError(request, update);
 
     this._request = null;
@@ -3812,7 +3867,7 @@ Checker.prototype = {
     }
 
     return getPref("getBoolPref", PREF_APP_UPDATE_ENABLED, true) &&
-           gCanCheckForUpdates && this._enabled;
+           gCanCheckForUpdates && hasUpdateMutex() && this._enabled;
   },
 
   /**
@@ -4111,6 +4166,10 @@ Downloader.prototype = {
     }
     this.isCompleteUpdate = this._patch.type == "complete";
 
+    recordInHealthReport(
+      this.isCompleteUpdate ? UpdaterHealthReportFields.COMPLETE_START :
+                              UpdaterHealthReportFields.PARTIAL_START, 0);
+
     var patchFile = null;
 
 #ifdef MOZ_WIDGET_GONK
@@ -4366,6 +4425,10 @@ Downloader.prototype = {
         "current fail: " + this.updateService._consecutiveSocketErrors + ", " +
         "max fail: " + maxFail + ", " + "retryTimeout: " + retryTimeout);
     if (Components.isSuccessCode(status)) {
+      recordInHealthReport(
+        this.isCompleteUpdate ? UpdaterHealthReportFields.COMPLETE_SUCCESS :
+                                UpdaterHealthReportFields.PARTIAL_SUCCESS, 0);
+
       if (this._verifyDownload()) {
         state = shouldUseService() ? STATE_PENDING_SVC : STATE_PENDING;
         if (this.background) {
@@ -4394,49 +4457,53 @@ Downloader.prototype = {
         // Destroy the updates directory, since we're done with it.
         cleanUpUpdatesDir();
       }
-    } else if (status == Cr.NS_ERROR_OFFLINE) {
-      // Register an online observer to try again.
-      // The online observer will continue the incremental download by
-      // calling downloadUpdate on the active update which continues
-      // downloading the file from where it was.
-      LOG("Downloader:onStopRequest - offline, register online observer: true");
-      shouldRegisterOnlineObserver = true;
-      deleteActiveUpdate = false;
-    // Each of NS_ERROR_NET_TIMEOUT, ERROR_CONNECTION_REFUSED, and
-    // NS_ERROR_NET_RESET can be returned when disconnecting the internet while
-    // a download of a MAR is in progress.  There may be others but I have not
-    // encountered them during testing.
-    } else if ((status == Cr.NS_ERROR_NET_TIMEOUT ||
-                status == Cr.NS_ERROR_CONNECTION_REFUSED ||
-                status == Cr.NS_ERROR_NET_RESET) &&
-               this.updateService._consecutiveSocketErrors < maxFail) {
-      LOG("Downloader:onStopRequest - socket error, shouldRetrySoon: true");
-      shouldRetrySoon = true;
-      deleteActiveUpdate = false;
-    } else if (status != Cr.NS_BINDING_ABORTED &&
-               status != Cr.NS_ERROR_ABORT &&
-               status != Cr.NS_ERROR_DOCUMENT_NOT_CACHED) {
-      LOG("Downloader:onStopRequest - non-verification failure");
-      // Some sort of other failure, log this in the |statusText| property
-      state = STATE_DOWNLOAD_FAILED;
+    } else {
+      recordInHealthReport(UpdaterHealthReportFields.FAILED, status);
 
-      // XXXben - if |request| (The Incremental Download) provided a means
-      // for accessing the http channel we could do more here.
+      if (status == Cr.NS_ERROR_OFFLINE) {
+        // Register an online observer to try again.
+        // The online observer will continue the incremental download by
+        // calling downloadUpdate on the active update which continues
+        // downloading the file from where it was.
+        LOG("Downloader:onStopRequest - offline, register online observer: true");
+        shouldRegisterOnlineObserver = true;
+        deleteActiveUpdate = false;
+      // Each of NS_ERROR_NET_TIMEOUT, ERROR_CONNECTION_REFUSED, and
+      // NS_ERROR_NET_RESET can be returned when disconnecting the internet while
+      // a download of a MAR is in progress.  There may be others but I have not
+      // encountered them during testing.
+      } else if ((status == Cr.NS_ERROR_NET_TIMEOUT ||
+                  status == Cr.NS_ERROR_CONNECTION_REFUSED ||
+                  status == Cr.NS_ERROR_NET_RESET) &&
+                 this.updateService._consecutiveSocketErrors < maxFail) {
+        LOG("Downloader:onStopRequest - socket error, shouldRetrySoon: true");
+        shouldRetrySoon = true;
+        deleteActiveUpdate = false;
+      } else if (status != Cr.NS_BINDING_ABORTED &&
+                 status != Cr.NS_ERROR_ABORT &&
+                 status != Cr.NS_ERROR_DOCUMENT_NOT_CACHED) {
+        LOG("Downloader:onStopRequest - non-verification failure");
+        // Some sort of other failure, log this in the |statusText| property
+        state = STATE_DOWNLOAD_FAILED;
 
-      this._update.statusText = getStatusTextFromCode(status,
-                                                      Cr.NS_BINDING_FAILED);
+        // XXXben - if |request| (The Incremental Download) provided a means
+        // for accessing the http channel we could do more here.
+
+        this._update.statusText = getStatusTextFromCode(status,
+                                                        Cr.NS_BINDING_FAILED);
 
 #ifdef MOZ_WIDGET_GONK
-      // bug891009: On FirefoxOS, manaully retry OTA download will reuse
-      // the Update object. We need to remove selected patch so that download
-      // can be triggered again successfully.
-      this._update.selectedPatch.selected = false;
+        // bug891009: On FirefoxOS, manaully retry OTA download will reuse
+        // the Update object. We need to remove selected patch so that download
+        // can be triggered again successfully.
+        this._update.selectedPatch.selected = false;
 #endif
 
-      // Destroy the updates directory, since we're done with it.
-      cleanUpUpdatesDir();
+        // Destroy the updates directory, since we're done with it.
+        cleanUpUpdatesDir();
 
-      deleteActiveUpdate = true;
+        deleteActiveUpdate = true;
+      }
     }
     LOG("Downloader:onStopRequest - setting state to: " + state);
     this._patch.state = state;

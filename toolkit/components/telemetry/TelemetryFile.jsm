@@ -1,3 +1,8 @@
+/* -*- js-indent-level: 2; indent-tabs-mode: nil -*- */
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 "use strict";
 
 this.EXPORTED_SYMBOLS = ["TelemetryFile"];
@@ -7,128 +12,125 @@ const Ci = Components.interfaces;
 const Cr = Components.results;
 const Cu = Components.utils;
 
-let imports = {};
-Cu.import("resource://gre/modules/Services.jsm", imports);
-Cu.import("resource://gre/modules/Deprecated.jsm", imports);
-Cu.import("resource://gre/modules/NetUtil.jsm", imports);
+Cu.import("resource://gre/modules/Services.jsm", this);
+Cu.import("resource://gre/modules/XPCOMUtils.jsm", this);
+Cu.import("resource://gre/modules/osfile.jsm", this);
+Cu.import("resource://gre/modules/Task.jsm", this);
+Cu.import("resource://gre/modules/Promise.jsm", this);
 
-let {Services, Deprecated, NetUtil} = imports;
+XPCOMUtils.defineLazyModuleGetter(this, 'Deprecated',
+  'resource://gre/modules/Deprecated.jsm');
 
-// Constants from prio.h for nsIFileOutputStream.init
-const PR_WRONLY = 0x2;
-const PR_CREATE_FILE = 0x8;
-const PR_TRUNCATE = 0x20;
-const PR_EXCL = 0x80;
-const RW_OWNER = parseInt("0600", 8);
-const RWX_OWNER = parseInt("0700", 8);
+const Telemetry = Services.telemetry;
 
-// Delete ping files that have been lying around for longer than this.
-const MAX_PING_FILE_AGE = 7 * 24 * 60 * 60 * 1000; // 1 week
+// Files that have been lying around for longer than MAX_PING_FILE_AGE are
+// deleted without being loaded.
+const MAX_PING_FILE_AGE = 14 * 24 * 60 * 60 * 1000; // 2 weeks
+
+// Files that are older than OVERDUE_PING_FILE_AGE, but younger than
+// MAX_PING_FILE_AGE indicate that we need to send all of our pings ASAP.
+const OVERDUE_PING_FILE_AGE = 7 * 24 * 60 * 60 * 1000; // 1 week
+
+// Maximum number of pings to save.
+const MAX_LRU_PINGS = 17;
 
 // The number of outstanding saved pings that we have issued loading
 // requests for.
 let pingsLoaded = 0;
 
-// The number of those requests that have actually completed.
-let pingLoadsCompleted = 0;
+// The number of pings that we have destroyed due to being older
+// than MAX_PING_FILE_AGE.
+let pingsDiscarded = 0;
 
-// If |true|, send notifications "telemetry-test-save-complete"
-// and "telemetry-test-load-complete" once save/load is complete.
-let shouldNotifyUponSave = false;
+// The number of pings that are older than OVERDUE_PING_FILE_AGE
+// but younger than MAX_PING_FILE_AGE.
+let pingsOverdue = 0;
 
 // Data that has neither been saved nor sent by ping
 let pendingPings = [];
 
+let isPingDirectoryCreated = false;
+
 this.TelemetryFile = {
+
+  get MAX_PING_FILE_AGE() {
+    return MAX_PING_FILE_AGE;
+  },
+
+  get OVERDUE_PING_FILE_AGE() {
+    return OVERDUE_PING_FILE_AGE;
+  },
+
+  get MAX_LRU_PINGS() {
+    return MAX_LRU_PINGS;
+  },
+
+  get pingDirectoryPath() {
+    return OS.Path.join(OS.Constants.Path.profileDir, "saved-telemetry-pings");
+  },
 
   /**
    * Save a single ping to a file.
    *
    * @param {object} ping The content of the ping to save.
-   * @param {nsIFile} file The destination file.
-   * @param {bool} sync If |true|, write synchronously. Deprecated.
-   * This argument should be |false|.
-   * @param {bool} overwrite If |true|, the file will be overwritten
-   * if it exists.
+   * @param {string} file The destination file.
+   * @param {bool} overwrite If |true|, the file will be overwritten if it exists,
+   * if |false| the file will not be overwritten and no error will be reported if
+   * the file exists.
+   * @returns {promise}
    */
-  savePingToFile: function(ping, file, sync, overwrite) {
-    let pingString = JSON.stringify(ping);
-
-    let converter = Cc["@mozilla.org/intl/scriptableunicodeconverter"]
-                    .createInstance(Ci.nsIScriptableUnicodeConverter);
-    converter.charset = "UTF-8";
-
-    let ostream = Cc["@mozilla.org/network/file-output-stream;1"]
-                  .createInstance(Ci.nsIFileOutputStream);
-    let initFlags = PR_WRONLY | PR_CREATE_FILE | PR_TRUNCATE;
-    if (!overwrite) {
-      initFlags |= PR_EXCL;
-    }
-    try {
-      ostream.init(file, initFlags, RW_OWNER, 0);
-    } catch (e) {
-      // Probably due to PR_EXCL.
-      return;
-    }
-
-    if (sync) {
-      let utf8String = converter.ConvertFromUnicode(pingString);
-      utf8String += converter.Finish();
-      let success = false;
+  savePingToFile: function(ping, file, overwrite) {
+    return Task.spawn(function*() {
       try {
-        let amount = ostream.write(utf8String, utf8String.length);
-        success = amount == utf8String.length;
-      } catch (e) {
+        let pingString = JSON.stringify(ping);
+        yield OS.File.writeAtomic(file, pingString, {tmpPath: file + ".tmp",
+                                  noOverwrite: !overwrite});
+      } catch(e if e.becauseExists) {
       }
-      finishTelemetrySave(success, ostream);
-    } else {
-      let istream = converter.convertToInputStream(pingString);
-      let self = this;
-      NetUtil.asyncCopy(istream, ostream,
-                        function(result) {
-                          finishTelemetrySave(Components.isSuccessCode(result),
-                              ostream);
-                        });
-    }
+    })
   },
 
   /**
-   * Save a ping to its file, synchronously.
+   * Save a ping to its file.
    *
    * @param {object} ping The content of the ping to save.
    * @param {bool} overwrite If |true|, the file will be overwritten
    * if it exists.
+   * @returns {promise}
    */
   savePing: function(ping, overwrite) {
-    this.savePingToFile(ping,
-      getSaveFileForPing(ping), true, overwrite);
+    return Task.spawn(function*() {
+      yield getPingDirectory();
+      let file = pingFilePath(ping);
+      yield this.savePingToFile(ping, file, overwrite);
+    }.bind(this));
   },
 
   /**
-   * Save all pending pings, synchronously.
+   * Save all pending pings.
    *
    * @param {object} sessionPing The additional session ping.
+   * @returns {promise}
    */
   savePendingPings: function(sessionPing) {
-    this.savePing(sessionPing, true);
-    pendingPings.forEach(function sppcb(e, i, a) {
-      this.savePing(e, false);
-    }, this);
+    let p = pendingPings.reduce((p, ping) => {
+      // Restore the files with the previous pings if for some reason they have
+      // been deleted, don't overwrite them otherwise.
+      p.push(this.savePing(ping, false));
+      return p;}, [this.savePing(sessionPing, true)]);
+
     pendingPings = [];
+    return Promise.all(p);
   },
 
   /**
    * Remove the file for a ping
    *
    * @param {object} ping The ping.
+   * @returns {promise}
    */
   cleanupPingFile: function(ping) {
-    // FIXME: We shouldn't create the directory just to remove the file.
-    let file = getSaveFileForPing(ping);
-    try {
-      file.remove(true); // FIXME: Should be |false|, isn't it?
-    } catch(e) {
-    }
+    return OS.File.remove(pingFilePath(ping));
   },
 
   /**
@@ -137,24 +139,53 @@ this.TelemetryFile = {
    * Once loaded, the saved pings can be accessed (destructively only)
    * through |popPendingPings|.
    *
-   * @param {bool} sync If |true|, loading takes place synchronously.
-   * @param {function*} onLoad A function called upon loading of each
-   * ping. It is passed |true| in case of success, |false| in case of
-   * format error.
+   * @returns {promise}
    */
-  loadSavedPings: function(sync, onLoad = null) {
-    let directory = ensurePingDirectory();
-    let entries = directory.directoryEntries
-                           .QueryInterface(Ci.nsIDirectoryEnumerator);
-    pingsLoaded = 0;
-    pingLoadsCompleted = 0;
-    try {
-      while (entries.hasMoreElements()) {
-        this.loadHistograms(entries.nextFile, sync, onLoad);
+  loadSavedPings: function() {
+    return Task.spawn(function*() {
+      let directory = TelemetryFile.pingDirectoryPath;
+      let iter = new OS.File.DirectoryIterator(directory);
+      let exists = yield iter.exists();
+
+      if (exists) {
+        let entries = yield iter.nextBatch();
+        let sortedEntries = [];
+
+        for (let entry of entries) {
+          if (entry.isDir) {
+            continue;
+          }
+
+          let info = yield OS.File.stat(entry.path);
+          sortedEntries.push({entry:entry, lastModificationDate: info.lastModificationDate});
+        }
+
+        sortedEntries.sort(function compare(a, b) {
+          return b.lastModificationDate - a.lastModificationDate;
+        });
+
+        let count = 0;
+        let result = [];
+
+        // Keep only the last MAX_LRU_PINGS entries to avoid that the backlog overgrows.
+        for (let i = 0; i < MAX_LRU_PINGS && i < sortedEntries.length; i++) {
+          let entry = sortedEntries[i].entry;
+          result.push(this.loadHistograms(entry.path))
+        }
+
+        for (let i = MAX_LRU_PINGS; i < sortedEntries.length; i++) {
+          let entry = sortedEntries[i].entry;
+          OS.File.remove(entry.path);
+        }
+
+        yield Promise.all(result);
+
+        Services.telemetry.getHistogramById('TELEMETRY_FILES_EVICTED').
+          add(sortedEntries.length - MAX_LRU_PINGS);
       }
-    } finally {
-      entries.close();
-    }
+
+      yield iter.close();
+    }.bind(this));
   },
 
   /**
@@ -163,37 +194,26 @@ this.TelemetryFile = {
    * Once loaded, the saved pings can be accessed (destructively only)
    * through |popPendingPings|.
    *
-   * @param {nsIFile} file The file to load.
-   * @param {bool} sync If |true|, loading takes place synchronously.
-   * @param {function*} onLoad A function called upon loading of the
-   * ping. It is passed |true| in case of success, |false| in case of
-   * format error.
+   * @param {string} file The file to load.
+   * @returns {promise}
    */
-  loadHistograms: function loadHistograms(file, sync, onLoad = null) {
-    let now = new Date();
-    if (now - file.lastModifiedTime > MAX_PING_FILE_AGE) {
-      // We haven't had much luck in sending this file; delete it.
-      file.remove(true);
-      return;
-    }
+  loadHistograms: function loadHistograms(file) {
+    return OS.File.stat(file).then(function(info){
+      let now = Date.now();
+      if (now - info.lastModificationDate > MAX_PING_FILE_AGE) {
+        // We haven't had much luck in sending this file; delete it.
+        pingsDiscarded++;
+        return OS.File.remove(file);
+      }
 
-    pingsLoaded++;
-    if (sync) {
-      let stream = Cc["@mozilla.org/network/file-input-stream;1"]
-                   .createInstance(Ci.nsIFileInputStream);
-      stream.init(file, -1, -1, 0);
-      addToPendingPings(file, stream, onLoad);
-    } else {
-      let channel = NetUtil.newChannel(file);
-      channel.contentType = "application/json";
+      // This file is a bit stale, and overdue for sending.
+      if (now - info.lastModificationDate > OVERDUE_PING_FILE_AGE) {
+        pingsOverdue++;
+      }
 
-      NetUtil.asyncFetch(channel, (function(stream, result) {
-        if (!Components.isSuccessCode(result)) {
-          return;
-        }
-        addToPendingPings(file, stream, onLoad);
-      }).bind(this));
-    }
+      pingsLoaded++;
+      return addToPendingPings(file);
+    });
   },
 
   /**
@@ -204,11 +224,27 @@ this.TelemetryFile = {
   },
 
   /**
+   * The number of pings loaded that are older than OVERDUE_PING_FILE_AGE
+   * but younger than MAX_PING_FILE_AGE.
+   */
+  get pingsOverdue() {
+    return pingsOverdue;
+  },
+
+  /**
+   * The number of pings that we just tossed out for being older than
+   * MAX_PING_FILE_AGE.
+   */
+  get pingsDiscarded() {
+    return pingsDiscarded;
+  },
+
+  /**
    * Iterate destructively through the pending pings.
    *
    * @return {iterator}
    */
-  popPendingPings: function(reason) {
+  popPendingPings: function*(reason) {
     while (pendingPings.length > 0) {
       let data = pendingPings.pop();
       // Send persisted pings to the test URL too.
@@ -219,68 +255,53 @@ this.TelemetryFile = {
     }
   },
 
-  set shouldNotifyUponSave(value) {
-    shouldNotifyUponSave = value;
-  },
-
-  testLoadHistograms: function(file, sync, onLoad) {
+  testLoadHistograms: function(file) {
     pingsLoaded = 0;
-    pingLoadsCompleted = 0;
-    this.loadHistograms(file, sync, onLoad);
+    return this.loadHistograms(file.path);
   }
 };
 
 ///// Utility functions
+function pingFilePath(ping) {
+  return OS.Path.join(TelemetryFile.pingDirectoryPath, ping.slug);
+}
 
-function getSaveFileForPing(ping) {
-  let file = ensurePingDirectory();
-  file.append(ping.slug);
-  return file;
-};
+function getPingDirectory() {
+  return Task.spawn(function*() {
+    let directory = TelemetryFile.pingDirectoryPath;
 
-function ensurePingDirectory() {
-  let directory = Services.dirsvc.get("ProfD", Ci.nsILocalFile).clone();
-  directory.append("saved-telemetry-pings");
-  try {
-    directory.create(Ci.nsIFile.DIRECTORY_TYPE, RWX_OWNER);
-  } catch (e) {
-    // Already exists, just ignore this.
-  }
-  return directory;
-};
-
-function addToPendingPings(file, stream, onLoad) {
-  let success = false;
-
-  try {
-    let string = NetUtil.readInputStreamToString(stream, stream.available(),
-      { charset: "UTF-8" });
-    stream.close();
-    let ping = JSON.parse(string);
-    // The ping's payload used to be stringified JSON.  Deal with that.
-    if (typeof(ping.payload) == "string") {
-      ping.payload = JSON.parse(ping.payload);
+    if (!isPingDirectoryCreated) {
+      yield OS.File.makeDir(directory, { unixMode: OS.Constants.S_IRWXU });
+      isPingDirectoryCreated = true;
     }
-    pingLoadsCompleted++;
-    pendingPings.push(ping);
-    if (shouldNotifyUponSave &&
-        pingLoadsCompleted == pingsLoaded) {
-      Services.obs.notifyObservers(null, "telemetry-test-load-complete", null);
-    }
-    success = true;
-  } catch (e) {
-    // An error reading the file, or an error parsing the contents.
-    stream.close();           // close is idempotent.
-    file.remove(true); // FIXME: Should be false, isn't it?
-  }
-  if (onLoad) {
-    onLoad(success);
-  }
-};
 
-function finishTelemetrySave(ok, stream) {
-  stream.close();
-  if (shouldNotifyUponSave && ok) {
-    Services.obs.notifyObservers(null, "telemetry-test-save-complete", null);
+    return directory;
+  });
+}
+
+function addToPendingPings(file) {
+  function onLoad(success) {
+    let success_histogram = Telemetry.getHistogramById("READ_SAVED_PING_SUCCESS");
+    success_histogram.add(success);
   }
-};
+
+  return Task.spawn(function*() {
+    try {
+      let array = yield OS.File.read(file);
+      let decoder = new TextDecoder();
+      let string = decoder.decode(array);
+
+      let ping = JSON.parse(string);
+      // The ping's payload used to be stringified JSON.  Deal with that.
+      if (typeof(ping.payload) == "string") {
+        ping.payload = JSON.parse(ping.payload);
+      }
+
+      pendingPings.push(ping);
+      onLoad(true);
+    } catch (e) {
+      onLoad(false);
+      yield OS.File.remove(file);
+    }
+  });
+}

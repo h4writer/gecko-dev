@@ -35,15 +35,14 @@ probes::CallTrackingActive(JSContext *cx)
 inline bool
 probes::WantNativeAddressInfo(JSContext *cx)
 {
-    return (cx->reportGranularity >= JITREPORT_GRANULARITY_FUNCTION &&
-            JITGranularityRequested(cx) >= JITREPORT_GRANULARITY_FUNCTION);
+    return cx->reportGranularity >= JITREPORT_GRANULARITY_FUNCTION &&
+           JITGranularityRequested(cx) >= JITREPORT_GRANULARITY_FUNCTION;
 }
 
 inline bool
 probes::EnterScript(JSContext *cx, JSScript *script, JSFunction *maybeFun,
-                    StackFrame *fp)
+                    InterpreterFrame *fp)
 {
-    bool ok = true;
 #ifdef INCLUDE_MOZILLA_DTRACE
     if (JAVASCRIPT_FUNCTION_ENTRY_ENABLED())
         DTraceEnterJSFun(cx, maybeFun, script);
@@ -54,19 +53,18 @@ probes::EnterScript(JSContext *cx, JSScript *script, JSFunction *maybeFun,
 
     JSRuntime *rt = cx->runtime();
     if (rt->spsProfiler.enabled()) {
-        rt->spsProfiler.enter(cx, script, maybeFun);
-        JS_ASSERT_IF(!fp->isGeneratorFrame(), !fp->hasPushedSPSFrame());
+        if (!rt->spsProfiler.enter(script, maybeFun))
+            return false;
+        MOZ_ASSERT_IF(!fp->isGeneratorFrame(), !fp->hasPushedSPSFrame());
         fp->setPushedSPSFrame();
     }
 
-    return ok;
+    return true;
 }
 
-inline bool
+inline void
 probes::ExitScript(JSContext *cx, JSScript *script, JSFunction *maybeFun, bool popSPSFrame)
 {
-    bool ok = true;
-
 #ifdef INCLUDE_MOZILLA_DTRACE
     if (JAVASCRIPT_FUNCTION_RETURN_ENABLED())
         DTraceExitJSFun(cx, maybeFun, script);
@@ -76,9 +74,7 @@ probes::ExitScript(JSContext *cx, JSScript *script, JSFunction *maybeFun, bool p
 #endif
 
     if (popSPSFrame)
-        cx->runtime()->spsProfiler.exit(cx, script, maybeFun);
-
-    return ok;
+        cx->runtime()->spsProfiler.exit(script, maybeFun);
 }
 
 inline bool
@@ -110,5 +106,5 @@ probes::StopExecution(JSScript *script)
 }
 
 } /* namespace js */
- 
+
 #endif /* vm_Probes_inl_h */

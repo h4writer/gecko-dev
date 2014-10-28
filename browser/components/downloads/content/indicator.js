@@ -1,4 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim: set ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -298,6 +298,19 @@ const DownloadsIndicatorView = {
   _notificationTimeout: null,
 
   /**
+   * Check if the panel containing aNode is open.
+   * @param aNode
+   *        the node whose panel we're interested in.
+   */
+  _isAncestorPanelOpen: function DIV_isAncestorPanelOpen(aNode)
+  {
+    while (aNode && aNode.localName != "panel") {
+      aNode = aNode.parentNode;
+    }
+    return aNode && aNode.state == "open";
+  },
+
+  /**
    * If the status indicator is visible in its assigned position, shows for a
    * brief time a visual notification of a relevant event, like a new download.
    *
@@ -321,15 +334,17 @@ const DownloadsIndicatorView = {
 
     let anchor = DownloadsButton._placeholder;
     let widgetGroup = CustomizableUI.getWidget("downloads-button");
-    let widgetInWindow = widgetGroup.forWindow(window);
-    if (widgetInWindow.overflowed || widgetGroup.areaType == CustomizableUI.TYPE_MENU_PANEL) {
-      if (anchor && isElementVisible(anchor.parentNode)) {
-        // If the panel is open, don't do anything:
+    let widget = widgetGroup.forWindow(window);
+    if (widget.overflowed || widgetGroup.areaType == CustomizableUI.TYPE_MENU_PANEL) {
+      if (anchor && this._isAncestorPanelOpen(anchor)) {
+        // If the containing panel is open, don't do anything, because the
+        // notification would appear under the open panel. See
+        // https://bugzilla.mozilla.org/show_bug.cgi?id=984023
         return;
       }
 
       // Otherwise, try to use the anchor of the panel:
-      anchor = widgetInWindow.anchor;
+      anchor = widget.anchor;
     }
     if (!anchor || !isElementVisible(anchor.parentNode)) {
       // Our container isn't visible, so can't show the animation:

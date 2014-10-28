@@ -28,7 +28,8 @@ add_task(function page_style() {
     if (title.startsWith("fail_")) {
       ok(!enabled.length, "didn't restore " + title);
     } else {
-      ok(enabled.length == 1 && enabled[0][0] == title, "restored " + title);
+      is(enabled.length, 1, "restored one style sheet");
+      is(enabled[0][0], title, "restored correct sheet");
     }
 
     gBrowser.removeTab(tab2);
@@ -61,11 +62,12 @@ add_task(function nested_page_style() {
   gBrowser.removeTab(tab);
 
   let [{state: {pageStyle}}] = JSON.parse(ss.getClosedTabData(window));
-  is(pageStyle, "alternate", "correct pageStyle persisted");
+  let expected = JSON.stringify({children: [{pageStyle: "alternate"}]});
+  is(JSON.stringify(pageStyle), expected, "correct pageStyle persisted");
 });
 
 function getStyleSheets(browser) {
-  return sendMessage(browser, "ss-test:getStyleSheets").then(({data}) => data);
+  return sendMessage(browser, "ss-test:getStyleSheets");
 }
 
 function enableStyleSheetsForSet(browser, name) {
@@ -79,8 +81,7 @@ function enableSubDocumentStyleSheetsForSet(browser, name) {
 }
 
 function getAuthorStyleDisabled(browser) {
-  return sendMessage(browser, "ss-test:getAuthorStyleDisabled")
-           .then(({data}) => data);
+  return sendMessage(browser, "ss-test:getAuthorStyleDisabled");
 }
 
 function setAuthorStyleDisabled(browser, val) {

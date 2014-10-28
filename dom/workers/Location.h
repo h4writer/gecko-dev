@@ -22,6 +22,7 @@ class WorkerLocation MOZ_FINAL : public nsWrapperCache
   nsString mPathname;
   nsString mSearch;
   nsString mHash;
+  nsString mOrigin;
 
   WorkerLocation(const nsAString& aHref,
                  const nsAString& aProtocol,
@@ -30,7 +31,8 @@ class WorkerLocation MOZ_FINAL : public nsWrapperCache
                  const nsAString& aPort,
                  const nsAString& aPathname,
                  const nsAString& aSearch,
-                 const nsAString& aHash)
+                 const nsAString& aHash,
+                 const nsAString& aOrigin)
     : mHref(aHref)
     , mProtocol(aProtocol)
     , mHost(aHost)
@@ -39,9 +41,14 @@ class WorkerLocation MOZ_FINAL : public nsWrapperCache
     , mPathname(aPathname)
     , mSearch(aSearch)
     , mHash(aHash)
+    , mOrigin(aOrigin)
   {
     MOZ_COUNT_CTOR(WorkerLocation);
-    SetIsDOMBinding();
+  }
+
+  ~WorkerLocation()
+  {
+    MOZ_COUNT_DTOR(WorkerLocation);
   }
 
 public:
@@ -53,15 +60,10 @@ public:
   Create(WorkerPrivate::LocationInfo& aInfo);
 
   virtual JSObject*
-  WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope) MOZ_OVERRIDE;
+  WrapObject(JSContext* aCx) MOZ_OVERRIDE;
 
   nsISupports* GetParentObject() const {
     return nullptr;
-  }
-
-  ~WorkerLocation()
-  {
-    MOZ_COUNT_DTOR(WorkerLocation);
   }
 
   void Stringify(nsString& aHref) const
@@ -99,6 +101,10 @@ public:
   void GetHash(nsString& aHash) const
   {
     aHash = mHash;
+  }
+  void GetOrigin(nsString& aOrigin) const
+  {
+    aOrigin = mOrigin;
   }
 };
 

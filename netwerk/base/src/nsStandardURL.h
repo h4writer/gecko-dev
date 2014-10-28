@@ -28,7 +28,6 @@
 class nsIBinaryInputStream;
 class nsIBinaryOutputStream;
 class nsIIDNService;
-class nsICharsetConverterManager;
 class nsIPrefBranch;
 class nsIFile;
 class nsIURLParser;
@@ -44,6 +43,9 @@ class nsStandardURL : public nsIFileURL
                     , public nsISizeOf
                     , public nsIIPCSerializableURI
 {
+protected:
+    virtual ~nsStandardURL();
+
 public:
     NS_DECL_ISUPPORTS
     NS_DECL_NSIURI
@@ -59,8 +61,7 @@ public:
     virtual size_t SizeOfExcludingThis(mozilla::MallocSizeOf aMallocSizeOf) const;
     virtual size_t SizeOfIncludingThis(mozilla::MallocSizeOf aMallocSizeOf) const;
 
-    nsStandardURL(bool aSupportsFileURL = false);
-    virtual ~nsStandardURL();
+    explicit nsStandardURL(bool aSupportsFileURL = false, bool aTrackURL = true);
 
     static void InitGlobalObjects();
     static void ShutdownGlobalObjects();
@@ -94,6 +95,8 @@ public: /* internal -- HPUX compiler can't handle this being private */
     //
     class nsPrefObserver MOZ_FINAL : public nsIObserver
     {
+        ~nsPrefObserver() {}
+
     public:
         NS_DECL_ISUPPORTS
         NS_DECL_NSIOBSERVER
@@ -108,7 +111,7 @@ public: /* internal -- HPUX compiler can't handle this being private */
     class nsSegmentEncoder
     {
     public:
-        nsSegmentEncoder(const char *charset);
+        explicit nsSegmentEncoder(const char *charset);
 
         // Encode the given segment if necessary, and return the length of
         // the encoded segment.  The encoded segment is appended to |buf|
@@ -153,6 +156,10 @@ protected:
     // Helper to share code between Clone methods.
     nsresult CloneInternal(RefHandlingEnum aRefHandlingMode,
                            nsIURI** aClone);
+    // Helper method that copies member variables from the source StandardURL
+    // if copyCached = true, it will also copy mFile and mHostA
+    nsresult CopyMembers(nsStandardURL * source, RefHandlingEnum mode,
+                         bool copyCached = false);
 
     // Helper for subclass implementation of GetFile().  Subclasses that map
     // URIs to files in a special way should implement this method.  It should
@@ -166,7 +173,7 @@ private:
     void     Clear();
     void     InvalidateCache(bool invalidateCachedFile = true);
 
-    bool     EscapeIPv6(const char *host, nsCString &result);
+    bool     ValidIPv6orHostname(const char *host);
     bool     NormalizeIDN(const nsCSubstring &host, nsCString &result);
     void     CoalescePath(netCoalesceFlags coalesceFlag, char *path);
 
@@ -227,6 +234,9 @@ private:
 
     static void PrefsChanged(nsIPrefBranch *prefs, const char *pref);
 
+    void FindHostLimit(nsACString::const_iterator& aStart,
+                       nsACString::const_iterator& aEnd);
+
     // mSpec contains the normalized version of the URL spec (UTF-8 encoded).
     nsCString mSpec;
     int32_t   mDefaultPort;
@@ -271,7 +281,7 @@ private:
     // global objects.  don't use COMPtr as its destructor will cause a
     // coredump if we leak it.
     static nsIIDNService               *gIDN;
-    static nsICharsetConverterManager  *gCharsetMgr;
+    static char                         gHostLimitDigits[];
     static bool                         gInitialized;
     static bool                         gEscapeUTF8;
     static bool                         gAlwaysEncodeInUTF8;

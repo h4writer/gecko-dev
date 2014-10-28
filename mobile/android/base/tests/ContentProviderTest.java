@@ -1,27 +1,35 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 package org.mozilla.gecko.tests;
 
+import java.io.File;
+import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.concurrent.Callable;
+
+import org.mozilla.gecko.db.BrowserContract;
+import org.mozilla.gecko.db.BrowserProvider;
+
 import android.content.ContentProvider;
+import android.content.ContentProviderOperation;
+import android.content.ContentProviderResult;
 import android.content.ContentValues;
 import android.content.Context;
-import android.content.ContentProviderResult;
-import android.content.ContentProviderOperation;
 import android.content.OperationApplicationException;
+import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.content.res.AssetManager;
 import android.content.res.Resources;
-import android.content.pm.ApplicationInfo;
-import android.content.SharedPreferences;
-import android.database.Cursor;
 import android.database.ContentObserver;
-import android.os.Build;
+import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.test.IsolatedContext;
 import android.test.RenamingDelegatingContext;
 import android.test.mock.MockContentResolver;
 import android.test.mock.MockContext;
-import java.io.File;
-import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.LinkedList;
 
 /*
  * ContentProviderTest provides the infrastructure to run content provider
@@ -45,10 +53,8 @@ import java.util.LinkedList;
 abstract class ContentProviderTest extends BaseTest {
     protected ContentProvider mProvider;
     protected ChangeRecordingMockContentResolver mResolver;
-    protected ClassLoader mClassLoader;
     protected ArrayList<Runnable> mTests;
-    protected Class mProviderClass;
-    protected Class mProviderContract;
+    protected String mDatabaseName;
     protected String mProviderAuthority;
     protected IsolatedContext mProviderContext;
 
@@ -91,7 +97,7 @@ abstract class ContentProviderTest extends BaseTest {
         }
     }
 
-    private class DelegatingTestContentProvider extends ContentProvider {
+    protected class DelegatingTestContentProvider extends ContentProvider {
         ContentProvider mTargetProvider;
 
         public DelegatingTestContentProvider(ContentProvider targetProvider) {
@@ -101,7 +107,7 @@ abstract class ContentProviderTest extends BaseTest {
 
         private Uri appendTestParam(Uri uri) {
             try {
-                return appendUriParam(uri, "PARAM_IS_TEST", "1");
+                return appendUriParam(uri, BrowserContract.PARAM_IS_TEST, "1");
             } catch (Exception e) {}
 
             return null;
@@ -151,6 +157,10 @@ abstract class ContentProviderTest extends BaseTest {
         public int bulkInsert(Uri uri, ContentValues[] values) {
             return mTargetProvider.bulkInsert(appendTestParam(uri), values);
         }
+
+        public ContentProvider getTargetProvider() {
+            return mTargetProvider;
+        }
     }
 
     /*
@@ -169,14 +179,20 @@ abstract class ContentProviderTest extends BaseTest {
         }
     }
 
-    private void setUpProviderClassAndAuthority(String providerClassName,
-            String authorityField) throws Exception {
-        mProviderContract = mClassLoader.loadClass("org.mozilla.gecko.db.BrowserContract");
-        mProviderAuthority = (String) mProviderContract.getField(authorityField).get(null);
-        mProviderClass = mClassLoader.loadClass(providerClassName);
-    }
+    /**
+     * Factory function that makes new ContentProvider instances.
+     * <p>
+     * We want a fresh provider each test, so this should be invoked in
+     * <code>setUp</code> before each individual test.
+     */
+    protected static Callable<ContentProvider> sBrowserProviderCallable = new Callable<ContentProvider>() {
+        @Override
+        public ContentProvider call() {
+            return new BrowserProvider();
+        }
+    };
 
-    private void setUpContentProvider() throws Exception {
+    private void setUpContentProvider(ContentProvider targetProvider) throws Exception {
         mResolver = new ChangeRecordingMockContentResolver();
 
         final String filenamePrefix = this.getClass().getSimpleName() + ".";
@@ -188,7 +204,6 @@ abstract class ContentProviderTest extends BaseTest {
 
         mProviderContext = new IsolatedContext(mResolver, targetContextWrapper);
 
-        ContentProvider targetProvider = (ContentProvider) mProviderClass.newInstance();
         targetProvider.attachInfo(mProviderContext, null);
 
         mProvider = new DelegatingTestContentProvider(targetProvider);
@@ -197,28 +212,7 @@ abstract class ContentProviderTest extends BaseTest {
         mResolver.addProvider(mProviderAuthority, mProvider);
     }
 
-    public Uri getContentUri(String className) throws Exception {
-        return getUriColumn(className, "CONTENT_URI");
-    }
-
-    public Uri getUriColumn(String className, String columnId) throws Exception {
-        Class aClass = mClassLoader.loadClass("org.mozilla.gecko.db.BrowserContract$" + className);
-        return (Uri) aClass.getField(columnId).get(null);
-    }
-
-    public String getStringColumn(String className, String columnId) throws Exception {
-        Class aClass = mClassLoader.loadClass("org.mozilla.gecko.db.BrowserContract$" + className);
-        return (String) aClass.getField(columnId).get(null);
-    }
-
-    public int getIntColumn(String className, String columnId) throws Exception {
-        Class aClass = mClassLoader.loadClass("org.mozilla.gecko.db.BrowserContract$" + className);
-        Integer intColumn = (Integer) aClass.getField(columnId).get(null);
-        return intColumn.intValue();
-    }
-
-    public Uri appendUriParam(Uri uri, String paramName, String value) throws Exception {
-        String param = (String) mProviderContract.getField(paramName).get(null);
+    public static Uri appendUriParam(Uri uri, String param, String value) {
         return uri.buildUpon().appendQueryParameter(param, value).build();
     }
 
@@ -228,18 +222,18 @@ abstract class ContentProviderTest extends BaseTest {
 
     @Override
     public void setUp() throws Exception {
-        throw new Exception("You should call setUp(providerClassName, authorityUriField) instead");
+        throw new UnsupportedOperationException("You should call setUp(authority, databaseName) instead");
     }
 
-    // TODO: Take the actual class as an arg.
-    public void setUp(String providerClassName, String authorityUriField) throws Exception {
+    public void setUp(Callable<ContentProvider> contentProviderFactory, String authority, String databaseName) throws Exception {
         super.setUp();
 
-        mClassLoader = getInstrumentation().getContext().getClassLoader();
         mTests = new ArrayList<Runnable>();
+        mDatabaseName = databaseName;
 
-        setUpProviderClassAndAuthority(providerClassName, authorityUriField);
-        setUpContentProvider();
+        mProviderAuthority = authority;
+
+        setUpContentProvider(contentProviderFactory.call());
     }
 
     @Override
@@ -248,16 +242,9 @@ abstract class ContentProviderTest extends BaseTest {
             mProvider.shutdown();
         }
 
-        String databaseName = null;
-        Method getDatabasePath =
-                mProviderClass.getDeclaredMethod("getDatabasePath", String.class, boolean.class);
-
-        String defaultProfile = "default";
-        ContentProvider targetProvider = (ContentProvider) mProviderClass.newInstance();
-        databaseName = (String) getDatabasePath.invoke(targetProvider, defaultProfile, true /* is test */);
-
-        if (databaseName != null)
-            mProviderContext.deleteDatabase(databaseName);
+        if (mDatabaseName != null) {
+            mProviderContext.deleteDatabase(mDatabaseName);
+        }
 
         super.tearDown();
     }

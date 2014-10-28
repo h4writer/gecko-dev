@@ -1,4 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim: set ts=2 et sw=2 tw=80: */
 /* Any copyright is dedicated to the Public Domain.
  * http://creativecommons.org/publicdomain/zero/1.0/ */
@@ -165,6 +165,26 @@ add_task(function test_basic_tryToKeepPartialData()
                               TEST_DATA_SHORT + TEST_DATA_SHORT);
   do_check_false(yield OS.File.exists(download.target.partFilePath));
   do_check_eq(32, download.saver.getSha256Hash().length);
+});
+
+/**
+ * Tests the permissions of the final target file once the download finished.
+ */
+add_task(function test_basic_unix_permissions()
+{
+  // This test is only executed on Linux and Mac.
+  if (Services.appinfo.OS != "Darwin" && Services.appinfo.OS != "Linux") {
+    do_print("Skipping test_basic_unix_permissions");
+    return;
+  }
+
+  let download = yield promiseStartDownload(httpUrl("source.txt"));
+  yield promiseDownloadStopped(download);
+
+  // The file should readable and writable by everyone, but the restrictions
+  // from the umask of the process should still apply.
+  do_check_eq((yield OS.File.stat(download.target.path)).unixMode,
+              0o666 & ~OS.Constants.Sys.umask);
 });
 
 /**
@@ -806,7 +826,10 @@ add_task(function test_cancel_immediately_restart_immediately()
   continueResponses();
   try {
     yield promiseAttempt;
-    do_throw("The download should have been canceled.");
+    // If we get here, it means that the first attempt actually succeeded.  In
+    // fact, this could be a valid outcome, because the cancellation request may
+    // not have been processed in time before the download finished.
+    do_print("The download should have been canceled.");
   } catch (ex if ex instanceof Downloads.Error) {
     do_check_false(ex.becauseSourceFailed);
     do_check_false(ex.becauseTargetFailed);
@@ -1061,6 +1084,56 @@ add_task(function test_error_source()
   } finally {
     serverSocket.close();
   }
+});
+
+/**
+ * Ensures a download error is reported when receiving less bytes than what was
+ * specified in the Content-Length header.
+ */
+add_task(function test_error_source_partial()
+{
+  let sourceUrl = httpUrl("shorter-than-content-length-http-1-1.txt");
+
+  let enforcePref = Services.prefs.getBoolPref("network.http.enforce-framing.http1");
+  Services.prefs.setBoolPref("network.http.enforce-framing.http1", true);
+
+  function cleanup() {
+    Services.prefs.setBoolPref("network.http.enforce-framing.http1", enforcePref);
+  }
+  do_register_cleanup(cleanup);
+
+  let download;
+  try {
+    if (!gUseLegacySaver) {
+      // When testing DownloadCopySaver, we want to check that the promise
+      // returned by the "start" method is rejected.
+      download = yield promiseNewDownload(sourceUrl);
+
+      do_check_true(download.error === null);
+
+      yield download.start();
+    } else {
+      // When testing DownloadLegacySaver, we cannot be sure whether we are
+      // testing the promise returned by the "start" method or we are testing
+      // the "error" property checked by promiseDownloadStopped.  This happens
+      // because we don't have control over when the download is started.
+      download = yield promiseStartLegacyDownload(sourceUrl);
+      yield promiseDownloadStopped(download);
+    }
+    do_throw("The download should have failed.");
+  } catch (ex if ex instanceof Downloads.Error && ex.becauseSourceFailed) {
+    // A specific error object is thrown when reading from the source fails.
+  }
+
+  // Check the properties now that the download stopped.
+  do_check_true(download.stopped);
+  do_check_false(download.canceled);
+  do_check_true(download.error !== null);
+  do_check_true(download.error.becauseSourceFailed);
+  do_check_false(download.error.becauseTargetFailed);
+  do_check_eq(download.error.result, Cr.NS_ERROR_NET_PARTIAL_TRANSFER);
+
+  do_check_false(yield OS.File.exists(download.target.path));
 });
 
 /**
@@ -1668,10 +1741,28 @@ add_task(function test_toSerializable_startTime()
 add_task(function test_platform_integration()
 {
   let downloadFiles = [];
+  let oldDeviceStorageEnabled = false;
+  try {
+     oldDeviceStorageEnabled = Services.prefs.getBoolPref("device.storage.enabled");
+  } catch (e) {
+    // This happens if the pref doesn't exist.
+  }
+  let downloadWatcherNotified = false;
+  let observer = {
+    observe: function(subject, topic, data) {
+      do_check_eq(topic, "download-watcher-notify");
+      do_check_eq(data, "modified");
+      downloadWatcherNotified = true;
+    }
+  }
+  Services.obs.addObserver(observer, "download-watcher-notify", false);
+  Services.prefs.setBoolPref("device.storage.enabled", true);
   function cleanup() {
     for (let file of downloadFiles) {
       file.remove(true);
     }
+    Services.obs.removeObserver(observer, "download-watcher-notify");
+    Services.prefs.setBoolPref("device.storage.enabled", oldDeviceStorageEnabled);
   }
   do_register_cleanup(cleanup);
 
@@ -1705,6 +1796,7 @@ add_task(function test_platform_integration()
     // downloadDone should be called before the whenSucceeded promise is resolved.
     yield download.whenSucceeded().then(function () {
       do_check_true(DownloadIntegration.downloadDoneCalled);
+      do_check_true(downloadWatcherNotified);
     });
 
     // Then, wait for the promise returned by "start" to be resolved.

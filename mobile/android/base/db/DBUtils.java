@@ -7,6 +7,7 @@ package org.mozilla.gecko.db;
 import org.mozilla.gecko.GeckoAppShell;
 
 import android.content.ContentValues;
+import android.database.Cursor;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.text.TextUtils;
 import android.util.Log;
@@ -80,5 +81,61 @@ public class DBUtils {
         }
         Log.d(LOGTAG, "Failed to unlock database");
         GeckoAppShell.listOfOpenFiles();
+    }
+
+    /**
+     * Verifies that 0-byte arrays aren't added as favicon or thumbnail data.
+     * @param values        ContentValues of query
+     * @param columnName    Name of data column to verify
+     */
+    public static void stripEmptyByteArray(ContentValues values, String columnName) {
+        if (values.containsKey(columnName)) {
+            byte[] data = values.getAsByteArray(columnName);
+            if (data == null || data.length == 0) {
+                Log.w(LOGTAG, "Tried to insert an empty or non-byte-array image. Ignoring.");
+                values.putNull(columnName);
+            }
+        }
+    }
+
+    /**
+     * Builds a selection string that searches for a list of arguments in a particular column.
+     * For example URL in (?,?,?). Callers should pass the actual arguments into their query
+     * as selection args.
+     * @para columnName   The column to search in
+     * @para size         The number of arguments to search for
+     */
+    public static String computeSQLInClause(int items, String field) {
+        final StringBuilder builder = new StringBuilder(field);
+        builder.append(" IN (");
+        int i = 0;
+        for (; i < items - 1; ++i) {
+            builder.append("?, ");
+        }
+        if (i < items) {
+            builder.append("?");
+        }
+        builder.append(")");
+        return builder.toString();
+    }
+
+    /**
+     * Turn a single-column cursor of longs into a single SQL "IN" clause.
+     * We can do this without using selection arguments because Long isn't
+     * vulnerable to injection.
+     */
+    public static String computeSQLInClauseFromLongs(final Cursor cursor, String field) {
+        final StringBuilder builder = new StringBuilder(field);
+        builder.append(" IN (");
+        final int commaLimit = cursor.getCount() - 1;
+        int i = 0;
+        while (cursor.moveToNext()) {
+            builder.append(cursor.getLong(0));
+            if (i++ < commaLimit) {
+                builder.append(", ");
+            }
+        }
+        builder.append(")");
+        return builder.toString();
     }
 }

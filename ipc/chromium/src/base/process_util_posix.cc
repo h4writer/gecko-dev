@@ -22,11 +22,12 @@
 #include "base/logging.h"
 #include "base/platform_thread.h"
 #include "base/process_util.h"
-#include "base/scoped_ptr.h"
 #include "base/sys_info.h"
 #include "base/time.h"
 #include "base/waitable_event.h"
 #include "base/dir_reader_posix.h"
+
+#include "mozilla/UniquePtr.h"
 
 const int kMicrosecondsPerSecond = 1000000;
 
@@ -70,16 +71,21 @@ bool KillProcess(ProcessHandle process_id, int exit_code, bool wait) {
 
   if (result && wait) {
     int tries = 60;
+    bool exited = false;
     // The process may not end immediately due to pending I/O
     while (tries-- > 0) {
       int pid = HANDLE_EINTR(waitpid(process_id, NULL, WNOHANG));
-      if (pid == process_id)
+      if (pid == process_id) {
+        exited = true;
         break;
+      }
 
       sleep(1);
     }
 
-    result = kill(process_id, SIGKILL) == 0;
+    if (!exited) {
+      result = kill(process_id, SIGKILL) == 0;
+    }
   }
 
   if (!result)
@@ -101,7 +107,7 @@ class ScopedDIRClose {
     }
   }
 };
-typedef scoped_ptr_malloc<DIR, ScopedDIRClose> ScopedDIR;
+typedef mozilla::UniquePtr<DIR, ScopedDIRClose> ScopedDIR;
 
 
 void CloseSuperfluousFds(const base::InjectiveMultimap& saved_mapping) {
@@ -248,12 +254,19 @@ bool DidProcessCrash(bool* child_exited, ProcessHandle handle) {
   int status;
   const int result = HANDLE_EINTR(waitpid(handle, &status, WNOHANG));
   if (result == -1) {
-    // The dead process originally spawned from Nuwa might be taken as not
-    // crashed because the above waitpid() call returns -1 and ECHILD. The
-    // caller shouldn't behave incorrectly because of this false negative.
-    LOG(ERROR) << "waitpid failed pid:" << handle << " errno:" << errno;
+    // This shouldn't happen, but sometimes it does.  The error is
+    // probably ECHILD and the reason is probably that a pid was
+    // waited on again after a previous wait reclaimed its zombie.
+    // (It could also occur if the process isn't a direct child, but
+    // don't do that.)  This is bad, because it risks interfering with
+    // an unrelated child process if the pid is reused.
+    //
+    // So, lacking reliable information, we indicate that the process
+    // is dead, in the hope that the caller will give up and stop
+    // calling us.  See also bug 943174 and bug 933680.
+    CHROMIUM_LOG(ERROR) << "waitpid failed pid:" << handle << " errno:" << errno;
     if (child_exited)
-      *child_exited = false;
+      *child_exited = true;
     return false;
   } else if (result == 0) {
     // the child hasn't exited yet.
@@ -267,6 +280,7 @@ bool DidProcessCrash(bool* child_exited, ProcessHandle handle) {
 
   if (WIFSIGNALED(status)) {
     switch(WTERMSIG(status)) {
+      case SIGSYS:
       case SIGSEGV:
       case SIGILL:
       case SIGABRT:

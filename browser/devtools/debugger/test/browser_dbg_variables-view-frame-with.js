@@ -57,24 +57,25 @@ function testFirstWithScope() {
 
   is(withEnums[0].querySelector(".name").getAttribute("value"), "this",
     "Should have the right property name for 'this'.");
-  is(withEnums[0].querySelector(".value").getAttribute("value"), "Window",
+  is(withEnums[0].querySelector(".value").getAttribute("value"),
+    "Window \u2192 doc_with-frame.html",
     "Should have the right property value for 'this'.");
   ok(withEnums[0].querySelector(".value").className.contains("token-other"),
     "Should have the right token class for 'this'.");
 
-  is(withEnums[1].querySelector(".name").getAttribute("value"), "one",
-    "Should have the right property name for 'one'.");
+  is(withEnums[1].querySelector(".name").getAttribute("value"), "alpha",
+    "Should have the right property name for 'alpha'.");
   is(withEnums[1].querySelector(".value").getAttribute("value"), "1",
-    "Should have the right property value for 'one'.");
+    "Should have the right property value for 'alpha'.");
   ok(withEnums[1].querySelector(".value").className.contains("token-number"),
-    "Should have the right token class for 'one'.");
+    "Should have the right token class for 'alpha'.");
 
-  is(withEnums[2].querySelector(".name").getAttribute("value"), "two",
-    "Should have the right property name for 'two'.");
+  is(withEnums[2].querySelector(".name").getAttribute("value"), "beta",
+    "Should have the right property name for 'beta'.");
   is(withEnums[2].querySelector(".value").getAttribute("value"), "2",
-    "Should have the right property value for 'two'.");
+    "Should have the right property value for 'beta'.");
   ok(withEnums[2].querySelector(".value").className.contains("token-number"),
-    "Should have the right token class for 'two'.");
+    "Should have the right token class for 'beta'.");
 
   is(withNonEnums[0].querySelector(".name").getAttribute("value"), "__proto__",
    "Should have the right property name for '__proto__'.");
@@ -131,7 +132,7 @@ function testSecondWithScope() {
 
   is(secondWithScope.get("random").target.querySelector(".name").getAttribute("value"), "random",
     "Should have the right property name for 'random'.");
-  is(secondWithScope.get("random").target.querySelector(".value").getAttribute("value"), "Function",
+  is(secondWithScope.get("random").target.querySelector(".value").getAttribute("value"), "random()",
     "Should have the right property value for 'random'.");
   ok(secondWithScope.get("random").target.querySelector(".value").className.contains("token-other"),
     "Should have the right token class for 'random'.");
@@ -206,4 +207,5 @@ registerCleanupFunction(function() {
   gDebuggee = null;
   gPanel = null;
   gDebugger = null;
+  gVariables = null;
 });

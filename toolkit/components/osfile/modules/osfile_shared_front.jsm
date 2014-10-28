@@ -16,7 +16,9 @@ if (typeof Components != "undefined") {
 
 let SharedAll =
   require("resource://gre/modules/osfile/osfile_shared_allthreads.jsm");
-
+let Path = require("resource://gre/modules/osfile/ospath.jsm");
+let Lz4 =
+  require("resource://gre/modules/workers/lz4.js");
 let LOG = SharedAll.LOG.bind(SharedAll, "Shared front-end");
 let clone = SharedAll.clone;
 
@@ -24,10 +26,15 @@ let clone = SharedAll.clone;
  * Code shared by implementations of File.
  *
  * @param {*} fd An OS-specific file handle.
+ * @param {string} path File path of the file handle, used for error-reporting.
  * @constructor
  */
-let AbstractFile = function AbstractFile(fd) {
+let AbstractFile = function AbstractFile(fd, path) {
   this._fd = fd;
+  if (!path) {
+    throw new TypeError("path is expected");
+  }
+  this._path = path;
 };
 
 AbstractFile.prototype = {
@@ -40,7 +47,7 @@ AbstractFile.prototype = {
     if (this._fd) {
       return this._fd;
     }
-    throw OS.File.Error.closed();
+    throw OS.File.Error.closed("accessing file", this._path);
   },
   /**
    * Read bytes from this file to a new buffer.
@@ -82,7 +89,7 @@ AbstractFile.prototype = {
    * less than |bytes| if the file did not contain that many bytes left.
    */
   readTo: function readTo(buffer, options = {}) {
-    let {ptr, bytes} = AbstractFile.normalizeToPointer(buffer, options.bytes);
+    let {ptr, bytes} = SharedAll.normalizeToPointer(buffer, options.bytes);
     let pos = 0;
     while (pos < bytes) {
       let chunkSize = this._read(ptr, bytes - pos, options);
@@ -116,7 +123,7 @@ AbstractFile.prototype = {
   write: function write(buffer, options = {}) {
 
     let {ptr, bytes} =
-      AbstractFile.normalizeToPointer(buffer, options.bytes || undefined);
+      SharedAll.normalizeToPointer(buffer, ("bytes" in options) ? options.bytes : undefined);
 
     let pos = 0;
     while (pos < bytes) {
@@ -148,8 +155,8 @@ AbstractFile.openUnique = function openUnique(path, options = {}) {
     create : true
   };
 
-  let dirName = OS.Path.dirname(path);
-  let leafName = OS.Path.basename(path);
+  let dirName = Path.dirname(path);
+  let leafName = Path.basename(path);
   let lastDotCharacter = leafName.lastIndexOf('.');
   let fileName = leafName.substring(0, lastDotCharacter != -1 ? lastDotCharacter : leafName.length);
   let suffix = (lastDotCharacter != -1 ? leafName.substring(lastDotCharacter) : "");
@@ -169,10 +176,10 @@ AbstractFile.openUnique = function openUnique(path, options = {}) {
     for (let i = 0; i < maxAttempts; ++i) {
       try {
         if (humanReadable) {
-          uniquePath = OS.Path.join(dirName, fileName + "-" + (i + 1) + suffix);
+          uniquePath = Path.join(dirName, fileName + "-" + (i + 1) + suffix);
         } else {
           let hexNumber = Math.floor(Math.random() * MAX_HEX_NUMBER).toString(HEX_RADIX);
-          uniquePath = OS.Path.join(dirName, fileName + "-" + hexNumber + suffix);
+          uniquePath = Path.join(dirName, fileName + "-" + hexNumber + suffix);
         }
         return {
           path: uniquePath,
@@ -182,53 +189,8 @@ AbstractFile.openUnique = function openUnique(path, options = {}) {
         // keep trying ...
       }
     }
-    throw OS.File.Error.exists("could not find an unused file name.");
+    throw OS.File.Error.exists("could not find an unused file name.", path);
   }
-};
-
-/**
- * Utility function used to normalize a Typed Array or C
- * pointer into a uint8_t C pointer.
- *
- * Future versions might extend this to other data structures.
- *
- * @param {Typed array | C pointer} candidate The buffer. If
- * a C pointer, it must be non-null.
- * @param {number} bytes The number of bytes that |candidate| should contain.
- * Used for sanity checking if the size of |candidate| can be determined.
- *
- * @return {ptr:{C pointer}, bytes:number} A C pointer of type uint8_t,
- * corresponding to the start of |candidate|.
- */
-AbstractFile.normalizeToPointer = function normalizeToPointer(candidate, bytes) {
-  if (!candidate) {
-    throw new TypeError("Expecting  a Typed Array or a C pointer");
-  }
-  let ptr;
-  if ("isNull" in candidate) {
-    if (candidate.isNull()) {
-      throw new TypeError("Expecting a non-null pointer");
-    }
-    ptr = SharedAll.Type.uint8_t.out_ptr.cast(candidate);
-    if (bytes == null) {
-      throw new TypeError("C pointer missing bytes indication.");
-    }
-  } else if (SharedAll.isTypedArray(candidate)) {
-    // Typed Array
-    ptr = SharedAll.Type.uint8_t.out_ptr.implementation(candidate.buffer);
-    if (bytes == null) {
-      bytes = candidate.byteLength;
-    } else if (candidate.byteLength < bytes) {
-      throw new TypeError("Buffer is too short. I need at least " +
-                         bytes +
-                         " bytes but I have only " +
-                         candidate.byteLength +
-                          "bytes");
-    }
-  } else {
-    throw new TypeError("Expecting  a Typed Array or a C pointer");
-  }
-  return {ptr: ptr, bytes: bytes};
 };
 
 /**
@@ -355,16 +317,50 @@ AbstractFile.normalizeOpenMode = function normalizeOpenMode(mode) {
  *
  * @param {string} path The path to the file.
  * @param {number=} bytes Optionally, an upper bound to the number of bytes
- * to read.
- * @param {JSON} options Optionally contains additional options.
+ * to read. DEPRECATED - please use options.bytes instead.
+ * @param {object=} options Optionally, an object with some of the following
+ * fields:
+ * - {number} bytes An upper bound to the number of bytes to read.
+ * - {string} compression If "lz4" and if the file is compressed using the lz4
+ *   compression algorithm, decompress the file contents on the fly.
  *
  * @return {Uint8Array} A buffer holding the bytes
  * and the number of bytes read from the file.
  */
 AbstractFile.read = function read(path, bytes, options = {}) {
+  if (bytes && typeof bytes == "object") {
+    options = bytes;
+    bytes = options.bytes || null;
+  }
+  if ("encoding" in options && typeof options.encoding != "string") {
+    throw new TypeError("Invalid type for option encoding");
+  }
+  if ("compression" in options && typeof options.compression != "string") {
+    throw new TypeError("Invalid type for option compression: " + options.compression);
+  }
+  if ("bytes" in options && typeof options.bytes != "number") {
+    throw new TypeError("Invalid type for option bytes");
+  }
   let file = exports.OS.File.open(path);
   try {
-    return file.read(bytes, options);
+    let buffer = file.read(bytes, options);
+    if ("compression" in options) {
+      if (options.compression == "lz4") {
+        buffer = Lz4.decompressFileContent(buffer, options);
+      } else {
+        throw OS.File.Error.invalidArgument("Compression");
+      }
+    }
+    if (!("encoding" in options)) {
+      return buffer;
+    }
+    let decoder;
+    try {
+      decoder = new TextDecoder(options.encoding);
+    } catch (ex if ex instanceof TypeError) {
+      throw OS.File.Error.invalidArgument("Decode");
+    }
+    return decoder.decode(buffer);
   } finally {
     file.close();
   }
@@ -405,6 +401,15 @@ AbstractFile.read = function read(path, bytes, options = {}) {
  * if the system shuts down improperly (typically due to a kernel freeze
  * or a power failure) or if the device is disconnected before the buffer
  * is flushed, the file has more chances of not being corrupted.
+ * - {string} compression - If empty or unspecified, do not compress the file.
+ * If "lz4", compress the contents of the file atomically using lz4. For the
+ * time being, the container format is specific to Mozilla and cannot be read
+ * by means other than OS.File.read(..., { compression: "lz4"})
+ * - {string} backupTo - If specified, backup the destination file as |backupTo|.
+ * Note that this function renames the destination file before overwriting it.
+ * If the process or the operating system freezes or crashes
+ * during the short window between these operations,
+ * the destination file will have been moved to its backup.
  *
  * @return {number} The number of bytes actually written.
  */
@@ -417,7 +422,7 @@ AbstractFile.writeAtomic =
   }
   let noOverwrite = options.noOverwrite;
   if (noOverwrite && OS.File.exists(path)) {
-    throw OS.File.Error.exists("writeAtomic");
+    throw OS.File.Error.exists("writeAtomic", path);
   }
 
   if (typeof buffer == "string") {
@@ -426,9 +431,22 @@ AbstractFile.writeAtomic =
     buffer = new TextEncoder(encoding).encode(buffer);
   }
 
+  if ("compression" in options && options.compression == "lz4") {
+    buffer = Lz4.compressFileContent(buffer, options);
+    options = Object.create(options);
+    options.bytes = buffer.byteLength;
+  }
+
   let bytesWritten = 0;
 
   if (!options.tmpPath) {
+    if (options.backupTo) {
+      try {
+        OS.File.move(path, options.backupTo, {noCopy: true});
+      } catch (ex if ex.becauseNoSuchFile) {
+        // The file doesn't exist, nothing to backup.
+      }
+    }
     // Just write, without any renaming trick
     let dest = OS.File.open(path, {write: true, truncate: true});
     try {
@@ -455,24 +473,24 @@ AbstractFile.writeAtomic =
     tmpFile.close();
   }
 
+  if (options.backupTo) {
+    try {
+      OS.File.move(path, options.backupTo, {noCopy: true});
+    } catch (ex if ex.becauseNoSuchFile) {
+      // The file doesn't exist, nothing to backup.
+    }
+  }
+
   OS.File.move(options.tmpPath, path, {noCopy: true});
   return bytesWritten;
 };
 
 /**
-  * Remove an existing directory and its contents.
-  *
-  * @param {string} path The name of the directory.
-  * @param {*=} options Additional options.
-  *   - {bool} ignoreAbsent If |false|, throw an error if the directory doesn't
-  *     exist. |true| by default.
-  *   - {boolean} ignorePermissions If |true|, remove the file even when lacking write
-  *     permission.
-  *
-  * @throws {OS.File.Error} In case of I/O error, in particular if |path| is
-            not a directory.
-  */
-AbstractFile.removeDir = function(path, options = {}) {
+ * This function is used by removeDir to avoid calling lstat for each
+ * files under the specified directory. External callers should not call
+ * this function directly.
+ */
+AbstractFile.removeRecursive = function(path, options = {}) {
   let iterator = new OS.File.DirectoryIterator(path);
   if (!iterator.exists()) {
     if (!("ignoreAbsent" in options) || options.ignoreAbsent) {
@@ -483,8 +501,17 @@ AbstractFile.removeDir = function(path, options = {}) {
   try {
     for (let entry in iterator) {
       if (entry.isDir) {
-        OS.File.removeDir(entry.path, options);
+        if (entry.isLink) {
+          // Unlike Unix symlinks, NTFS junctions or NTFS symlinks to
+          // directories are directories themselves. OS.File.remove()
+          // will not work for them.
+          OS.File.removeEmptyDir(entry.path, options);
+        } else {
+          // Normal directories.
+          AbstractFile.removeRecursive(entry.path, options);
+        }
       } else {
+        // NTFS symlinks to files, Unix symlinks, or regular files.
         OS.File.remove(entry.path, options);
       }
     }
@@ -493,6 +520,62 @@ AbstractFile.removeDir = function(path, options = {}) {
   }
 
   OS.File.removeEmptyDir(path);
+};
+
+/**
+ * Create a directory and, optionally, its parent directories.
+ *
+ * @param {string} path The name of the directory.
+ * @param {*=} options Additional options.
+ *
+ * - {string} from If specified, the call to |makeDir| creates all the
+ * ancestors of |path| that are descendants of |from|. Note that |path|
+ * must be a descendant of |from|, and that |from| and its existing
+ * subdirectories present in |path|  must be user-writeable.
+ * Example:
+ *   makeDir(Path.join(profileDir, "foo", "bar"), { from: profileDir });
+ *  creates directories profileDir/foo, profileDir/foo/bar
+ * - {bool} ignoreExisting If |false|, throw an error if the directory
+ * already exists. |true| by default. Ignored if |from| is specified.
+ * - {number} unixMode Under Unix, if specified, a file creation mode,
+ * as per libc function |mkdir|. If unspecified, dirs are
+ * created with a default mode of 0700 (dir is private to
+ * the user, the user can read, write and execute). Ignored under Windows
+ * or if the file system does not support file creation modes.
+ * - {C pointer} winSecurity Under Windows, if specified, security
+ * attributes as per winapi function |CreateDirectory|. If
+ * unspecified, use the default security descriptor, inherited from
+ * the parent directory. Ignored under Unix or if the file system
+ * does not support security descriptors.
+ */
+AbstractFile.makeDir = function(path, options = {}) {
+  let from = options.from;
+  if (!from) {
+    OS.File._makeDir(path, options);
+    return;
+  }
+  if (!path.startsWith(from)) {
+    // Apparently, `from` is not a parent of `path`. However, we may
+    // have false negatives due to non-normalized paths, e.g.
+    // "foo//bar" is a parent of "foo/bar/sna".
+    path = Path.normalize(path);
+    from = Path.normalize(from);
+    if (!path.startsWith(from)) {
+      throw new Error("Incorrect use of option |from|: " + path + " is not a descendant of " + from);
+    }
+  }
+  let innerOptions = Object.create(options, {
+    ignoreExisting: {
+      value: true
+    }
+  });
+  // Compute the elements that appear in |path| but not in |from|.
+  let items = Path.split(path).components.slice(Path.split(from).components.length);
+  let current = from;
+  for (let item of items) {
+    current = Path.join(current, item);
+    OS.File._makeDir(current, innerOptions);
+  }
 };
 
 if (!exports.OS.Shared) {

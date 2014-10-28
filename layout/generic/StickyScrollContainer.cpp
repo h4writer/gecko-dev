@@ -15,8 +15,6 @@
 #include "nsLayoutUtils.h"
 #include "RestyleTracker.h"
 
-using namespace mozilla::css;
-
 namespace mozilla {
 
 void DestroyStickyScrollContainer(void* aPropertyValue)
@@ -93,7 +91,9 @@ StickyScrollContainer::NotifyReparentedFrameAcrossScrollFrameBoundary(nsIFrame* 
     StickyScrollContainer* newSSC = GetStickyScrollContainerForFrame(f);
     if (newSSC != oldSSC) {
       oldSSC->RemoveFrame(f);
-      newSSC->AddFrame(f);
+      if (newSSC) {
+        newSSC->AddFrame(f);
+      }
     }
   }
 }
@@ -164,7 +164,7 @@ void
 StickyScrollContainer::ComputeStickyLimits(nsIFrame* aFrame, nsRect* aStick,
                                            nsRect* aContain) const
 {
-  NS_ASSERTION(nsLayoutUtils::IsFirstContinuationOrSpecialSibling(aFrame),
+  NS_ASSERTION(nsLayoutUtils::IsFirstContinuationOrIBSplitSibling(aFrame),
                "Can't sticky position individual continuations");
 
   aStick->SetRect(nscoord_MIN/2, nscoord_MIN/2, nscoord_MAX, nscoord_MAX);
@@ -179,11 +179,6 @@ StickyScrollContainer::ComputeStickyLimits(nsIFrame* aFrame, nsRect* aStick,
   }
 
   nsIFrame* scrolledFrame = mScrollFrame->GetScrolledFrame();
-  // FIXME (Bug 920688):  cbFrame isn't quite right if we're dealing
-  // with a block-in-inline split whose first part is a block.  We
-  // probably want the first in flow of the containing block of the
-  // first inline part.  (Or maybe those block-in-inline split pieces
-  // are never a containing block, and we're ok?)
   nsIFrame* cbFrame = aFrame->GetContainingBlock();
   NS_ASSERTION(cbFrame == scrolledFrame ||
     nsLayoutUtils::IsProperAncestorFrame(scrolledFrame, cbFrame),
@@ -288,7 +283,7 @@ StickyScrollContainer::GetScrollRanges(nsIFrame* aFrame, nsRect* aOuter,
   // this, at the very least because its call to
   // nsLayoutUtils::GetAllInFlowRectsUnion requires it.
   nsIFrame *firstCont =
-    nsLayoutUtils::FirstContinuationOrSpecialSibling(aFrame);
+    nsLayoutUtils::FirstContinuationOrIBSplitSibling(aFrame);
 
   nsRect stick;
   nsRect contain;
@@ -325,14 +320,14 @@ StickyScrollContainer::GetScrollRanges(nsIFrame* aFrame, nsRect* aOuter,
 void
 StickyScrollContainer::PositionContinuations(nsIFrame* aFrame)
 {
-  NS_ASSERTION(nsLayoutUtils::IsFirstContinuationOrSpecialSibling(aFrame),
+  NS_ASSERTION(nsLayoutUtils::IsFirstContinuationOrIBSplitSibling(aFrame),
                "Should be starting from the first continuation");
-  nsPoint translation = ComputePosition(aFrame) - aFrame->GetPosition();
+  nsPoint translation = ComputePosition(aFrame) - aFrame->GetNormalPosition();
 
   // Move all continuation frames by the same amount.
   for (nsIFrame* cont = aFrame; cont;
-       cont = nsLayoutUtils::GetNextContinuationOrSpecialSibling(cont)) {
-    cont->SetPosition(cont->GetPosition() + translation);
+       cont = nsLayoutUtils::GetNextContinuationOrIBSplitSibling(cont)) {
+    cont->SetPosition(cont->GetNormalPosition() + translation);
   }
 }
 
@@ -353,9 +348,9 @@ StickyScrollContainer::UpdatePositions(nsPoint aScrollPosition,
   oct.SetSubtreeRoot(aSubtreeRoot);
   for (nsTArray<nsIFrame*>::size_type i = 0; i < mFrames.Length(); i++) {
     nsIFrame* f = mFrames[i];
-    if (!nsLayoutUtils::IsFirstContinuationOrSpecialSibling(f)) {
+    if (!nsLayoutUtils::IsFirstContinuationOrIBSplitSibling(f)) {
       // This frame was added in nsFrame::Init before we knew it wasn't
-      // the first special-sibling.
+      // the first ib-split-sibling.
       mFrames.RemoveElementAt(i);
       --i;
       continue;
@@ -369,9 +364,12 @@ StickyScrollContainer::UpdatePositions(nsPoint aScrollPosition,
     // nsIFrame::Init.
     PositionContinuations(f);
 
-    for (nsIFrame* cont = f; cont;
-         cont = nsLayoutUtils::GetNextContinuationOrSpecialSibling(cont)) {
-      oct.AddFrame(cont);
+    f = f->GetParent();
+    if (f != aSubtreeRoot) {
+      for (nsIFrame* cont = f; cont;
+           cont = nsLayoutUtils::GetNextContinuationOrIBSplitSibling(cont)) {
+        oct.AddFrame(cont, OverflowChangedTracker::CHILDREN_CHANGED);
+      }
     }
   }
   oct.Flush();

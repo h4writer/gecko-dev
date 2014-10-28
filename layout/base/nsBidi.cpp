@@ -3,7 +3,6 @@
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-#ifdef IBMBIDI
 
 #include "nsBidi.h"
 #include "nsUnicodeProperties.h"
@@ -236,7 +235,7 @@ void nsBidi::Free()
 
 /* SetPara ------------------------------------------------------------ */
 
-nsresult nsBidi::SetPara(const PRUnichar *aText, int32_t aLength,
+nsresult nsBidi::SetPara(const char16_t *aText, int32_t aLength,
                          nsBidiLevel aParaLevel, nsBidiLevel *aEmbeddingLevels)
 {
   nsBidiDirection direction;
@@ -416,13 +415,13 @@ nsresult nsBidi::SetPara(const PRUnichar *aText, int32_t aLength,
  * calculate the flags bit-set, and
  * determine the partagraph level if necessary.
  */
-void nsBidi::GetDirProps(const PRUnichar *aText)
+void nsBidi::GetDirProps(const char16_t *aText)
 {
   DirProp *dirProps=mDirPropsMemory;    /* mDirProps is const */
 
   int32_t i=0, length=mLength;
   Flags flags=0;      /* collect all directionalities in the text */
-  PRUnichar uchar;
+  char16_t uchar;
   DirProp dirProp;
 
   if(IS_DEFAULT_LEVEL(mParaLevel)) {
@@ -1453,7 +1452,7 @@ bool nsBidi::GetRuns()
     GetSingleRun(mParaLevel);
   } else /* NSBIDI_MIXED, length>0 */ {
     /* mixed directionality */
-    int32_t length=mLength, limit=length;
+    int32_t length=mLength, limit=mTrailingWSStart;
 
     /*
      * If there are WS characters at the end of the line
@@ -1466,7 +1465,6 @@ bool nsBidi::GetRuns()
      * In other words, for the trailing WS, it may be
      * levels[]!=paraLevel but we have to treat it like it were so.
      */
-    limit=mTrailingWSStart;
     if(limit==0) {
       /* there is only WS on this line */
       GetSingleRun(mParaLevel);
@@ -2056,8 +2054,8 @@ nsresult nsBidi::InvertMap(const int32_t *aSrcMap, int32_t *aDestMap, int32_t aL
   return NS_OK;
 }
 
-int32_t nsBidi::doWriteReverse(const PRUnichar *src, int32_t srcLength,
-                               PRUnichar *dest, uint16_t options) {
+int32_t nsBidi::doWriteReverse(const char16_t *src, int32_t srcLength,
+                               char16_t *dest, uint16_t options) {
   /*
    * RTL run -
    *
@@ -2145,7 +2143,7 @@ int32_t nsBidi::doWriteReverse(const PRUnichar *src, int32_t srcLength,
       /* we need to find out the destination length of the run,
                which will not include the Bidi control characters */
         int32_t length=srcLength;
-        PRUnichar ch;
+        char16_t ch;
 
         i=0;
         do {
@@ -2197,7 +2195,7 @@ int32_t nsBidi::doWriteReverse(const PRUnichar *src, int32_t srcLength,
   return destSize;
 }
 
-nsresult nsBidi::WriteReverse(const PRUnichar *aSrc, int32_t aSrcLength, PRUnichar *aDest, uint16_t aOptions, int32_t *aDestSize)
+nsresult nsBidi::WriteReverse(const char16_t *aSrc, int32_t aSrcLength, char16_t *aDest, uint16_t aOptions, int32_t *aDestSize)
 {
   if( aSrc==nullptr || aSrcLength<0 ||
       aDest==nullptr
@@ -2218,4 +2216,3 @@ nsresult nsBidi::WriteReverse(const PRUnichar *aSrc, int32_t aSrcLength, PRUnich
   return NS_OK;
 }
 #endif // FULL_BIDI_ENGINE
-#endif // IBMBIDI

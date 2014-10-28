@@ -127,7 +127,7 @@ gTests.push({
        PlacesUtils.bookmarks.getItemTitle(PlacesUtils.unfiledBookmarksFolderId),
        "Node title is correct");
     // Blur the field and ensure root's name has not been changed.
-    this.window.gEditItemOverlay.onNamePickerChange();
+    this.window.gEditItemOverlay.onNamePickerBlur();
     is(namepicker.value,
        PlacesUtils.bookmarks.getItemTitle(PlacesUtils.unfiledBookmarksFolderId),
        "Root title is correct");
@@ -173,6 +173,8 @@ gTests.push({
   },
 
   selectNode: function(tree) {
+    tree.selectItems([PlacesUtils.unfiledBookmarksFolderId]);
+    PlacesUtils.asContainer(tree.selectedNode).containerOpen = true;
     tree.selectItems([this._itemId]);
     is(tree.selectedNode.itemId, this._itemId, "Bookmark has been selected");
   },
@@ -329,6 +331,8 @@ gTests.push({
   },
 
   selectNode: function(tree) {
+    tree.selectItems([PlacesUtils.unfiledBookmarksFolderId]);
+    PlacesUtils.asContainer(tree.selectedNode).containerOpen = true;
     tree.selectItems([this._itemId]);
     is(tree.selectedNode.itemId, this._itemId, "Bookmark has been selected");
   },

@@ -1,16 +1,14 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-
 "use strict";
 
 const { Cc, Ci, Cu } = require("chrome");
 const AddonInstaller = require("sdk/addon/installer");
-const observers = require("sdk/deprecated/observer-service");
+const { on, off } = require("sdk/system/events");
 const { setTimeout } = require("sdk/timers");
 const tmp = require("sdk/test/tmp-file");
 const system = require("sdk/system");
-const fixtures = require("./fixtures");
 
 const testFolderURL = module.uri.split('test-addon-installer.js')[0];
 const ADDON_URL = testFolderURL + "fixtures/addon-install-unit-test@mozilla.com.xpi";
@@ -20,10 +18,10 @@ exports["test Install"] = function (assert, done) {
 
   // Save all events distpatched by bootstrap.js of the installed addon
   let events = [];
-  function eventsObserver(subject, data) {
+  function eventsObserver({ data }) {
     events.push(data);
   }
-  observers.add("addon-install-unit-test", eventsObserver, false);
+  on("addon-install-unit-test", eventsObserver);
 
   // Install the test addon
   AddonInstaller.install(ADDON_PATH).then(
@@ -39,13 +37,13 @@ exports["test Install"] = function (assert, done) {
                          JSON.stringify(expectedEvents),
                          "addon's bootstrap.js functions have been called");
 
-        observers.remove("addon-install-unit-test", eventsObserver);
+        off("addon-install-unit-test", eventsObserver);
         done();
       });
     },
     function onFailure(code) {
       assert.fail("Install failed: "+code);
-      observers.remove("addon-install-unit-test", eventsObserver);
+      off("addon-install-unit-test", eventsObserver);
       done();
     }
   );
@@ -84,10 +82,8 @@ exports["test Update"] = function (assert, done) {
   // Save all events distpatched by bootstrap.js of the installed addon
   let events = [];
   let iteration = 1;
-  function eventsObserver(subject, data) {
-    events.push(data);
-  }
-  observers.add("addon-install-unit-test", eventsObserver);
+  let eventsObserver = ({data}) => events.push(data);
+  on("addon-install-unit-test", eventsObserver);
 
   function onInstalled(id) {
     let prefix = "[" + iteration + "] ";
@@ -115,14 +111,14 @@ exports["test Update"] = function (assert, done) {
                      JSON.stringify(expectedEvents),
                      prefix + "addon's bootstrap.js functions have been called");
 
-        observers.remove("addon-install-unit-test", eventsObserver);
+        off("addon-install-unit-test", eventsObserver);
         done();
       });
     }
   }
   function onFailure(code) {
     assert.fail("Install failed: "+code);
-    observers.remove("addon-install-unit-test", eventsObserver);
+    off("addon-install-unit-test", eventsObserver);
     done();
   }
 
@@ -179,4 +175,4 @@ exports['test Enable failure'] = function (assert, done) {
   ).then(done, assert.fail);
 };
 
-require("test").run(exports);
+require("sdk/test").run(exports);

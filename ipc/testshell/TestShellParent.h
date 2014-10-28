@@ -24,6 +24,8 @@ class TestShellCommandParent;
 class TestShellParent : public PTestShellParent
 {
 public:
+  virtual void ActorDestroy(ActorDestroyReason aWhy) MOZ_OVERRIDE;
+
   PTestShellCommandParent*
   AllocPTestShellCommandParent(const nsString& aCommand);
 
@@ -38,7 +40,7 @@ public:
 class TestShellCommandParent : public PTestShellCommandParent
 {
 public:
-  TestShellCommandParent() : mCx(nullptr) { }
+  TestShellCommandParent() {}
 
   bool SetCallback(JSContext* aCx, JS::Value aCallback);
 
@@ -56,7 +58,6 @@ protected:
   }
 
 private:
-  JSContext* mCx;
   nsAutoJSValHolder mCallback;
 };
 

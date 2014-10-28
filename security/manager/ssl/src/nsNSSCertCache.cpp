@@ -11,7 +11,7 @@
 
 using namespace mozilla;
 
-NS_IMPL_ISUPPORTS1(nsNSSCertCache, nsINSSCertCache)
+NS_IMPL_ISUPPORTS(nsNSSCertCache, nsINSSCertCache)
 
 nsNSSCertCache::nsNSSCertCache()
 :mutex("nsNSSCertCache.mutex"), mCertList(nullptr)
@@ -21,9 +21,9 @@ nsNSSCertCache::nsNSSCertCache()
 nsNSSCertCache::~nsNSSCertCache()
 {
   nsNSSShutDownPreventionLock locker;
-  if (isAlreadyShutDown())
+  if (isAlreadyShutDown()) {
     return;
-
+  }
   destructorSafeDestroyNSSReference();
   shutdown(calledFromObject);
 }
@@ -35,8 +35,6 @@ void nsNSSCertCache::virtualDestroyNSSReference()
 
 void nsNSSCertCache::destructorSafeDestroyNSSReference()
 {
-  if (isAlreadyShutDown())
-    return;
 }
 
 NS_IMETHODIMP
@@ -48,7 +46,7 @@ nsNSSCertCache::CacheAllCerts()
 
   nsCOMPtr<nsIInterfaceRequestor> cxt = new PipUIContext();
   
-  CERTCertList *newList = PK11_ListCerts(PK11CertListUnique, cxt);
+  ScopedCERTCertList newList(PK11_ListCerts(PK11CertListUnique, cxt));
 
   if (newList) {
     MutexAutoLock lock(mutex);

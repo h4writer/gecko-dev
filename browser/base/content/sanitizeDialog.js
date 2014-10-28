@@ -1,4 +1,4 @@
-/* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -120,7 +120,9 @@ var gSanitizePromptDialog = {
                               this.bundleBrowser.getString("sanitizeButtonClearing"));
     docElt.getButton("cancel").disabled = true;
     try {
-      s.sanitize().then(window.close, window.close);
+      s.sanitize().then(null, Components.utils.reportError)
+                  .then(() => window.close())
+                  .then(null, Components.utils.reportError);
     } catch (er) {
       Components.utils.reportError("Exception during sanitize: " + er);
       return true; // We *do* want to close immediately on error.

@@ -25,14 +25,11 @@
             return;
 
           if (this._contentScrollHeight == -1) {
-            let scrollheight = {};
-            this.scrollBoxObject.getScrolledSize({}, scrollheight);
-            this._contentScrollHeight = scrollheight.value;
+            this._contentScrollHeight = this.scrollBoxObject.scrolledHeight;
           }
 
-          let y = {};
-          this.scrollBoxObject.getPosition({}, y);
-          let scrollRatio = (y.value + this._childrenHeight) / this._contentScrollHeight;
+          let y = this.scrollBoxObject.positionY;
+          let scrollRatio = (y + this._childrenHeight) / this._contentScrollHeight;
 
           // If we're scrolled 80% to the bottom of the list, append the next
           // set of items
@@ -196,7 +193,7 @@
         if (event.mozInputSource == Ci.nsIDOMMouseEvent.MOZ_SOURCE_TOUCH) {
           if (typeof SelectionHelperUI != 'undefined') {
             SelectionHelperUI.attachEditSession(ChromeSelectionHandler,
-                                                event.clientX, event.clientY);
+                event.clientX, event.clientY, this);
           } else {
             // If we don't have access to SelectionHelperUI then we are using this
             // binding for browser content (e.g. about:config)
@@ -295,7 +292,7 @@
           if (event.mozInputSource == Ci.nsIDOMMouseEvent.MOZ_SOURCE_TOUCH) {
             if (typeof SelectionHelperUI != 'undefined') {
               SelectionHelperUI.attachEditSession(ChromeSelectionHandler,
-                                                  event.clientX, event.clientY);
+                  event.clientX, event.clientY, event.target);
             } else {
               // If we don't have access to SelectionHelperUI then we are using this
               // binding for browser content (e.g. about:config)

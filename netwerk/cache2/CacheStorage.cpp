@@ -6,6 +6,7 @@
 #include "CacheStorage.h"
 #include "CacheStorageService.h"
 #include "CacheEntry.h"
+#include "CacheObserver.h"
 
 #include "OldWrappers.h"
 
@@ -20,7 +21,7 @@
 namespace mozilla {
 namespace net {
 
-NS_IMPL_ISUPPORTS1(CacheStorage, nsICacheStorage)
+NS_IMPL_ISUPPORTS(CacheStorage, nsICacheStorage)
 
 CacheStorage::CacheStorage(nsILoadContextInfo* aInfo,
                            bool aAllowDisk,
@@ -43,6 +44,16 @@ NS_IMETHODIMP CacheStorage::AsyncOpenURI(nsIURI *aURI,
   if (!CacheStorageService::Self())
     return NS_ERROR_NOT_INITIALIZED;
 
+  if (MOZ_UNLIKELY(!CacheObserver::UseDiskCache()) && mWriteToDisk) {
+    aCallback->OnCacheEntryAvailable(nullptr, false, nullptr, NS_ERROR_NOT_AVAILABLE);
+    return NS_OK;
+  }
+
+  if (MOZ_UNLIKELY(!CacheObserver::UseMemoryCache()) && !mWriteToDisk) {
+    aCallback->OnCacheEntryAvailable(nullptr, false, nullptr, NS_ERROR_NOT_AVAILABLE);
+    return NS_OK;
+  }
+
   NS_ENSURE_ARG(aURI);
   NS_ENSURE_ARG(aCallback);
 
@@ -56,8 +67,6 @@ NS_IMETHODIMP CacheStorage::AsyncOpenURI(nsIURI *aURI,
 
   nsCOMPtr<nsIApplicationCache> appCache;
   if (LookupAppCache()) {
-    MOZ_ASSERT(!truncate);
-
     rv = ChooseApplicationCache(noRefURI, getter_AddRefs(appCache));
     NS_ENSURE_SUCCESS(rv, rv);
   }
@@ -81,7 +90,7 @@ NS_IMETHODIMP CacheStorage::AsyncOpenURI(nsIURI *aURI,
     return NS_OK;
   }
 
-  nsRefPtr<CacheEntry> entry;
+  nsRefPtr<CacheEntryHandle> entry;
   rv = CacheStorageService::Self()->AddStorageEntry(
     this, noRefURI, aIdExtension,
     true, // create always
@@ -90,9 +99,56 @@ NS_IMETHODIMP CacheStorage::AsyncOpenURI(nsIURI *aURI,
   NS_ENSURE_SUCCESS(rv, rv);
 
   // May invoke the callback synchronously
-  entry->AsyncOpen(aCallback, aFlags);
+  entry->Entry()->AsyncOpen(aCallback, aFlags);
 
   return NS_OK;
+}
+
+
+NS_IMETHODIMP CacheStorage::OpenTruncate(nsIURI *aURI, const nsACString & aIdExtension,
+                                         nsICacheEntry **aCacheEntry)
+{
+  if (!CacheStorageService::Self())
+    return NS_ERROR_NOT_INITIALIZED;
+
+  nsresult rv;
+
+  nsCOMPtr<nsIURI> noRefURI;
+  rv = aURI->CloneIgnoringRef(getter_AddRefs(noRefURI));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsRefPtr<CacheEntryHandle> entry;
+  rv = CacheStorageService::Self()->AddStorageEntry(
+    this, noRefURI, aIdExtension,
+    true, // create always
+    true, // replace any existing one
+    getter_AddRefs(entry));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // Just open w/o callback, similar to nsICacheEntry.recreate().
+  entry->Entry()->AsyncOpen(nullptr, OPEN_TRUNCATE);
+  entry.forget(aCacheEntry);
+
+  return NS_OK;
+}
+
+NS_IMETHODIMP CacheStorage::Exists(nsIURI *aURI, const nsACString & aIdExtension,
+                                   bool *aResult)
+{
+  NS_ENSURE_ARG(aURI);
+  NS_ENSURE_ARG(aResult);
+
+  if (!CacheStorageService::Self())
+    return NS_ERROR_NOT_INITIALIZED;
+
+  nsresult rv;
+
+  nsCOMPtr<nsIURI> noRefURI;
+  rv = aURI->CloneIgnoringRef(getter_AddRefs(noRefURI));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  return CacheStorageService::Self()->CheckStorageEntry(
+    this, noRefURI, aIdExtension, aResult);
 }
 
 NS_IMETHODIMP CacheStorage::AsyncDoomURI(nsIURI *aURI, const nsACString & aIdExtension,

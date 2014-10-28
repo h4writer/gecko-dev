@@ -14,15 +14,14 @@
 #include "mozilla/layers/LayersTypes.h"  // for LayerRenderState, etc
 #include "nsISupportsImpl.h"            // for TextureImage::AddRef, etc
 #include "nscore.h"                     // for nsACString
+#include "CompositableHost.h"           // for CompositableHost
 
-class gfx3DMatrix;
 struct nsIntPoint;
 struct nsIntRect;
 
 namespace mozilla {
 namespace layers {
 
-class CompositableHost;
 class ImageHost;
 class Layer;
 
@@ -32,32 +31,48 @@ class ImageLayerComposite : public ImageLayer,
   typedef gl::TextureImage TextureImage;
 
 public:
-  ImageLayerComposite(LayerManagerComposite* aManager);
+  explicit ImageLayerComposite(LayerManagerComposite* aManager);
 
+protected:
   virtual ~ImageLayerComposite();
 
+public:
   virtual LayerRenderState GetRenderState() MOZ_OVERRIDE;
 
   virtual void Disconnect() MOZ_OVERRIDE;
 
-  virtual void SetCompositableHost(CompositableHost* aHost) MOZ_OVERRIDE;
+  virtual bool SetCompositableHost(CompositableHost* aHost) MOZ_OVERRIDE;
 
   virtual Layer* GetLayer() MOZ_OVERRIDE;
 
+  virtual void SetLayerManager(LayerManagerComposite* aManager) MOZ_OVERRIDE
+  {
+    LayerComposite::SetLayerManager(aManager);
+    mManager = aManager;
+    if (mImageHost) {
+      mImageHost->SetCompositor(mCompositor);
+    }
+  }
+
   virtual void RenderLayer(const nsIntRect& aClipRect);
 
-  virtual void ComputeEffectiveTransforms(const gfx3DMatrix& aTransformToSurface) MOZ_OVERRIDE;
+  virtual void ComputeEffectiveTransforms(const mozilla::gfx::Matrix4x4& aTransformToSurface) MOZ_OVERRIDE;
 
   virtual void CleanupResources() MOZ_OVERRIDE;
 
   CompositableHost* GetCompositableHost() MOZ_OVERRIDE;
+
+  virtual void GenEffectChain(EffectChain& aEffect) MOZ_OVERRIDE;
 
   virtual LayerComposite* AsLayerComposite() MOZ_OVERRIDE { return this; }
 
   virtual const char* Name() const { return "ImageLayerComposite"; }
 
 protected:
-  virtual nsACString& PrintInfo(nsACString& aTo, const char* aPrefix) MOZ_OVERRIDE;
+  virtual void PrintInfo(std::stringstream& aStream, const char* aPrefix) MOZ_OVERRIDE;
+
+private:
+  gfx::Filter GetEffectFilter();
 
 private:
   RefPtr<CompositableHost> mImageHost;

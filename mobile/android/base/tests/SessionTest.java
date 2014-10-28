@@ -1,26 +1,19 @@
 package org.mozilla.gecko.tests;
 
-import org.mozilla.gecko.*;
-
-import java.io.IOException;
 import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
+import java.io.IOException;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.mozilla.gecko.Actions;
+import org.mozilla.gecko.Assert;
+import org.mozilla.gecko.FennecMochitestAssert;
 
 public abstract class SessionTest extends BaseTest {
-    private File mSessionDir;
     protected Navigation mNavigation;
-
-    @Override
-    final protected int getTestType() {
-        return TEST_MOCHITEST;
-    }
 
     @Override
     public void setUp() throws Exception {
@@ -52,8 +45,8 @@ public abstract class SessionTest extends BaseTest {
     }
 
     protected class PageInfo {
-        private String url;
-        private String title;
+        private final String url;
+        private final String title;
 
         public PageInfo(String key) {
             if (key.startsWith("about:")) {
@@ -139,7 +132,7 @@ public abstract class SessionTest extends BaseTest {
     protected void loadSessionTabs(Session session) {
         // Verify initial about:home tab
         verifyTabCount(1);
-        verifyUrl("about:home");
+        verifyUrl(StringHelper.ABOUT_HOME_URL);
 
         SessionTab[] tabs = session.getItems();
         for (int i = 0; i < tabs.length; i++) {
@@ -148,16 +141,14 @@ public abstract class SessionTest extends BaseTest {
 
             // New tabs always start with about:home, so make sure about:home
             // is always the first entry.
-            mAsserter.is(pages[0].url, "about:home", "first page in tab is about:home");
+            mAsserter.is(pages[0].url, StringHelper.ABOUT_HOME_URL, "first page in tab is " +
+                    StringHelper.ABOUT_HOME_URL);
 
             // If this is the first tab, the tab already exists, so no need to
             // create a new one. Otherwise, create a new tab if we're loading
             // the first the first page in the set.
             if (i > 0) {
-                Actions.EventExpecter pageShowExpecter = mActions.expectGeckoEvent("Content:PageShow");
                 addTab();
-                pageShowExpecter.blockForEvent();
-                pageShowExpecter.unregisterListener();
             }
 
             for (int j = 1; j < pages.length; j++) {
@@ -201,12 +192,12 @@ public abstract class SessionTest extends BaseTest {
                 (new NavigationWalker<PageInfo>(tab) {
                     @Override
                     public void onItem(PageInfo page, int currentIndex) {
-                        if (page.url.equals("about:home")) {
+                        if (page.url.equals(StringHelper.ABOUT_HOME_URL)) {
                             waitForText("Enter Search or Address");
                             verifyUrl(page.url);
                         } else {
                             waitForText(page.title);
-                            verifyPageTitle(page.title);
+                            verifyPageTitle(page.title, page.url);
                         }
                     }
 
@@ -378,6 +369,10 @@ public abstract class SessionTest extends BaseTest {
     }
 
     private String readFile(File target) throws IOException {
+        if (!target.exists()) {
+            return null;
+        }
+
         FileReader fr = new FileReader(target);
         try {
             StringBuffer sb = new StringBuffer();

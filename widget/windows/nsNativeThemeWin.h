@@ -4,6 +4,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#ifndef nsNativeThemeWin_h
+#define nsNativeThemeWin_h
+
 #include "nsITheme.h"
 #include "nsCOMPtr.h"
 #include "nsIAtom.h"
@@ -17,6 +20,8 @@ struct nsIntSize;
 
 class nsNativeThemeWin : private nsNativeTheme,
                          public nsITheme {
+  virtual ~nsNativeThemeWin();
+
 public:
   typedef mozilla::TimeStamp TimeStamp;
   typedef mozilla::TimeDuration TimeDuration;
@@ -45,7 +50,7 @@ public:
                                    uint8_t aWidgetType,
                                    nsRect* aOverflowRect);
 
-  NS_IMETHOD GetMinimumWidgetSize(nsRenderingContext* aContext, nsIFrame* aFrame,
+  NS_IMETHOD GetMinimumWidgetSize(nsPresContext* aPresContext, nsIFrame* aFrame,
                                   uint8_t aWidgetType,
                                   nsIntSize* aResult,
                                   bool* aIsOverridable);
@@ -72,7 +77,6 @@ public:
   virtual bool ShouldHideScrollbars() MOZ_OVERRIDE;
 
   nsNativeThemeWin();
-  virtual ~nsNativeThemeWin();
 
 protected:
   HANDLE GetTheme(uint8_t aWidgetType);
@@ -93,7 +97,7 @@ protected:
                                nsIFrame* aFrame,
                                uint8_t aWidgetType,
                                nsIntMargin* aResult);
-  nsresult ClassicGetMinimumWidgetSize(nsRenderingContext* aContext, nsIFrame* aFrame,
+  nsresult ClassicGetMinimumWidgetSize(nsPresContext* aPresContext, nsIFrame* aFrame,
                                        uint8_t aWidgetType,
                                        nsIntSize* aResult,
                                        bool* aIsOverridable);
@@ -118,3 +122,5 @@ private:
   TimeStamp mProgressDeterminateTimeStamp;
   TimeStamp mProgressIndeterminateTimeStamp;
 };
+
+#endif

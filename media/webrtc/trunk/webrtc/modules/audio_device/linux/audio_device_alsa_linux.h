@@ -16,7 +16,9 @@
 #include "webrtc/system_wrappers/interface/critical_section_wrapper.h"
 
 
+#ifdef USE_X11
 #include <X11/Xlib.h>
+#endif
 #include <alsa/asoundlib.h>
 #include <sys/ioctl.h>
 #include <sys/soundcard.h>
@@ -176,8 +178,8 @@ private:
     bool KeyPressed() const;
 
 private:
-    void Lock() { _critSect.Enter(); };
-    void UnLock() { _critSect.Leave(); };
+    void Lock() EXCLUSIVE_LOCK_FUNCTION(_critSect) { _critSect.Enter(); };
+    void UnLock() UNLOCK_FUNCTION(_critSect) { _critSect.Leave(); };
 private:
     inline int32_t InputSanityCheckAfterUnlockedPeriod() const;
     inline int32_t OutputSanityCheckAfterUnlockedPeriod() const;
@@ -253,7 +255,9 @@ private:
     uint16_t _playBufDelayFixed;            // fixed playback delay
 
     char _oldKeyState[32];
+#ifdef USE_X11
     Display* _XDisplay;
+#endif
 };
 
 }

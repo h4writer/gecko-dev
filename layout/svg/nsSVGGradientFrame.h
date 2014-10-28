@@ -40,26 +40,27 @@ typedef nsSVGPaintServerFrame nsSVGGradientFrameBase;
 class nsSVGGradientFrame : public nsSVGGradientFrameBase
 {
 protected:
-  nsSVGGradientFrame(nsStyleContext* aContext);
+  explicit nsSVGGradientFrame(nsStyleContext* aContext);
 
 public:
   NS_DECL_FRAMEARENA_HELPERS
 
   // nsSVGPaintServerFrame methods:
   virtual already_AddRefed<gfxPattern>
-    GetPaintServerPattern(nsIFrame *aSource,
+    GetPaintServerPattern(nsIFrame* aSource,
+                          const DrawTarget* aDrawTarget,
                           const gfxMatrix& aContextMatrix,
                           nsStyleSVGPaint nsStyleSVG::*aFillOrStroke,
                           float aGraphicOpacity,
-                          const gfxRect *aOverrideBounds) MOZ_OVERRIDE;
+                          const gfxRect* aOverrideBounds) MOZ_OVERRIDE;
 
   // nsIFrame interface:
-  NS_IMETHOD AttributeChanged(int32_t         aNameSpaceID,
-                              nsIAtom*        aAttribute,
-                              int32_t         aModType) MOZ_OVERRIDE;
+  virtual nsresult AttributeChanged(int32_t         aNameSpaceID,
+                                    nsIAtom*        aAttribute,
+                                    int32_t         aModType) MOZ_OVERRIDE;
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
   {
     return MakeFrameName(NS_LITERAL_STRING("SVGGradient"), aResult);
   }
@@ -130,7 +131,7 @@ class nsSVGLinearGradientFrame : public nsSVGLinearGradientFrameBase
   friend nsIFrame* NS_NewSVGLinearGradientFrame(nsIPresShell* aPresShell,
                                                 nsStyleContext* aContext);
 protected:
-  nsSVGLinearGradientFrame(nsStyleContext* aContext) :
+  explicit nsSVGLinearGradientFrame(nsStyleContext* aContext) :
     nsSVGLinearGradientFrameBase(aContext) {}
 
 public:
@@ -138,19 +139,19 @@ public:
 
   // nsIFrame interface:
 #ifdef DEBUG
-  virtual void Init(nsIContent*      aContent,
-                    nsIFrame*        aParent,
-                    nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 #endif
 
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;  // frame type: nsGkAtoms::svgLinearGradientFrame
 
-  NS_IMETHOD AttributeChanged(int32_t         aNameSpaceID,
-                              nsIAtom*        aAttribute,
-                              int32_t         aModType) MOZ_OVERRIDE;
+  virtual nsresult AttributeChanged(int32_t         aNameSpaceID,
+                                    nsIAtom*        aAttribute,
+                                    int32_t         aModType) MOZ_OVERRIDE;
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
   {
     return MakeFrameName(NS_LITERAL_STRING("SVGLinearGradient"), aResult);
   }
@@ -175,7 +176,7 @@ class nsSVGRadialGradientFrame : public nsSVGRadialGradientFrameBase
   friend nsIFrame* NS_NewSVGRadialGradientFrame(nsIPresShell* aPresShell,
                                                 nsStyleContext* aContext);
 protected:
-  nsSVGRadialGradientFrame(nsStyleContext* aContext) :
+  explicit nsSVGRadialGradientFrame(nsStyleContext* aContext) :
     nsSVGRadialGradientFrameBase(aContext) {}
 
 public:
@@ -183,19 +184,19 @@ public:
 
   // nsIFrame interface:
 #ifdef DEBUG
-  virtual void Init(nsIContent*      aContent,
-                    nsIFrame*        aParent,
-                    nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 #endif
 
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;  // frame type: nsGkAtoms::svgRadialGradientFrame
 
-  NS_IMETHOD AttributeChanged(int32_t         aNameSpaceID,
-                              nsIAtom*        aAttribute,
-                              int32_t         aModType) MOZ_OVERRIDE;
+  virtual nsresult AttributeChanged(int32_t         aNameSpaceID,
+                                    nsIAtom*        aAttribute,
+                                    int32_t         aModType) MOZ_OVERRIDE;
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
   {
     return MakeFrameName(NS_LITERAL_STRING("SVGRadialGradient"), aResult);
   }

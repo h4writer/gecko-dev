@@ -14,13 +14,18 @@
 #include "nsIXPConnect.h"
 #include "nsIArray.h"
 #include "mozilla/Attributes.h"
+#include "nsPIDOMWindow.h"
 #include "nsThreadUtils.h"
+#include "xpcpublic.h"
 
 class nsICycleCollectorListener;
 class nsIXPConnectJSObjectHolder;
-class nsRootedJSValueArray;
 class nsScriptNameSpaceManager;
 class nsCycleCollectionNoteRootCallback;
+
+namespace JS {
+class AutoValueVector;
+}
 
 namespace mozilla {
 template <class> class Maybe;
@@ -35,23 +40,10 @@ class nsJSContext : public nsIScriptContext
 {
 public:
   nsJSContext(bool aGCOnDestruction, nsIScriptGlobalObject* aGlobalObject);
-  virtual ~nsJSContext();
 
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
   NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS_AMBIGUOUS(nsJSContext,
                                                          nsIScriptContext)
-
-  virtual nsresult EvaluateString(const nsAString& aScript,
-                                  JS::Handle<JSObject*> aScopeObject,
-                                  JS::CompileOptions &aOptions,
-                                  bool aCoerceToString,
-                                  JS::Value* aRetValue,
-                                  void **aOffThreadToken = nullptr) MOZ_OVERRIDE;
-
-  virtual nsresult BindCompiledEventHandler(nsISupports *aTarget,
-                                            JS::Handle<JSObject*> aScope,
-                                            JS::Handle<JSObject*> aHandler,
-                                            JS::MutableHandle<JSObject*> aBoundHandler) MOZ_OVERRIDE;
 
   virtual nsIScriptGlobalObject *GetGlobalObject() MOZ_OVERRIDE;
   inline nsIScriptGlobalObject *GetGlobalObjectRef() { return mGlobalObjectRef; }
@@ -77,11 +69,6 @@ public:
   static void LoadStart();
   static void LoadEnd();
 
-  enum IsCompartment {
-    CompartmentGC,
-    NonCompartmentGC
-  };
-
   enum IsShrinking {
     ShrinkingGC,
     NonShrinkingGC
@@ -97,17 +84,29 @@ public:
 
   static void GarbageCollectNow(JS::gcreason::Reason reason,
                                 IsIncremental aIncremental = NonIncrementalGC,
-                                IsCompartment aCompartment = NonCompartmentGC,
                                 IsShrinking aShrinking = NonShrinkingGC,
                                 int64_t aSliceMillis = 0);
   static void ShrinkGCBuffersNow();
+
   // If aExtraForgetSkippableCalls is -1, forgetSkippable won't be
   // called even if the previous collection was GC.
   static void CycleCollectNow(nsICycleCollectorListener *aListener = nullptr,
                               int32_t aExtraForgetSkippableCalls = 0);
-  static void ScheduledCycleCollectNow();
+
+  // Run a cycle collector slice, using a heuristic to decide how long to run it.
+  static void RunCycleCollectorSlice();
+
+  // Run a cycle collector slice, using the given work budget.
+  static void RunCycleCollectorWorkSlice(int64_t aWorkBudget);
+
   static void BeginCycleCollectionCallback();
   static void EndCycleCollectionCallback(mozilla::CycleCollectorResults &aResults);
+
+  // Return the longest CC slice time since ClearMaxCCSliceTime() was last called.
+  static uint32_t GetMaxCCSliceTimeSinceClear();
+  static void ClearMaxCCSliceTime();
+
+  static void RunNextCollectorTimer();
 
   static void PokeGC(JS::gcreason::Reason aReason, int aDelay = 0);
   static void KillGCTimer();
@@ -117,6 +116,7 @@ public:
 
   static void MaybePokeCC();
   static void KillCCTimer();
+  static void KillICCTimer();
   static void KillFullGCTimer();
   static void KillInterSliceGCTimer();
 
@@ -135,22 +135,14 @@ public:
     return global ? mGlobalObjectRef.get() : nullptr;
   }
 protected:
-  nsresult InitializeExternalClasses();
+  virtual ~nsJSContext();
 
   // Helper to convert xpcom datatypes to jsvals.
   nsresult ConvertSupportsTojsvals(nsISupports *aArgs,
                                    JS::Handle<JSObject*> aScope,
-                                   uint32_t *aArgc,
-                                   JS::Value **aArgv,
-                                   mozilla::Maybe<nsRootedJSValueArray> &aPoolRelease);
+                                   JS::AutoValueVector &aArgsOut);
 
   nsresult AddSupportsPrimitiveTojsvals(nsISupports *aArg, JS::Value *aArgv);
-
-  // given an nsISupports object (presumably an event target or some other
-  // DOM object), get (or create) the JSObject wrapping it.
-  nsresult JSObjectFromInterface(nsISupports *aSup,
-                                 JS::Handle<JSObject*> aScript,
-                                 JSObject **aRet);
 
   // Report the pending exception on our mContext, if any.  This
   // function will set aside the frame chain on mContext before
@@ -169,13 +161,8 @@ private:
   bool mGCOnDestruction;
   bool mProcessingScriptTag;
 
-  PRTime mOperationCallbackTime;
-
   PRTime mModalStateTime;
   uint32_t mModalStateDepth;
-
-  nsJSContext *mNext;
-  nsJSContext **mPrev;
 
   // mGlobalObjectRef ensures that the outer window stays alive as long as the
   // context does. It is eventually collected by the cycle collector.
@@ -204,30 +191,18 @@ class AsyncErrorReporter : public nsRunnable
 {
 public:
   // aWindow may be null if this error report is not associated with a window
-  AsyncErrorReporter(JSRuntime* aRuntime,
-                     JSErrorReport* aErrorReport,
-                     const char* aFallbackMessage,
-                     bool aIsChromeError, // To determine category
-                     nsPIDOMWindow* aWindow);
+  AsyncErrorReporter(JSRuntime* aRuntime, xpc::ErrorReport* aReport)
+    : mReport(aReport)
+  {}
 
   NS_IMETHOD Run()
   {
-    ReportError();
+    mReport->LogToConsole();
     return NS_OK;
   }
 
 protected:
-  // Do the actual error reporting
-  void ReportError();
-
-  nsString mErrorMsg;
-  nsString mFileName;
-  nsString mSourceLine;
-  nsCString mCategory;
-  uint32_t mLineNumber;
-  uint32_t mColumn;
-  uint32_t mFlags;
-  uint64_t mInnerWindowID;
+  nsRefPtr<xpc::ErrorReport> mReport;
 };
 
 } // namespace dom
@@ -252,9 +227,6 @@ public:
 };
 
 NS_DEFINE_STATIC_IID_ACCESSOR(nsIJSArgArray, NS_IJSARGARRAY_IID)
-
-/* prototypes */
-void NS_ScriptErrorReporter(JSContext *cx, const char *message, JSErrorReport *report);
 
 JSObject* NS_DOMReadStructuredClone(JSContext* cx,
                                     JSStructuredCloneReader* reader, uint32_t tag,

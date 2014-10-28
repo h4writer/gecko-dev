@@ -47,19 +47,23 @@ class StringTable:
             return ", ".join(map(toCChar, string))
         f.write("const char %s[] = {\n" % name)
         for (string, offset) in entries[:-1]:
-            f.write("  /* %5d */ %s, '\\0',\n"
-                    % (offset, explodeToCharArray(string)))
+            e = explodeToCharArray(string)
+            if e:
+                f.write("  /* %5d */ %s, '\\0',\n"
+                        % (offset, explodeToCharArray(string)))
+            else:
+                f.write("  /* %5d */ '\\0',\n" % offset)
         f.write("  /* %5d */ %s, '\\0' };\n\n"
                 % (entries[-1][1], explodeToCharArray(entries[-1][0])))
 
-def print_array_entry(histogram, name_index, desc_index):
+def print_array_entry(histogram, name_index, exp_index):
     cpp_guard = histogram.cpp_guard()
     if cpp_guard:
         print "#if defined(%s)" % cpp_guard
     print "  { %s, %s, %s, %s, %d, %d, %s }," \
         % (histogram.low(), histogram.high(),
            histogram.n_buckets(), histogram.nsITelemetry_kind(),
-           name_index, desc_index,
+           name_index, exp_index,
            "true" if histogram.extended_statistics_ok() else "false")
     if cpp_guard:
         print "#endif"
@@ -70,8 +74,8 @@ def write_histogram_table(histograms):
     print "const TelemetryHistogram gHistograms[] = {"
     for histogram in histograms:
         name_index = table.stringIndex(histogram.name())
-        desc_index = table.stringIndex(histogram.description())
-        print_array_entry(histogram, name_index, desc_index)
+        exp_index = table.stringIndex(histogram.expiration())
+        print_array_entry(histogram, name_index, exp_index)
     print "};"
 
     strtab_name = "gHistogramStringTable"
@@ -91,6 +95,9 @@ def static_asserts_for_boolean(histogram):
     pass
 
 def static_asserts_for_flag(histogram):
+    pass
+
+def static_asserts_for_count(histogram):
     pass
 
 def static_asserts_for_enumerated(histogram):
@@ -124,6 +131,7 @@ def write_histogram_static_asserts(histograms):
     table = {
         'boolean' : static_asserts_for_boolean,
         'flag' : static_asserts_for_flag,
+        'count': static_asserts_for_count,
         'enumerated' : static_asserts_for_enumerated,
         'linear' : static_asserts_for_linear,
         'exponential' : static_asserts_for_exponential,

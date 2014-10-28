@@ -12,6 +12,23 @@ SOURCES += [
     'nsToolkitCompsModule.cpp',
 ]
 
-LIBRARY_NAME = 'toolkitcomps'
-
 FINAL_LIBRARY = 'xul'
+
+LOCAL_INCLUDES += [
+    '../../xre',
+    '../alerts',
+    '../downloads',
+    '../feeds',
+    '../find',
+    '../jsdownloads/src',
+    '../protobuf',
+    '../startup',
+    '../statusfilter',
+    '../typeaheadfind',
+    '../url-classifier',
+]
+
+if not CONFIG['MOZ_DISABLE_PARENTAL_CONTROLS']:
+    LOCAL_INCLUDES += [
+        '../parentalcontrols',
+    ]

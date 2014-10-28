@@ -13,14 +13,15 @@
     _(UnboxFloatingPoint)           \
     _(DivI)                         \
     _(DivPowTwoI)                   \
-    _(DivSelfI)                     \
+    _(DivOrModConstantI)            \
     _(ModI)                         \
     _(ModPowTwoI)                   \
-    _(ModSelfI)                     \
     _(PowHalfD)                     \
     _(AsmJSUInt32ToDouble)          \
     _(AsmJSUInt32ToFloat32)         \
     _(AsmJSLoadFuncPtr)             \
+    _(SimdValueInt32x4)             \
+    _(SimdValueFloat32x4)           \
     _(UDivOrMod)
 
 #endif /* jit_x64_LOpcodes_x64_h */

@@ -9,10 +9,10 @@ import org.mozilla.gecko.Assert;
 import org.mozilla.gecko.Driver;
 import org.mozilla.gecko.tests.components.BaseComponent;
 
-import com.jayway.android.robotium.solo.Solo;
-
 import android.app.Activity;
 import android.app.Instrumentation;
+
+import com.jayway.android.robotium.solo.Solo;
 
 /**
  * Interface to the global information about a UITest environment.
@@ -21,6 +21,8 @@ public interface UITestContext {
 
     public static enum ComponentType {
         ABOUTHOME,
+        APPMENU,
+        GECKOVIEW,
         TOOLBAR
     }
 
@@ -31,8 +33,8 @@ public interface UITestContext {
     public Actions getActions();
     public Instrumentation getInstrumentation();
 
-    public void dumpLog(final String message);
-    public void dumpLog(final String message, final Throwable t);
+    public void dumpLog(final String logtag, final String message);
+    public void dumpLog(final String logtag, final String message, final Throwable t);
 
     /**
      * Returns the absolute version of the given URL using the host's hostname.

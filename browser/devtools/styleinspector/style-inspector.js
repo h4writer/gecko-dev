@@ -1,11 +1,11 @@
-/* -*- Mode: Javascript; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim: set ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 const {Cc, Cu, Ci} = require("chrome");
-const promise = require("sdk/core/promise");
+const {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
 
 let ToolDefinitions = require("main").Tools;
 
@@ -17,7 +17,7 @@ loader.lazyGetter(this, "ComputedView", () => require("devtools/styleinspector/c
 loader.lazyGetter(this, "_strings", () => Services.strings
   .createBundle("chrome://global/locale/devtools/styleinspector.properties"));
 
-const PREF_ORIG_SOURCES = "devtools.styleeditor.source-maps-enabled";
+const { PREF_ORIG_SOURCES } = require("devtools/styleeditor/utils");
 
 // This module doesn't currently export any symbols directly, it only
 // registers inspector tools.
@@ -49,10 +49,11 @@ function RuleViewTool(aInspector, aWindow, aIFrame)
 
     // Chrome stylesheets are not listed in the style editor, so show
     // these sheets in the view source window instead.
-    if (!sheet || !rule.href || sheet.isSystem) {
+    if (!sheet || sheet.isSystem) {
       let contentDoc = this.inspector.selection.document;
       let viewSourceUtils = this.inspector.viewSourceUtils;
-      viewSourceUtils.viewSource(rule.href, null, contentDoc, rule.line || 0);
+      let href = rule.nodeHref || rule.href;
+      viewSourceUtils.viewSource(href, null, contentDoc, rule.line || 0);
       return;
     }
 
@@ -60,11 +61,12 @@ function RuleViewTool(aInspector, aWindow, aIFrame)
     if (Services.prefs.getBoolPref(PREF_ORIG_SOURCES)) {
       location = rule.getOriginalLocation();
     }
-    location.then(({ href, line, column }) => {
+    location.then(({ source, href, line, column }) => {
       let target = this.inspector.target;
       if (ToolDefinitions.styleEditor.isTargetSupported(target)) {
         gDevTools.showToolbox(target, "styleeditor").then(function(toolbox) {
-          toolbox.getCurrentPanel().selectStyleSheet(href, line, column);
+          let sheet = source || href;
+          toolbox.getCurrentPanel().selectStyleSheet(sheet, line, column);
         });
       }
       return;
@@ -81,9 +83,9 @@ function RuleViewTool(aInspector, aWindow, aIFrame)
   this.inspector.on("layout-change", this.refresh);
 
   this.inspector.selection.on("pseudoclass", this.refresh);
-  if (this.inspector.highlighter) {
-    this.inspector.highlighter.on("locked", this._onSelect);
-  }
+
+  this._clearUserProperties = this._clearUserProperties.bind(this);
+  this.inspector.target.on("navigate", this._clearUserProperties);
 
   this.onSelect();
 }
@@ -92,6 +94,10 @@ exports.RuleViewTool = RuleViewTool;
 
 RuleViewTool.prototype = {
   onSelect: function RVT_onSelect(aEvent) {
+    if (!this.view) {
+      // Skip the event if RuleViewTool has been destroyed.
+      return;
+    }
     this.view.setPageStyle(this.inspector.pageStyle);
 
     if (!this.inspector.selection.isConnected() ||
@@ -101,31 +107,26 @@ RuleViewTool.prototype = {
     }
 
     if (!aEvent || aEvent == "new-node-front") {
-      if (this.inspector.selection.reason == "highlighter") {
-        this.view.highlight(null);
-      } else {
-        let done = this.inspector.updating("rule-view");
-        this.view.highlight(this.inspector.selection.nodeFront).then(done, done);
-      }
-    }
-
-    if (aEvent == "locked") {
       let done = this.inspector.updating("rule-view");
       this.view.highlight(this.inspector.selection.nodeFront).then(done, done);
     }
   },
 
   refresh: function RVT_refresh() {
-    this.view.nodeChanged();
+    this.view.refreshPanel();
+  },
+
+  _clearUserProperties: function() {
+    if (this.view && this.view.store && this.view.store.userProperties) {
+      this.view.store.userProperties.clear();
+    }
   },
 
   destroy: function RVT_destroy() {
     this.inspector.off("layout-change", this.refresh);
     this.inspector.selection.off("pseudoclass", this.refresh);
     this.inspector.selection.off("new-node-front", this._onSelect);
-    if (this.inspector.highlighter) {
-      this.inspector.highlighter.off("locked", this._onSelect);
-    }
+    this.inspector.target.off("navigate", this._clearUserProperties);
 
     this.view.element.removeEventListener("CssRuleViewCSSLinkClicked",
       this._cssLinkHandler);
@@ -145,7 +146,7 @@ RuleViewTool.prototype = {
     delete this.doc;
     delete this.inspector;
   }
-}
+};
 
 function ComputedViewTool(aInspector, aWindow, aIFrame)
 {
@@ -158,9 +159,6 @@ function ComputedViewTool(aInspector, aWindow, aIFrame)
   this._onSelect = this.onSelect.bind(this);
   this.inspector.selection.on("detached", this._onSelect);
   this.inspector.selection.on("new-node-front", this._onSelect);
-  if (this.inspector.highlighter) {
-    this.inspector.highlighter.on("locked", this._onSelect);
-  }
   this.refresh = this.refresh.bind(this);
   this.inspector.on("layout-change", this.refresh);
   this.inspector.selection.on("pseudoclass", this.refresh);
@@ -175,6 +173,10 @@ exports.ComputedViewTool = ComputedViewTool;
 ComputedViewTool.prototype = {
   onSelect: function CVT_onSelect(aEvent)
   {
+    if (!this.view) {
+      // Skip the event if ComputedViewTool has been destroyed.
+      return;
+    }
     this.view.setPageStyle(this.inspector.pageStyle);
 
     if (!this.inspector.selection.isConnected() ||
@@ -184,17 +186,6 @@ ComputedViewTool.prototype = {
     }
 
     if (!aEvent || aEvent == "new-node-front") {
-      if (this.inspector.selection.reason == "highlighter") {
-        // FIXME: We should hide view's content
-      } else {
-        let done = this.inspector.updating("computed-view");
-        this.view.highlight(this.inspector.selection.nodeFront).then(() => {
-          done();
-        });
-      }
-    }
-
-    if (aEvent == "locked" && this.inspector.selection.nodeFront != this.view.viewedElement) {
       let done = this.inspector.updating("computed-view");
       this.view.highlight(this.inspector.selection.nodeFront).then(() => {
         done();
@@ -212,9 +203,6 @@ ComputedViewTool.prototype = {
     this.inspector.sidebar.off("computedview-selected", this.refresh);
     this.inspector.selection.off("pseudoclass", this.refresh);
     this.inspector.selection.off("new-node-front", this._onSelect);
-    if (this.inspector.highlighter) {
-      this.inspector.highlighter.off("locked", this._onSelect);
-    }
 
     this.view.destroy();
     delete this.view;

@@ -38,6 +38,8 @@ class LIRGeneratorX86 : public LIRGeneratorX86Shared
         return LDefinition::BogusTemp();
     }
 
+    bool needTempForPostBarrier() { return true; }
+
     LDefinition tempForDispatchCache(MIRType outputType = MIRType_None);
 
     void lowerUntypedPhiInput(MPhi *phi, uint32_t inputPosition, LBlock *block, size_t lirIndex);
@@ -62,15 +64,14 @@ class LIRGeneratorX86 : public LIRGeneratorX86Shared
     static bool allowStaticTypedArrayAccesses() {
         return true;
     }
-
-    static bool allowFloat32Optimizations() {
+    static bool allowInlineForkJoinGetSlice() {
         return true;
     }
 };
 
 typedef LIRGeneratorX86 LIRGeneratorSpecific;
 
-} // namespace js
 } // namespace jit
+} // namespace js
 
 #endif /* jit_x86_Lowering_x86_h */

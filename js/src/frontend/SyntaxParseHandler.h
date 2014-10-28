@@ -61,6 +61,10 @@ class SyntaxParseHandler
         return NodeName;
     }
 
+    Node newComputedName(Node expr, uint32_t start, uint32_t end) {
+        return NodeName;
+    }
+
     DefinitionNode newPlaceholder(JSAtom *atom, uint32_t blockid, const TokenPos &pos) {
         return Definition::PLACEHOLDER;
     }
@@ -75,11 +79,23 @@ class SyntaxParseHandler
         return NodeString;
     }
 
+    Node newTemplateStringLiteral(JSAtom *atom, const TokenPos &pos) {
+        return NodeGeneric;
+    }
+
+    Node newCallSiteObject(uint32_t begin, unsigned blockidGen) {
+        return NodeGeneric;
+    }
+
+    bool addToCallSiteObject(Node callSiteObj, Node rawNode, Node cookedNode) {
+        return true;
+    }
+
     Node newThisLiteral(const TokenPos &pos) { return NodeGeneric; }
     Node newNullLiteral(const TokenPos &pos) { return NodeGeneric; }
 
     template <class Boxer>
-    Node newRegExp(JSObject *reobj, const TokenPos &pos, Boxer &boxer) { return NodeGeneric; }
+    Node newRegExp(RegExpObject *reobj, const TokenPos &pos, Boxer &boxer) { return NodeGeneric; }
 
     Node newConditional(Node cond, Node thenExpr, Node elseExpr) { return NodeGeneric; }
 
@@ -107,20 +123,26 @@ class SyntaxParseHandler
 
     // Expressions
 
+    Node newArrayComprehension(Node body, unsigned blockid, const TokenPos &pos) {
+        return NodeGeneric;
+    }
     Node newArrayLiteral(uint32_t begin, unsigned blockid) { return NodeGeneric; }
     bool addElision(Node literal, const TokenPos &pos) { return true; }
     bool addSpreadElement(Node literal, uint32_t begin, Node inner) { return true; }
     bool addArrayElement(Node literal, Node element) { return true; }
 
     Node newObjectLiteral(uint32_t begin) { return NodeGeneric; }
-    bool addPropertyDefinition(Node literal, Node name, Node expr) { return true; }
-    bool addShorthandPropertyDefinition(Node literal, Node name) { return true; }
-    bool addAccessorPropertyDefinition(Node literal, Node name, Node fn, JSOp op) { return true; }
+    bool addPrototypeMutation(Node literal, uint32_t begin, Node expr) { return true; }
+    bool addPropertyDefinition(Node literal, Node name, Node expr, bool isShorthand = false) { return true; }
+    bool addMethodDefinition(Node literal, Node name, Node fn, JSOp op) { return true; }
+    Node newYieldExpression(uint32_t begin, Node value, Node gen) { return NodeGeneric; }
+    Node newYieldStarExpression(uint32_t begin, Node value, Node gen) { return NodeGeneric; }
 
     // Statements
 
     Node newStatementList(unsigned blockid, const TokenPos &pos) { return NodeGeneric; }
     void addStatementToList(Node list, Node stmt, ParseContext<SyntaxParseHandler> *pc) {}
+    bool prependInitialYield(Node stmtList, Node gen) { return true; }
     Node newEmptyStatement(const TokenPos &pos) { return NodeGeneric; }
 
     Node newExprStatement(Node expr, uint32_t end) {
@@ -156,14 +178,23 @@ class SyntaxParseHandler
     bool addCatchBlock(Node catchList, Node letBlock,
                        Node catchName, Node catchGuard, Node catchBody) { return true; }
 
-    void setLeaveBlockResult(Node block, Node kid, bool leaveBlockExpr) {}
-
     void setLastFunctionArgumentDefault(Node funcpn, Node pn) {}
     Node newFunctionDefinition() { return NodeGeneric; }
     void setFunctionBody(Node pn, Node kid) {}
     void setFunctionBox(Node pn, FunctionBox *funbox) {}
     void addFunctionArgument(Node pn, Node argpn) {}
+
+    Node newForStatement(uint32_t begin, Node forHead, Node body, unsigned iflags) {
+        return NodeGeneric;
+    }
+
+    Node newForHead(ParseNodeKind kind, Node decls, Node lhs, Node rhs, const TokenPos &pos) {
+        return NodeGeneric;
+    }
+
     Node newLexicalScope(ObjectBox *blockbox) { return NodeGeneric; }
+    void setLexicalScopeBody(Node block, Node body) {}
+
     bool isOperationWithoutParens(Node pn, ParseNodeKind kind) {
         // It is OK to return false here, callers should only use this method
         // for reporting strict option warnings and parsing code which the
@@ -198,7 +229,7 @@ class SyntaxParseHandler
     Node setInParens(Node pn) {
         // String literals enclosed by parentheses are ignored during
         // strict mode parsing.
-        return NodeGeneric;
+        return (pn == NodeString) ? NodeGeneric : pn;
     }
     void setPrologue(Node pn) {}
 
@@ -221,6 +252,7 @@ class SyntaxParseHandler
 
     static Node getDefinitionNode(DefinitionNode dn) { return NodeGeneric; }
     static Definition::Kind getDefinitionKind(DefinitionNode dn) { return dn; }
+    static bool isPlaceholderDefinition(DefinitionNode dn) { return dn == Definition::PLACEHOLDER; }
     void linkUseToDef(Node pn, DefinitionNode dn) {}
     DefinitionNode resolve(DefinitionNode dn) { return dn; }
     void deoptimizeUsesWithin(DefinitionNode dn, const TokenPos &pos) {}
@@ -230,6 +262,8 @@ class SyntaxParseHandler
         // dependency location with blockid.
         return functionScope;
     }
+    void markMaybeUninitializedLexicalUseInSwitch(Node pn, DefinitionNode dn,
+                                                  uint16_t firstDominatingLexicalSlot) {}
 
     static uintptr_t definitionToBits(DefinitionNode dn) {
         // Use a shift, as DefinitionList tags the lower bit of its associated union.

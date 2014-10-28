@@ -6,9 +6,12 @@
 #include "FrozenImage.h"
 
 namespace mozilla {
+
+using namespace gfx;
+
 namespace image {
 
-NS_IMPL_ISUPPORTS1(FrozenImage, imgIContainer)
+NS_IMPL_ISUPPORTS_INHERITED0(FrozenImage, ImageWrapper)
 
 nsIntRect
 FrozenImage::FrameRect(uint32_t /* aWhichFrame - ignored */)
@@ -40,12 +43,11 @@ FrozenImage::GetAnimated(bool* aAnimated)
   return rv;
 }
 
-NS_IMETHODIMP
+NS_IMETHODIMP_(TemporaryRef<SourceSurface>)
 FrozenImage::GetFrame(uint32_t aWhichFrame,
-                      uint32_t aFlags,
-                      gfxASurface** _retval)
+                      uint32_t aFlags)
 {
-  return InnerImage()->GetFrame(FRAME_FIRST, aFlags, _retval);
+  return InnerImage()->GetFrame(FRAME_FIRST, aFlags);
 }
 
 NS_IMETHODIMP_(bool)
@@ -70,22 +72,19 @@ FrozenImage::GetImageContainer(layers::LayerManager* aManager,
 
 NS_IMETHODIMP
 FrozenImage::Draw(gfxContext* aContext,
-                  GraphicsFilter aFilter,
-                  const gfxMatrix& aUserSpaceToImageSpace,
-                  const gfxRect& aFill,
-                  const nsIntRect& aSubimage,
-                  const nsIntSize& aViewportSize,
-                  const SVGImageContext* aSVGContext,
+                  const nsIntSize& aSize,
+                  const ImageRegion& aRegion,
                   uint32_t /* aWhichFrame - ignored */,
+                  GraphicsFilter aFilter,
+                  const Maybe<SVGImageContext>& aSVGContext,
                   uint32_t aFlags)
 {
-  return InnerImage()->Draw(aContext, aFilter, aUserSpaceToImageSpace,
-                            aFill, aSubimage, aViewportSize, aSVGContext,
-                            FRAME_FIRST, aFlags);
+  return InnerImage()->Draw(aContext, aSize, aRegion, FRAME_FIRST,
+                            aFilter, aSVGContext, aFlags);
 }
 
 NS_IMETHODIMP_(void)
-FrozenImage::RequestRefresh(const mozilla::TimeStamp& aTime)
+FrozenImage::RequestRefresh(const TimeStamp& aTime)
 {
   // Do nothing.
 }

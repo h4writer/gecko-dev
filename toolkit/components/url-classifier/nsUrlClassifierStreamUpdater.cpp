@@ -17,6 +17,7 @@
 #include "prlog.h"
 #include "nsIInterfaceRequestor.h"
 #include "mozilla/LoadContext.h"
+#include "nsContentUtils.h"
 
 static const char* gQuitApplicationMessage = "quit-application";
 
@@ -39,23 +40,23 @@ static const PRLogModuleInfo *gUrlClassifierStreamUpdaterLog = nullptr;
 
 nsUrlClassifierStreamUpdater::nsUrlClassifierStreamUpdater()
   : mIsUpdating(false), mInitialized(false), mDownloadError(false),
-    mBeganStream(false), mUpdateUrl(nullptr), mChannel(nullptr)
+    mBeganStream(false), mChannel(nullptr)
 {
 #if defined(PR_LOGGING)
   if (!gUrlClassifierStreamUpdaterLog)
     gUrlClassifierStreamUpdaterLog = PR_NewLogModule("UrlClassifierStreamUpdater");
 #endif
-
+  LOG(("nsUrlClassifierStreamUpdater init [this=%p]", this));
 }
 
-NS_IMPL_ISUPPORTS7(nsUrlClassifierStreamUpdater,
-                              nsIUrlClassifierStreamUpdater,
-                              nsIUrlClassifierUpdateObserver,
-                              nsIRequestObserver,
-                              nsIStreamListener,
-                              nsIObserver,
-                              nsIInterfaceRequestor,
-                              nsITimerCallback)
+NS_IMPL_ISUPPORTS(nsUrlClassifierStreamUpdater,
+                  nsIUrlClassifierStreamUpdater,
+                  nsIUrlClassifierUpdateObserver,
+                  nsIRequestObserver,
+                  nsIStreamListener,
+                  nsIObserver,
+                  nsIInterfaceRequestor,
+                  nsITimerCallback)
 
 /**
  * Clear out the update.
@@ -76,39 +77,32 @@ nsUrlClassifierStreamUpdater::DownloadDone()
 ///////////////////////////////////////////////////////////////////////////////
 // nsIUrlClassifierStreamUpdater implementation
 
-NS_IMETHODIMP
-nsUrlClassifierStreamUpdater::GetUpdateUrl(nsACString & aUpdateUrl)
-{
-  if (mUpdateUrl) {
-    mUpdateUrl->GetSpec(aUpdateUrl);
-  } else {
-    aUpdateUrl.Truncate();
-  }
-  return NS_OK;
-}
-
-NS_IMETHODIMP
-nsUrlClassifierStreamUpdater::SetUpdateUrl(const nsACString & aUpdateUrl)
-{
-  LOG(("Update URL is %s\n", PromiseFlatCString(aUpdateUrl).get()));
-
-  nsresult rv = NS_NewURI(getter_AddRefs(mUpdateUrl), aUpdateUrl);
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  return NS_OK;
-}
-
 nsresult
 nsUrlClassifierStreamUpdater::FetchUpdate(nsIURI *aUpdateUrl,
                                           const nsACString & aRequestBody,
-                                          const nsACString & aStreamTable,
-                                          const nsACString & aServerMAC)
+                                          const nsACString & aStreamTable)
 {
+
+#ifdef DEBUG
+  {
+    nsCString spec;
+    aUpdateUrl->GetSpec(spec);
+    LOG(("Fetching update %s from %s", aRequestBody.Data(), spec.get()));
+  }
+#endif
+
   nsresult rv;
   uint32_t loadFlags = nsIChannel::INHIBIT_CACHING |
                        nsIChannel::LOAD_BYPASS_CACHE;
-  rv = NS_NewChannel(getter_AddRefs(mChannel), aUpdateUrl, nullptr, nullptr, this,
+  rv = NS_NewChannel(getter_AddRefs(mChannel),
+                     aUpdateUrl,
+                     nsContentUtils::GetSystemPrincipal(),
+                     nsILoadInfo::SEC_NORMAL,
+                     nsIContentPolicy::TYPE_OTHER,
+                     nullptr,  // aLoadGroup
+                     this,     // aInterfaceRequestor
                      loadFlags);
+
   NS_ENSURE_SUCCESS(rv, rv);
 
   mBeganStream = false;
@@ -141,7 +135,6 @@ nsUrlClassifierStreamUpdater::FetchUpdate(nsIURI *aUpdateUrl,
   NS_ENSURE_SUCCESS(rv, rv);
 
   mStreamTable = aStreamTable;
-  mServerMAC = aServerMAC;
 
   return NS_OK;
 }
@@ -149,8 +142,7 @@ nsUrlClassifierStreamUpdater::FetchUpdate(nsIURI *aUpdateUrl,
 nsresult
 nsUrlClassifierStreamUpdater::FetchUpdate(const nsACString & aUpdateUrl,
                                           const nsACString & aRequestBody,
-                                          const nsACString & aStreamTable,
-                                          const nsACString & aServerMAC)
+                                          const nsACString & aStreamTable)
 {
   LOG(("(pre) Fetching update from %s\n", PromiseFlatCString(aUpdateUrl).get()));
 
@@ -163,30 +155,38 @@ nsUrlClassifierStreamUpdater::FetchUpdate(const nsACString & aUpdateUrl,
 
   LOG(("(post) Fetching update from %s\n", urlSpec.get()));
 
-  return FetchUpdate(uri, aRequestBody, aStreamTable, aServerMAC);
+  return FetchUpdate(uri, aRequestBody, aStreamTable);
 }
 
 NS_IMETHODIMP
 nsUrlClassifierStreamUpdater::DownloadUpdates(
-                                const nsACString &aRequestTables,
-                                const nsACString &aRequestBody,
-                                const nsACString &aClientKey,
-                                nsIUrlClassifierCallback *aSuccessCallback,
-                                nsIUrlClassifierCallback *aUpdateErrorCallback,
-                                nsIUrlClassifierCallback *aDownloadErrorCallback,
-                                bool *_retval)
+  const nsACString &aRequestTables,
+  const nsACString &aRequestBody,
+  const nsACString &aUpdateUrl,
+  nsIUrlClassifierCallback *aSuccessCallback,
+  nsIUrlClassifierCallback *aUpdateErrorCallback,
+  nsIUrlClassifierCallback *aDownloadErrorCallback,
+  bool *_retval)
 {
   NS_ENSURE_ARG(aSuccessCallback);
   NS_ENSURE_ARG(aUpdateErrorCallback);
   NS_ENSURE_ARG(aDownloadErrorCallback);
 
   if (mIsUpdating) {
-    LOG(("already updating, skipping update"));
+    LOG(("Already updating, queueing update %s from %s", aRequestBody.Data(),
+         aUpdateUrl.Data()));
     *_retval = false;
+    PendingRequest *request = mPendingRequests.AppendElement();
+    request->mTables = aRequestTables;
+    request->mRequest = aRequestBody;
+    request->mUrl = aUpdateUrl;
+    request->mSuccessCallback = aSuccessCallback;
+    request->mUpdateErrorCallback = aUpdateErrorCallback;
+    request->mDownloadErrorCallback = aDownloadErrorCallback;
     return NS_OK;
   }
 
-  if (!mUpdateUrl) {
+  if (aUpdateUrl.IsEmpty()) {
     NS_ERROR("updateUrl not set");
     return NS_ERROR_NOT_INITIALIZED;
   }
@@ -210,12 +210,22 @@ nsUrlClassifierStreamUpdater::DownloadUpdates(
     mInitialized = true;
   }
 
-  rv = mDBService->BeginUpdate(this, aRequestTables, aClientKey);
+  rv = mDBService->BeginUpdate(this, aRequestTables);
   if (rv == NS_ERROR_NOT_AVAILABLE) {
-    LOG(("already updating, skipping update"));
+    LOG(("Service busy, already updating, queuing update %s from %s",
+         aRequestBody.Data(), aUpdateUrl.Data()));
     *_retval = false;
+    PendingRequest *request = mPendingRequests.AppendElement();
+    request->mTables = aRequestTables;
+    request->mRequest = aRequestBody;
+    request->mUrl = aUpdateUrl;
+    request->mSuccessCallback = aSuccessCallback;
+    request->mUpdateErrorCallback = aUpdateErrorCallback;
+    request->mDownloadErrorCallback = aDownloadErrorCallback;
     return NS_OK;
-  } else if (NS_FAILED(rv)) {
+  }
+
+  if (NS_FAILED(rv)) {
     return rv;
   }
 
@@ -226,14 +236,10 @@ nsUrlClassifierStreamUpdater::DownloadUpdates(
   mIsUpdating = true;
   *_retval = true;
 
-  nsAutoCString urlSpec;
-  mUpdateUrl->GetAsciiSpec(urlSpec);
-
-  LOG(("FetchUpdate: %s", urlSpec.get()));
+  LOG(("FetchUpdate: %s", aUpdateUrl.Data()));
   //LOG(("requestBody: %s", aRequestBody.Data()));
 
-  LOG(("Calling into FetchUpdate"));
-  return FetchUpdate(mUpdateUrl, aRequestBody, EmptyCString(), EmptyCString());
+  return FetchUpdate(aUpdateUrl, aRequestBody, EmptyCString());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -241,8 +247,7 @@ nsUrlClassifierStreamUpdater::DownloadUpdates(
 
 NS_IMETHODIMP
 nsUrlClassifierStreamUpdater::UpdateUrlRequested(const nsACString &aUrl,
-                                                 const nsACString &aTable,
-                                                 const nsACString &aServerMAC)
+                                                 const nsACString &aTable)
 {
   LOG(("Queuing requested update from %s\n", PromiseFlatCString(aUrl).get()));
 
@@ -255,29 +260,18 @@ nsUrlClassifierStreamUpdater::UpdateUrlRequested(const nsACString &aUrl,
       StringBeginsWith(aUrl, NS_LITERAL_CSTRING("file:"))) {
     update->mUrl = aUrl;
   } else {
-    // This must be fixed when bug 783047 is fixed. However, for unittesting
-    // update urls to localhost should use http, not https (otherwise the
-    // connection will fail silently, since there will be no cert available).
-    update->mUrl = NS_LITERAL_CSTRING("http://") + aUrl;
+    // For unittesting update urls to localhost should use http, not https
+    // (otherwise the connection will fail silently, since there will be no
+    // cert available).
+    if (!StringBeginsWith(aUrl, NS_LITERAL_CSTRING("localhost"))) {
+      update->mUrl = NS_LITERAL_CSTRING("https://") + aUrl;
+    } else {
+      update->mUrl = NS_LITERAL_CSTRING("http://") + aUrl;
+    }
   }
   update->mTable = aTable;
-  update->mServerMAC = aServerMAC;
 
   return NS_OK;
-}
-
-NS_IMETHODIMP
-nsUrlClassifierStreamUpdater::RekeyRequested()
-{
-  nsCOMPtr<nsIObserverService> observerService =
-    mozilla::services::GetObserverService();
-
-  if (!observerService)
-    return NS_ERROR_FAILURE;
-
-  return observerService->NotifyObservers(static_cast<nsIUrlClassifierStreamUpdater*>(this),
-                                          "url-classifier-rekey-requested",
-                                          nullptr);
 }
 
 nsresult
@@ -290,7 +284,7 @@ nsUrlClassifierStreamUpdater::FetchNext()
   PendingUpdate &update = mPendingUpdates[0];
   LOG(("Fetching update url: %s\n", update.mUrl.get()));
   nsresult rv = FetchUpdate(update.mUrl, EmptyCString(),
-                            update.mTable, update.mServerMAC);
+                            update.mTable);
   if (NS_FAILED(rv)) {
     LOG(("Error fetching update url: %s\n", update.mUrl.get()));
     // We can commit the urls that we've applied so far.  This is
@@ -302,6 +296,34 @@ nsUrlClassifierStreamUpdater::FetchNext()
   }
 
   mPendingUpdates.RemoveElementAt(0);
+
+  return NS_OK;
+}
+
+nsresult
+nsUrlClassifierStreamUpdater::FetchNextRequest()
+{
+  if (mPendingRequests.Length() == 0) {
+    LOG(("No more requests, returning"));
+    return NS_OK;
+  }
+
+  PendingRequest &request = mPendingRequests[0];
+  LOG(("Stream updater: fetching next request: %s, %s",
+       request.mTables.get(), request.mUrl.get()));
+  bool dummy;
+  DownloadUpdates(
+    request.mTables,
+    request.mRequest,
+    request.mUrl,
+    request.mSuccessCallback,
+    request.mUpdateErrorCallback,
+    request.mDownloadErrorCallback,
+    &dummy);
+  request.mSuccessCallback = nullptr;
+  request.mUpdateErrorCallback = nullptr;
+  request.mDownloadErrorCallback = nullptr;
+  mPendingRequests.RemoveElementAt(0);
 
   return NS_OK;
 }
@@ -350,6 +372,9 @@ nsUrlClassifierStreamUpdater::UpdateSuccess(uint32_t requestedTimeout)
   if (successCallback) {
     successCallback->HandleEvent(strTimeout);
   }
+  // Now fetch the next request
+  LOG(("stream updater: calling into fetch next request"));
+  FetchNextRequest();
 
   return NS_OK;
 }
@@ -453,12 +478,11 @@ nsUrlClassifierStreamUpdater::OnStartRequest(nsIRequest *request,
     status = NS_ERROR_ABORT;
   } else if (NS_SUCCEEDED(status)) {
     mBeganStream = true;
-    rv = mDBService->BeginStream(mStreamTable, mServerMAC);
+    rv = mDBService->BeginStream(mStreamTable);
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
   mStreamTable.Truncate();
-  mServerMAC.Truncate();
 
   return status;
 }
@@ -524,7 +548,7 @@ nsUrlClassifierStreamUpdater::OnStopRequest(nsIRequest *request, nsISupports* co
 
 NS_IMETHODIMP
 nsUrlClassifierStreamUpdater::Observe(nsISupports *aSubject, const char *aTopic,
-                                      const PRUnichar *aData)
+                                      const char16_t *aData)
 {
   if (nsCRT::strcmp(aTopic, gQuitApplicationMessage) == 0) {
     if (mIsUpdating && mChannel) {

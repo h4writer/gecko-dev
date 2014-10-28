@@ -6,48 +6,33 @@
 #include "ParentProcessController.h"
 #include "nsIContent.h"
 #include "nsLayoutUtils.h"
-#include "APZCCallbackHelper.h"
+#include "mozilla/layers/APZCCallbackHelper.h"
 #include "base/message_loop.h"
 
 namespace mozilla {
 namespace widget {
 
-class RequestContentRepaintEvent : public nsRunnable
-{
-    typedef mozilla::layers::FrameMetrics FrameMetrics;
-
-public:
-    RequestContentRepaintEvent(const FrameMetrics& aFrameMetrics)
-        : mFrameMetrics(aFrameMetrics)
-    {
-    }
-
-    NS_IMETHOD Run() {
-        MOZ_ASSERT(NS_IsMainThread());
-        nsCOMPtr<nsIContent> content = nsLayoutUtils::FindContentFor(mFrameMetrics.mScrollId);
-        if (content) {
-            APZCCallbackHelper::UpdateSubFrame(content, mFrameMetrics);
-        }
-        return NS_OK;
-    }
-
-protected:
-    FrameMetrics mFrameMetrics;
-};
-
 void
 ParentProcessController::RequestContentRepaint(const FrameMetrics& aFrameMetrics)
 {
-    if (aFrameMetrics.mScrollId == FrameMetrics::NULL_SCROLL_ID) {
+    MOZ_ASSERT(NS_IsMainThread());
+
+    if (aFrameMetrics.GetScrollId() == FrameMetrics::NULL_SCROLL_ID) {
         return;
     }
 
-    nsCOMPtr<nsIRunnable> r = new RequestContentRepaintEvent(aFrameMetrics);
-    if (!NS_IsMainThread()) {
-        NS_DispatchToMainThread(r);
-    } else {
-        r->Run();
+    nsCOMPtr<nsIContent> content = nsLayoutUtils::FindContentFor(aFrameMetrics.GetScrollId());
+    if (content) {
+        FrameMetrics metrics = aFrameMetrics;
+        mozilla::layers::APZCCallbackHelper::UpdateSubFrame(content, metrics);
     }
+}
+
+void
+ParentProcessController::AcknowledgeScrollUpdate(const FrameMetrics::ViewID& aScrollId,
+                                                 const uint32_t& aScrollGeneration)
+{
+    mozilla::layers::APZCCallbackHelper::AcknowledgeScrollUpdate(aScrollId, aScrollGeneration);
 }
 
 void

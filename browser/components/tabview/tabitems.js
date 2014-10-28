@@ -846,6 +846,12 @@ let TabItems = {
   _isComplete: function TabItems__isComplete(tab, callback) {
     Utils.assertThrow(tab, "tab");
 
+    // A pending tab can't be complete, yet.
+    if (tab.hasAttribute("pending")) {
+      setTimeout(() => callback(false));
+      return;
+    }
+
     let mm = tab.linkedBrowser.messageManager;
     let message = "Panorama:isDocumentLoaded";
 
@@ -1377,15 +1383,9 @@ TabCanvas.prototype = Utils.extend(new Subscribable(), {
     if (!w || !h)
       return;
 
-    if (!this.tab.linkedBrowser.contentWindow) {
-      Utils.log('no tab.linkedBrowser.contentWindow in TabCanvas.paint()');
-      return;
-    }
-
-    let win = this.tab.linkedBrowser.contentWindow;
-    gPageThumbnails.captureToCanvas(win, this.canvas);
-
-    this._sendToSubscribers("painted");
+    gPageThumbnails.captureToCanvas(this.tab.linkedBrowser, this.canvas, () => {
+      this._sendToSubscribers("painted");
+    });
   },
 
   // ----------

@@ -61,13 +61,10 @@ function PaymentUI() {
 
 PaymentUI.prototype = {
   get bundle() {
-    delete this.bundle;
-    return this.bundle = Services.strings.createBundle("chrome://browser/locale/payments.properties");
-  },
-
-  sendMessageToJava: function(aMsg) {
-    let data = Services.androidBridge.handleGeckoMessage(JSON.stringify(aMsg));
-    return JSON.parse(data);
+    if (!this._bundle) {
+      this._bundle = Services.strings.createBundle("chrome://browser/locale/payments.properties");
+    }
+    return this._bundle;
   },
 
   confirmPaymentRequest: function confirmPaymentRequest(aRequestId,
@@ -80,13 +77,13 @@ PaymentUI.prototype = {
 
     // If there's only one payment provider that will work, just move on without prompting the user.
     if (aRequests.length == 1) {
-      aSuccessCb.onresult(aRequestId, aRequests[0].wrappedJSObject.type);
+      aSuccessCb.onresult(aRequestId, aRequests[0].type);
       return;
     }
 
     // Otherwise, let the user select a payment provider from a list.
     for (let i = 0; i < aRequests.length; i++) {
-      let request = aRequests[i].wrappedJSObject;
+      let request = aRequests[i];
       let requestText = request.providerName;
       if (request.productPrice) {
         requestText += " (" + request.productPrice[0].amount + " " +
@@ -100,7 +97,7 @@ PaymentUI.prototype = {
       title: this.bundle.GetStringFromName("payments.providerdialog.title"),
     }).setSingleChoiceItems(listItems).show(function(data) {
       if (data.button > -1 && aSuccessCb) {
-        aSuccessCb.onresult(aRequestId, aRequests[data.button].wrappedJSObject.type);
+        aSuccessCb.onresult(aRequestId, aRequests[data.button].type);
       } else {
         _error(aRequestId, "USER_CANCELED");
       }
@@ -133,7 +130,7 @@ PaymentUI.prototype = {
     let tab = content.BrowserApp.addTab(aPaymentFlowInfo.uri + aPaymentFlowInfo.jwt);
 
     // Inject paymentSuccess and paymentFailed methods into the document after its loaded.
-    tab.browser.addEventListener("DOMContentLoaded", function loadPaymentShim() {
+    tab.browser.addEventListener("DOMWindowCreated", function loadPaymentShim() {
       let frame = tab.browser.contentDocument.defaultView;
       try {
         frame.wrappedJSObject.mozPaymentProvider = {
@@ -145,11 +142,15 @@ PaymentUI.prototype = {
           },
 
           _getNetworkInfo: function(type) {
-            let jni = new JNI();
-            let cls = jni.findClass("org/mozilla/gecko/GeckoNetworkManager");
-            let method = jni.getStaticMethodID(cls, "get" + type.toUpperCase(), "()I");
-            let val = jni.callStaticIntMethod(cls, method);
-            jni.close();
+            let jenv = JNI.GetForThread();
+            let jMethodName = "get" + type.toUpperCase();
+            let jGeckoNetworkManager = JNI.LoadClass(jenv, "org/mozilla/gecko/GeckoNetworkManager", {
+              static_methods: [
+                { name: jMethodName, sig: "()I" },
+              ],
+            });
+            let val = jGeckoNetworkManager[jMethodName]();
+            JNI.UnloadClasses(jenv);
 
             if (val < 0)
               return null;
@@ -172,7 +173,7 @@ PaymentUI.prototype = {
       } catch (e) {
         _error(aRequestId, "ERROR_ADDING_METHODS");
       } finally {
-        tab.browser.removeEventListener("DOMContentLoaded", loadPaymentShim);
+        tab.browser.removeEventListener("DOMWindowCreated", loadPaymentShim);
       }
     }, true);
 

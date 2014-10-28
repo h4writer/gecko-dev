@@ -17,13 +17,20 @@ using namespace IPC;
 namespace mozilla {
 namespace ipc {
 
+#ifdef MOZ_IPDL_TESTS
+bool IToplevelProtocol::sAllowNonMainThreadUse;
+#endif
+
 IToplevelProtocol::~IToplevelProtocol()
 {
+  MOZ_ASSERT(NS_IsMainThread() || AllowNonMainThreadUse());
   mOpenActors.clear();
 }
 
 void IToplevelProtocol::AddOpenedActor(IToplevelProtocol* aActor)
 {
+  MOZ_ASSERT(NS_IsMainThread() || AllowNonMainThreadUse());
+
 #ifdef DEBUG
   for (const IToplevelProtocol* actor = mOpenActors.getFirst();
        actor;
@@ -58,6 +65,14 @@ IToplevelProtocol::CloneOpenedToplevels(IToplevelProtocol* aTemplate,
     AddOpenedActor(newactor);
   }
 }
+
+#ifdef MOZ_IPDL_TESTS
+void
+IToplevelProtocol::SetAllowNonMainThreadUse()
+{
+  sAllowNonMainThreadUse = true;
+}
+#endif
 
 class ChannelOpened : public IPC::Message
 {
@@ -189,7 +204,8 @@ FatalError(const char* aProtocolName, const char* aMsg,
     formattedMessage.AppendLiteral("\". Killing child side as a result.");
     NS_ERROR(formattedMessage.get());
 
-    if (!base::KillProcess(aHandle, base::PROCESS_END_KILLED_BY_USER, false)) {
+    if (aHandle != kInvalidProcessHandle &&
+        !base::KillProcess(aHandle, base::PROCESS_END_KILLED_BY_USER, false)) {
       NS_ERROR("May have failed to kill child!");
     }
   } else {

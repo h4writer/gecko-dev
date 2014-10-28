@@ -21,7 +21,6 @@ enum ChannelInterpretation {
     "discrete"
 };
 
-[PrefControlled]
 interface AudioNode : EventTarget {
 
     [Throws]
@@ -42,5 +41,16 @@ interface AudioNode : EventTarget {
     attribute ChannelCountMode channelCountMode;
     attribute ChannelInterpretation channelInterpretation;
 
+};
+
+// Mozilla extension
+partial interface AudioNode {
+  [ChromeOnly]
+  readonly attribute unsigned long id;
+};
+[NoInterfaceObject]
+interface AudioNodePassThrough {
+  [ChromeOnly]
+  attribute boolean passThrough;
 };
 

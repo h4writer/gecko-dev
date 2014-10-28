@@ -9,11 +9,15 @@
 #include <stddef.h>                     // for size_t
 #include <stdint.h>                     // for uint32_t
 #include "gfxTypes.h"
-#include "gfxPoint.h"                   // for gfxIntSize
+#include "mozilla/gfx/Point.h"          // for IntSize
 #include "mozilla/ipc/SharedMemory.h"   // for SharedMemory, etc
 #include "mozilla/RefPtr.h"
-#include "nsIMemoryReporter.h"          // for MemoryUniReporter
+#include "nsIMemoryReporter.h"          // for nsIMemoryReporter
 #include "mozilla/Atomics.h"            // for Atomic
+#include "mozilla/layers/LayersMessages.h" // for ShmemSection
+#include "LayersTypes.h"
+#include <vector>
+#include "mozilla/layers/AtomicRefCountedWithFinalize.h"
 
 /*
  * FIXME [bjacob] *** PURE CRAZYNESS WARNING ***
@@ -36,10 +40,12 @@ namespace mozilla {
 namespace ipc {
 class Shmem;
 }
+namespace gfx {
+class DataSourceSurface;
+}
 
 namespace layers {
 
-class PGrallocBufferChild;
 class MaybeMagicGrallocBufferHandle;
 class MemoryTextureClient;
 class MemoryTextureHost;
@@ -47,8 +53,7 @@ class MemoryTextureHost;
 enum BufferCapabilities {
   DEFAULT_BUFFER_CAPS = 0,
   /**
-   * The allocated buffer must be efficiently mappable as a
-   * gfxImageSurface.
+   * The allocated buffer must be efficiently mappable as a DataSourceSurface.
    */
   MAP_AS_IMAGE_SURFACE = 1 << 0,
   /**
@@ -64,6 +69,9 @@ mozilla::ipc::SharedMemory::SharedMemoryType OptimalShmemType();
 bool IsSurfaceDescriptorValid(const SurfaceDescriptor& aSurface);
 bool IsSurfaceDescriptorOwned(const SurfaceDescriptor& aDescriptor);
 bool ReleaseOwnedSurfaceDescriptor(const SurfaceDescriptor& aDescriptor);
+
+TemporaryRef<gfx::DrawTarget> GetDrawTargetForDescriptor(const SurfaceDescriptor& aDescriptor, gfx::BackendType aBackend);
+TemporaryRef<gfx::DataSourceSurface> GetSurfaceForDescriptor(const SurfaceDescriptor& aDescriptor);
 /**
  * An interface used to create and destroy surfaces that are shared with the
  * Compositor process (using shmem, or gralloc, or other platform specific memory)
@@ -73,10 +81,25 @@ bool ReleaseOwnedSurfaceDescriptor(const SurfaceDescriptor& aDescriptor);
  * These methods should be only called in the ipdl implementor's thread, unless
  * specified otherwise in the implementing class.
  */
-class ISurfaceAllocator : public AtomicRefCounted<ISurfaceAllocator>
+class ISurfaceAllocator : public AtomicRefCountedWithFinalize<ISurfaceAllocator>
 {
 public:
-  ISurfaceAllocator() {}
+  MOZ_DECLARE_REFCOUNTED_TYPENAME(ISurfaceAllocator)
+  ISurfaceAllocator()
+    : mDefaultMessageLoop(MessageLoop::current())
+  {}
+
+  void Finalize();
+
+  /**
+   * Returns the type of backend that is used off the main thread.
+   * We only don't allow changing the backend type at runtime so this value can
+   * be queried once and will not change until Gecko is restarted.
+   *
+   * XXX - With e10s this may not be true anymore. we can have accelerated widgets
+   * and non-accelerated widgets (small popups, etc.)
+   */
+  virtual LayersBackend GetCompositorBackendType() const = 0;
 
   /**
    * Allocate shared memory that can be accessed by only one process at a time.
@@ -94,63 +117,90 @@ public:
   virtual bool AllocUnsafeShmem(size_t aSize,
                                 mozilla::ipc::SharedMemory::SharedMemoryType aType,
                                 mozilla::ipc::Shmem* aShmem) = 0;
+
+  /**
+   * Allocate memory in shared memory that can always be accessed by both
+   * processes at a time. Safety is left for the user of the memory to care
+   * about.
+   */
+  bool AllocShmemSection(size_t aSize,
+                         mozilla::layers::ShmemSection* aShmemSection);
+
+  /**
+   * Deallocates a shmem section.
+   */
+  void FreeShmemSection(mozilla::layers::ShmemSection& aShmemSection);
+
   /**
    * Deallocate memory allocated by either AllocShmem or AllocUnsafeShmem.
    */
   virtual void DeallocShmem(mozilla::ipc::Shmem& aShmem) = 0;
 
   // was AllocBuffer
-  virtual bool AllocSharedImageSurface(const gfxIntSize& aSize,
-                                       gfxContentType aContent,
-                                       gfxSharedImageSurface** aBuffer);
-  virtual bool AllocSurfaceDescriptor(const gfxIntSize& aSize,
+  virtual bool AllocSurfaceDescriptor(const gfx::IntSize& aSize,
                                       gfxContentType aContent,
                                       SurfaceDescriptor* aBuffer);
 
   // was AllocBufferWithCaps
-  virtual bool AllocSurfaceDescriptorWithCaps(const gfxIntSize& aSize,
+  virtual bool AllocSurfaceDescriptorWithCaps(const gfx::IntSize& aSize,
                                               gfxContentType aContent,
                                               uint32_t aCaps,
                                               SurfaceDescriptor* aBuffer);
 
+  /**
+   * Returns the maximum texture size supported by the compositor.
+   */
+  virtual int32_t GetMaxTextureSize() const { return INT32_MAX; }
+
   virtual void DestroySharedSurface(SurfaceDescriptor* aSurface);
 
   // method that does the actual allocation work
-  virtual PGrallocBufferChild* AllocGrallocBuffer(const gfxIntSize& aSize,
-                                                  uint32_t aFormat,
-                                                  uint32_t aUsage,
-                                                  MaybeMagicGrallocBufferHandle* aHandle)
-  {
-    return nullptr;
-  }
+  bool AllocGrallocBuffer(const gfx::IntSize& aSize,
+                          uint32_t aFormat,
+                          uint32_t aUsage,
+                          MaybeMagicGrallocBufferHandle* aHandle);
+
+  void DeallocGrallocBuffer(MaybeMagicGrallocBufferHandle* aHandle);
+
+  void DropGrallocBuffer(MaybeMagicGrallocBufferHandle* aHandle);
 
   virtual bool IPCOpen() const { return true; }
+  virtual bool IsSameProcess() const = 0;
+
+  virtual bool IsImageBridgeChild() const { return false; }
+
+  virtual MessageLoop * GetMessageLoop() const
+  {
+    return mDefaultMessageLoop;
+  }
 
   // Returns true if aSurface wraps a Shmem.
   static bool IsShmem(SurfaceDescriptor* aSurface);
 
 protected:
-  // this method is needed for a temporary fix, will be removed after
-  // DeprecatedTextureClient/Host rework.
+
   virtual bool IsOnCompositorSide() const = 0;
-  static bool PlatformDestroySharedSurface(SurfaceDescriptor* aSurface);
-  virtual bool PlatformAllocSurfaceDescriptor(const gfxIntSize& aSize,
-                                              gfxContentType aContent,
-                                              uint32_t aCaps,
-                                              SurfaceDescriptor* aBuffer);
 
+  virtual ~ISurfaceAllocator();
 
-  virtual ~ISurfaceAllocator() {}
+  void ShrinkShmemSectionHeap();
 
-  friend class detail::RefCounted<ISurfaceAllocator, detail::AtomicRefCount>;
+  // This is used to implement an extremely simple & naive heap allocator.
+  std::vector<mozilla::ipc::Shmem> mUsedShmems;
+
+  MessageLoop* mDefaultMessageLoop;
+
+  friend class AtomicRefCountedWithFinalize<ISurfaceAllocator>;
 };
 
-class GfxMemoryImageReporter MOZ_FINAL : public mozilla::MemoryUniReporter
+class GfxMemoryImageReporter MOZ_FINAL : public nsIMemoryReporter
 {
+  ~GfxMemoryImageReporter() {}
+
 public:
+  NS_DECL_ISUPPORTS
+
   GfxMemoryImageReporter()
-    : MemoryUniReporter("explicit/gfx/heap-textures", KIND_HEAP, UNITS_BYTES,
-                        "Heap memory shared between threads by texture clients and hosts.")
   {
 #ifdef DEBUG
     // There must be only one instance of this class, due to |sAmount|
@@ -160,6 +210,9 @@ public:
     hasRun = true;
 #endif
   }
+
+  MOZ_DEFINE_MALLOC_SIZE_OF_ON_ALLOC(MallocSizeOfOnAlloc)
+  MOZ_DEFINE_MALLOC_SIZE_OF_ON_FREE(MallocSizeOfOnFree)
 
   static void DidAlloc(void* aPointer)
   {
@@ -171,10 +224,16 @@ public:
     sAmount -= MallocSizeOfOnFree(aPointer);
   }
 
-private:
-  int64_t Amount() MOZ_OVERRIDE { return sAmount; }
+  NS_IMETHOD CollectReports(nsIHandleReportCallback* aHandleReport,
+                            nsISupports* aData, bool aAnonymize)
+  {
+    return MOZ_COLLECT_REPORT(
+      "explicit/gfx/heap-textures", KIND_HEAP, UNITS_BYTES, sAmount,
+      "Heap memory shared between threads by texture clients and hosts.");
+  }
 
-  static mozilla::Atomic<int32_t> sAmount;
+private:
+  static mozilla::Atomic<size_t> sAmount;
 };
 
 } // namespace

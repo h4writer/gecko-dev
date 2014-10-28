@@ -26,6 +26,7 @@
 #include "mozilla/Mutex.h"
 #include "nsRegion.h"
 #include "mozilla/MouseEvents.h"
+#include "mozilla/UniquePtr.h"
 
 #include "nsString.h"
 #include "nsIDragService.h"
@@ -93,8 +94,10 @@ class RectTextureImage;
 }
 
 namespace mozilla {
+class VibrancyManager;
 namespace layers {
 class GLManager;
+class APZCTreeManager;
 }
 }
 
@@ -108,6 +111,18 @@ class GLManager;
 @end
 
 @interface NSView (Undocumented)
+
+// Draws the title string of a window.
+// Present on NSThemeFrame since at least 10.6.
+// _drawTitleBar is somewhat complex, and has changed over the years
+// since OS X 10.6.  But in that time it's never done anything that
+// would break when called outside of -[NSView drawRect:] (which we
+// sometimes do), or whose output can't be redirected to a
+// CGContextRef object (which we also sometimes do).  This is likely
+// to remain true for the indefinite future.  However we should
+// check _drawTitleBar in each new major version of OS X.  For more
+// information see bug 877767.
+- (void)_drawTitleBar:(NSRect)aRect;
 
 // Returns an NSRect that is the bounding box for all an NSView's dirty
 // rectangles (ones that need to be redrawn).  The full list of dirty
@@ -126,18 +141,15 @@ class GLManager;
 // format since at least OS X 10.5.
 - (void)_tileTitlebarAndRedisplay:(BOOL)redisplay;
 
-@end
+// The following undocumented methods are used to work around bug 1069658,
+// which is an Apple bug or design flaw that effects Yosemite.  None of them
+// were present prior to Yosemite (OS X 10.10).
+- (NSView *)titlebarView; // Method of NSThemeFrame
+- (NSView *)titlebarContainerView; // Method of NSThemeFrame
+- (BOOL)transparent; // Method of NSTitlebarView and NSTitlebarContainerView
+- (void)setTransparent:(BOOL)transparent; // Method of NSTitlebarView and
+                                          // NSTitlebarContainerView
 
-// Support for pixel scroll deltas, not part of NSEvent.h
-// See http://lists.apple.com/archives/cocoa-dev/2007/Feb/msg00050.html
-@interface NSEvent (DeviceDelta)
-// Leopard and SnowLeopard
-- (CGFloat)deviceDeltaX;
-- (CGFloat)deviceDeltaY;
-// Lion and above
-- (CGFloat)scrollingDeltaX;
-- (CGFloat)scrollingDeltaY;
-- (BOOL)hasPreciseScrollingDeltas;
 @end
 
 #if !defined(MAC_OS_X_VERSION_10_6) || \
@@ -164,14 +176,12 @@ MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_6
 // hexadecimal numbers).
 #if !defined(MAC_OS_X_VERSION_10_7) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_7
 enum {
-  NSEventPhaseNone        = 0,
-  NSEventPhaseBegan       = 0x1 << 0,
-  NSEventPhaseStationary  = 0x1 << 1,
-  NSEventPhaseChanged     = 0x1 << 2,
-  NSEventPhaseEnded       = 0x1 << 3,
-  NSEventPhaseCancelled   = 0x1 << 4,
+   NSFullScreenWindowMask = 1 << 14
 };
-typedef NSUInteger NSEventPhase;
+
+@interface NSWindow (LionWindowFeatures)
+- (NSRect)convertRectToScreen:(NSRect)aRect;
+@end
 
 #ifdef __LP64__
 enum {
@@ -200,21 +210,6 @@ typedef NSInteger NSEventGestureAxis;
 @end
 #endif // #ifdef __LP64__
 #endif // #if !defined(MAC_OS_X_VERSION_10_7) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_7
-
-#if !defined(MAC_OS_X_VERSION_10_8) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_8
-enum {
-  NSEventPhaseMayBegin    = 0x1 << 5
-};
-#endif // #if !defined(MAC_OS_X_VERSION_10_8) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_8
-
-// Undocumented scrollPhase flag that lets us discern between real scrolls and
-// automatically firing momentum scroll events.
-@interface NSEvent (ScrollPhase)
-// Leopard and SnowLeopard
-- (long long)_scrollPhase;
-// Lion and above
-- (NSEventPhase)momentumPhase;
-@end
 
 @interface ChildView : NSView<
 #ifdef ACCESSIBILITY
@@ -324,8 +319,6 @@ enum {
 
 - (void)handleMouseMoved:(NSEvent*)aEvent;
 
-- (void)updateWindowDraggableStateOnMouseMove:(NSEvent*)theEvent;
-
 - (void)sendMouseEnterOrExitEvent:(NSEvent*)aEvent
                             enter:(BOOL)aEnter
                              type:(mozilla::WidgetMouseEvent::exitType)aType;
@@ -345,6 +338,9 @@ enum {
 
 - (BOOL)isCoveringTitlebar;
 
+- (NSColor*)vibrancyFillColorForWidgetType:(uint8_t)aWidgetType;
+- (NSColor*)vibrancyFontSmoothingBackgroundColorForWidgetType:(uint8_t)aWidgetType;
+
 // Simple gestures support
 //
 // XXX - The swipeWithEvent, beginGestureWithEvent, magnifyWithEvent,
@@ -363,6 +359,7 @@ enum {
 - (void)endGestureWithEvent:(NSEvent *)anEvent;
 
 - (void)scrollWheel:(NSEvent *)anEvent;
+- (void)handleAsyncScrollEvent:(CGEventRef)cgEvent ofType:(CGEventType)type;
 
 // Helper function for Lion smart magnify events
 + (BOOL)isLionSmartMagnifyEvent:(NSEvent*)anEvent;
@@ -416,11 +413,11 @@ class nsChildView : public nsBaseWidget,
 {
 private:
   typedef nsBaseWidget Inherited;
+  typedef mozilla::layers::APZCTreeManager APZCTreeManager;
 
 public:
-                          nsChildView();
-  virtual                 ~nsChildView();
-  
+  nsChildView();
+
   NS_DECL_ISUPPORTS_INHERITED
 
   // nsIWidget interface
@@ -459,7 +456,7 @@ public:
   // will be 2.0 (and might potentially other values as screen resolutions
   // evolve). This gives the relationship between what Gecko calls "device
   // pixels" and the Cocoa "points" coordinate system.
-  CGFloat                 BackingScaleFactor();
+  CGFloat                 BackingScaleFactor() const;
 
   // Call if the window's backing scale factor changes - i.e., it is moved
   // between HiDPI and non-HiDPI screens
@@ -497,10 +494,16 @@ public:
   NS_IMETHOD        ActivateNativeMenuItemAt(const nsAString& indexString);
   NS_IMETHOD        ForceUpdateNativeMenuAt(const nsAString& indexString);
 
-  NS_IMETHOD        NotifyIME(NotificationToIME aNotification) MOZ_OVERRIDE;
+  NS_IMETHOD        NotifyIME(const IMENotification& aIMENotification) MOZ_OVERRIDE;
   NS_IMETHOD_(void) SetInputContext(const InputContext& aContext,
                                     const InputContextAction& aAction);
   NS_IMETHOD_(InputContext) GetInputContext();
+  NS_IMETHOD        AttachNativeKeyEvent(mozilla::WidgetKeyboardEvent& aEvent);
+  NS_IMETHOD_(bool) ExecuteNativeKeyBinding(
+                      NativeKeyBindingsType aType,
+                      const mozilla::WidgetKeyboardEvent& aEvent,
+                      DoCommandCallback aCallback,
+                      void* aCallbackData) MOZ_OVERRIDE;
   virtual nsIMEUpdatePreference GetIMEUpdatePreference() MOZ_OVERRIDE;
   NS_IMETHOD        GetToggledKeyState(uint32_t aKeyCode,
                                        bool* aLEDState);
@@ -545,8 +548,8 @@ public:
   already_AddRefed<mozilla::a11y::Accessible> GetDocumentAccessible();
 #endif
 
+  virtual CompositorParent* NewCompositorParent(int aSurfaceWidth, int aSurfaceHeight);
   virtual void CreateCompositor();
-  virtual gfxASurface* GetThebesSurface();
   virtual void PrepareWindowEffects() MOZ_OVERRIDE;
   virtual void CleanupWindowEffects() MOZ_OVERRIDE;
   virtual bool PreRender(LayerManagerComposite* aManager) MOZ_OVERRIDE;
@@ -554,6 +557,9 @@ public:
   virtual void DrawWindowOverlay(LayerManagerComposite* aManager, nsIntRect aRect) MOZ_OVERRIDE;
 
   virtual void UpdateThemeGeometries(const nsTArray<ThemeGeometry>& aThemeGeometries);
+
+  virtual void UpdateWindowDraggingRegion(const nsIntRegion& aRegion) MOZ_OVERRIDE;
+  const nsIntRegion& GetDraggableRegion() { return mDraggableRegion; }
 
   void              HidePlugin();
   void              UpdatePluginPort();
@@ -578,21 +584,24 @@ public:
   }
 
   void              NotifyDirtyRegion(const nsIntRegion& aDirtyRegion);
+  void              ClearVibrantAreas();
+  NSColor*          VibrancyFillColorForWidgetType(uint8_t aWidgetType);
+  NSColor*          VibrancyFontSmoothingBackgroundColorForWidgetType(uint8_t aWidgetType);
 
   // unit conversion convenience functions
-  int32_t           CocoaPointsToDevPixels(CGFloat aPts) {
+  int32_t           CocoaPointsToDevPixels(CGFloat aPts) const {
     return nsCocoaUtils::CocoaPointsToDevPixels(aPts, BackingScaleFactor());
   }
-  nsIntPoint        CocoaPointsToDevPixels(const NSPoint& aPt) {
+  nsIntPoint        CocoaPointsToDevPixels(const NSPoint& aPt) const {
     return nsCocoaUtils::CocoaPointsToDevPixels(aPt, BackingScaleFactor());
   }
-  nsIntRect         CocoaPointsToDevPixels(const NSRect& aRect) {
+  nsIntRect         CocoaPointsToDevPixels(const NSRect& aRect) const {
     return nsCocoaUtils::CocoaPointsToDevPixels(aRect, BackingScaleFactor());
   }
-  CGFloat           DevPixelsToCocoaPoints(int32_t aPixels) {
+  CGFloat           DevPixelsToCocoaPoints(int32_t aPixels) const {
     return nsCocoaUtils::DevPixelsToCocoaPoints(aPixels, BackingScaleFactor());
   }
-  NSRect            DevPixelsToCocoaPoints(const nsIntRect& aRect) {
+  NSRect            DevPixelsToCocoaPoints(const nsIntRect& aRect) const {
     return nsCocoaUtils::DevPixelsToCocoaPoints(aRect, BackingScaleFactor());
   }
 
@@ -600,7 +609,10 @@ public:
   void EndRemoteDrawing() MOZ_OVERRIDE;
   void CleanupRemoteDrawing() MOZ_OVERRIDE;
 
+  APZCTreeManager* APZCTM() { return mAPZCTreeManager; }
+
 protected:
+  virtual ~nsChildView();
 
   void              ReportMoveEvent();
   void              ReportSizeEvent();
@@ -631,6 +643,8 @@ protected:
   void UpdateTitlebarCGContext();
 
   nsIntRect RectContainingTitlebarControls();
+  void UpdateVibrancy(const nsTArray<ThemeGeometry>& aThemeGeometries);
+  mozilla::VibrancyManager& EnsureVibrancyManager();
 
   nsIWidget* GetWidgetForListenerEvents();
 
@@ -649,8 +663,6 @@ protected:
   nsWeakPtr             mAccessible;
 #endif
 
-  nsRefPtr<gfxASurface> mTempThebesSurface;
-
   // Protects the view from being teared down while a composition is in
   // progress on the compositor thread.
   mozilla::Mutex mViewTearDownLock;
@@ -664,6 +676,7 @@ protected:
   bool mHasRoundedBottomCorners;
   int mDevPixelCornerRadius;
   bool mIsCoveringTitlebar;
+  bool mIsFullscreen;
   nsIntRect mTitlebarRect;
 
   // The area of mTitlebarCGContext that needs to be redrawn during the next
@@ -681,11 +694,13 @@ protected:
   // uploaded to to mTitlebarImage. Main thread only.
   nsIntRegion           mDirtyTitlebarRegion;
 
+  nsIntRegion           mDraggableRegion;
+
   // Cached value of [mView backingScaleFactor], to avoid sending two obj-c
   // messages (respondsToSelector, backingScaleFactor) every time we need to
   // use it.
   // ** We'll need to reinitialize this if the backing resolution changes. **
-  CGFloat               mBackingScaleFactor;
+  mutable CGFloat       mBackingScaleFactor;
 
   bool                  mVisible;
   bool                  mDrawing;
@@ -698,6 +713,10 @@ protected:
   // Used in OMTC BasicLayers mode. Presents the BasicCompositor result
   // surface to the screen using an OpenGL context.
   nsAutoPtr<GLPresenter> mGLPresenter;
+
+  nsRefPtr<APZCTreeManager> mAPZCTreeManager;
+
+  mozilla::UniquePtr<mozilla::VibrancyManager> mVibrancyManager;
 
   static uint32_t sLastInputEventCount;
 

@@ -20,9 +20,6 @@
 
 #ifdef MOZ_WIDGET_GTK
 #include <gtk/gtk.h>
-#if (MOZ_WIDGET_GTK == 3)
-#include <gtk/gtkx.h>
-#endif
 #endif
 
 #include "nsIFile.h"
@@ -40,7 +37,6 @@
 #include "mozilla/plugins/StreamNotifyChild.h"
 #include "mozilla/plugins/BrowserStreamChild.h"
 #include "mozilla/plugins/PluginStreamChild.h"
-#include "PluginIdentifierChild.h"
 #include "mozilla/dom/CrashReporterChild.h"
 
 #include "nsNPAPIPlugin.h"
@@ -124,6 +120,7 @@ PluginModuleChild::~PluginModuleChild()
     // other similar hooks.
 
     DeinitGraphics();
+    PluginScriptableObjectChild::ClearIdentifiers();
 
     gInstance = nullptr;
 }
@@ -144,6 +141,13 @@ PluginModuleChild::Init(const std::string& aPluginFilename,
 {
     PLUGIN_LOG_DEBUG_METHOD;
 
+    GetIPCChannel()->SetAbortOnError(true);
+
+    // Request Windows message deferral behavior on our channel. This
+    // applies to the top level and all sub plugin protocols since they
+    // all share the same channel.
+    GetIPCChannel()->SetChannelFlags(MessageChannel::REQUIRE_DEFERRED_MESSAGE_PROTECTION);
+
 #ifdef XP_WIN
     COMMessageFilter::Initialize(this);
 #endif
@@ -159,6 +163,9 @@ PluginModuleChild::Init(const std::string& aPluginFilename,
                     true,
                     getter_AddRefs(localFile));
 
+    if (!localFile)
+        return false;
+
     bool exists;
     localFile->Exists(&exists);
     NS_ASSERTION(exists, "plugin file ain't there");
@@ -167,8 +174,9 @@ PluginModuleChild::Init(const std::string& aPluginFilename,
 
 #if defined(MOZ_X11) || defined(OS_MACOSX)
     nsPluginInfo info = nsPluginInfo();
-    if (NS_FAILED(pluginFile.GetPluginInfo(info, &mLibrary)))
+    if (NS_FAILED(pluginFile.GetPluginInfo(info, &mLibrary))) {
         return false;
+    }
 
 #if defined(MOZ_X11)
     NS_NAMED_LITERAL_CSTRING(flash10Head, "Shockwave Flash 10.");
@@ -176,8 +184,13 @@ PluginModuleChild::Init(const std::string& aPluginFilename,
         AddQuirk(QUIRK_FLASH_EXPOSE_COORD_TRANSLATION);
     }
 #else // defined(OS_MACOSX)
-    mozilla::plugins::PluginUtilsOSX::SetProcessName(info.fName);
+    const char* namePrefix = "Plugin Content";
+    char nameBuffer[80];
+    snprintf(nameBuffer, sizeof(nameBuffer), "%s (%s)", namePrefix, info.fName);
+    mozilla::plugins::PluginUtilsOSX::SetProcessName(nameBuffer);
 #endif
+
+    pluginFile.FreePluginInfo(info);
 
     if (!mLibrary)
 #endif
@@ -595,6 +608,8 @@ PluginModuleChild::AnswerNP_Shutdown(NPError *rv)
     ResetEventHooks();
 #endif
 
+    GetIPCChannel()->SetAbortOnError(false);
+
     return true;
 }
 
@@ -777,169 +792,158 @@ namespace mozilla {
 namespace plugins {
 namespace child {
 
-static NPError NP_CALLBACK
+static NPError
 _requestread(NPStream *pstream, NPByteRange *rangeList);
 
-static NPError NP_CALLBACK
+static NPError
 _geturlnotify(NPP aNPP, const char* relativeURL, const char* target,
               void* notifyData);
 
-static NPError NP_CALLBACK
+static NPError
 _getvalue(NPP aNPP, NPNVariable variable, void *r_value);
 
-static NPError NP_CALLBACK
+static NPError
 _setvalue(NPP aNPP, NPPVariable variable, void *r_value);
 
-static NPError NP_CALLBACK
+static NPError
 _geturl(NPP aNPP, const char* relativeURL, const char* target);
 
-static NPError NP_CALLBACK
+static NPError
 _posturlnotify(NPP aNPP, const char* relativeURL, const char *target,
                uint32_t len, const char *buf, NPBool file, void* notifyData);
 
-static NPError NP_CALLBACK
+static NPError
 _posturl(NPP aNPP, const char* relativeURL, const char *target, uint32_t len,
          const char *buf, NPBool file);
 
-static NPError NP_CALLBACK
+static NPError
 _newstream(NPP aNPP, NPMIMEType type, const char* window, NPStream** pstream);
 
-static int32_t NP_CALLBACK
+static int32_t
 _write(NPP aNPP, NPStream *pstream, int32_t len, void *buffer);
 
-static NPError NP_CALLBACK
+static NPError
 _destroystream(NPP aNPP, NPStream *pstream, NPError reason);
 
-static void NP_CALLBACK
+static void
 _status(NPP aNPP, const char *message);
 
-static void NP_CALLBACK
+static void
 _memfree (void *ptr);
 
-static uint32_t NP_CALLBACK
+static uint32_t
 _memflush(uint32_t size);
 
-static void NP_CALLBACK
+static void
 _reloadplugins(NPBool reloadPages);
 
-static void NP_CALLBACK
+static void
 _invalidaterect(NPP aNPP, NPRect *invalidRect);
 
-static void NP_CALLBACK
+static void
 _invalidateregion(NPP aNPP, NPRegion invalidRegion);
 
-static void NP_CALLBACK
+static void
 _forceredraw(NPP aNPP);
 
-static const char* NP_CALLBACK
+static const char*
 _useragent(NPP aNPP);
 
-static void* NP_CALLBACK
+static void*
 _memalloc (uint32_t size);
 
 // Deprecated entry points for the old Java plugin.
-static void* NP_CALLBACK /* OJI type: JRIEnv* */
+static void* /* OJI type: JRIEnv* */
 _getjavaenv(void);
 
 // Deprecated entry points for the old Java plugin.
-static void* NP_CALLBACK /* OJI type: jref */
+static void* /* OJI type: jref */
 _getjavapeer(NPP aNPP);
 
-static bool NP_CALLBACK
+static bool
 _invoke(NPP aNPP, NPObject* npobj, NPIdentifier method, const NPVariant *args,
         uint32_t argCount, NPVariant *result);
 
-static bool NP_CALLBACK
+static bool
 _invokedefault(NPP aNPP, NPObject* npobj, const NPVariant *args,
                uint32_t argCount, NPVariant *result);
 
-static bool NP_CALLBACK
+static bool
 _evaluate(NPP aNPP, NPObject* npobj, NPString *script, NPVariant *result);
 
-static bool NP_CALLBACK
+static bool
 _getproperty(NPP aNPP, NPObject* npobj, NPIdentifier property,
              NPVariant *result);
 
-static bool NP_CALLBACK
+static bool
 _setproperty(NPP aNPP, NPObject* npobj, NPIdentifier property,
              const NPVariant *value);
 
-static bool NP_CALLBACK
+static bool
 _removeproperty(NPP aNPP, NPObject* npobj, NPIdentifier property);
 
-static bool NP_CALLBACK
+static bool
 _hasproperty(NPP aNPP, NPObject* npobj, NPIdentifier propertyName);
 
-static bool NP_CALLBACK
+static bool
 _hasmethod(NPP aNPP, NPObject* npobj, NPIdentifier methodName);
 
-static bool NP_CALLBACK
+static bool
 _enumerate(NPP aNPP, NPObject *npobj, NPIdentifier **identifier,
            uint32_t *count);
 
-static bool NP_CALLBACK
+static bool
 _construct(NPP aNPP, NPObject* npobj, const NPVariant *args,
            uint32_t argCount, NPVariant *result);
 
-static void NP_CALLBACK
+static void
 _releasevariantvalue(NPVariant *variant);
 
-static void NP_CALLBACK
+static void
 _setexception(NPObject* npobj, const NPUTF8 *message);
 
-static void NP_CALLBACK
+static void
 _pushpopupsenabledstate(NPP aNPP, NPBool enabled);
 
-static void NP_CALLBACK
+static void
 _poppopupsenabledstate(NPP aNPP);
 
-static void NP_CALLBACK
+static void
 _pluginthreadasynccall(NPP instance, PluginThreadCallback func,
                        void *userData);
 
-static NPError NP_CALLBACK
+static NPError
 _getvalueforurl(NPP npp, NPNURLVariable variable, const char *url,
                 char **value, uint32_t *len);
 
-static NPError NP_CALLBACK
+static NPError
 _setvalueforurl(NPP npp, NPNURLVariable variable, const char *url,
                 const char *value, uint32_t len);
 
-static NPError NP_CALLBACK
+static NPError
 _getauthenticationinfo(NPP npp, const char *protocol,
                        const char *host, int32_t port,
                        const char *scheme, const char *realm,
                        char **username, uint32_t *ulen,
                        char **password, uint32_t *plen);
 
-static uint32_t NP_CALLBACK
+static uint32_t
 _scheduletimer(NPP instance, uint32_t interval, NPBool repeat,
                void (*timerFunc)(NPP npp, uint32_t timerID));
 
-static void NP_CALLBACK
+static void
 _unscheduletimer(NPP instance, uint32_t timerID);
 
-static NPError NP_CALLBACK
+static NPError
 _popupcontextmenu(NPP instance, NPMenu* menu);
 
-static NPBool NP_CALLBACK
+static NPBool
 _convertpoint(NPP instance, 
               double sourceX, double sourceY, NPCoordinateSpace sourceSpace,
               double *destX, double *destY, NPCoordinateSpace destSpace);
 
-static void NP_CALLBACK
+static void
 _urlredirectresponse(NPP instance, void* notifyData, NPBool allow);
-
-static NPError NP_CALLBACK
-_initasyncsurface(NPP instance, NPSize *size,
-                  NPImageFormat format, void *initData,
-                  NPAsyncSurface *surface);
-
-static NPError NP_CALLBACK
-_finalizeasyncsurface(NPP instance, NPAsyncSurface *surface);
-
-static void NP_CALLBACK
-_setcurrentasyncsurface(NPP instance, NPAsyncSurface *surface, NPRect *changed);
 
 } /* namespace child */
 } /* namespace plugins */
@@ -1002,10 +1006,7 @@ const NPNetscapeFuncs PluginModuleChild::sBrowserFuncs = {
     mozilla::plugins::child::_convertpoint,
     nullptr, // handleevent, unimplemented
     nullptr, // unfocusinstance, unimplemented
-    mozilla::plugins::child::_urlredirectresponse,
-    mozilla::plugins::child::_initasyncsurface,
-    mozilla::plugins::child::_finalizeasyncsurface,
-    mozilla::plugins::child::_setcurrentasyncsurface
+    mozilla::plugins::child::_urlredirectresponse
 };
 
 PluginInstanceChild*
@@ -1019,7 +1020,7 @@ namespace mozilla {
 namespace plugins {
 namespace child {
 
-NPError NP_CALLBACK
+NPError
 _requestread(NPStream* aStream,
              NPByteRange* aRangeList)
 {
@@ -1032,7 +1033,7 @@ _requestread(NPStream* aStream,
     return bs->NPN_RequestRead(aRangeList);
 }
 
-NPError NP_CALLBACK
+NPError
 _geturlnotify(NPP aNPP,
               const char* aRelativeURL,
               const char* aTarget,
@@ -1060,7 +1061,7 @@ _geturlnotify(NPP aNPP,
     return err;
 }
 
-NPError NP_CALLBACK
+NPError
 _getvalue(NPP aNPP,
           NPNVariable aVariable,
           void* aValue)
@@ -1089,7 +1090,7 @@ _getvalue(NPP aNPP,
             *(NPBool*)aValue = value ? true : false;
             return result;
         }
-#if (MOZ_WIDGET_GTK == 2)
+#if defined(MOZ_WIDGET_GTK)
         case NPNVxDisplay: {
             if (aNPP) {
                 return InstCast(aNPP)->NPN_GetValue(aVariable, aValue);
@@ -1116,7 +1117,7 @@ _getvalue(NPP aNPP,
     return NPERR_GENERIC_ERROR;
 }
 
-NPError NP_CALLBACK
+NPError
 _setvalue(NPP aNPP,
           NPPVariable aVariable,
           void* aValue)
@@ -1126,7 +1127,7 @@ _setvalue(NPP aNPP,
     return InstCast(aNPP)->NPN_SetValue(aVariable, aValue);
 }
 
-NPError NP_CALLBACK
+NPError
 _geturl(NPP aNPP,
         const char* aRelativeURL,
         const char* aTarget)
@@ -1140,7 +1141,7 @@ _geturl(NPP aNPP,
     return err;
 }
 
-NPError NP_CALLBACK
+NPError
 _posturlnotify(NPP aNPP,
                const char* aRelativeURL,
                const char* aTarget,
@@ -1172,7 +1173,7 @@ _posturlnotify(NPP aNPP,
     return err;
 }
 
-NPError NP_CALLBACK
+NPError
 _posturl(NPP aNPP,
          const char* aRelativeURL,
          const char* aTarget,
@@ -1192,7 +1193,7 @@ _posturl(NPP aNPP,
     return err;
 }
 
-NPError NP_CALLBACK
+NPError
 _newstream(NPP aNPP,
            NPMIMEType aMIMEType,
            const char* aWindow,
@@ -1203,7 +1204,7 @@ _newstream(NPP aNPP,
     return InstCast(aNPP)->NPN_NewStream(aMIMEType, aWindow, aStream);
 }
 
-int32_t NP_CALLBACK
+int32_t
 _write(NPP aNPP,
        NPStream* aStream,
        int32_t aLength,
@@ -1219,7 +1220,7 @@ _write(NPP aNPP,
     return ps->NPN_Write(aLength, aBuffer);
 }
 
-NPError NP_CALLBACK
+NPError
 _destroystream(NPP aNPP,
                NPStream* aStream,
                NPError aReason)
@@ -1242,7 +1243,7 @@ _destroystream(NPP aNPP,
     return NPERR_NO_ERROR;
 }
 
-void NP_CALLBACK
+void
 _status(NPP aNPP,
         const char* aMessage)
 {
@@ -1251,7 +1252,7 @@ _status(NPP aNPP,
     NS_WARNING("Not yet implemented!");
 }
 
-void NP_CALLBACK
+void
 _memfree(void* aPtr)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -1260,7 +1261,7 @@ _memfree(void* aPtr)
     NS_Free(aPtr);
 }
 
-uint32_t NP_CALLBACK
+uint32_t
 _memflush(uint32_t aSize)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -1269,7 +1270,7 @@ _memflush(uint32_t aSize)
     return 0;
 }
 
-void NP_CALLBACK
+void
 _reloadplugins(NPBool aReloadPages)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -1278,7 +1279,7 @@ _reloadplugins(NPBool aReloadPages)
     PluginModuleChild::current()->SendNPN_ReloadPlugins(!!aReloadPages);
 }
 
-void NP_CALLBACK
+void
 _invalidaterect(NPP aNPP,
                 NPRect* aInvalidRect)
 {
@@ -1290,7 +1291,7 @@ _invalidaterect(NPP aNPP,
     }
 }
 
-void NP_CALLBACK
+void
 _invalidateregion(NPP aNPP,
                   NPRegion aInvalidRegion)
 {
@@ -1299,7 +1300,7 @@ _invalidateregion(NPP aNPP,
     NS_WARNING("Not yet implemented!");
 }
 
-void NP_CALLBACK
+void
 _forceredraw(NPP aNPP)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -1309,7 +1310,7 @@ _forceredraw(NPP aNPP)
     // never be necessary.
 }
 
-const char* NP_CALLBACK
+const char*
 _useragent(NPP aNPP)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -1317,7 +1318,7 @@ _useragent(NPP aNPP)
     return PluginModuleChild::current()->GetUserAgent();
 }
 
-void* NP_CALLBACK
+void*
 _memalloc(uint32_t aSize)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -1327,21 +1328,21 @@ _memalloc(uint32_t aSize)
 }
 
 // Deprecated entry points for the old Java plugin.
-void* NP_CALLBACK /* OJI type: JRIEnv* */
+void* /* OJI type: JRIEnv* */
 _getjavaenv(void)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
     return 0;
 }
 
-void* NP_CALLBACK /* OJI type: jref */
+void* /* OJI type: jref */
 _getjavapeer(NPP aNPP)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
     return 0;
 }
 
-bool NP_CALLBACK
+bool
 _invoke(NPP aNPP,
         NPObject* aNPObj,
         NPIdentifier aMethod,
@@ -1358,7 +1359,7 @@ _invoke(NPP aNPP,
     return aNPObj->_class->invoke(aNPObj, aMethod, aArgs, aArgCount, aResult);
 }
 
-bool NP_CALLBACK
+bool
 _invokedefault(NPP aNPP,
                NPObject* aNPObj,
                const NPVariant* aArgs,
@@ -1374,7 +1375,7 @@ _invokedefault(NPP aNPP,
     return aNPObj->_class->invokeDefault(aNPObj, aArgs, aArgCount, aResult);
 }
 
-bool NP_CALLBACK
+bool
 _evaluate(NPP aNPP,
           NPObject* aObject,
           NPString* aScript,
@@ -1405,7 +1406,7 @@ _evaluate(NPP aNPP,
     return actor->Evaluate(aScript, aResult);
 }
 
-bool NP_CALLBACK
+bool
 _getproperty(NPP aNPP,
              NPObject* aNPObj,
              NPIdentifier aPropertyName,
@@ -1420,7 +1421,7 @@ _getproperty(NPP aNPP,
     return aNPObj->_class->getProperty(aNPObj, aPropertyName, aResult);
 }
 
-bool NP_CALLBACK
+bool
 _setproperty(NPP aNPP,
              NPObject* aNPObj,
              NPIdentifier aPropertyName,
@@ -1435,7 +1436,7 @@ _setproperty(NPP aNPP,
     return aNPObj->_class->setProperty(aNPObj, aPropertyName, aValue);
 }
 
-bool NP_CALLBACK
+bool
 _removeproperty(NPP aNPP,
                 NPObject* aNPObj,
                 NPIdentifier aPropertyName)
@@ -1449,7 +1450,7 @@ _removeproperty(NPP aNPP,
     return aNPObj->_class->removeProperty(aNPObj, aPropertyName);
 }
 
-bool NP_CALLBACK
+bool
 _hasproperty(NPP aNPP,
              NPObject* aNPObj,
              NPIdentifier aPropertyName)
@@ -1463,7 +1464,7 @@ _hasproperty(NPP aNPP,
     return aNPObj->_class->hasProperty(aNPObj, aPropertyName);
 }
 
-bool NP_CALLBACK
+bool
 _hasmethod(NPP aNPP,
            NPObject* aNPObj,
            NPIdentifier aMethodName)
@@ -1477,7 +1478,7 @@ _hasmethod(NPP aNPP,
     return aNPObj->_class->hasMethod(aNPObj, aMethodName);
 }
 
-bool NP_CALLBACK
+bool
 _enumerate(NPP aNPP,
            NPObject* aNPObj,
            NPIdentifier** aIdentifiers,
@@ -1499,7 +1500,7 @@ _enumerate(NPP aNPP,
     return aNPObj->_class->enumerate(aNPObj, aIdentifiers, aCount);
 }
 
-bool NP_CALLBACK
+bool
 _construct(NPP aNPP,
            NPObject* aNPObj,
            const NPVariant* aArgs,
@@ -1518,7 +1519,7 @@ _construct(NPP aNPP,
     return aNPObj->_class->construct(aNPObj, aArgs, aArgCount, aResult);
 }
 
-void NP_CALLBACK
+void
 _releasevariantvalue(NPVariant* aVariant)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -1538,7 +1539,7 @@ _releasevariantvalue(NPVariant* aVariant)
     VOID_TO_NPVARIANT(*aVariant);
 }
 
-void NP_CALLBACK
+void
 _setexception(NPObject* aNPObj,
               const NPUTF8* aMessage)
 {
@@ -1559,7 +1560,7 @@ _setexception(NPObject* aNPObj,
                                NullableString(aMessage));
 }
 
-void NP_CALLBACK
+void
 _pushpopupsenabledstate(NPP aNPP,
                         NPBool aEnabled)
 {
@@ -1569,7 +1570,7 @@ _pushpopupsenabledstate(NPP aNPP,
     InstCast(aNPP)->CallNPN_PushPopupsEnabledState(aEnabled ? true : false);
 }
 
-void NP_CALLBACK
+void
 _poppopupsenabledstate(NPP aNPP)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -1578,7 +1579,7 @@ _poppopupsenabledstate(NPP aNPP)
     InstCast(aNPP)->CallNPN_PopPopupsEnabledState();
 }
 
-void NP_CALLBACK
+void
 _pluginthreadasynccall(NPP aNPP,
                        PluginThreadCallback aFunc,
                        void* aUserData)
@@ -1590,7 +1591,7 @@ _pluginthreadasynccall(NPP aNPP,
     InstCast(aNPP)->AsyncCall(aFunc, aUserData);
 }
 
-NPError NP_CALLBACK
+NPError
 _getvalueforurl(NPP npp, NPNURLVariable variable, const char *url,
                 char **value, uint32_t *len)
 {
@@ -1620,7 +1621,7 @@ _getvalueforurl(NPP npp, NPNURLVariable variable, const char *url,
     return NPERR_INVALID_PARAM;
 }
 
-NPError NP_CALLBACK
+NPError
 _setvalueforurl(NPP npp, NPNURLVariable variable, const char *url,
                 const char *value, uint32_t len)
 {
@@ -1646,7 +1647,7 @@ _setvalueforurl(NPP npp, NPNURLVariable variable, const char *url,
     return NPERR_INVALID_PARAM;
 }
 
-NPError NP_CALLBACK
+NPError
 _getauthenticationinfo(NPP npp, const char *protocol,
                        const char *host, int32_t port,
                        const char *scheme, const char *realm,
@@ -1679,7 +1680,7 @@ _getauthenticationinfo(NPP npp, const char *protocol,
     return result;
 }
 
-uint32_t NP_CALLBACK
+uint32_t
 _scheduletimer(NPP npp, uint32_t interval, NPBool repeat,
                void (*timerFunc)(NPP npp, uint32_t timerID))
 {
@@ -1688,7 +1689,7 @@ _scheduletimer(NPP npp, uint32_t interval, NPBool repeat,
     return InstCast(npp)->ScheduleTimer(interval, repeat, timerFunc);
 }
 
-void NP_CALLBACK
+void
 _unscheduletimer(NPP npp, uint32_t timerID)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -1708,7 +1709,7 @@ static void ProcessBrowserEvents(void* pluginModule) {
 }
 #endif
 
-NPError NP_CALLBACK
+NPError
 _popupcontextmenu(NPP instance, NPMenu* menu)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -1759,7 +1760,7 @@ _popupcontextmenu(NPP instance, NPMenu* menu)
 #endif
 }
 
-NPBool NP_CALLBACK
+NPBool
 _convertpoint(NPP instance, 
               double sourceX, double sourceY, NPCoordinateSpace sourceSpace,
               double *destX, double *destY, NPCoordinateSpace destSpace)
@@ -1787,30 +1788,10 @@ _convertpoint(NPP instance,
     return result;
 }
 
-void NP_CALLBACK
+void
 _urlredirectresponse(NPP instance, void* notifyData, NPBool allow)
 {
     InstCast(instance)->NPN_URLRedirectResponse(notifyData, allow);
-}
-
-NPError NP_CALLBACK
-_initasyncsurface(NPP instance, NPSize *size,
-                  NPImageFormat format, void *initData,
-                  NPAsyncSurface *surface)
-{
-    return InstCast(instance)->NPN_InitAsyncSurface(size, format, initData, surface);
-}
-
-NPError NP_CALLBACK
-_finalizeasyncsurface(NPP instance, NPAsyncSurface *surface)
-{
-    return InstCast(instance)->NPN_FinalizeAsyncSurface(surface);
-}
-
-void NP_CALLBACK
-_setcurrentasyncsurface(NPP instance, NPAsyncSurface *surface, NPRect *changed)
-{
-    InstCast(instance)->NPN_SetCurrentAsyncSurface(surface, changed);
 }
 
 } /* namespace child */
@@ -1836,12 +1817,10 @@ PluginModuleChild::AnswerNP_GetEntryPoints(NPError* _retval)
 }
 
 bool
-PluginModuleChild::AnswerNP_Initialize(const uint32_t& aFlags, NPError* _retval)
+PluginModuleChild::AnswerNP_Initialize(NPError* _retval)
 {
     PLUGIN_LOG_DEBUG_METHOD;
     AssertPluginThread();
-
-    mAsyncDrawingAllowed = aFlags & kAllowAsyncDrawing;
 
 #ifdef OS_WIN
     SetEventHooks();
@@ -1863,38 +1842,6 @@ PluginModuleChild::AnswerNP_Initialize(const uint32_t& aFlags, NPError* _retval)
 #else
 #  error Please implement me for your platform
 #endif
-}
-
-PPluginIdentifierChild*
-PluginModuleChild::AllocPPluginIdentifierChild(const nsCString& aString,
-                                               const int32_t& aInt,
-                                               const bool& aTemporary)
-{
-    // We cannot call SetPermanent within this function because Manager() isn't
-    // set up yet.
-    if (aString.IsVoid()) {
-        return new PluginIdentifierChildInt(aInt);
-    }
-    return new PluginIdentifierChildString(aString);
-}
-
-bool
-PluginModuleChild::RecvPPluginIdentifierConstructor(PPluginIdentifierChild* actor,
-                                                    const nsCString& aString,
-                                                    const int32_t& aInt,
-                                                    const bool& aTemporary)
-{
-    if (!aTemporary) {
-        static_cast<PluginIdentifierChild*>(actor)->MakePermanent();
-    }
-    return true;
-}
-
-bool
-PluginModuleChild::DeallocPPluginIdentifierChild(PPluginIdentifierChild* aActor)
-{
-    delete aActor;
-    return true;
 }
 
 #if defined(XP_WIN)
@@ -2077,7 +2024,7 @@ PluginModuleChild::DeallocPPluginInstanceChild(PPluginInstanceChild* aActor)
     return true;
 }
 
-NPObject* NP_CALLBACK
+NPObject*
 PluginModuleChild::NPN_CreateObject(NPP aNPP, NPClass* aClass)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -2111,7 +2058,7 @@ PluginModuleChild::NPN_CreateObject(NPP aNPP, NPClass* aClass)
     return newObject;
 }
 
-NPObject* NP_CALLBACK
+NPObject*
 PluginModuleChild::NPN_RetainObject(NPObject* aNPObj)
 {
     AssertPluginThread();
@@ -2125,7 +2072,7 @@ PluginModuleChild::NPN_RetainObject(NPObject* aNPObj)
     return aNPObj;
 }
 
-void NP_CALLBACK
+void
 PluginModuleChild::NPN_ReleaseObject(NPObject* aNPObj)
 {
     AssertPluginThread();
@@ -2192,7 +2139,7 @@ PluginModuleChild::CollectForInstance(NPObjectData* d, void* userArg)
     return PL_DHASH_NEXT;
 }
 
-NPIdentifier NP_CALLBACK
+NPIdentifier
 PluginModuleChild::NPN_GetStringIdentifier(const NPUTF8* aName)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
@@ -2201,21 +2148,14 @@ PluginModuleChild::NPN_GetStringIdentifier(const NPUTF8* aName)
     if (!aName)
         return 0;
 
-    PluginModuleChild* self = PluginModuleChild::current();
     nsDependentCString name(aName);
-
-    PluginIdentifierChildString* ident = self->mStringIdentifiers.Get(name);
-    if (!ident) {
-        nsCString nameCopy(name);
-
-        ident = new PluginIdentifierChildString(nameCopy);
-        self->SendPPluginIdentifierConstructor(ident, nameCopy, -1, false);
-    }
-    ident->MakePermanent();
-    return ident;
+    PluginIdentifier ident(name);
+    PluginScriptableObjectChild::StackIdentifier stackID(ident);
+    stackID.MakePermanent();
+    return stackID.ToNPIdentifier();
 }
 
-void NP_CALLBACK
+void
 PluginModuleChild::NPN_GetStringIdentifiers(const NPUTF8** aNames,
                                             int32_t aNameCount,
                                             NPIdentifier* aIdentifiers)
@@ -2227,74 +2167,60 @@ PluginModuleChild::NPN_GetStringIdentifiers(const NPUTF8** aNames,
         NS_RUNTIMEABORT("Bad input! Headed for a crash!");
     }
 
-    PluginModuleChild* self = PluginModuleChild::current();
-
     for (int32_t index = 0; index < aNameCount; ++index) {
         if (!aNames[index]) {
             aIdentifiers[index] = 0;
             continue;
         }
         nsDependentCString name(aNames[index]);
-        PluginIdentifierChildString* ident = self->mStringIdentifiers.Get(name);
-        if (!ident) {
-            nsCString nameCopy(name);
-
-            ident = new PluginIdentifierChildString(nameCopy);
-            self->SendPPluginIdentifierConstructor(ident, nameCopy, -1, false);
-        }
-        ident->MakePermanent();
-        aIdentifiers[index] = ident;
+        PluginIdentifier ident(name);
+        PluginScriptableObjectChild::StackIdentifier stackID(ident);
+        stackID.MakePermanent();
+        aIdentifiers[index] = stackID.ToNPIdentifier();
     }
 }
 
-bool NP_CALLBACK
+bool
 PluginModuleChild::NPN_IdentifierIsString(NPIdentifier aIdentifier)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
 
-    PluginIdentifierChild* ident =
-        static_cast<PluginIdentifierChild*>(aIdentifier);
-    return ident->IsString();
+    PluginScriptableObjectChild::StackIdentifier stack(aIdentifier);
+    return stack.IsString();
 }
 
-NPIdentifier NP_CALLBACK
+NPIdentifier
 PluginModuleChild::NPN_GetIntIdentifier(int32_t aIntId)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
     AssertPluginThread();
 
-    PluginModuleChild* self = PluginModuleChild::current();
-
-    PluginIdentifierChildInt* ident = self->mIntIdentifiers.Get(aIntId);
-    if (!ident) {
-        nsCString voidString;
-        voidString.SetIsVoid(true);
-
-        ident = new PluginIdentifierChildInt(aIntId);
-        self->SendPPluginIdentifierConstructor(ident, voidString, aIntId, false);
-    }
-    ident->MakePermanent();
-    return ident;
+    PluginIdentifier ident(aIntId);
+    PluginScriptableObjectChild::StackIdentifier stackID(ident);
+    stackID.MakePermanent();
+    return stackID.ToNPIdentifier();
 }
 
-NPUTF8* NP_CALLBACK
+NPUTF8*
 PluginModuleChild::NPN_UTF8FromIdentifier(NPIdentifier aIdentifier)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
 
-    if (static_cast<PluginIdentifierChild*>(aIdentifier)->IsString()) {
-      return static_cast<PluginIdentifierChildString*>(aIdentifier)->ToString();
+    PluginScriptableObjectChild::StackIdentifier stackID(aIdentifier);
+    if (stackID.IsString()) {
+        return ToNewCString(stackID.GetString());
     }
     return nullptr;
 }
 
-int32_t NP_CALLBACK
+int32_t
 PluginModuleChild::NPN_IntFromIdentifier(NPIdentifier aIdentifier)
 {
     PLUGIN_LOG_DEBUG_FUNCTION;
 
-    if (!static_cast<PluginIdentifierChild*>(aIdentifier)->IsString()) {
-      return static_cast<PluginIdentifierChildInt*>(aIdentifier)->ToInt();
+    PluginScriptableObjectChild::StackIdentifier stackID(aIdentifier);
+    if (!stackID.IsString()) {
+        return stackID.GetInt();
     }
     return INT32_MIN;
 }
@@ -2333,7 +2259,7 @@ PluginModuleChild::CallWindowProcHook(int nCode, WPARAM wParam, LPARAM lParam)
             // message, otherwise fullscreen focus will not work correctly.
             wchar_t szClass[26];
             if (GetClassNameW(pCwp->hwnd, szClass,
-                              sizeof(szClass)/sizeof(PRUnichar)) &&
+                              sizeof(szClass)/sizeof(char16_t)) &&
                 !wcscmp(szClass, kFlashFullscreenClass)) {
                 gDelayFlashFocusReplyUntilEval = true;
             }

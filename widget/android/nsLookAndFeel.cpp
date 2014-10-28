@@ -20,7 +20,7 @@ AndroidSystemColors nsLookAndFeel::mSystemColors;
 bool nsLookAndFeel::mInitializedShowPassword = false;
 bool nsLookAndFeel::mShowPassword = true;
 
-static const PRUnichar UNICODE_BULLET = 0x2022;
+static const char16_t UNICODE_BULLET = 0x2022;
 
 nsLookAndFeel::nsLookAndFeel()
     : nsXPLookAndFeel()
@@ -368,7 +368,7 @@ nsLookAndFeel::GetIntImpl(IntID aID, int32_t &aResult)
 
         case eIntID_SelectTextfieldsOnKeyFocus:
             // Select textfield content when focused by kbd
-            // used by nsEventStateManager::sTextfieldSelectModel
+            // used by EventStateManager::sTextfieldSelectModel
             aResult = 1;
             break;
 
@@ -470,7 +470,7 @@ nsLookAndFeel::GetEchoPasswordImpl()
 {
     if (!mInitializedShowPassword) {
         if (XRE_GetProcessType() == GeckoProcessType_Default) {
-            mShowPassword = GeckoAppShell::GetShowPasswordSetting();
+            mShowPassword = mozilla::widget::android::GeckoAppShell::GetShowPasswordSetting();
         } else {
             ContentChild::GetSingleton()->SendGetShowPasswordSetting(&mShowPassword);
         }
@@ -487,7 +487,7 @@ nsLookAndFeel::GetPasswordMaskDelayImpl()
 }
 
 /* virtual */
-PRUnichar
+char16_t
 nsLookAndFeel::GetPasswordCharacterImpl()
 {
   // This value is hard-coded in Android OS's PasswordTransformationMethod.java

@@ -7,25 +7,6 @@ function run_test() {
   run_next_test();
 }
 
-function _getWorker() {
-  let _postedMessage;
-  let _worker = newWorker({
-    postRILMessage: function fakePostRILMessage(data) {
-    },
-    postMessage: function fakePostMessage(message) {
-      _postedMessage = message;
-    }
-  });
-  return {
-    get postedMessage() {
-      return _postedMessage;
-    },
-    get worker() {
-      return _worker;
-    }
-  };
-}
-
 var timeoutCallback = null;
 var timeoutDelayMs = 0;
 const TIMER_ID = 1234;
@@ -54,16 +35,17 @@ function fireTimeout() {
 }
 
 add_test(function test_enter_emergencyCbMode() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
   // Do it twice. Should always send the event.
   for (let i = 0; i < 2; ++i) {
-    worker.RIL[UNSOLICITED_ENTER_EMERGENCY_CALLBACK_MODE]();
+    context.RIL[UNSOLICITED_ENTER_EMERGENCY_CALLBACK_MODE]();
     let postedMessage = workerHelper.postedMessage;
 
     // Should store the mode.
-    do_check_eq(worker.RIL._isInEmergencyCbMode, true);
+    do_check_eq(context.RIL._isInEmergencyCbMode, true);
 
     // Should notify change.
     do_check_eq(postedMessage.rilMessageType, "emergencyCbModeChange");
@@ -71,43 +53,45 @@ add_test(function test_enter_emergencyCbMode() {
     do_check_eq(postedMessage.timeoutMs, TIMEOUT_VALUE);
 
     // Should start timer.
-    do_check_eq(worker.RIL._exitEmergencyCbModeTimeoutID, TIMER_ID);
+    do_check_eq(context.RIL._exitEmergencyCbModeTimeoutID, TIMER_ID);
   }
 
   run_next_test();
 });
 
 add_test(function test_exit_emergencyCbMode() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
-  worker.RIL[UNSOLICITED_ENTER_EMERGENCY_CALLBACK_MODE]();
-  worker.RIL[UNSOLICITED_EXIT_EMERGENCY_CALLBACK_MODE]();
+  context.RIL[UNSOLICITED_ENTER_EMERGENCY_CALLBACK_MODE]();
+  context.RIL[UNSOLICITED_EXIT_EMERGENCY_CALLBACK_MODE]();
   let postedMessage = workerHelper.postedMessage;
 
   // Should store the mode.
-  do_check_eq(worker.RIL._isInEmergencyCbMode, false);
+  do_check_eq(context.RIL._isInEmergencyCbMode, false);
 
   // Should notify change.
   do_check_eq(postedMessage.rilMessageType, "emergencyCbModeChange");
   do_check_eq(postedMessage.active, false);
 
   // Should clear timer.
-  do_check_eq(worker.RIL._exitEmergencyCbModeTimeoutID, null);
+  do_check_eq(context.RIL._exitEmergencyCbModeTimeoutID, null);
 
   run_next_test();
 });
 
 add_test(function test_request_exit_emergencyCbMode_when_timeout() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
-  worker.RIL[UNSOLICITED_ENTER_EMERGENCY_CALLBACK_MODE]();
-  do_check_eq(worker.RIL._isInEmergencyCbMode, true);
-  do_check_eq(worker.RIL._exitEmergencyCbModeTimeoutID, TIMER_ID);
+  context.RIL[UNSOLICITED_ENTER_EMERGENCY_CALLBACK_MODE]();
+  do_check_eq(context.RIL._isInEmergencyCbMode, true);
+  do_check_eq(context.RIL._exitEmergencyCbModeTimeoutID, TIMER_ID);
 
   let parcelTypes = [];
-  worker.Buf.newParcel = function(type, options) {
+  context.Buf.newParcel = function(type, options) {
     parcelTypes.push(type);
   };
 
@@ -115,7 +99,7 @@ add_test(function test_request_exit_emergencyCbMode_when_timeout() {
   fireTimeout();
 
   // Should clear timeout event.
-  do_check_eq(worker.RIL._exitEmergencyCbModeTimeoutID, null);
+  do_check_eq(context.RIL._exitEmergencyCbModeTimeoutID, null);
 
   // Check indeed sent out REQUEST_EXIT_EMERGENCY_CALLBACK_MODE.
   do_check_neq(parcelTypes.indexOf(REQUEST_EXIT_EMERGENCY_CALLBACK_MODE), -1);
@@ -124,24 +108,26 @@ add_test(function test_request_exit_emergencyCbMode_when_timeout() {
 });
 
 add_test(function test_request_exit_emergencyCbMode_when_dial() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
-  worker.RIL[UNSOLICITED_ENTER_EMERGENCY_CALLBACK_MODE]();
-  do_check_eq(worker.RIL._isInEmergencyCbMode, true);
-  do_check_eq(worker.RIL._exitEmergencyCbModeTimeoutID, TIMER_ID);
+  context.RIL[UNSOLICITED_ENTER_EMERGENCY_CALLBACK_MODE]();
+  do_check_eq(context.RIL._isInEmergencyCbMode, true);
+  do_check_eq(context.RIL._exitEmergencyCbModeTimeoutID, TIMER_ID);
 
   let parcelTypes = [];
-  worker.Buf.newParcel = function(type, options) {
+  context.Buf.newParcel = function(type, options) {
     parcelTypes.push(type);
   };
 
   // Dial non-emergency call.
-  worker.RIL.dial({number: "0912345678",
-                  isDialEmergency: false});
+  context.RIL.dialNonEmergencyNumber({number: "0912345678",
+                                      isEmergency: false,
+                                      isDialEmergency: false});
 
   // Should clear timeout event.
-  do_check_eq(worker.RIL._exitEmergencyCbModeTimeoutID, null);
+  do_check_eq(context.RIL._exitEmergencyCbModeTimeoutID, null);
 
   // Check indeed sent out REQUEST_EXIT_EMERGENCY_CALLBACK_MODE.
   do_check_neq(parcelTypes.indexOf(REQUEST_EXIT_EMERGENCY_CALLBACK_MODE), -1);
@@ -150,27 +136,28 @@ add_test(function test_request_exit_emergencyCbMode_when_dial() {
 });
 
 add_test(function test_request_exit_emergencyCbMode_explicitly() {
-  let workerHelper = _getWorker();
+  let workerHelper = newInterceptWorker();
   let worker = workerHelper.worker;
+  let context = worker.ContextPool._contexts[0];
 
-  worker.RIL[UNSOLICITED_ENTER_EMERGENCY_CALLBACK_MODE]();
-  do_check_eq(worker.RIL._isInEmergencyCbMode, true);
-  do_check_eq(worker.RIL._exitEmergencyCbModeTimeoutID, TIMER_ID);
+  context.RIL[UNSOLICITED_ENTER_EMERGENCY_CALLBACK_MODE]();
+  do_check_eq(context.RIL._isInEmergencyCbMode, true);
+  do_check_eq(context.RIL._exitEmergencyCbModeTimeoutID, TIMER_ID);
 
   let parcelTypes = [];
-  worker.Buf.newParcel = function(type, options) {
+  context.Buf.newParcel = function(type, options) {
     parcelTypes.push(type);
   };
 
-  worker.RIL.handleChromeMessage({rilMessageType: "exitEmergencyCbMode"});
-  worker.RIL[REQUEST_EXIT_EMERGENCY_CALLBACK_MODE](1, {
+  context.RIL.handleChromeMessage({rilMessageType: "exitEmergencyCbMode"});
+  context.RIL[REQUEST_EXIT_EMERGENCY_CALLBACK_MODE](1, {
     rilMessageType: "exitEmergencyCbMode",
     rilRequestError: ERROR_SUCCESS
   });
   let postedMessage = workerHelper.postedMessage;
 
   // Should clear timeout event.
-  do_check_eq(worker.RIL._exitEmergencyCbModeTimeoutID, null);
+  do_check_eq(context.RIL._exitEmergencyCbModeTimeoutID, null);
 
   // Check indeed sent out REQUEST_EXIT_EMERGENCY_CALLBACK_MODE.
   do_check_neq(parcelTypes.indexOf(REQUEST_EXIT_EMERGENCY_CALLBACK_MODE), -1);

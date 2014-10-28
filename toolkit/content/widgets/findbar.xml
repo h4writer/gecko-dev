@@ -110,6 +110,13 @@
         findbar.browser.finder.enableSelection();
       ]]></handler>
 
+#ifdef XP_MACOSX
+      <handler event="focus"><![CDATA[
+        let findbar = this.findbar;
+        findbar._onFindFieldFocus();
+      ]]></handler>
+#endif
+
       <handler event="compositionstart"><![CDATA[
         // Don't close the find toolbar while IME is composing.
         let findbar = this.findbar;
@@ -123,8 +130,7 @@
       <handler event="compositionend"><![CDATA[
         let findbar = this.findbar;
         findbar._isIMEComposing = false;
-        if (findbar._findMode != findbar.FIND_NORMAL &&
-            !findbar.hidden)
+        if (findbar._findMode != findbar.FIND_NORMAL)
           findbar._setFindCloseTimeout();
       ]]></handler>
 
@@ -168,13 +174,6 @@
                            disabled="true"
                            xbl:inherits="accesskey=findnextaccesskey"/>
       </xul:hbox>
-      <xul:image anonid="find-status-icon" class="findbar-find-fast find-status-icon"/>
-      <xul:description anonid="find-status"
-                       control="findbar-textbox"
-                       class="findbar-find-fast findbar-find-status">
-      <!-- Do not use value, first child is used because it provides a11y with text change events -->
-      </xul:description>
-      <xul:spacer flex="1"/>
       <xul:toolbarbutton anonid="highlight"
                          class="findbar-highlight tabbable"
                          label="&highlightAll.label;"
@@ -188,10 +187,17 @@
                          label="&caseSensitive.label;"
                          accesskey="&caseSensitive.accesskey;"
                          tooltiptext="&caseSensitive.tooltiptext;"
-                         oncommand="_setCaseSensitivity(this.checked);"
+                         oncommand="_setCaseSensitivity(this.checked ? 1 : 0);"
                          type="checkbox"
                          xbl:inherits="accesskey=matchcaseaccesskey"/>
       <xul:label anonid="match-case-status" class="findbar-find-fast"/>
+      <xul:label anonid="found-matches" class="findbar-find-fast found-matches" hidden="true"/>
+      <xul:image anonid="find-status-icon" class="findbar-find-fast find-status-icon"/>
+      <xul:description anonid="find-status"
+                       control="findbar-textbox"
+                       class="findbar-find-fast findbar-find-status">
+      <!-- Do not use value, first child is used because it provides a11y with text change events -->
+      </xul:description>
     </xul:hbox>
     <xul:toolbarbutton anonid="find-closebutton"
                        class="findbar-closebutton close-icon"
@@ -251,9 +257,15 @@
           return this._browser;
         ]]></getter>
         <setter><![CDATA[
+          // A shortcut for the service.
+          let els = Components.classes["@mozilla.org/eventlistenerservice;1"].
+            getService(Components.interfaces.nsIEventListenerService);
+
           if (this._browser) {
-            this._browser.removeEventListener("keypress", this, false);
-            this._browser.removeEventListener("mouseup", this, false);
+            els.removeSystemEventListener(this._browser, "keypress", this,
+                                          false);
+            els.removeSystemEventListener(this._browser, "mouseup", this,
+                                          false);
             let finder = this._browser.finder;
             if (finder)
               finder.removeResultListener(this);
@@ -261,8 +273,8 @@
 
           this._browser = val;
           if (this._browser) {
-            this._browser.addEventListener("keypress", this, false);
-            this._browser.addEventListener("mouseup", this, false);
+            els.addSystemEventListener(this._browser, "keypress", this, false);
+            els.addSystemEventListener(this._browser, "mouseup", this, false);
             this._browser.finder.addResultListener(this);
 
             this._findField.value = this._browser._lastSearchString;
@@ -299,10 +311,7 @@
               this._self._typeAheadLinksOnly = prefsvc.getBoolPref(aPrefName);
               break;
             case "accessibility.typeaheadfind.casesensitive":
-              this._self._typeAheadCaseSensitive = prefsvc.getIntPref(aPrefName);
-              this._self._updateCaseSensitivity();
-              if (this._self.getElement("highlight").checked)
-                this._self._setHighlightTimeout();
+              this._self._setCaseSensitivity(prefsvc.getIntPref(aPrefName));
               break;
           }
         }
@@ -313,6 +322,7 @@
       <constructor><![CDATA[
         // These elements are accessed frequently and are therefore cached
         this._findField = this.getElement("findbar-textbox");
+        this._foundMatches = this.getElement("found-matches");
         this._findStatusIcon = this.getElement("find-status-icon");
         this._findStatusDesc = this.getElement("find-status");
 
@@ -326,6 +336,10 @@
           prefsvc.getIntPref("accessibility.typeaheadfind.timeout");
         this._flashFindBar =
           prefsvc.getIntPref("accessibility.typeaheadfind.flashBar");
+        this._matchesCountTimeoutLength =
+          prefsvc.getIntPref("accessibility.typeaheadfind.matchesCountTimeout");
+        this._matchesCountLimit =
+          prefsvc.getIntPref("accessibility.typeaheadfind.matchesCountLimit");
 
         prefsvc.addObserver("accessibility.typeaheadfind",
                             this._observer, false);
@@ -367,15 +381,6 @@
             return;
           this._destroyed = true;
 
-          // It is possible that the findbar may be destroyed before any
-          // documents it is listening to (see nsIEditActionListener code below).
-          // Thus, to avoid leaking, if we are listening to any editors, unhook
-          // ourselves now, and remove our cached copies
-          if (this._editors) {
-            for (let x = this._editors.length - 1; x >= 0; --x)
-              this._unhookListenersAtIndex(x);
-          }
-
           this.browser = null;
 
           let prefsvc =
@@ -411,6 +416,10 @@
             clearTimeout(this._findResetTimeout);
             this._findResetTimeout = null;
           }
+          if (this._updateMatchesCountTimeout) {
+            clearTimeout(this._updateMatchesCountTimeout);
+            this._updateMatchesCountTimeout = null;
+          }
         ]]></body>
       </method>
 
@@ -419,17 +428,50 @@
           if (this._quickFindTimeout)
             clearTimeout(this._quickFindTimeout);
 
-          // Don't close the find toolbar while IME is composing.
-          if (this._isIMEComposing) {
+          // Don't close the find toolbar while IME is composing OR when the
+          // findbar is already hidden.
+          if (this._isIMEComposing || this.hidden) {
             this._quickFindTimeout = null;
             return;
           }
 
-          this._quickFindTimeout =
-            setTimeout(function(aSelf) {
-                         if (aSelf._findMode != aSelf.FIND_NORMAL)
-                           aSelf.close();
-                       }, this._quickFindTimeoutLength, this);
+          this._quickFindTimeout = setTimeout(() => {
+             if (this._findMode != this.FIND_NORMAL)
+               this.close();
+             this._quickFindTimeout = null;
+           }, this._quickFindTimeoutLength);
+        ]]></body>
+      </method>
+
+      <field name="_pluralForm">null</field>
+      <property name="pluralForm">
+        <getter><![CDATA[
+          if (!this._pluralForm) {
+            this._pluralForm = Components.utils.import(
+                               "resource://gre/modules/PluralForm.jsm", {}).PluralForm;
+          }
+          return this._pluralForm;
+        ]]></getter>
+      </property>
+
+      <!--
+        - Updates the search match count after each find operation on a new string.
+        - @param aRes
+        -        the result of the find operation
+        -->
+      <method name="_updateMatchesCount">
+        <body><![CDATA[
+          if (this._matchesCountLimit == 0 || !this._dispatchFindEvent("matchescount"))
+            return;
+
+          if (this._updateMatchesCountTimeout) {
+            window.clearTimeout(this._updateMatchesCountTimeout);
+          }
+          this._updateMatchesCountTimeout =
+            window.setTimeout(() => {
+              this.browser.finder.requestMatchesCount(this._findField.value, this._matchesCountLimit,
+                  this._findMode == this.FIND_LINKS);
+            }, this._matchesCountTimeoutLength);
         ]]></body>
       </method>
 
@@ -451,6 +493,9 @@
 
           this.browser._lastSearchHighlight = aHighlight;
           this.browser.finder.highlight(aHighlight, word);
+
+          // Update the matches count
+          this._updateMatchesCount(this.nsITypeAheadFind.FIND_FOUND);
         ]]></body>
       </method>
 
@@ -488,23 +533,38 @@
 
       <!--
         - Sets the findbar case-sensitivity mode
-        - @param aCaseSensitive (boolean)
-        -        Whether or not case-sensitivity should be turned on.
+        - @param aCaseSensitivity (int)
+        -   0 - case insensitive
+        -   1 - case sensitive
+        -   2 - auto = case sensitive iff match string contains upper case letters
+        -   @see _shouldBeCaseSensitive
         -->
       <method name="_setCaseSensitivity">
-        <parameter name="aCaseSensitive"/>
+        <parameter name="aCaseSensitivity"/>
         <body><![CDATA[
-          let prefsvc =
-            Components.classes["@mozilla.org/preferences-service;1"]
-                      .getService(Components.interfaces.nsIPrefBranch);
-
-          // Just set the pref; our observer will change the find bar behavior
-          prefsvc.setIntPref("accessibility.typeaheadfind.casesensitive",
-                             aCaseSensitive ? 1 : 0);
+          this._typeAheadCaseSensitive = aCaseSensitivity;
+          this._updateCaseSensitivity();
+          this._findFailedString = null;
+          this._find();
+          if (this.getElement("highlight").checked)
+            this._setHighlightTimeout();
 
           this._dispatchFindEvent("casesensitivitychange");
         ]]></body>
       </method>
+
+      <field name="_strBundle">null</field>
+      <property name="strBundle">
+        <getter><![CDATA[
+          if (!this._strBundle) {
+            this._strBundle =
+              Components.classes["@mozilla.org/intl/stringbundle;1"]
+                        .getService(Components.interfaces.nsIStringBundleService)
+                        .createBundle("chrome://global/locale/findbar.properties");
+          }
+          return this._strBundle;
+        ]]></getter>
+      </property>
 
       <!--
         - Opens and displays the find bar.
@@ -522,10 +582,7 @@
             this._findMode = aMode;
 
           if (!this._notFoundStr) {
-            let stringsBundle =
-              Components.classes["@mozilla.org/intl/stringbundle;1"]
-                        .getService(Components.interfaces.nsIStringBundleService)
-                        .createBundle("chrome://global/locale/findbar.properties");
+            var stringsBundle = this.strBundle;
             this._notFoundStr = stringsBundle.GetStringFromName("NotFound");
             this._wrappedToTopStr =
               stringsBundle.GetStringFromName("WrappedToTop");
@@ -678,20 +735,14 @@
               aEvent.defaultPrevented)
             return false;
 
-          let elt = document.commandDispatcher.focusedElement;
-          let win = document.commandDispatcher.focusedWindow;
-
-          // Temporary fix for e10s.
-          const XUL_NS = "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul";
-          if (elt instanceof XULElement &&
-              elt.localName == "browser" &&
-              elt.namespaceURI == XUL_NS &&
-              elt.getAttribute("remote")) {
-            [elt, win] = elt.syncHandler.getFocusedElementAndWindow();
-          }
+          let {BrowserUtils} = Components.utils.import("resource://gre/modules/BrowserUtils.jsm", {});
+          let [elt, win] = BrowserUtils.getFocusSync(document);
 
           if (elt) {
             if (elt instanceof HTMLInputElement && elt.mozIsTextField(false))
+              return false;
+
+            if (elt.isContentEditable)
               return false;
 
             if (elt instanceof HTMLTextAreaElement ||
@@ -962,6 +1013,7 @@
               this._findField.removeAttribute("status");
               break;
           }
+          this._updateMatchesCount(res);
         ]]></body>
       </method>
 
@@ -1054,8 +1106,17 @@
             userWantsPrefill =
               prefsvc.getBoolPref("accessibility.typeaheadfind.prefillwithselection");
 
-          let initialString = (this.prefillWithSelection && userWantsPrefill) ?
-                              this._getInitialSelection() : null;
+          let initialString = null;
+          if (this.prefillWithSelection && userWantsPrefill)
+            initialString = this._getInitialSelection();
+#ifdef XP_MACOSX
+          if (!initialString) {
+            let clipboardSearchString = this.browser.finder.clipboardSearchString;
+            if (clipboardSearchString)
+              initialString = clipboardSearchString;
+          }
+#endif
+
           if (initialString)
             this._findField.value = initialString;
 
@@ -1111,6 +1172,39 @@
         ]]></body>
       </method>
 
+#ifdef XP_MACOSX
+      <!--
+        - Fetches the currently selected text and sets that as the text to search
+        - next. This is a MacOS specific feature.
+      -->
+      <method name="onFindSelectionCommand">
+        <body><![CDATA[
+          let searchString = this.browser.finder.setSearchStringToSelection();
+          if (searchString)
+            this._findField.value = searchString;
+        ]]></body>
+      </method>
+
+      <method name="_onFindFieldFocus">
+        <body><![CDATA[
+          let prefsvc =
+            Components.classes["@mozilla.org/preferences-service;1"]
+                      .getService(Components.interfaces.nsIPrefBranch);
+          const kPref = "accessibility.typeaheadfind.prefillwithselection";
+          if (this.prefillWithSelection && prefsvc.getBoolPref(kPref))
+            return;
+
+          let clipboardSearchString = this._browser.finder.clipboardSearchString;
+          if (clipboardSearchString && this._findField.value != clipboardSearchString) {
+            this._findField.value = clipboardSearchString;
+            // Changing the search string makes the previous status invalid, so
+            // we better clear it here.
+            this._updateStatusUI();
+          }
+        ]]></body>
+      </method>
+#endif
+
       <!--
         - This handles all the result changes for both
         - type-ahead-find and highlighting.
@@ -1126,20 +1220,48 @@
         -   when not in FIND_LINKS mode.
         -->
       <method name="onFindResult">
-        <parameter name="aResult"/>
-        <parameter name="aFindBackwards"/>
-        <parameter name="aLinkURL" />
+        <parameter name="aData"/>
         <body><![CDATA[
-          this._updateStatusUI(aResult, aFindBackwards);
-          this._updateStatusUIBar(aLinkURL);
+          this._updateStatusUI(aData.result, aData.findBackwards);
+          this._updateStatusUIBar(aData.linkURL);
 
-          if (aResult == this.nsITypeAheadFind.FIND_NOTFOUND)
-            this._findFailedString = this.browser.finder.searchString;
+          if (aData.result == this.nsITypeAheadFind.FIND_NOTFOUND)
+            this._findFailedString = aData.searchString;
           else
             this._findFailedString = null;
 
-          if (this._findMode != this.FIND_NORMAL && !this.hidden)
+          if (this._findMode != this.FIND_NORMAL)
             this._setFindCloseTimeout();
+        ]]></body>
+      </method>
+
+      <!--
+        - This handles all the result changes for matches counts.
+        - @param aResult
+        -   Result Object, containing the total amount of matches and a vector
+        -   of the current result.
+        -->
+      <method name="onMatchesCountResult">
+        <parameter name="aResult"/>
+        <body><![CDATA[
+          if (aResult.total !== 0) {
+            if (aResult.total == -1) {
+              this._foundMatches.value = this.pluralForm.get(
+                this._matchesCountLimit,
+                this.strBundle.GetStringFromName("FoundMatchesCountLimit")
+              ).replace("#1", this._matchesCountLimit);
+            } else {
+              this._foundMatches.value = this.pluralForm.get(
+                aResult.total,
+                this.strBundle.GetStringFromName("FoundMatches")
+              ).replace("#1", aResult.current)
+               .replace("#2", aResult.total);
+            }
+            this._foundMatches.hidden = false;
+          } else {
+            this._foundMatches.hidden = true;
+            this._foundMatches.value = "";
+          }
         ]]></body>
       </method>
 
@@ -1169,7 +1291,12 @@
     </implementation>
 
     <handlers>
-      <handler event="keypress" keycode="VK_ESCAPE" phase="capturing" action="this.close();" preventdefault="true"/>
+      <!--
+        - We have to guard against `this.close` being |null| due to an unknown
+        - issue, which is tracked in bug 957999.
+        -->
+      <handler event="keypress" keycode="VK_ESCAPE" phase="capturing"
+               action="if (this.close) this.close();" preventdefault="true"/>
     </handlers>
   </binding>
 </bindings>

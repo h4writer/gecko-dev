@@ -35,7 +35,7 @@ class FinalizationEvent MOZ_FINAL: public nsRunnable
 {
 public:
   FinalizationEvent(const char* aTopic,
-                  const jschar* aValue)
+                  const char16_t* aValue)
     : mTopic(aTopic)
     , mValue(aValue)
   { }
@@ -171,7 +171,7 @@ static const JSFunctionSpec sWitnessClassFunctions[] = {
 
 }
 
-NS_IMPL_ISUPPORTS1(FinalizationWitnessService, nsIFinalizationWitnessService)
+NS_IMPL_ISUPPORTS(FinalizationWitnessService, nsIFinalizationWitnessService)
 
 /**
  * Create a new Finalization Witness.
@@ -187,12 +187,12 @@ NS_IMPL_ISUPPORTS1(FinalizationWitnessService, nsIFinalizationWitnessService)
  */
 NS_IMETHODIMP
 FinalizationWitnessService::Make(const char* aTopic,
-                                 const PRUnichar* aValue,
+                                 const char16_t* aValue,
                                  JSContext* aCx,
-                                 JS::Value *aRetval) {
-  MOZ_ASSERT(aRetval);
-
-  JS::Rooted<JSObject*> objResult(aCx, JS_NewObject(aCx, &sWitnessClass, nullptr, nullptr));
+                                 JS::MutableHandle<JS::Value> aRetval)
+{
+  JS::Rooted<JSObject*> objResult(aCx, JS_NewObject(aCx, &sWitnessClass, JS::NullPtr(),
+                                                    JS::NullPtr()));
   if (!objResult) {
     return NS_ERROR_OUT_OF_MEMORY;
   }
@@ -204,9 +204,9 @@ FinalizationWitnessService::Make(const char* aTopic,
 
   // Transfer ownership of the addrefed |event| to |objResult|.
   JS_SetReservedSlot(objResult, WITNESS_SLOT_EVENT,
-                     JS::PrivateValue(event.forget().get()));
+                     JS::PrivateValue(event.forget().take()));
 
-  aRetval->setObject(*objResult);
+  aRetval.setObject(*objResult);
   return NS_OK;
 }
 

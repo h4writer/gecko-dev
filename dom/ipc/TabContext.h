@@ -14,7 +14,7 @@
 namespace mozilla {
 namespace dom {
 
-struct IPCTabContext;
+class IPCTabContext;
 
 /**
  * TabContext encapsulates information about an iframe that may be a mozbrowser
@@ -143,6 +143,11 @@ protected:
   bool SetTabContextForBrowserFrame(mozIApplication* aBrowserFrameOwnerApp,
                                     ScrollingBehavior aRequestedBehavior);
 
+  /**
+   * Set this TabContext to be a normal non-browser non-app frame.
+   */
+  bool SetTabContextForNormalFrame(ScrollingBehavior aRequestedBehavior);
+
 private:
   /**
    * Has this TabContext been initialized?  If so, mutator methods will fail.
@@ -212,6 +217,11 @@ public:
     return TabContext::SetTabContextForBrowserFrame(aBrowserFrameOwnerApp,
                                                     aRequestedBehavior);
   }
+
+  bool SetTabContextForNormalFrame(ScrollingBehavior aRequestedBehavior)
+  {
+    return TabContext::SetTabContextForNormalFrame(aRequestedBehavior);
+  }
 };
 
 /**
@@ -244,7 +254,7 @@ public:
    * This constructor copies the information in aContext and sets IsValid() as
    * appropriate.
    */
-  MaybeInvalidTabContext(const IPCTabContext& aContext);
+  explicit MaybeInvalidTabContext(const IPCTabContext& aContext);
 
   /**
    * Was the IPCTabContext we received in our constructor valid?

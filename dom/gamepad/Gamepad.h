@@ -6,10 +6,10 @@
 #define mozilla_dom_gamepad_Gamepad_h
 
 #include "mozilla/ErrorResult.h"
+#include "mozilla/dom/GamepadBinding.h"
 #include "mozilla/dom/GamepadButton.h"
 #include <stdint.h>
 #include "nsCOMPtr.h"
-#include "nsIVariant.h"
 #include "nsString.h"
 #include "nsTArray.h"
 #include "nsWrapperCache.h"
@@ -17,11 +17,18 @@
 namespace mozilla {
 namespace dom {
 
-enum GamepadMappingType
-{
-  NoMapping = 0,
-  StandardMapping = 1
-};
+// Per spec:
+// https://dvcs.w3.org/hg/gamepad/raw-file/default/gamepad.html#remapping
+const int kStandardGamepadButtons = 17;
+const int kStandardGamepadAxes = 4;
+
+const int kButtonLeftTrigger = 6;
+const int kButtonRightTrigger = 7;
+
+const int kLeftStickXAxis = 0;
+const int kLeftStickYAxis = 1;
+const int kRightStickXAxis = 2;
+const int kRightStickYAxis = 3;
 
 class Gamepad : public nsISupports,
                 public nsWrapperCache
@@ -51,21 +58,16 @@ public:
     return mParent;
   }
 
-  virtual JSObject* WrapObject(JSContext* aCx,
-			       JS::Handle<JSObject*> aScope) MOZ_OVERRIDE;
+  virtual JSObject* WrapObject(JSContext* aCx) MOZ_OVERRIDE;
 
   void GetId(nsAString& aID) const
   {
     aID = mID;
   }
 
-  void GetMapping(nsAString& aMapping) const
+  GamepadMappingType Mapping()
   {
-    if (mMapping == StandardMapping) {
-      aMapping = NS_LITERAL_STRING("standard");
-    } else {
-      aMapping = NS_LITERAL_STRING("");
-    }
+    return mMapping;
   }
 
   bool Connected() const
@@ -78,25 +80,18 @@ public:
     return mIndex;
   }
 
-  already_AddRefed<nsIVariant> GetButtons(mozilla::ErrorResult& aRv)
+  void GetButtons(nsTArray<nsRefPtr<GamepadButton>>& aButtons) const
   {
-    nsCOMPtr<nsIVariant> buttons;
-    aRv = GetButtons(getter_AddRefs(buttons));
-    return buttons.forget();
+    aButtons = mButtons;
   }
 
-  already_AddRefed<nsIVariant> GetAxes(mozilla::ErrorResult& aRv)
+  void GetAxes(nsTArray<double>& aAxes) const
   {
-    nsCOMPtr<nsIVariant> axes;
-    aRv = GetAxes(getter_AddRefs(axes));
-    return axes.forget();
+    aAxes = mAxes;
   }
 
 private:
   virtual ~Gamepad() {}
-
-  nsresult GetButtons(nsIVariant** aButtons);
-  nsresult GetAxes(nsIVariant** aAxes);
 
 protected:
   nsCOMPtr<nsISupports> mParent;
@@ -112,9 +107,6 @@ protected:
   // Current state of buttons, axes.
   nsTArray<nsRefPtr<GamepadButton>> mButtons;
   nsTArray<double> mAxes;
-
-  // Cached variant array.
-  nsCOMPtr<nsIVariant> mButtonsVariant;
 };
 
 } // namespace dom

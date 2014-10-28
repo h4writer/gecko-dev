@@ -25,7 +25,8 @@ class PathRecording;
 class DrawEventRecorderPrivate : public DrawEventRecorder
 {
 public:
-  DrawEventRecorderPrivate(std::ostream *aStream);
+  MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(DrawEventRecorderPrivate)
+  explicit DrawEventRecorderPrivate(std::ostream *aStream);
   virtual ~DrawEventRecorderPrivate() { }
 
   void RecordEvent(const RecordedEvent &aEvent);
@@ -64,7 +65,8 @@ protected:
 class DrawEventRecorderFile : public DrawEventRecorderPrivate
 {
 public:
-  DrawEventRecorderFile(const char *aFilename);
+  MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(DrawEventRecorderFile)
+  explicit DrawEventRecorderFile(const char *aFilename);
   ~DrawEventRecorderFile();
 
 private:

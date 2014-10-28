@@ -3,6 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include <algorithm>
 #include <string>
 #include <stdio.h>
 #include <fstream>
@@ -21,8 +22,7 @@
 #include "nsXULAppAPI.h"
 
 // JSON
-#include "JSObjectBuilder.h"
-#include "JSCustomObjectBuilder.h"
+#include "JSStreamWriter.h"
 
 // Meta
 #include "nsXPCOM.h"
@@ -36,13 +36,15 @@
 #include "nsIObserverService.h"
 #include "mozilla/Services.h"
 #include "PlatformMacros.h"
+#include "nsTArray.h"
 
 #if defined(SPS_OS_android) && !defined(MOZ_WIDGET_GONK)
   #include "AndroidBridge.h"
 #endif
 
 // JS
-#include "js/OldDebugAPI.h"
+#include "jsfriendapi.h"
+#include "js/ProfilingFrameIterator.h"
 
 #if defined(MOZ_PROFILING) && (defined(XP_MACOSX) || defined(XP_WIN))
  #define USE_NS_STACKWALK
@@ -105,202 +107,261 @@ void TableTicker::HandleSaveRequest()
   NS_DispatchToMainThread(runnable);
 }
 
-template <typename Builder>
-typename Builder::Object TableTicker::GetMetaJSCustomObject(Builder& b)
+
+void TableTicker::StreamTaskTracer(JSStreamWriter& b)
 {
-  typename Builder::RootedObject meta(b.context(), b.CreateObject());
+  b.BeginObject();
+#ifdef MOZ_TASK_TRACER
+    b.Name("data");
+    b.BeginArray();
+      nsAutoPtr<nsTArray<nsCString>> data(
+        mozilla::tasktracer::GetLoggedData(sStartTime));
+      for (uint32_t i = 0; i < data->Length(); ++i) {
+        b.Value((data->ElementAt(i)).get());
+      }
+      mozilla::tasktracer::StartLogging();
+    b.EndArray();
 
-  b.DefineProperty(meta, "version", 2);
-  b.DefineProperty(meta, "interval", interval());
-  b.DefineProperty(meta, "stackwalk", mUseStackWalk);
-  b.DefineProperty(meta, "jank", mJankOnly);
-  b.DefineProperty(meta, "processType", XRE_GetProcessType());
+    b.Name("threads");
+    b.BeginArray();
+      mozilla::MutexAutoLock lock(*sRegisteredThreadsMutex);
+      for (size_t i = 0; i < sRegisteredThreads->size(); i++) {
+        // Thread meta data
+        ThreadInfo* info = sRegisteredThreads->at(i);
+        b.BeginObject();
+        if (XRE_GetProcessType() == GeckoProcessType_Plugin) {
+          // TODO Add the proper plugin name
+          b.NameValue("name", "Plugin");
+        } else {
+          b.NameValue("name", info->Name());
+        }
+        b.NameValue("tid", static_cast<int>(info->ThreadId()));
+        b.EndObject();
+      }
+    b.EndArray();
+#endif
+  b.EndObject();
+}
 
-  TimeDuration delta = TimeStamp::Now() - sStartTime;
-  b.DefineProperty(meta, "startTime", PR_Now()/1000.0 - delta.ToMilliseconds());
 
-  nsresult res;
-  nsCOMPtr<nsIHttpProtocolHandler> http = do_GetService(NS_NETWORK_PROTOCOL_CONTRACTID_PREFIX "http", &res);
-  if (!NS_FAILED(res)) {
-    nsAutoCString string;
+void TableTicker::StreamMetaJSCustomObject(JSStreamWriter& b)
+{
+  b.BeginObject();
 
-    res = http->GetPlatform(string);
-    if (!NS_FAILED(res))
-      b.DefineProperty(meta, "platform", string.Data());
+    b.NameValue("version", 2);
+    b.NameValue("interval", interval());
+    b.NameValue("stackwalk", mUseStackWalk);
+    b.NameValue("jank", mJankOnly);
+    b.NameValue("processType", XRE_GetProcessType());
 
-    res = http->GetOscpu(string);
-    if (!NS_FAILED(res))
-      b.DefineProperty(meta, "oscpu", string.Data());
+    mozilla::TimeDuration delta = mozilla::TimeStamp::Now() - sStartTime;
+    b.NameValue("startTime", static_cast<double>(PR_Now()/1000.0 - delta.ToMilliseconds()));
 
-    res = http->GetMisc(string);
-    if (!NS_FAILED(res))
-      b.DefineProperty(meta, "misc", string.Data());
-  }
+    nsresult res;
+    nsCOMPtr<nsIHttpProtocolHandler> http = do_GetService(NS_NETWORK_PROTOCOL_CONTRACTID_PREFIX "http", &res);
+    if (!NS_FAILED(res)) {
+      nsAutoCString string;
 
-  nsCOMPtr<nsIXULRuntime> runtime = do_GetService("@mozilla.org/xre/runtime;1");
-  if (runtime) {
-    nsAutoCString string;
+      res = http->GetPlatform(string);
+      if (!NS_FAILED(res))
+        b.NameValue("platform", string.Data());
 
-    res = runtime->GetXPCOMABI(string);
-    if (!NS_FAILED(res))
-      b.DefineProperty(meta, "abi", string.Data());
+      res = http->GetOscpu(string);
+      if (!NS_FAILED(res))
+        b.NameValue("oscpu", string.Data());
 
-    res = runtime->GetWidgetToolkit(string);
-    if (!NS_FAILED(res))
-      b.DefineProperty(meta, "toolkit", string.Data());
-  }
+      res = http->GetMisc(string);
+      if (!NS_FAILED(res))
+        b.NameValue("misc", string.Data());
+    }
 
-  nsCOMPtr<nsIXULAppInfo> appInfo = do_GetService("@mozilla.org/xre/app-info;1");
-  if (appInfo) {
-    nsAutoCString string;
+    nsCOMPtr<nsIXULRuntime> runtime = do_GetService("@mozilla.org/xre/runtime;1");
+    if (runtime) {
+      nsAutoCString string;
 
-    res = appInfo->GetName(string);
-    if (!NS_FAILED(res))
-      b.DefineProperty(meta, "product", string.Data());
-  }
+      res = runtime->GetXPCOMABI(string);
+      if (!NS_FAILED(res))
+        b.NameValue("abi", string.Data());
 
-  return meta;
+      res = runtime->GetWidgetToolkit(string);
+      if (!NS_FAILED(res))
+        b.NameValue("toolkit", string.Data());
+    }
+
+    nsCOMPtr<nsIXULAppInfo> appInfo = do_GetService("@mozilla.org/xre/app-info;1");
+    if (appInfo) {
+      nsAutoCString string;
+
+      res = appInfo->GetName(string);
+      if (!NS_FAILED(res))
+        b.NameValue("product", string.Data());
+    }
+
+  b.EndObject();
 }
 
 void TableTicker::ToStreamAsJSON(std::ostream& stream)
 {
-  JSCustomObjectBuilder b;
-  JSCustomObject* profile = b.CreateObject();
-  BuildJSObject(b, profile);
-  b.Serialize(profile, stream);
-  b.DeleteObject(profile);
+  JSStreamWriter b(stream);
+  StreamJSObject(b);
 }
 
 JSObject* TableTicker::ToJSObject(JSContext *aCx)
 {
-  JSObjectBuilder b(aCx);
-  JS::RootedObject profile(aCx, b.CreateObject());
-  BuildJSObject(b, profile);
-  return profile;
+  JS::RootedValue val(aCx);
+  std::stringstream ss;
+  {
+    // Define a scope to prevent a moving GC during ~JSStreamWriter from
+    // trashing the return value.
+    JSStreamWriter b(ss);
+    StreamJSObject(b);
+    NS_ConvertUTF8toUTF16 js_string(nsDependentCString(ss.str().c_str()));
+    JS_ParseJSON(aCx, static_cast<const char16_t*>(js_string.get()),
+                 js_string.Length(), &val);
+  }
+  return &val.toObject();
 }
 
-template <typename Builder>
 struct SubprocessClosure {
-  SubprocessClosure(Builder *aBuilder, typename Builder::ArrayHandle aThreads)
-    : mBuilder(aBuilder), mThreads(aThreads)
+  explicit SubprocessClosure(JSStreamWriter *aWriter)
+    : mWriter(aWriter)
   {}
 
-  Builder* mBuilder;
-  typename Builder::ArrayHandle mThreads;
+  JSStreamWriter* mWriter;
 };
 
-template <typename Builder>
 void SubProcessCallback(const char* aProfile, void* aClosure)
 {
   // Called by the observer to get their profile data included
   // as a sub profile
-  SubprocessClosure<Builder>* closure = (SubprocessClosure<Builder>*)aClosure;
+  SubprocessClosure* closure = (SubprocessClosure*)aClosure;
 
-  closure->mBuilder->ArrayPush(closure->mThreads, aProfile);
+  // Add the string profile into the profile
+  closure->mWriter->Value(aProfile);
 }
 
+
 #if defined(SPS_OS_android) && !defined(MOZ_WIDGET_GONK)
-template <typename Builder>
 static
-typename Builder::Object BuildJavaThreadJSObject(Builder& b)
+void BuildJavaThreadJSObject(JSStreamWriter& b)
 {
-  typename Builder::RootedObject javaThread(b.context(), b.CreateObject());
-  b.DefineProperty(javaThread, "name", "Java Main Thread");
+  b.BeginObject();
 
-  typename Builder::RootedArray samples(b.context(), b.CreateArray());
-  b.DefineProperty(javaThread, "samples", samples);
+    b.NameValue("name", "Java Main Thread");
 
-  int sampleId = 0;
-  while (true) {
-    int frameId = 0;
-    typename Builder::RootedObject sample(b.context());
-    typename Builder::RootedArray frames(b.context());
-    while (true) {
-      nsCString result;
-      bool hasFrame = AndroidBridge::Bridge()->GetFrameNameJavaProfiling(0, sampleId, frameId, result);
-      if (!hasFrame) {
-        if (frames) {
-          b.DefineProperty(sample, "frames", frames);
+    b.Name("samples");
+    b.BeginArray();
+
+      // for each sample
+      for (int sampleId = 0; true; sampleId++) {
+        bool firstRun = true;
+        // for each frame
+        for (int frameId = 0; true; frameId++) {
+          nsCString result;
+          bool hasFrame = AndroidBridge::Bridge()->GetFrameNameJavaProfiling(0, sampleId, frameId, result);
+          // when we run out of frames, we stop looping
+          if (!hasFrame) {
+            // if we found at least one frame, we have objects to close
+            if (!firstRun) {
+                b.EndArray();
+              b.EndObject();
+            }
+            break;
+          }
+          // the first time around, open the sample object and frames array
+          if (firstRun) {
+            firstRun = false;
+
+            double sampleTime =
+              mozilla::widget::android::GeckoJavaSampler::GetSampleTimeJavaProfiling(0, sampleId);
+
+            b.BeginObject();
+              b.NameValue("time", sampleTime);
+
+              b.Name("frames");
+              b.BeginArray();
+          }
+          // add a frame to the sample
+          b.BeginObject();
+            b.NameValue("location", result.BeginReading());
+          b.EndObject();
         }
-        break;
+        // if we found no frames for this sample, we are done
+        if (firstRun) {
+          break;
+        }
       }
-      if (!sample) {
-        sample = b.CreateObject();
-        frames = b.CreateArray();
-        b.DefineProperty(sample, "frames", frames);
-        b.ArrayPush(samples, sample);
 
-        double sampleTime = GeckoJavaSampler::GetSampleTimeJavaProfiling(0, sampleId);
-        b.DefineProperty(sample, "time", sampleTime);
-      }
-      typename Builder::RootedObject frame(b.context(), b.CreateObject());
-      b.DefineProperty(frame, "location", result.BeginReading());
-      b.ArrayPush(frames, frame);
-      frameId++;
-    }
-    if (frameId == 0) {
-      break;
-    }
-    sampleId++;
-  }
+    b.EndArray();
 
-  return javaThread;
+  b.EndObject();
 }
 #endif
 
-template <typename Builder>
-void TableTicker::BuildJSObject(Builder& b, typename Builder::ObjectHandle profile)
+void TableTicker::StreamJSObject(JSStreamWriter& b)
 {
-  // Put shared library info
-  b.DefineProperty(profile, "libs", GetSharedLibraryInfoString().c_str());
+  b.BeginObject();
+    // Put shared library info
+    b.NameValue("libs", GetSharedLibraryInfoString().c_str());
 
-  // Put meta data
-  typename Builder::RootedObject meta(b.context(), GetMetaJSCustomObject(b));
-  b.DefineProperty(profile, "meta", meta);
+    // Put meta data
+    b.Name("meta");
+    StreamMetaJSCustomObject(b);
 
-  // Lists the samples for each ThreadProfile
-  typename Builder::RootedArray threads(b.context(), b.CreateArray());
-  b.DefineProperty(profile, "threads", threads);
-
-  SetPaused(true);
-
-  {
-    mozilla::MutexAutoLock lock(*sRegisteredThreadsMutex);
-
-    for (size_t i = 0; i < sRegisteredThreads->size(); i++) {
-      // Thread not being profiled, skip it
-      if (!sRegisteredThreads->at(i)->Profile())
-        continue;
-
-      MutexAutoLock lock(*sRegisteredThreads->at(i)->Profile()->GetMutex());
-
-      typename Builder::RootedObject threadSamples(b.context(), b.CreateObject());
-      sRegisteredThreads->at(i)->Profile()->BuildJSObject(b, threadSamples);
-      b.ArrayPush(threads, threadSamples);
+    // Data of TaskTracer doesn't belong in the circular buffer.
+    if (TaskTracer()) {
+      b.Name("tasktracer");
+      StreamTaskTracer(b);
     }
-  }
 
-#if defined(SPS_OS_android) && !defined(MOZ_WIDGET_GONK)
-  if (ProfileJava()) {
-    GeckoJavaSampler::PauseJavaProfiling();
+    // Lists the samples for each ThreadProfile
+    b.Name("threads");
+    b.BeginArray();
 
-    typename Builder::RootedObject javaThread(b.context(), BuildJavaThreadJSObject(b));
-    b.ArrayPush(threads, javaThread);
+      SetPaused(true);
 
-    GeckoJavaSampler::UnpauseJavaProfiling();
-  }
-#endif
+      {
+        mozilla::MutexAutoLock lock(*sRegisteredThreadsMutex);
 
-  SetPaused(false);
+        for (size_t i = 0; i < sRegisteredThreads->size(); i++) {
+          // Thread not being profiled, skip it
+          if (!sRegisteredThreads->at(i)->Profile())
+            continue;
 
-  // Send a event asking any subprocesses (plugins) to
-  // give us their information
-  SubprocessClosure<Builder> closure(&b, threads);
-  nsCOMPtr<nsIObserverService> os = mozilla::services::GetObserverService();
-  if (os) {
-    nsRefPtr<ProfileSaveEvent> pse = new ProfileSaveEvent(SubProcessCallback<Builder>, &closure);
-    os->NotifyObservers(pse, "profiler-subprocess", nullptr);
-  }
+          // Note that we intentionally include ThreadProfile which
+          // have been marked for pending delete.
+
+          MutexAutoLock lock(*sRegisteredThreads->at(i)->Profile()->GetMutex());
+
+          sRegisteredThreads->at(i)->Profile()->StreamJSObject(b);
+        }
+      }
+
+      if (Sampler::CanNotifyObservers()) {
+        // Send a event asking any subprocesses (plugins) to
+        // give us their information
+        SubprocessClosure closure(&b);
+        nsCOMPtr<nsIObserverService> os = mozilla::services::GetObserverService();
+        if (os) {
+          nsRefPtr<ProfileSaveEvent> pse = new ProfileSaveEvent(SubProcessCallback, &closure);
+          os->NotifyObservers(pse, "profiler-subprocess", nullptr);
+        }
+      }
+
+  #if defined(SPS_OS_android) && !defined(MOZ_WIDGET_GONK)
+      if (ProfileJava()) {
+        mozilla::widget::android::GeckoJavaSampler::PauseJavaProfiling();
+
+        BuildJavaThreadJSObject(b);
+
+        mozilla::widget::android::GeckoJavaSampler::UnpauseJavaProfiling();
+      }
+  #endif
+
+      SetPaused(false);
+    b.EndArray();
+
+  b.EndObject();
 }
 
 // END SaveProfileTask et al
@@ -327,9 +388,14 @@ void addDynamicTag(ThreadProfile &aProfile, char aTagName, const char *aStr)
 }
 
 static
-void addProfileEntry(volatile StackEntry &entry, ThreadProfile &aProfile,
-                     PseudoStack *stack, void *lastpc)
+void addPseudoEntry(volatile StackEntry &entry, ThreadProfile &aProfile,
+                    PseudoStack *stack, void *lastpc)
 {
+  // Pseudo-frames with the ASMJS flag are just annotations and should not be
+  // recorded in the profile.
+  if (entry.hasFlag(StackEntry::ASMJS))
+    return;
+
   int lineno = -1;
 
   // First entry has tagName 's' (start)
@@ -340,7 +406,7 @@ void addProfileEntry(volatile StackEntry &entry, ThreadProfile &aProfile,
     // that will happen to the preceding tag
 
     addDynamicTag(aProfile, 'c', sampleLabel);
-    if (entry.js()) {
+    if (entry.isJs()) {
       if (!entry.pc()) {
         // The JIT only allows the top-most entry to have a nullptr pc
         MOZ_ASSERT(&entry == &stack->mStack[stack->stackSize() - 1]);
@@ -349,82 +415,189 @@ void addProfileEntry(volatile StackEntry &entry, ThreadProfile &aProfile,
           jsbytecode *jspc = js::ProfilingGetPC(stack->mRuntime, entry.script(),
                                                 lastpc);
           if (jspc) {
-            lineno = JS_PCToLineNumber(nullptr, entry.script(), jspc);
+            lineno = JS_PCToLineNumber(entry.script(), jspc);
           }
         }
       } else {
-        lineno = JS_PCToLineNumber(nullptr, entry.script(), entry.pc());
+        lineno = JS_PCToLineNumber(entry.script(), entry.pc());
       }
     } else {
       lineno = entry.line();
     }
   } else {
     aProfile.addTag(ProfileEntry('c', sampleLabel));
-    lineno = entry.line();
+
+    // XXX: Bug 1010578. Don't assume a CPP entry and try to get the
+    // line for js entries as well.
+    if (entry.isCpp()) {
+      lineno = entry.line();
+    }
   }
+
   if (lineno != -1) {
     aProfile.addTag(ProfileEntry('n', lineno));
   }
-}
 
-#if defined(USE_NS_STACKWALK) || defined(USE_EHABI_STACKWALK)
-typedef struct {
-  void** array;
-  void** sp_array;
-  size_t size;
-  size_t count;
-} PCArray;
+  uint32_t category = entry.category();
+  MOZ_ASSERT(!(category & StackEntry::IS_CPP_ENTRY));
+  MOZ_ASSERT(!(category & StackEntry::FRAME_LABEL_COPY));
 
-static void mergeNativeBacktrace(ThreadProfile &aProfile, const PCArray &array) {
-  aProfile.addTag(ProfileEntry('s', "(root)"));
-
-  PseudoStack* stack = aProfile.GetPseudoStack();
-  uint32_t pseudoStackPos = 0;
-
-  /* We have two stacks, the native C stack we extracted from unwinding,
-   * and the pseudostack we managed during execution. We want to consolidate
-   * the two in order. We do so by merging using the approximate stack address
-   * when each entry was push. When pushing JS entry we may not now the stack
-   * address in which case we have a nullptr stack address in which case we assume
-   * that it follows immediatly the previous element.
-   *
-   *  C Stack | Address    --  Pseudo Stack | Address
-   *  main()  | 0x100          run_js()     | 0x40
-   *  start() | 0x80           jsCanvas()   | nullptr
-   *  timer() | 0x50           drawLine()   | nullptr
-   *  azure() | 0x10
-   *
-   * Merged: main(), start(), timer(), run_js(), jsCanvas(), drawLine(), azure()
-   */
-  // i is the index in C stack starting at main and decreasing
-  // pseudoStackPos is the position in the Pseudo stack starting
-  // at the first frame (run_js in the example) and increasing.
-  for (size_t i = array.count; i > 0; --i) {
-    while (pseudoStackPos < stack->stackSize()) {
-      volatile StackEntry& entry = stack->mStack[pseudoStackPos];
-
-      if (entry.stackAddress() < array.sp_array[i-1] && entry.stackAddress())
-        break;
-
-      addProfileEntry(entry, aProfile, stack, array.array[0]);
-      pseudoStackPos++;
-    }
-
-    aProfile.addTag(ProfileEntry('l', (void*)array.array[i-1]));
+  if (category) {
+    aProfile.addTag(ProfileEntry('y', (int)category));
   }
 }
 
+struct NativeStack
+{
+  void** pc_array;
+  void** sp_array;
+  size_t size;
+  size_t count;
+};
+
+struct JSFrame
+{
+    void* stackAddress;
+    const char* label;
+};
+
+static
+void mergeStacksIntoProfile(ThreadProfile& aProfile, TickSample* aSample, NativeStack& aNativeStack)
+{
+  PseudoStack* pseudoStack = aProfile.GetPseudoStack();
+  volatile StackEntry *pseudoFrames = pseudoStack->mStack;
+  uint32_t pseudoCount = pseudoStack->stackSize();
+
+  // Make a copy of the JS stack into a JSFrame array. This is necessary since,
+  // like the native stack, the JS stack is iterated youngest-to-oldest and we
+  // need to iterate oldest-to-youngest when adding entries to aProfile.
+
+  JSFrame jsFrames[1000];
+  uint32_t jsCount = 0;
+  if (aSample && pseudoStack->mRuntime) {
+    JS::ProfilingFrameIterator::RegisterState registerState;
+    registerState.pc = aSample->pc;
+    registerState.sp = aSample->sp;
+#ifdef ENABLE_ARM_LR_SAVING
+    registerState.lr = aSample->lr;
 #endif
+
+    JS::ProfilingFrameIterator jsIter(pseudoStack->mRuntime, registerState);
+    for (; jsCount < mozilla::ArrayLength(jsFrames) && !jsIter.done(); ++jsCount, ++jsIter) {
+      jsFrames[jsCount].stackAddress = jsIter.stackAddress();
+      jsFrames[jsCount].label = jsIter.label();
+    }
+  }
+
+  // Start the sample with a root entry.
+  aProfile.addTag(ProfileEntry('s', "(root)"));
+
+  // While the pseudo-stack array is ordered oldest-to-youngest, the JS and
+  // native arrays are ordered youngest-to-oldest. We must add frames to
+  // aProfile oldest-to-youngest. Thus, iterate over the pseudo-stack forwards
+  // and JS and native arrays backwards. Note: this means the terminating
+  // condition jsIndex and nativeIndex is being < 0.
+  uint32_t pseudoIndex = 0;
+  int32_t jsIndex = jsCount - 1;
+  int32_t nativeIndex = aNativeStack.count - 1;
+
+  // Iterate as long as there is at least one frame remaining.
+  while (pseudoIndex != pseudoCount || jsIndex >= 0 || nativeIndex >= 0) {
+    // There are 1 to 3 frames available. Find and add the oldest. Handle pseudo
+    // frames first, since there are two special cases that must be considered
+    // before everything else.
+    if (pseudoIndex != pseudoCount) {
+      volatile StackEntry &pseudoFrame = pseudoFrames[pseudoIndex];
+
+      // isJs pseudo-stack frames assume the stackAddress of the preceding isCpp
+      // pseudo-stack frame. If we arrive at an isJs pseudo frame, we've already
+      // encountered the preceding isCpp stack frame and it was oldest, we can
+      // assume the isJs frame is oldest without checking other frames.
+      if (pseudoFrame.isJs()) {
+          addPseudoEntry(pseudoFrame, aProfile, pseudoStack, nullptr);
+          pseudoIndex++;
+          continue;
+      }
+
+      // Currently, only asm.js frames use the JS stack and Ion/Baseline/Interp
+      // frames use the pseudo stack. In the optimized asm.js->Ion call path, no
+      // isCpp frame is pushed, leading to the callstack:
+      //   old | pseudo isCpp | asm.js | pseudo isJs | new
+      // Since there is no interleaving isCpp pseudo frame between the asm.js
+      // and isJs pseudo frame, the above isJs logic will render the callstack:
+      //   old | pseudo isCpp | pseudo isJs | asm.js | new
+      // which is wrong. To deal with this, a pseudo isCpp frame pushed right
+      // before entering asm.js flagged with StackEntry::ASMJS. When we see this
+      // flag, we first push all the asm.js frames (up to the next frame with a
+      // stackAddress) before pushing the isJs frames. There is no Ion->asm.js
+      // fast path, so we don't have to worry about asm.js->Ion->asm.js.
+      //
+      // (This and the above isJs special cases can be removed once all JS
+      // execution modes switch from the pseudo stack to the JS stack.)
+      if (pseudoFrame.hasFlag(StackEntry::ASMJS)) {
+        void *stopStackAddress = nullptr;
+        for (uint32_t i = pseudoIndex + 1; i != pseudoCount; i++) {
+          if (pseudoFrames[i].isCpp()) {
+            stopStackAddress = pseudoFrames[i].stackAddress();
+            break;
+          }
+        }
+
+        if (nativeIndex >= 0) {
+          stopStackAddress = std::max(stopStackAddress, aNativeStack.sp_array[nativeIndex]);
+        }
+
+        while (jsIndex >= 0 && jsFrames[jsIndex].stackAddress > stopStackAddress) {
+          addDynamicTag(aProfile, 'c', jsFrames[jsIndex].label);
+          jsIndex--;
+        }
+
+        pseudoIndex++;
+        continue;
+      }
+
+      // Finally, consider the normal case of a plain C++ pseudo-frame.
+      if ((jsIndex < 0 || pseudoFrame.stackAddress() > jsFrames[jsIndex].stackAddress) &&
+          (nativeIndex < 0 || pseudoFrame.stackAddress() > aNativeStack.sp_array[nativeIndex]))
+      {
+        // The (C++) pseudo-frame is the oldest.
+        addPseudoEntry(pseudoFrame, aProfile, pseudoStack, nullptr);
+        pseudoIndex++;
+        continue;
+      }
+    }
+
+    if (jsIndex >= 0) {
+      // Test whether the JS frame is the oldest.
+      JSFrame &jsFrame = jsFrames[jsIndex];
+      if ((pseudoIndex == pseudoCount || jsFrame.stackAddress > pseudoFrames[pseudoIndex].stackAddress()) &&
+          (nativeIndex < 0 || jsFrame.stackAddress > aNativeStack.sp_array[nativeIndex]))
+      {
+        // The JS frame is the oldest.
+        addDynamicTag(aProfile, 'c', jsFrame.label);
+        jsIndex--;
+        continue;
+      }
+    }
+
+    // If execution reaches this point, there must be a native frame and it must
+    // be the oldest.
+    MOZ_ASSERT(nativeIndex >= 0);
+    aProfile.addTag(ProfileEntry('l', (void*)aNativeStack.pc_array[nativeIndex]));
+    nativeIndex--;
+  }
+}
 
 #ifdef USE_NS_STACKWALK
 static
-void StackWalkCallback(void* aPC, void* aSP, void* aClosure)
+void StackWalkCallback(uint32_t aFrameNumber, void* aPC, void* aSP,
+                       void* aClosure)
 {
-  PCArray* array = static_cast<PCArray*>(aClosure);
-  MOZ_ASSERT(array->count < array->size);
-  array->sp_array[array->count] = aSP;
-  array->array[array->count] = aPC;
-  array->count++;
+  NativeStack* nativeStack = static_cast<NativeStack*>(aClosure);
+  MOZ_ASSERT(nativeStack->count < nativeStack->size);
+  nativeStack->sp_array[nativeStack->count] = aSP;
+  nativeStack->pc_array[nativeStack->count] = aPC;
+  nativeStack->count++;
 }
 
 void TableTicker::doNativeBacktrace(ThreadProfile &aProfile, TickSample* aSample)
@@ -435,17 +608,20 @@ void TableTicker::doNativeBacktrace(ThreadProfile &aProfile, TickSample* aSample
 #endif
   void* pc_array[1000];
   void* sp_array[1000];
-  PCArray array = {
+  NativeStack nativeStack = {
     pc_array,
     sp_array,
     mozilla::ArrayLength(pc_array),
     0
   };
 
-  // Start with the current function.
-  StackWalkCallback(aSample->pc, aSample->sp, &array);
+  // Start with the current function. We use 0 as the frame number here because
+  // the FramePointerStackWalk() and NS_StackWalk() calls below will use 1..N.
+  // This is a bit weird but it doesn't matter because StackWalkCallback()
+  // doesn't use the frame number argument.
+  StackWalkCallback(/* frameNumber */ 0, aSample->pc, aSample->sp, &nativeStack);
 
-  uint32_t maxFrames = uint32_t(array.size - array.count);
+  uint32_t maxFrames = uint32_t(nativeStack.size - nativeStack.count);
 #ifdef XP_MACOSX
   pthread_t pt = GetProfiledThread(aSample->threadProfile->GetPlatformData());
   void *stackEnd = reinterpret_cast<void*>(-1);
@@ -454,7 +630,7 @@ void TableTicker::doNativeBacktrace(ThreadProfile &aProfile, TickSample* aSample
   nsresult rv = NS_OK;
   if (aSample->fp >= aSample->sp && aSample->fp <= stackEnd)
     rv = FramePointerStackWalk(StackWalkCallback, /* skipFrames */ 0,
-                               maxFrames, &array,
+                               maxFrames, &nativeStack,
                                reinterpret_cast<void**>(aSample->fp), stackEnd);
 #else
   void *platformData = nullptr;
@@ -468,10 +644,10 @@ void TableTicker::doNativeBacktrace(ThreadProfile &aProfile, TickSample* aSample
 #endif // XP_WIN
 
   nsresult rv = NS_StackWalk(StackWalkCallback, /* skipFrames */ 0, maxFrames,
-                             &array, thread, platformData);
+                             &nativeStack, thread, platformData);
 #endif
   if (NS_SUCCEEDED(rv))
-    mergeNativeBacktrace(aProfile, array);
+    mergeStacksIntoProfile(aProfile, aSample, nativeStack);
 }
 #endif
 
@@ -480,36 +656,80 @@ void TableTicker::doNativeBacktrace(ThreadProfile &aProfile, TickSample* aSample
 {
   void *pc_array[1000];
   void *sp_array[1000];
-  PCArray array = {
+  NativeStack nativeStack = {
     pc_array,
     sp_array,
     mozilla::ArrayLength(pc_array),
     0
   };
 
-  ucontext_t *ucontext = reinterpret_cast<ucontext_t *>(aSample->context);
-  array.count = EHABIStackWalk(ucontext->uc_mcontext, aProfile.GetStackTop(),
-                               sp_array, pc_array, array.size);
-  mergeNativeBacktrace(aProfile, array);
+  const mcontext_t *mcontext = &reinterpret_cast<ucontext_t *>(aSample->context)->uc_mcontext;
+  mcontext_t savedContext;
+  PseudoStack *pseudoStack = aProfile.GetPseudoStack();
+
+  nativeStack.count = 0;
+  // The pseudostack contains an "EnterJIT" frame whenever we enter
+  // JIT code with profiling enabled; the stack pointer value points
+  // the saved registers.  We use this to unwind resume unwinding
+  // after encounting JIT code.
+  for (uint32_t i = pseudoStack->stackSize(); i > 0; --i) {
+    // The pseudostack grows towards higher indices, so we iterate
+    // backwards (from callee to caller).
+    volatile StackEntry &entry = pseudoStack->mStack[i - 1];
+    if (!entry.isJs() && strcmp(entry.label(), "EnterJIT") == 0) {
+      // Found JIT entry frame.  Unwind up to that point (i.e., force
+      // the stack walk to stop before the block of saved registers;
+      // note that it yields nondecreasing stack pointers), then restore
+      // the saved state.
+      uint32_t *vSP = reinterpret_cast<uint32_t*>(entry.stackAddress());
+
+      nativeStack.count += EHABIStackWalk(*mcontext,
+                                          /* stackBase = */ vSP,
+                                          sp_array + nativeStack.count,
+                                          pc_array + nativeStack.count,
+                                          nativeStack.size - nativeStack.count);
+
+      memset(&savedContext, 0, sizeof(savedContext));
+      // See also: struct EnterJITStack in js/src/jit/arm/Trampoline-arm.cpp
+      savedContext.arm_r4 = *vSP++;
+      savedContext.arm_r5 = *vSP++;
+      savedContext.arm_r6 = *vSP++;
+      savedContext.arm_r7 = *vSP++;
+      savedContext.arm_r8 = *vSP++;
+      savedContext.arm_r9 = *vSP++;
+      savedContext.arm_r10 = *vSP++;
+      savedContext.arm_fp = *vSP++;
+      savedContext.arm_lr = *vSP++;
+      savedContext.arm_sp = reinterpret_cast<uint32_t>(vSP);
+      savedContext.arm_pc = savedContext.arm_lr;
+      mcontext = &savedContext;
+    }
+  }
+
+  // Now unwind whatever's left (starting from either the last EnterJIT
+  // frame or, if no EnterJIT was found, the original registers).
+  nativeStack.count += EHABIStackWalk(*mcontext,
+                                      aProfile.GetStackTop(),
+                                      sp_array + nativeStack.count,
+                                      pc_array + nativeStack.count,
+                                      nativeStack.size - nativeStack.count);
+
+  mergeStacksIntoProfile(aProfile, aSample, nativeStack);
 }
 
 #endif
 
 static
-void doSampleStackTrace(PseudoStack *aStack, ThreadProfile &aProfile, TickSample *sample)
+void doSampleStackTrace(ThreadProfile &aProfile, TickSample *aSample, bool aAddLeafAddresses)
 {
-  // Sample
-  // 's' tag denotes the start of a sample block
-  // followed by 0 or more 'c' tags.
-  aProfile.addTag(ProfileEntry('s', "(root)"));
-  for (uint32_t i = 0; i < aStack->stackSize(); i++) {
-    addProfileEntry(aStack->mStack[i], aProfile, aStack, nullptr);
-  }
+  NativeStack nativeStack = { nullptr, nullptr, 0, 0 };
+  mergeStacksIntoProfile(aProfile, aSample, nativeStack);
+
 #ifdef ENABLE_SPS_LEAF_DATA
-  if (sample) {
-    aProfile.addTag(ProfileEntry('l', (void*)sample->pc));
+  if (aSample && aAddLeafAddresses) {
+    aProfile.addTag(ProfileEntry('l', (void*)aSample->pc));
 #ifdef ENABLE_ARM_LR_SAVING
-    aProfile.addTag(ProfileEntry('L', (void*)sample->lr));
+    aProfile.addTag(ProfileEntry('L', (void*)aSample->lr));
 #endif
   }
 #endif
@@ -529,6 +749,7 @@ void TableTicker::InplaceTick(TickSample* sample)
   ThreadProfile& currThreadProfile = *sample->threadProfile;
 
   PseudoStack* stack = currThreadProfile.GetPseudoStack();
+  stack->updateGeneration(currThreadProfile.GetGenerationID());
   bool recordSample = true;
 #if defined(XP_WIN)
   bool powerSample = false;
@@ -544,7 +765,6 @@ void TableTicker::InplaceTick(TickSample* sample)
       stack->addStoredMarker(marker);
       currThreadProfile.addTag(ProfileEntry('m', marker));
     }
-    stack->updateGeneration(currThreadProfile.GetGenerationID());
 
 #if defined(XP_WIN)
     if (mProfilePower) {
@@ -567,7 +787,7 @@ void TableTicker::InplaceTick(TickSample* sample)
       recordSample = false;
       // only record the events when we have a we haven't seen a tracer event for 100ms
       if (!sLastTracerEvent.IsNull()) {
-        TimeDuration delta = sample->timestamp - sLastTracerEvent;
+        mozilla::TimeDuration delta = sample->timestamp - sLastTracerEvent;
         if (delta.ToMilliseconds() > 100.0) {
             recordSample = true;
         }
@@ -579,28 +799,38 @@ void TableTicker::InplaceTick(TickSample* sample)
   if (mUseStackWalk) {
     doNativeBacktrace(currThreadProfile, sample);
   } else {
-    doSampleStackTrace(stack, currThreadProfile, mAddLeafAddresses ? sample : nullptr);
+    doSampleStackTrace(currThreadProfile, sample, mAddLeafAddresses);
   }
 #else
-  doSampleStackTrace(stack, currThreadProfile, mAddLeafAddresses ? sample : nullptr);
+  doSampleStackTrace(currThreadProfile, sample, mAddLeafAddresses);
 #endif
 
   if (recordSample)
     currThreadProfile.flush();
 
-  if (!sLastTracerEvent.IsNull() && sample && currThreadProfile.IsMainThread()) {
-    TimeDuration delta = sample->timestamp - sLastTracerEvent;
-    currThreadProfile.addTag(ProfileEntry('r', delta.ToMilliseconds()));
+  if (sample && currThreadProfile.GetThreadResponsiveness()->HasData()) {
+    mozilla::TimeDuration delta = currThreadProfile.GetThreadResponsiveness()->GetUnresponsiveDuration(sample->timestamp);
+    currThreadProfile.addTag(ProfileEntry('r', static_cast<float>(delta.ToMilliseconds())));
   }
 
   if (sample) {
-    TimeDuration delta = sample->timestamp - sStartTime;
-    currThreadProfile.addTag(ProfileEntry('t', delta.ToMilliseconds()));
+    mozilla::TimeDuration delta = sample->timestamp - sStartTime;
+    currThreadProfile.addTag(ProfileEntry('t', static_cast<float>(delta.ToMilliseconds())));
+  }
+
+  // rssMemory is equal to 0 when we are not recording.
+  if (sample && sample->rssMemory != 0) {
+    currThreadProfile.addTag(ProfileEntry('R', static_cast<float>(sample->rssMemory)));
+  }
+
+  // ussMemory is equal to 0 when we are not recording.
+  if (sample && sample->ussMemory != 0) {
+    currThreadProfile.addTag(ProfileEntry('U', static_cast<float>(sample->ussMemory)));
   }
 
 #if defined(XP_WIN)
   if (powerSample) {
-    currThreadProfile.addTag(ProfileEntry('p', mIntelPowerGadget->GetTotalPackagePowerInWatts()));
+    currThreadProfile.addTag(ProfileEntry('p', static_cast<float>(mIntelPowerGadget->GetTotalPackagePowerInWatts())));
   }
 #endif
 
@@ -621,9 +851,8 @@ SyncProfile* NewSyncProfile()
   }
   Thread::tid_t tid = Thread::GetCurrentId();
 
-  SyncProfile* profile = new SyncProfile("SyncProfile",
-                                         GET_BACKTRACE_DEFAULT_ENTRY,
-                                         stack, tid, NS_IsMainThread());
+  ThreadInfo* info = new ThreadInfo("SyncProfile", tid, NS_IsMainThread(), stack, nullptr);
+  SyncProfile* profile = new SyncProfile(info, GET_BACKTRACE_DEFAULT_ENTRY);
   return profile;
 }
 
@@ -681,12 +910,14 @@ void mozilla_sampler_print_location1()
   }
 
   syncProfile->BeginUnwind();
-  doSampleStackTrace(syncProfile->GetPseudoStack(), *syncProfile, nullptr);
+  doSampleStackTrace(*syncProfile, nullptr, false);
   syncProfile->EndUnwind();
 
   printf_stderr("Backtrace:\n");
   syncProfile->IterateTags(print_callback);
+  ThreadInfo* info = syncProfile->GetThreadInfo();
   delete syncProfile;
+  delete info;
 }
 
 

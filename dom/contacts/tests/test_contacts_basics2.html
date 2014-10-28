@@ -552,7 +552,8 @@ var steps = [
         honorificPrefix: [],
         honorificSuffix: [{foo: "bar"}],
         sex: 17,
-        genderIdentity: 18
+        genderIdentity: 18,
+        email: [{type: ["foo"], value: "bar"}]
     };
     obj.honorificPrefix.__defineGetter__('0',(function() {
       var c = 0;
@@ -566,13 +567,15 @@ var steps = [
       }
     })());
     createResult1 = new mozContact(obj);
+    createResult1.email.push({aeiou: "abcde"});
     req = mozContacts.save(createResult1);
     req.onsuccess = function () {
       checkContacts(createResult1, {
         honorificPrefix: ["string"],
         honorificSuffix: ["[object Object]"],
         sex: "17",
-        genderIdentity: "18"
+        genderIdentity: "18",
+        email: [{type: ["foo"], value: "bar"}, {}]
       });
       next();
     };
@@ -678,12 +681,15 @@ var steps = [
     req.onerror = onFailure;
   },
   function() {
-    ok(true, "Test setting array properties to scalar values")
+    ok(true, "Test that after setting array properties to scalar values the property os not a non-array")
     const FIELDS = ["email","url","adr","tel","impp"];
     createResult1 = new mozContact();
     for (var prop of FIELDS) {
-      createResult1[prop] = {type: ["foo"]};
-      ok(Array.isArray(createResult1[prop]), prop + " is array");
+      try {
+        createResult1[prop] = {type: ["foo"]};
+      } catch (e) {}
+      ok(createResult1[prop] === null ||
+         Array.isArray(createResult1[prop]), prop + " is array");
     }
     next();
   },
@@ -696,13 +702,13 @@ var steps = [
       impp: [{value: undefined}],
       tel: [{value: undefined}],
     });
-    ise(c.adr[0].streetAddress, null, "adr.streetAddress is null");
-    ise(c.adr[0].locality, null, "adr.locality is null");
-    ise(c.adr[0].pref, null, "adr.pref is null");
-    ise(c.email[0].value, null, "email.value is null");
-    ise(c.url[0].value, null, "url.value is null");
-    ise(c.impp[0].value, null, "impp.value is null");
-    ise(c.tel[0].value, null, "tel.value is null");
+    ise(c.adr[0].streetAddress, undefined, "adr.streetAddress is undefined");
+    ise(c.adr[0].locality, undefined, "adr.locality is undefined");
+    ise(c.adr[0].pref, undefined, "adr.pref is undefined");
+    ise(c.email[0].value, undefined, "email.value is undefined");
+    ise(c.url[0].value, undefined, "url.value is undefined");
+    ise(c.impp[0].value, undefined, "impp.value is undefined");
+    ise(c.tel[0].value, undefined, "tel.value is undefined");
     next();
   },
   function() {
@@ -721,6 +727,401 @@ var steps = [
     testArrayProp("url");
     next();
   },
+  function() {
+    ok(true, "Passing a mozContact with invalid data to save() should throw");
+    var c = new mozContact({
+      photo: [],
+      tel: []
+    });
+    c.photo.push({});
+    SimpleTest.doesThrow(()=>navigator.mozContacts.save(c), "Invalid data in Blob array");
+    c.tel.push(123);
+    SimpleTest.doesThrow(()=>navigator.mozContacts.save(c), "Invalid data in dictionary array");
+    next();
+  },
+  function() {
+    ok(true, "Inline changes to array properties should be seen by save");
+    var c = new mozContact({
+      name: [],
+      familyName: [],
+      givenName: [],
+      phoneticFamilyName: [],
+      phoneticGivenName: [],
+      nickname: [],
+      tel: [],
+      adr: [],
+      email: []
+    });
+    for (var prop of Object.getOwnPropertyNames(properties1)) {
+      if (!Array.isArray(properties1[prop])) {
+        continue;
+      }
+      for (var i = 0; i < properties1[prop].length; ++i) {
+        c[prop].push(properties1[prop][i]);
+      }
+    }
+    req = navigator.mozContacts.save(c);
+    req.onsuccess = function() {
+      req = navigator.mozContacts.find(defaultOptions);
+      req.onsuccess = function() {
+        ise(req.result.length, 1, "Got 1 contact");
+        checkContacts(req.result[0], properties1);
+        next();
+      };
+      req.onerror = onFailure;
+    };
+    req.onerror = onFailure;
+  },
+  clearDatabase,
+  function() {
+    ok(true, "mozContact.init deprecation message");
+    var c = new mozContact();
+    SimpleTest.monitorConsole(next, [
+      { errorMessage: "mozContact.init is DEPRECATED. Use the mozContact constructor instead. " +
+                      "See https://developer.mozilla.org/docs/WebAPI/Contacts for details." }
+    ], /* forbidUnexpectedMsgs */ true);
+    c.init({name: ["Bar"]});
+    c.init({name: ["Bar"]});
+    SimpleTest.endMonitorConsole();
+  },
+  function() {
+    ok(true, "mozContact.init works as expected");
+    var c = new mozContact({name: ["Foo"]});
+    c.init({name: ["Bar"]});
+    ise(c.name[0], "Bar", "Same name");
+    next();
+  },
+  function() {
+    ok(true, "mozContact.init without parameters");
+    var c = new mozContact({name: ["Foo"]});
+    c.init();
+    next();
+  },
+  function() {
+    ok(true, "mozContact.init resets properties");
+    var c = new mozContact({jobTitle: ["Software Engineer"]});
+    c.init({nickname: ["Jobless Johnny"]});
+    ise(c.nickname[0], "Jobless Johnny", "Same nickname");
+    ok(!c.jobTitle, "jobTitle is not set");
+    next();
+  },
+  function() {
+    ok(true, "mozContacts.remove with an ID works");
+    var c = new mozContact({name: ["Ephemeral Jimmy"]});
+    req = navigator.mozContacts.save(c);
+    req.onsuccess = function() {
+      req = navigator.mozContacts.remove(c.id);
+      req.onsuccess = function() {
+        req = navigator.mozContacts.find({
+          filterBy: ["id"],
+          filterOp: "equals",
+          filterValue: c.id
+        });
+        req.onsuccess = function() {
+          ise(req.result.length, 0, "Successfully removed contact by ID");
+          next();
+        };
+        req.onerror = onFailure;
+      };
+      req.onerror = onFailure;
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Adding a new contact");
+    createResult1 = new mozContact(properties3);
+    req = mozContacts.save(createResult1)
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      sample_id1 = createResult1.id;
+      next();
+    }
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Adding a new contact2");
+    createResult2 = new mozContact(properties4);
+    req = mozContacts.save(createResult2);
+    req.onsuccess = function () {
+      ok(createResult2.id, "The contact now has an ID.");
+      sample_id2 = createResult2.id;
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Retrieving all contacts");
+    req = mozContacts.find({sortBy: "phoneticFamilyName"});
+    req.onsuccess = function () {
+      is(req.result.length, 2, "Found exactly 2 contact.");
+      checkContacts(req.result[1], properties3);
+      next();
+    }
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Searching contacts by query1");
+    var options = {filterBy: ["phoneticGivenName", "email"],
+                   filterOp: "startsWith",
+                   filterValue: properties3.phoneticGivenName[0].substring(0, 3)}
+    req = mozContacts.find(options)
+    req.onsuccess = function () {
+      is(req.result.length, 1, "Found exactly 1 contact.");
+      findResult1 = req.result[0];
+      ok(findResult1.id == sample_id1, "Same ID");
+      checkContacts(findResult1, createResult1);
+      next();
+    }
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Searching contacts by query2");
+    var options = {filterBy: ["phoneticGivenName", "email"],
+                   filterOp: "startsWith",
+                   filterValue: properties4.phoneticGivenName[0].substring(0, 3)};
+    req = mozContacts.find(options);
+    req.onsuccess = function () {
+      is(req.result.length, 1, "Found exactly 1 contact.");
+      findResult1 = req.result[0];
+      is(findResult1.adr.length, 2, "Adr length 2");
+      checkContacts(findResult1, createResult2);
+      next();
+    }
+    req.onerror = onFailure;
+  },
+  clearDatabase,
+  function () {
+    ok(true, "Adding 20 contacts");
+    for (var i=0; i<19; i++) {
+      createResult1 = new mozContact(properties3);
+      req = mozContacts.save(createResult1);
+      req.onsuccess = function () {
+        ok(createResult1.id, "The contact now has an ID.");
+      };
+      req.onerror = onFailure;
+    };
+    createResult1 = new mozContact(properties3);
+    req = mozContacts.save(createResult1);
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      checkStrArray(createResult1.name, properties3.name, "Same Name");
+      checkCount(20, "20 contacts in DB", next);
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Retrieving all contacts");
+    req = mozContacts.find(defaultOptions);
+    req.onsuccess = function () {
+      is(req.result.length, 20, "20 Entries.");
+      next();
+    }
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Retrieving all contacts2");
+    var options = {filterBy: ["phoneticGivenName"],
+                   filterOp: "startsWith",
+                   filterValue: properties3.phoneticGivenName[0].substring(0, 3)};
+    req = mozContacts.find(options);
+    req.onsuccess = function () {
+      is(req.result.length, 20, "20 Entries.");
+      checkContacts(createResult1, req.result[19]);
+      next();
+    }
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Retrieving all contacts3");
+    var options = {filterBy: ["phoneticGivenName", "tel", "email"],
+                   filterOp: "startsWith",
+                   filterValue: properties3.phoneticGivenName[0].substring(0, 3)};
+    req = mozContacts.find(options);
+    req.onsuccess = function () {
+      is(req.result.length, 20, "20 Entries.");
+      checkContacts(createResult1, req.result[10]);
+      next();
+    }
+    req.onerror = onFailure;
+  },
+  clearDatabase,
+  function () {
+    ok(true, "Testing clone contact");
+    createResult1 = new mozContact(properties3);
+    req = mozContacts.save(createResult1);
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      checkStrArray(createResult1.phoneticFamilyName, properties3.phoneticFamilyName, "Same phoneticFamilyName");
+      checkStrArray(createResult1.phoneticGivenName, properties3.phoneticGivenName, "Same phoneticGivenName");
+      next();
+    }
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Retrieving all contacts");
+    req = mozContacts.find({sortBy: "phoneticGivenName"});
+    req.onsuccess = function () {
+      is(req.result.length, 1, "1 Entries.");
+      next();
+    }
+    req.onerror = onFailure;
+  },
+  clearDatabase,
+  function () {
+    ok(true, "Test sorting");
+    createResult1 = new mozContact(c11);
+    req = navigator.mozContacts.save(createResult1);
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      checkContacts(c11, createResult1);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Test sorting");
+    createResult1 = new mozContact(c10);
+    req = navigator.mozContacts.save(createResult1);
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      checkContacts(c10, createResult1);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Test sorting");
+    createResult1 = new mozContact(c12);
+    req = navigator.mozContacts.save(createResult1);
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      checkContacts(c12, createResult1);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Test sorting");
+    createResult1 = new mozContact(c9);
+    req = navigator.mozContacts.save(createResult1);
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      checkContacts(c9, createResult1);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Test sorting");
+    var options = {sortBy: "phoneticFamilyName",
+                   sortOrder: "ascending"};
+    req = navigator.mozContacts.find(options);
+    req.onsuccess = function () {
+      is(req.result.length, 4, "4 results");
+      checkContacts(req.result[0], c9);
+      checkContacts(req.result[1], c10);
+      checkContacts(req.result[2], c11);
+      checkContacts(req.result[3], c12);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Test sorting");
+    var options = {sortBy: "phoneticFamilyName",
+                   sortOrder: "descending"};
+    req = navigator.mozContacts.find(options);
+    req.onsuccess = function () {
+      is(req.result.length, 4, "4 results");
+      checkContacts(req.result[0], c12);
+      checkContacts(req.result[1], c11);
+      checkContacts(req.result[2], c10);
+      checkContacts(req.result[3], c9);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Test sorting");
+    createResult1 = new mozContact(c13);
+    req = navigator.mozContacts.save(createResult1);
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      checkContacts(c13, createResult1);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Test sorting with empty string");
+    var options = {sortBy: "phoneticFamilyName",
+                   sortOrder: "ascending"};
+    req = navigator.mozContacts.find(options);
+    req.onsuccess = function () {
+      is(req.result.length, 5, "5 results");
+      checkContacts(req.result[0], c13);
+      checkContacts(req.result[1], c9);
+      checkContacts(req.result[2], c10);
+      checkContacts(req.result[3], c11);
+      checkContacts(req.result[4], c12);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  clearDatabase,
+  function () {
+    ok(true, "Test sorting");
+    createResult1 = new mozContact(c15);
+    req = navigator.mozContacts.save(createResult1);
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      checkContacts(c15, createResult1);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Test sorting");
+    createResult1 = new mozContact(c14);
+    req = navigator.mozContacts.save(createResult1);
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      checkContacts(c14, createResult1);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    ok(true, "Test sorting");
+    createResult1 = new mozContact(c16);
+    req = navigator.mozContacts.save(createResult1);
+    req.onsuccess = function () {
+      ok(createResult1.id, "The contact now has an ID.");
+      checkContacts(c16, createResult1);
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  function () {
+    // Android does not support published/updated fields. Skip this.
+    if (isAndroid) {
+      next();
+      return;
+    }
+
+    ok(true, "Test sorting with published");
+    var options = {sortBy: "phoneticFamilyName",
+                   sortOrder: "descending"};
+    req = navigator.mozContacts.find(options);
+    req.onsuccess = function () {
+      is(req.result.length, 3, "3 results");
+      ok(req.result[0].published < req.result[1].published, "Right sorting order");
+      ok(req.result[1].published < req.result[2].published, "Right sorting order");
+      next();
+    };
+    req.onerror = onFailure;
+  },
+  clearDatabase,
   function () {
     ok(true, "all done!\n");
     SimpleTest.finish();

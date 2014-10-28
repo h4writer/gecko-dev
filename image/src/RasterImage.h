@@ -25,14 +25,17 @@
 #include "nsTArray.h"
 #include "imgFrame.h"
 #include "nsThreadUtils.h"
+#include "DecodeStrategy.h"
 #include "DiscardTracker.h"
 #include "Orientation.h"
 #include "nsIObserver.h"
 #include "mozilla/MemoryReporting.h"
+#include "mozilla/Mutex.h"
+#include "mozilla/ReentrantMonitor.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/StaticPtr.h"
 #include "mozilla/WeakPtr.h"
-#include "mozilla/Mutex.h"
+#include "mozilla/UniquePtr.h"
 #ifdef DEBUG
   #include "imgIContainerDebug.h"
 #endif
@@ -119,36 +122,38 @@ class nsIRequest;
  * it's not allocated until the second frame is added.
  */
 
-class ScaleRequest;
-
 namespace mozilla {
+
 namespace layers {
 class LayerManager;
 class ImageContainer;
 class Image;
 }
+
 namespace image {
 
 class Decoder;
 class FrameAnimator;
+class ScaleRunner;
 
-class RasterImage : public ImageResource
-                  , public nsIProperties
-                  , public SupportsWeakPtr<RasterImage>
+class RasterImage MOZ_FINAL : public ImageResource
+                            , public nsIProperties
+                            , public SupportsWeakPtr<RasterImage>
 #ifdef DEBUG
-                  , public imgIContainerDebug
+                            , public imgIContainerDebug
 #endif
 {
+  // (no public constructor - use ImageFactory)
+  virtual ~RasterImage();
+
 public:
+  MOZ_DECLARE_REFCOUNTED_TYPENAME(RasterImage)
   NS_DECL_THREADSAFE_ISUPPORTS
   NS_DECL_NSIPROPERTIES
   NS_DECL_IMGICONTAINER
 #ifdef DEBUG
   NS_DECL_IMGICONTAINERDEBUG
 #endif
-
-  // (no public constructor - use ImageFactory)
-  virtual ~RasterImage();
 
   virtual nsresult StartAnimation();
   virtual nsresult StopAnimation();
@@ -164,17 +169,17 @@ public:
                                       uint32_t aToOffset, uint32_t aCount,
                                       uint32_t* aWriteCount);
 
-  /* The index of the current frame that would be drawn if the image was to be
-   * drawn now. */
-  uint32_t GetCurrentFrameIndex();
-
   /* The total number of frames in this image. */
   uint32_t GetNumFrames() const;
 
-  virtual size_t HeapSizeOfSourceWithComputedFallback(mozilla::MallocSizeOf aMallocSizeOf) const;
-  virtual size_t HeapSizeOfDecodedWithComputedFallback(mozilla::MallocSizeOf aMallocSizeOf) const;
+  virtual size_t HeapSizeOfSourceWithComputedFallback(MallocSizeOf aMallocSizeOf) const;
+  virtual size_t HeapSizeOfDecodedWithComputedFallback(MallocSizeOf aMallocSizeOf) const;
   virtual size_t NonHeapSizeOfDecoded() const;
   virtual size_t OutOfProcessSizeOfDecoded() const;
+
+  virtual size_t HeapSizeOfVectorImageDocument(nsACString* aDocURL = nullptr) const MOZ_OVERRIDE {
+    return 0;
+  }
 
   /* Triggers discarding. */
   void Discard(bool force = false);
@@ -197,7 +202,7 @@ public:
    */
   nsresult EnsureFrame(uint32_t aFramenum, int32_t aX, int32_t aY,
                        int32_t aWidth, int32_t aHeight,
-                       gfxImageFormat aFormat,
+                       gfx::SurfaceFormat aFormat,
                        uint8_t aPaletteDepth,
                        uint8_t** imageData,
                        uint32_t* imageLength,
@@ -211,7 +216,7 @@ public:
    */
   nsresult EnsureFrame(uint32_t aFramenum, int32_t aX, int32_t aY,
                        int32_t aWidth, int32_t aHeight,
-                       gfxImageFormat aFormat,
+                       gfx::SurfaceFormat aFormat,
                        uint8_t** imageData,
                        uint32_t* imageLength,
                        imgFrame** aFrame);
@@ -271,6 +276,16 @@ public:
   nsIntSize GetRequestedResolution() {
     return mRequestedResolution;
   }
+  /* Provide a hint for the requested dimension of the resulting image. */
+  void SetRequestedSampleSize(int requestedSampleSize) {
+    mRequestedSampleSize = requestedSampleSize;
+  }
+
+  int GetRequestedSampleSize() {
+    return mRequestedSampleSize;
+  }
+
+
 
  nsCString GetURIString() {
     nsCString spec;
@@ -283,23 +298,6 @@ public:
   // Called from module startup. Sets up RasterImage to be used.
   static void Initialize();
 
-  enum ScaleStatus
-  {
-    SCALE_INVALID,
-    SCALE_PENDING,
-    SCALE_DONE
-  };
-
-  // Call this with a new ScaleRequest to mark this RasterImage's scale result
-  // as waiting for the results of this request. You call to ScalingDone before
-  // request is destroyed!
-  void ScalingStart(ScaleRequest* request);
-
-  // Call this with a finished ScaleRequest to set this RasterImage's scale
-  // result. Give it a ScaleStatus of SCALE_DONE if everything succeeded, and
-  // SCALE_INVALID otherwise.
-  void ScalingDone(ScaleRequest* request, ScaleStatus status);
-
   // Decoder shutdown
   enum eShutdownIntent {
     eShutdownIntent_Done        = 0,
@@ -308,9 +306,12 @@ public:
     eShutdownIntent_AllCount    = 3
   };
 
+  // Decode strategy
+
 private:
   already_AddRefed<imgStatusTracker> CurrentStatusTracker()
   {
+    mDecodingMonitor.AssertCurrentThreadIn();
     nsRefPtr<imgStatusTracker> statusTracker;
     statusTracker = mDecodeRequest ? mDecodeRequest->mStatusTracker
                                    : mStatusTracker;
@@ -326,7 +327,7 @@ private:
    */
   struct DecodeRequest
   {
-    DecodeRequest(RasterImage* aImage)
+    explicit DecodeRequest(RasterImage* aImage)
       : mImage(aImage)
       , mBytesToDecode(0)
       , mRequestStatus(REQUEST_INACTIVE)
@@ -347,7 +348,7 @@ private:
 
     RasterImage* mImage;
 
-    uint32_t mBytesToDecode;
+    size_t mBytesToDecode;
 
     enum DecodeRequestStatus
     {
@@ -368,6 +369,9 @@ private:
     /* True if a new frame has been allocated, but DecodeSomeData hasn't yet
      * been called to flush data to it */
     bool mAllocatedNewFrame;
+
+  private:
+    ~DecodeRequest() {}
   };
 
   /*
@@ -400,7 +404,7 @@ private:
      * Decode aImg for a short amount of time, and post the remainder to the
      * queue.
      */
-    void DecodeABitOf(RasterImage* aImg);
+    void DecodeABitOf(RasterImage* aImg, DecodeStrategy aStrategy);
 
     /**
      * Ask the DecodePool to stop decoding this image.  Internally, we also
@@ -429,13 +433,12 @@ private:
      */
     already_AddRefed<nsIEventTarget> GetEventTarget();
 
-    virtual ~DecodePool();
-
   private: /* statics */
     static StaticRefPtr<DecodePool> sSingleton;
 
   private: /* methods */
     DecodePool();
+    virtual ~DecodePool();
 
     enum DecodeType {
       DECODE_TYPE_UNTIL_TIME,
@@ -449,6 +452,7 @@ private:
      * UNTIL_DONE_BYTES, decode until all bytesToDecode bytes are decoded.
      */
     nsresult DecodeSomeOfImage(RasterImage* aImg,
+                               DecodeStrategy aStrategy,
                                DecodeType aDecodeType = DECODE_TYPE_UNTIL_TIME,
                                uint32_t bytesToDecode = 0);
 
@@ -464,6 +468,9 @@ private:
 
       NS_IMETHOD Run();
 
+    protected:
+      virtual ~DecodeJob();
+
     private:
       nsRefPtr<DecodeRequest> mRequest;
       nsRefPtr<RasterImage> mImage;
@@ -472,10 +479,10 @@ private:
   private: /* members */
 
     // mThreadPoolMutex protects mThreadPool. For all RasterImages R,
-    // R::mDecodingMutex must be acquired before mThreadPoolMutex if both are
-    // acquired; the other order may cause deadlock.
-    mozilla::Mutex          mThreadPoolMutex;
-    nsCOMPtr<nsIThreadPool> mThreadPool;
+    // R::mDecodingMonitor must be acquired before mThreadPoolMutex
+    // if both are acquired; the other order may cause deadlock.
+    Mutex                     mThreadPoolMutex;
+    nsCOMPtr<nsIThreadPool>   mThreadPool;
   };
 
   class DecodeDoneWorker : public nsRunnable
@@ -516,7 +523,7 @@ private:
     NS_IMETHOD Run();
 
   private: /* methods */
-    FrameNeededWorker(RasterImage* image);
+    explicit FrameNeededWorker(RasterImage* image);
 
   private: /* members */
 
@@ -526,36 +533,27 @@ private:
   nsresult FinishedSomeDecoding(eShutdownIntent intent = eShutdownIntent_Done,
                                 DecodeRequest* request = nullptr);
 
-  void DrawWithPreDownscaleIfNeeded(imgFrame *aFrame,
-                                    gfxContext *aContext,
+  void DrawWithPreDownscaleIfNeeded(DrawableFrameRef&& aFrameRef,
+                                    gfxContext* aContext,
+                                    const nsIntSize& aSize,
+                                    const ImageRegion& aRegion,
                                     GraphicsFilter aFilter,
-                                    const gfxMatrix &aUserSpaceToImageSpace,
-                                    const gfxRect &aFill,
-                                    const nsIntRect &aSubimage,
                                     uint32_t aFlags);
 
-  nsresult CopyFrame(uint32_t aWhichFrame,
-                     uint32_t aFlags,
-                     gfxImageSurface **_retval);
+  TemporaryRef<gfx::SourceSurface> CopyFrame(uint32_t aWhichFrame,
+                                             uint32_t aFlags,
+                                             bool aShouldSyncNotify = true);
+  TemporaryRef<gfx::SourceSurface> GetFrameInternal(uint32_t aWhichFrame,
+                                                    uint32_t aFlags,
+                                                    bool aShouldSyncNotify = true);
 
-  /**
-   * Deletes and nulls out the frame in mFrames[framenum].
-   *
-   * Does not change the size of mFrames.
-   *
-   * @param framenum The index of the frame to be deleted.
-   *                 Must lie in [0, mFrames.Length() )
-   */
-  void DeleteImgFrame(uint32_t framenum);
-
-  imgFrame* GetImgFrameNoDecode(uint32_t framenum);
-  imgFrame* GetImgFrame(uint32_t framenum);
-  imgFrame* GetDrawableImgFrame(uint32_t framenum);
-  imgFrame* GetCurrentImgFrame();
-  uint32_t GetCurrentImgFrameIndex() const;
+  already_AddRefed<imgFrame> LookupFrameNoDecode(uint32_t aFrameNum);
+  DrawableFrameRef LookupFrame(uint32_t aFrameNum, uint32_t aFlags, bool aShouldSyncNotify = true);
+  uint32_t GetCurrentFrameIndex() const;
+  uint32_t GetRequestedFrameIndex(uint32_t aWhichFrame) const;
 
   size_t SizeOfDecodedWithComputedFallbackIfHeap(gfxMemoryLocation aLocation,
-                                                 mozilla::MallocSizeOf aMallocSizeOf) const;
+                                                 MallocSizeOf aMallocSizeOf) const;
 
   void EnsureAnimExists();
 
@@ -564,14 +562,14 @@ private:
                                   uint32_t **paletteData, uint32_t *paletteLength,
                                   imgFrame** aRetFrame);
   nsresult InternalAddFrame(uint32_t framenum, int32_t aX, int32_t aY, int32_t aWidth, int32_t aHeight,
-                            gfxImageFormat aFormat, uint8_t aPaletteDepth,
+                            gfx::SurfaceFormat aFormat, uint8_t aPaletteDepth,
                             uint8_t **imageData, uint32_t *imageLength,
                             uint32_t **paletteData, uint32_t *paletteLength,
                             imgFrame** aRetFrame);
 
   nsresult DoImageDataComplete();
 
-  bool ApplyDecodeFlags(uint32_t aNewFlags);
+  bool ApplyDecodeFlags(uint32_t aNewFlags, uint32_t aWhichFrame);
 
   already_AddRefed<layers::Image> GetCurrentImage();
   void UpdateImageContainer();
@@ -609,14 +607,14 @@ private: // data
   FrameBlender              mFrameBlender;
 
   // The last frame we decoded for multipart images.
-  imgFrame*                  mMultipartDecodedFrame;
+  nsRefPtr<imgFrame>        mMultipartDecodedFrame;
 
-  nsCOMPtr<nsIProperties>    mProperties;
+  nsCOMPtr<nsIProperties>   mProperties;
 
   // IMPORTANT: if you use mAnim in a method, call EnsureImageIsDecoded() first to ensure
   // that the frames actually exist (they may have been discarded to save memory, or
   // we maybe decoding on draw).
-  FrameAnimator* mAnim;
+  UniquePtr<FrameAnimator> mAnim;
 
   // Discard members
   uint32_t                   mLockCount;
@@ -634,25 +632,30 @@ private: // data
   // If the image contains multiple resolutions, a hint as to which one should be used
   nsIntSize                  mRequestedResolution;
 
+  // A hint for image decoder that directly scale the image to smaller buffer
+  int                        mRequestedSampleSize;
+
   // Cached value for GetImageContainer.
-  nsRefPtr<mozilla::layers::ImageContainer> mImageContainer;
+  nsRefPtr<layers::ImageContainer> mImageContainer;
+
+  // If not cached in mImageContainer, this might have our image container
+  WeakPtr<layers::ImageContainer> mImageContainerCache;
 
 #ifdef DEBUG
   uint32_t                       mFramesNotified;
 #endif
 
   // Below are the pieces of data that can be accessed on more than one thread
-  // at once, and hence need to be locked by mDecodingMutex.
+  // at once, and hence need to be locked by mDecodingMonitor.
 
   // BEGIN LOCKED MEMBER VARIABLES
-  mozilla::Mutex             mDecodingMutex;
+  ReentrantMonitor           mDecodingMonitor;
 
   FallibleTArray<char>       mSourceData;
 
   // Decoder and friends
   nsRefPtr<Decoder>          mDecoder;
   nsRefPtr<DecodeRequest>    mDecodeRequest;
-  uint32_t                   mBytesDecoded;
 
   bool                       mInDecoder;
   // END LOCKED MEMBER VARIABLES
@@ -696,39 +699,35 @@ private: // data
                                  eShutdownIntent aIntent,
                                  bool aDone,
                                  bool aWasSize);
-  nsresult WantDecodedFrames();
+  nsresult WantDecodedFrames(uint32_t aFlags, bool aShouldSyncNotify);
   nsresult SyncDecode();
   nsresult InitDecoder(bool aDoSizeDecode);
-  nsresult WriteToDecoder(const char *aBuffer, uint32_t aCount);
-  nsresult DecodeSomeData(uint32_t aMaxBytes);
+  nsresult WriteToDecoder(const char *aBuffer, uint32_t aCount, DecodeStrategy aStrategy);
+  nsresult DecodeSomeData(size_t aMaxBytes, DecodeStrategy aStrategy);
   bool     IsDecodeFinished();
   TimeStamp mDrawStartTime;
-
-  inline bool CanQualityScale(const gfxSize& scale);
-  inline bool CanScale(GraphicsFilter aFilter, gfxSize aScale, uint32_t aFlags);
-
-  struct ScaleResult
-  {
-    ScaleResult()
-     : status(SCALE_INVALID)
-    {}
-
-    gfxSize scale;
-    nsAutoPtr<imgFrame> frame;
-    ScaleStatus status;
-  };
-
-  ScaleResult mScaleResult;
-
-  // We hold on to a bare pointer to a ScaleRequest while it's outstanding so
-  // we can mark it as stopped if necessary. The ScaleWorker/DrawWorker duo
-  // will inform us when to let go of this pointer.
-  ScaleRequest* mScaleRequest;
 
   // Initializes imgStatusTracker and resets it on RasterImage destruction.
   nsAutoPtr<imgStatusTrackerInit> mStatusTrackerInit;
 
   nsresult ShutdownDecoder(eShutdownIntent aIntent);
+
+
+  //////////////////////////////////////////////////////////////////////////////
+  // Scaling.
+  //////////////////////////////////////////////////////////////////////////////
+
+  // Initiates an HQ scale for the given frame, if possible.
+  void RequestScale(imgFrame* aFrame, uint32_t aFlags, const nsIntSize& aSize);
+
+  // Determines whether we can perform an HQ scale with the given parameters.
+  bool CanScale(GraphicsFilter aFilter, const nsIntSize& aSize, uint32_t aFlags);
+
+  // Called by the HQ scaler when a new scaled frame is ready.
+  void NotifyNewScaledFrame();
+
+  friend class ScaleRunner;
+
 
   // Error handling.
   void DoError();
@@ -746,7 +745,7 @@ private: // data
     NS_IMETHOD Run();
 
   private:
-    HandleErrorWorker(RasterImage* aImage);
+    explicit HandleErrorWorker(RasterImage* aImage);
 
     nsRefPtr<RasterImage> mImage;
   };
@@ -754,12 +753,13 @@ private: // data
   // Helpers
   bool CanDiscard();
   bool CanForciblyDiscard();
+  bool CanForciblyDiscardAndRedecode();
   bool DiscardingActive();
   bool StoringSourceData() const;
 
 protected:
-  RasterImage(imgStatusTracker* aStatusTracker = nullptr,
-              ImageURL* aURI = nullptr);
+  explicit RasterImage(imgStatusTracker* aStatusTracker = nullptr,
+                       ImageURL* aURI = nullptr);
 
   bool ShouldAnimate();
 
@@ -779,8 +779,8 @@ inline NS_IMETHODIMP RasterImage::GetAnimationMode(uint16_t *aAnimationMode) {
 class imgDecodeRequestor : public nsRunnable
 {
   public:
-    imgDecodeRequestor(RasterImage &aContainer) {
-      mContainer = aContainer.asWeakPtr();
+    explicit imgDecodeRequestor(RasterImage &aContainer) {
+      mContainer = &aContainer;
     }
     NS_IMETHOD Run() {
       if (mContainer)

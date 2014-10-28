@@ -63,7 +63,7 @@ hb_buffer_serialize_format_t
 hb_buffer_serialize_format_from_string (const char *str, int len)
 {
   /* Upper-case it. */
-  return (hb_buffer_serialize_format_t) (hb_tag_from_string (str, len) & ~0x20202020);
+  return (hb_buffer_serialize_format_t) (hb_tag_from_string (str, len) & ~0x20202020u);
 }
 
 /**
@@ -204,7 +204,7 @@ _hb_buffer_serialize_glyphs_text (hb_buffer_t *buffer,
 
       *p++ = '+';
       p += MAX (0, snprintf (p, ARRAY_LENGTH (b) - (p - b), "%d", pos[i].x_advance));
-      if (pos->y_advance)
+      if (pos[i].y_advance)
 	p += MAX (0, snprintf (p, ARRAY_LENGTH (b) - (p - b), ",%d", pos[i].y_advance));
     }
 

@@ -20,11 +20,52 @@ var gPrivacyPane = {
    */
   init: function ()
   {
+    function setEventListener(aId, aEventType, aCallback)
+    {
+      document.getElementById(aId)
+              .addEventListener(aEventType, aCallback.bind(gPrivacyPane));
+    }
+
     this._updateSanitizeSettingsButton();
     this.initializeHistoryMode();
     this.updateHistoryModePane();
     this.updatePrivacyMicroControls();
     this.initAutoStartPrivateBrowsingReverter();
+
+    setEventListener("browser.urlbar.default.behavior", "change",
+      document.getElementById('browser.urlbar.autocomplete.enabled')
+              .updateElements
+    );
+    setEventListener("privacy.sanitize.sanitizeOnShutdown", "change",
+                     gPrivacyPane._updateSanitizeSettingsButton);
+    setEventListener("browser.privatebrowsing.autostart", "change",
+                     gPrivacyPane.updatePrivacyMicroControls);
+    setEventListener("historyMode", "command", function () {
+      gPrivacyPane.updateHistoryModePane();
+      gPrivacyPane.updateHistoryModePrefs();
+      gPrivacyPane.updatePrivacyMicroControls();
+      gPrivacyPane.updateAutostart();
+    });
+    setEventListener("historyRememberClear", "click", function () {
+      gPrivacyPane.clearPrivateDataNow(false);
+      return false;
+    });
+    setEventListener("historyRememberCookies", "click", function () {
+      gPrivacyPane.showCookies();
+      return false;
+    });
+    setEventListener("historyDontRememberClear", "click", function () {
+      gPrivacyPane.clearPrivateDataNow(true);
+      return false;
+    });
+    setEventListener("privateBrowsingAutoStart", "command",
+                     gPrivacyPane.updateAutostart);
+    setEventListener("cookieExceptions", "command",
+                     gPrivacyPane.showCookieExceptions);
+    setEventListener("showCookiesButton", "command",
+                     gPrivacyPane.showCookies);
+    setEventListener("clearDataSettings", "command",
+                     gPrivacyPane.showClearPrivateDataSettings);
   },
 
   // HISTORY MODE
@@ -122,43 +163,6 @@ var gPrivacyPane = {
   },
 
   /**
-   * Update the Tracking preferences based on controls.
-   */
-  setTrackingPrefs: function PPP_setTrackingPrefs()
-  {
-    let dntRadioGroup = document.getElementById("doNotTrackSelection"),
-        dntValuePref = document.getElementById("privacy.donottrackheader.value"),
-        dntEnabledPref = document.getElementById("privacy.donottrackheader.enabled");
-
-    // if the selected radio button says "no preference", set on/off pref to
-    // false and don't change the value pref.
-    if (dntRadioGroup.selectedItem.value == -1) {
-      dntEnabledPref.value = false;
-      return dntValuePref.value;
-    }
-
-    dntEnabledPref.value = true;
-    return dntRadioGroup.selectedItem.value;
-  },
-
-  /**
-   * Obtain the tracking preference value and reflect it in the UI.
-   */
-  getTrackingPrefs: function PPP_getTrackingPrefs()
-  {
-    // XXX avoid using bindings that might not be attached, see bug 859982
-    let dntValue = Services.prefs.getIntPref("privacy.donottrackheader.value"),
-        dntEnabled = Services.prefs.getBoolPref("privacy.donottrackheader.enabled");
-
-    // if DNT is enbaled, select the value from the selected radio
-    // button, otherwise choose the "no preference" radio button
-    if (dntEnabled)
-      return dntValue;
-
-    return document.getElementById("dntnopref").value;
-  },
-
-  /**
    * Update the private browsing auto-start pref and the history mode
    * micro-management prefs based on the history mode menulist
    */
@@ -247,7 +251,7 @@ var gPrivacyPane = {
   },
 
   _lastMode: null,
-  _lasCheckState: null,
+  _lastCheckState: null,
   updateAutostart: function PPP_updateAutostart() {
       let mode = document.getElementById("historyMode");
       let autoStart = document.getElementById("privateBrowsingAutoStart");
@@ -284,7 +288,6 @@ var gPrivacyPane = {
 
         if (shouldProceed) {
           pref.value = autoStart.hasAttribute('checked');
-          document.documentElement.acceptDialog();
           let appStartup = Cc["@mozilla.org/toolkit/app-startup;1"]
                              .getService(Ci.nsIAppStartup);
           appStartup.quit(Ci.nsIAppStartup.eAttemptQuit |  Ci.nsIAppStartup.eRestart);
@@ -299,6 +302,7 @@ var gPrivacyPane = {
       } else {
         autoStart.removeAttribute('checked');
       }
+      pref.value = autoStart.hasAttribute('checked');
       mode.selectedIndex = this._lastMode;
       mode.doCommand();
 
@@ -469,9 +473,8 @@ var gPrivacyPane = {
                    permissionType : "cookie",
                    windowTitle    : bundlePreferences.getString("cookiepermissionstitle"),
                    introText      : bundlePreferences.getString("cookiepermissionstext") };
-    openDialog("chrome://browser/content/preferences/permissions.xul",
-               "Browser:Permissions",
-               "modal=yes", params);
+    gSubDialog.open("chrome://browser/content/preferences/permissions.xul",
+                    null, params);
   },
 
   /**
@@ -479,9 +482,7 @@ var gPrivacyPane = {
    */
   showCookies: function (aCategory)
   {
-    openDialog("chrome://browser/content/preferences/cookies.xul",
-               "Browser:Cookies",
-               "modal=yes", null);
+    gSubDialog.open("chrome://browser/content/preferences/cookies.xul");
   },
 
   // CLEAR PRIVATE DATA
@@ -499,8 +500,7 @@ var gPrivacyPane = {
    */
   showClearPrivateDataSettings: function ()
   {
-    openDialog("chrome://browser/content/preferences/sanitize.xul",
-               "modal=yes", null);
+    gSubDialog.open("chrome://browser/content/preferences/sanitize.xul");
   },
 
 
@@ -523,6 +523,7 @@ var gPrivacyPane = {
     // reset the timeSpan pref
     if (aClearEverything)
       ts.value = timeSpanOrig;
+    Services.obs.notifyObservers(null, "clear-private-data", null);
   },
 
   /**

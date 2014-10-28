@@ -4,7 +4,14 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-TEST_DIRS += ['tests']
+XPCSHELL_TESTS_MANIFESTS += [
+    'tests/unit/xpcshell.ini',
+    'tests/unit_cps2/xpcshell.ini',
+]
+
+MOCHITEST_MANIFESTS += [
+    'tests/mochitest/mochitest.ini'
+]
 
 EXTRA_COMPONENTS += [
     'nsContentPrefService.js',
@@ -14,6 +21,9 @@ EXTRA_COMPONENTS += [
 EXTRA_JS_MODULES += [
     'ContentPrefInstance.jsm',
     'ContentPrefService2.jsm',
+    'ContentPrefServiceChild.jsm',
+    'ContentPrefServiceParent.jsm',
     'ContentPrefStore.jsm',
+    'ContentPrefUtils.jsm',
 ]
 

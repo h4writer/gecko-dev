@@ -42,7 +42,7 @@ interface nsISimpleEnumerator;
  * be safely passed to javascript via xpconnect.  Therefore, the "native
  * methods" are not scriptable.
  */
-[scriptable, uuid(272a5020-64f5-485c-a8c4-44b2882ae0a2), builtinclass]
+[scriptable, uuid(dfb5a307-7ecf-41dd-aee2-f1d623459c44), builtinclass]
 interface nsIFile : nsISupports
 {
     /**
@@ -181,6 +181,16 @@ interface nsIFile : nsISupports
     [noscript] void moveToNative(in nsIFile newParentDir, in ACString newName);
 
     /**
+     *  renameTo
+     *
+     *  This method is identical to moveTo except that if this file or directory
+     *  is moved to a a different volume, it fails and returns an error
+     *  (NS_ERROR_FILE_ACCESS_DENIED).
+     *  This object will still point to the old location after renaming.
+     */
+    void renameTo(in nsIFile newParentDir, in AString newName);
+
+    /**
      *  This will try to delete this file.  The 'recursive' flag
      *  must be PR_TRUE to delete directories which are not empty.
      *
@@ -301,10 +311,10 @@ interface nsIFile : nsISupports
     boolean equals(in nsIFile inFile);
 
     /**
-     *  Will determine if inFile is a descendant of this file
-     *  If |recur| is true, look in subdirectories too
+     *  Will determine if inFile is a descendant of this file.
+     *  This routine looks in subdirectories too.
      */
-    boolean contains(in nsIFile inFile, in boolean recur);
+    boolean contains(in nsIFile inFile);
 
     /**
      *  Parent will be null when this is at the top of the volume.

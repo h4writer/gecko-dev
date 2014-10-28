@@ -7,7 +7,7 @@ var gNextRunFunc;
 var gExpectedStatusResult;
 
 function run_test() {
-  setupTestCommon(true);
+  setupTestCommon();
 
   logTestInfo("testing mar download and mar hash verification");
 
@@ -23,11 +23,7 @@ function run_test() {
 
 // The HttpServer must be stopped before calling do_test_finished
 function finish_test() {
-  stop_httpserver(do_test_finished);
-}
-
-function end_test() {
-  cleanupTestCommon();
+  stop_httpserver(doTestFinish);
 }
 
 // Callback function used by the custom XMLHttpRequest implementation to
@@ -39,8 +35,7 @@ function callHandleEvent() {
     var parser = AUS_Cc["@mozilla.org/xmlextras/domparser;1"].
                  createInstance(AUS_Ci.nsIDOMParser);
     gXHR.responseXML = parser.parseFromString(gResponseBody, "application/xml");
-  }
-  catch(e) {
+  } catch(e) {
   }
   var e = { target: gXHR };
   gXHR.onload(e);

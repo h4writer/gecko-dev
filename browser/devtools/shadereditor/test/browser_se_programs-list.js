@@ -1,13 +1,20 @@
 /* Any copyright is dedicated to the Public Domain.
    http://creativecommons.org/publicdomain/zero/1.0/ */
 
+///////////////////
+//
+// Whitelisting this test.
+// As part of bug 1077403, the leaking uncaught rejection should be fixed. 
+//
+thisTestLeaksUncaughtRejectionsAndShouldBeFixed("Error: Shader Editor is still waiting for a WebGL context to be created.");
+
 /**
  * Tests if the programs list contains an entry after vertex and fragment
  * shaders are linked.
  */
 
 function ifWebGLSupported() {
-  let [target, debuggee, panel] = yield initShaderEditor(MULTIPLE_CONTEXTS_URL);
+  let { target, panel } = yield initShaderEditor(MULTIPLE_CONTEXTS_URL);
   let { gFront, EVENTS, L10N, ShadersListView, ShadersEditorsView } = panel.panelWin;
 
   is(ShadersListView.itemCount, 0,
@@ -31,9 +38,9 @@ function ifWebGLSupported() {
     once(panel.panelWin, EVENTS.SOURCES_SHOWN)
   ]).then(([programs, ]) => programs);
 
-  is(ShadersListView.labels[0], L10N.getFormatStr("shadersList.programLabel", 0),
+  is(ShadersListView.attachments[0].label, L10N.getFormatStr("shadersList.programLabel", 0),
     "The correct first label is shown in the shaders list.");
-  is(ShadersListView.labels[1], L10N.getFormatStr("shadersList.programLabel", 1),
+  is(ShadersListView.attachments[1].label, L10N.getFormatStr("shadersList.programLabel", 1),
     "The correct second label is shown in the shaders list.");
 
   let vertexShader = yield firstProgramActor.getVertexShader();

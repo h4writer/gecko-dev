@@ -22,6 +22,10 @@
 #include <mach/mach.h>
 #endif
 
+#if defined(XP_LINUX)
+#include <signal.h>
+#endif
+
 class nsIFile;
 template<class KeyClass, class DataType> class nsDataHashtable;
 class nsCStringHashKey;
@@ -29,6 +33,30 @@ class nsCStringHashKey;
 namespace CrashReporter {
 nsresult SetExceptionHandler(nsIFile* aXREDirectory, bool force=false);
 nsresult UnsetExceptionHandler();
+
+/**
+ * Tell the crash reporter to recalculate where crash events files should go.
+ * SetCrashEventsDir is used before XPCOM is initialized from the startup
+ * code.
+ *
+ * UpdateCrashEventsDir uses the directory service to re-set the
+ * crash event directory based on the current profile.
+ *
+ * 1. If environment variable is present, use it. We don't expect
+ *    the environment variable except for tests and other atypical setups.
+ * 2. <profile>/crashes/events
+ * 3. <UAppData>/Crash Reports/events
+ */
+void SetUserAppDataDirectory(nsIFile* aDir);
+void SetProfileDirectory(nsIFile* aDir);
+void UpdateCrashEventsDir();
+void SetMemoryReportFile(nsIFile* aFile);
+
+/**
+ * Get the path where crash event files should be written.
+ */
+bool     GetCrashEventsDir(nsAString& aPath);
+
 bool     GetEnabled();
 bool     GetServerURL(nsACString& aServerURL);
 nsresult SetServerURL(const nsACString& aServerURL);
@@ -44,6 +72,7 @@ nsresult AppendAppNotesToCrashReport(const nsACString& data);
 
 void AnnotateOOMAllocationSize(size_t size);
 nsresult SetGarbageCollecting(bool collecting);
+void SetEventloopNestingLevel(uint32_t level);
 
 nsresult SetRestartArgs(int argc, char** argv);
 nsresult SetupExtraData(nsIFile* aAppDataDirectory,
@@ -69,6 +98,9 @@ void RenameAdditionalHangMinidump(nsIFile* minidump, nsIFile* childMinidump,
 #ifdef XP_WIN32
   nsresult WriteMinidumpForException(EXCEPTION_POINTERS* aExceptionInfo);
 #endif
+#ifdef XP_LINUX
+  bool WriteMinidumpForSigInfo(int signo, siginfo_t* info, void* uc);
+#endif
 #ifdef XP_MACOSX
   nsresult AppendObjCExceptionInfoToAppNotes(void *inException);
 #endif
@@ -78,7 +110,9 @@ nsresult SetSubmitReports(bool aSubmitReport);
 // Out-of-process crash reporter API.
 
 // Initializes out-of-process crash reporting. This method must be called
-// before the platform-specifi notificationpipe APIs are called.
+// before the platform-specific notification pipe APIs are called. If called
+// from off the main thread, this method will synchronously proxy to the main
+// thread.
 void OOPInit();
 
 // Return true if a dump was found for |childPid|, and return the

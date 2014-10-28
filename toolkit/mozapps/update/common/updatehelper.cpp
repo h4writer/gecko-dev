@@ -22,11 +22,15 @@
 #include <stdio.h>
 #include "shlobj.h"
 #include "updatehelper.h"
+#include "uachelper.h"
 #include "pathhash.h"
+#include "mozilla/UniquePtr.h"
 
 // Needed for PathAppendW
 #include <shlwapi.h>
-#pragma comment(lib, "shlwapi.lib")
+
+using mozilla::MakeUnique;
+using mozilla::UniquePtr;
 
 WCHAR* MakeCommandLine(int argc, WCHAR **argv);
 BOOL PathAppendSafe(LPWSTR base, LPCWSTR extra);
@@ -216,26 +220,66 @@ StartServiceUpdate(LPCWSTR installDir)
     CloseServiceHandle(manager);
     return FALSE;
   }
-  CloseServiceHandle(svc);
-  CloseServiceHandle(manager);
 
   // If we reach here, then the service is installed, so
   // proceed with upgrading it.
 
+  CloseServiceHandle(manager);
+
+  // The service exists and we opened it, get the config bytes needed
+  DWORD bytesNeeded;
+  if (!QueryServiceConfigW(svc, nullptr, 0, &bytesNeeded) &&
+      GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    CloseServiceHandle(svc);
+    return FALSE;
+  }
+
+  // Get the service config information, in particular we want the binary
+  // path of the service.
+  UniquePtr<char[]> serviceConfigBuffer = MakeUnique<char[]>(bytesNeeded);
+  if (!QueryServiceConfigW(svc,
+      reinterpret_cast<QUERY_SERVICE_CONFIGW*>(serviceConfigBuffer.get()),
+      bytesNeeded, &bytesNeeded)) {
+    CloseServiceHandle(svc);
+    return FALSE;
+  }
+
+  CloseServiceHandle(svc);
+
+  QUERY_SERVICE_CONFIGW &serviceConfig =
+    *reinterpret_cast<QUERY_SERVICE_CONFIGW*>(serviceConfigBuffer.get());
+
+  PathUnquoteSpacesW(serviceConfig.lpBinaryPathName);
+
+  // Obtain the temp path of the maintenance service binary
+  WCHAR tmpService[MAX_PATH + 1] = { L'\0' };
+  if (!PathGetSiblingFilePath(tmpService, serviceConfig.lpBinaryPathName,
+                              L"maintenanceservice_tmp.exe")) {
+    return FALSE;
+  }
+
+  // Get the new maintenance service path from the install dir
+  WCHAR newMaintServicePath[MAX_PATH + 1] = { L'\0' };
+  wcsncpy(newMaintServicePath, installDir, MAX_PATH);
+  PathAppendSafe(newMaintServicePath,
+                 L"maintenanceservice.exe");
+
+  // Copy the temp file in alongside the maintenace service.
+  // This is a requirement for maintenance service upgrades.
+  if (!CopyFileW(newMaintServicePath, tmpService, FALSE)) {
+    return FALSE;
+  }
+
+  // Start the upgrade comparison process
   STARTUPINFOW si = {0};
   si.cb = sizeof(STARTUPINFOW);
   // No particular desktop because no UI
   si.lpDesktop = L"";
   PROCESS_INFORMATION pi = {0};
-
-  WCHAR maintserviceInstallerPath[MAX_PATH + 1] = { L'\0' };
-  wcsncpy(maintserviceInstallerPath, installDir, MAX_PATH);
-  PathAppendSafe(maintserviceInstallerPath,
-                 L"maintenanceservice_installer.exe");
   WCHAR cmdLine[64] = { '\0' };
-  wcsncpy(cmdLine, L"dummyparam.exe /Upgrade",
+  wcsncpy(cmdLine, L"dummyparam.exe upgrade",
           sizeof(cmdLine) / sizeof(cmdLine[0]) - 1);
-  BOOL svcUpdateProcessStarted = CreateProcessW(maintserviceInstallerPath,
+  BOOL svcUpdateProcessStarted = CreateProcessW(tmpService,
                                                 cmdLine,
                                                 nullptr, nullptr, FALSE,
                                                 0,
@@ -682,16 +726,20 @@ GetDWORDValue(HKEY key, LPCWSTR valueName, DWORD &retValue)
 
 /**
  * Determines if the the system's elevation type allows
- * unprmopted elevation.  This may not 100% reflect reality since
- * a reboot is necessary to change the UAC level.
+ * unprmopted elevation.
  *
  * @param isUnpromptedElevation Out parameter which specifies if unprompted
  *                              elevation is allowed.
- * @return TRUE if the value was obtained successfully.
+ * @return TRUE if the user can actually elevate and the value was obtained
+ *         successfully.
 */
 BOOL
 IsUnpromptedElevation(BOOL &isUnpromptedElevation)
 {
+  if (!UACHelper::CanUserElevate()) {
+    return FALSE;
+  }
+
   LPCWSTR UACBaseRegKey =
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System";
   HKEY baseKey;
@@ -702,13 +750,12 @@ IsUnpromptedElevation(BOOL &isUnpromptedElevation)
     return FALSE;
   }
 
-  DWORD enabled, consent, secureDesktop;
-  BOOL success = GetDWORDValue(baseKey, L"EnableLUA", enabled);
-  success = success &&
-            GetDWORDValue(baseKey, L"ConsentPromptBehaviorAdmin", consent);
+  DWORD consent, secureDesktop;
+  BOOL success = GetDWORDValue(baseKey, L"ConsentPromptBehaviorAdmin",
+                               consent);
   success = success &&
             GetDWORDValue(baseKey, L"PromptOnSecureDesktop", secureDesktop);
-  isUnpromptedElevation = enabled && !consent && !secureDesktop;
+  isUnpromptedElevation = !consent && !secureDesktop;
 
   RegCloseKey(baseKey);
   return success;

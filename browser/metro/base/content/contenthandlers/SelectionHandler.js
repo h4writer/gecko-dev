@@ -2,6 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+let Ci = Components.interfaces;
+let Cc = Components.classes;
+
 dump("### SelectionHandler.js loaded\n");
 
 var SelectionHandler = {
@@ -115,13 +118,24 @@ var SelectionHandler = {
       return;
     }
 
-    // Similar to _onSelectionStart - we need to create initial selection
-    // but without the initialization bits.
-    let framePoint = this._clientPointToFramePoint({ xPos: aX, yPos: aY });
-    if (!this._domWinUtils.selectAtPoint(framePoint.xPos, framePoint.yPos,
-                                         Ci.nsIDOMWindowUtils.SELECT_CHARACTER)) {
-      this._onFail("failed to set selection at point");
-      return;
+    // Only use selectAtPoint for editable content and avoid that for inputs,
+    // as we can expand caret to selection manually more precisely. We can use
+    // selectAtPoint for inputs too though, but only once bug 881938 is fully
+    // resolved.
+    if(Util.isEditableContent(this._targetElement)) {
+      // Similar to _onSelectionStart - we need to create initial selection
+      // but without the initialization bits.
+      let framePoint = this._clientPointToFramePoint({ xPos: aX, yPos: aY });
+      if (!this._domWinUtils.selectAtPoint(framePoint.xPos, framePoint.yPos,
+                                           Ci.nsIDOMWindowUtils.SELECT_CHARACTER)) {
+        this._onFail("failed to set selection at point");
+        return;
+      }
+    } else if (this._targetElement.selectionStart == 0 || aMarker == "end") {
+      // Expand caret forward or backward depending on direction
+      this._targetElement.selectionEnd++;
+    } else {
+      this._targetElement.selectionStart--;
     }
 
     // We bail if things get out of sync here implying we missed a message.
@@ -175,14 +189,7 @@ var SelectionHandler = {
       return;
     }
 
-    // Update selection in the doc
-    let pos = null;
-    if (aMsg.change == "start") {
-      pos = aMsg.start;
-    } else {
-      pos = aMsg.end;
-    }
-    this._handleSelectionPoint(aMsg.change, pos, false);
+    this._handleSelectionPoint(aMsg, false);
   },
 
   /*
@@ -199,15 +206,7 @@ var SelectionHandler = {
       return;
     }
 
-    // Update selection in the doc
-    let pos = null;
-    if (aMsg.change == "start") {
-      pos = aMsg.start;
-    } else {
-      pos = aMsg.end;
-    }
-
-    this._handleSelectionPoint(aMsg.change, pos, true);
+    this._handleSelectionPoint(aMsg, true);
     this._selectionMoveActive = false;
     
     // _handleSelectionPoint may set a scroll timer, so this must
@@ -297,10 +296,16 @@ var SelectionHandler = {
    * Called any time SelectionHelperUI would like us to
    * recalculate the selection bounds.
    */
-  _onSelectionUpdate: function _onSelectionUpdate() {
+  _onSelectionUpdate: function _onSelectionUpdate(aMsg) {
     if (!this._contentWindow) {
       this._onFail("_onSelectionUpdate was called without proper view set up");
       return;
+    }
+
+    if (aMsg && aMsg.isInitiatedByAPZC) {
+      let {offset: offset} = Content.getCurrentWindowAndOffset(
+        this._targetCoordinates.x, this._targetCoordinates.y);
+      this._contentOffset = offset;
     }
 
     // Update the position of our selection monocles
@@ -384,6 +389,7 @@ var SelectionHandler = {
     this._contentOffset = null;
     this._domWinUtils = null;
     this._targetIsEditable = false;
+    this._targetCoordinates = null;
     sendSyncMessage("Content:HandlerShutdown", {});
   },
 
@@ -406,6 +412,11 @@ var SelectionHandler = {
     this._contentOffset = offset;
     this._domWinUtils = utils;
     this._targetIsEditable = Util.isEditable(this._targetElement);
+    this._targetCoordinates = {
+      x: aX,
+      y: aY
+    };
+
     return true;
   },
 
@@ -436,9 +447,11 @@ var SelectionHandler = {
     // Special case: we are dealing with an input that is taller than the
     // desired height of content. We need to center on the caret location.
     let rect =
-      this._domWinUtils.sendQueryContentEvent(this._domWinUtils.QUERY_CARET_RECT,
-                                              this._targetElement.selectionEnd,
-                                              0, 0, 0);
+      this._domWinUtils.sendQueryContentEvent(
+        this._domWinUtils.QUERY_CARET_RECT,
+        this._targetElement.selectionEnd,
+        0, 0, 0,
+        this._domWinUtils.QUERY_CONTENT_FLAG_USE_XP_LINE_BREAK);
     if (!rect || !rect.succeeded) {
       Util.dumpLn("no caret was present, unexpected.");
       return 0;
@@ -530,7 +543,7 @@ var SelectionHandler = {
         break;
 
       case "Browser:SelectionUpdate":
-        this._onSelectionUpdate();
+        this._onSelectionUpdate(json);
         break;
 
       case "Browser:RepositionInfoRequest":
@@ -596,6 +609,7 @@ var SelectionHandler = {
     }
   },
 };
+this.SelectionHandler = SelectionHandler;
 
 SelectionHandler.__proto__ = new SelectionPrototype();
 SelectionHandler.init();

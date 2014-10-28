@@ -1,4 +1,4 @@
-// -*- Mode: js2; tab-width: 2; indent-tabs-mode: nil; js2-basic-offset: 2; js2-skip-preprocessor-directives: t; -*-
+// -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -67,8 +67,6 @@ var ContextCommands = {
       // content
       if (ContextMenuUI.popupState.string) {
         this.sendCommand("copy");
-
-        SelectionHelperUI.closeEditSession(true);
       }
     } else if (ContextMenuUI.popupState.string) {
       this.clipboard.copyString(ContextMenuUI.popupState.string, this.docRef);
@@ -288,7 +286,7 @@ var ContextCommands = {
   viewPageSource: function cc_viewPageSource() {
     let uri = this.getPageSource();
     if (uri) {
-      BrowserUI.addAndShowTab(uri);
+      BrowserUI.addAndShowTab(uri, Browser.selectedTab);
     }
   },
 

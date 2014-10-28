@@ -8,7 +8,7 @@
 
 #include "mozilla/TextEvents.h"
 #include "mozilla/dom/Element.h"
-#include "nsDOMEvent.h"
+#include "mozilla/dom/Event.h" // for nsIDOMEvent::InternalDOMEvent()
 #include "nsIDOMWindow.h"
 #include "nsPIDOMWindow.h"
 #include "nsIDOMElement.h"
@@ -23,7 +23,7 @@
 using namespace mozilla;
 using namespace mozilla::dom;
 
-NS_IMPL_ISUPPORTS1(nsPrintPreviewListener, nsIDOMEventListener)
+NS_IMPL_ISUPPORTS(nsPrintPreviewListener, nsIDOMEventListener)
 
 
 //
@@ -170,7 +170,7 @@ nsPrintPreviewListener::HandleEvent(nsIDOMEvent* aEvent)
       {
         nsAutoString eventString;
         aEvent->GetType(eventString);
-        if (eventString == NS_LITERAL_STRING("keydown")) {
+        if (eventString.EqualsLiteral("keydown")) {
           // Handle tabbing explicitly here since we don't want focus ending up
           // inside the content document, bug 244128.
           nsIDocument* doc = content->GetCurrentDoc();

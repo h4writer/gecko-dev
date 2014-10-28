@@ -17,6 +17,7 @@
 #include <android/log.h>
 #include "HwcUtils.h"
 #include "gfxUtils.h"
+#include "gfx2DGlue.h"
 
 #define LOG_TAG "HwcUtils"
 
@@ -36,10 +37,12 @@ namespace mozilla {
 
 
 /* static */ bool
-HwcUtils::PrepareLayerRects(nsIntRect aVisible, const gfxMatrix& aTransform,
+HwcUtils::PrepareLayerRects(nsIntRect aVisible, const gfx::Matrix& transform,
                             nsIntRect aClip, nsIntRect aBufferRect,
+                            bool aYFlipped,
                             hwc_rect_t* aSourceCrop, hwc_rect_t* aVisibleRegionScreen) {
 
+    gfxMatrix aTransform = gfx::ThebesMatrix(transform);
     gfxRect visibleRect(aVisible);
     gfxRect clip(aClip);
     gfxRect visibleRectScreen = aTransform.TransformBounds(visibleRect);
@@ -47,11 +50,10 @@ HwcUtils::PrepareLayerRects(nsIntRect aVisible, const gfxMatrix& aTransform,
     visibleRectScreen.IntersectRect(visibleRectScreen, clip);
 
     if (visibleRectScreen.IsEmpty()) {
-        LOGD("Skip layer");
         return false;
     }
 
-    gfxMatrix inverse(aTransform);
+    gfxMatrix inverse = aTransform;
     inverse.Invert();
     gfxRect crop = inverse.TransformBounds(visibleRectScreen);
 
@@ -60,7 +62,6 @@ HwcUtils::PrepareLayerRects(nsIntRect aVisible, const gfxMatrix& aTransform,
     crop.Round();
 
     if (crop.IsEmpty()) {
-        LOGD("Skip layer");
         return false;
     }
 
@@ -70,6 +71,9 @@ HwcUtils::PrepareLayerRects(nsIntRect aVisible, const gfxMatrix& aTransform,
 
     // Map from layer space to buffer space
     crop -= aBufferRect.TopLeft();
+    if (aYFlipped) {
+        crop.y = aBufferRect.height - (crop.y + crop.height);
+    }
 
     aSourceCrop->left = crop.x;
     aSourceCrop->top  = crop.y;
@@ -86,10 +90,11 @@ HwcUtils::PrepareLayerRects(nsIntRect aVisible, const gfxMatrix& aTransform,
 
 /* static */ bool
 HwcUtils::PrepareVisibleRegion(const nsIntRegion& aVisible,
-                               const gfxMatrix& aTransform,
+                               const gfx::Matrix& transform,
                                nsIntRect aClip, nsIntRect aBufferRect,
                                RectVector* aVisibleRegionScreen) {
 
+    gfxMatrix aTransform = gfx::ThebesMatrix(transform);
     nsIntRegionRectIterator rect(aVisible);
     bool isVisible = false;
     while (const nsIntRect* visibleRect = rect.Next()) {
@@ -115,10 +120,11 @@ HwcUtils::PrepareVisibleRegion(const nsIntRegion& aVisible,
 }
 
 /* static */ bool
-HwcUtils::CalculateClipRect(const gfxMatrix& aTransform,
+HwcUtils::CalculateClipRect(const gfx::Matrix& transform,
                             const nsIntRect* aLayerClip,
                             nsIntRect aParentClip, nsIntRect* aRenderClip) {
 
+    gfxMatrix aTransform = gfx::ThebesMatrix(transform);
     *aRenderClip = aParentClip;
 
     if (!aLayerClip) {

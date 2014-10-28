@@ -56,9 +56,11 @@ static NS_DEFINE_CID(kRDFXMLDataSourceCID,  NS_RDFXMLDATASOURCE_CID);
 
 class ConsoleOutputStreamImpl : public nsIOutputStream
 {
+protected:
+    virtual ~ConsoleOutputStreamImpl(void) {}
+
 public:
     ConsoleOutputStreamImpl(void) {}
-    virtual ~ConsoleOutputStreamImpl(void) {}
 
     // nsISupports interface
     NS_DECL_ISUPPORTS
@@ -98,7 +100,7 @@ public:
     }
 };
 
-NS_IMPL_ISUPPORTS1(ConsoleOutputStreamImpl, nsIOutputStream)
+NS_IMPL_ISUPPORTS(ConsoleOutputStreamImpl, nsIOutputStream)
 
 ////////////////////////////////////////////////////////////////////////
 

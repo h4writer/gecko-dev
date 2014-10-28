@@ -14,6 +14,7 @@
 #include "nsHashKeys.h"
 
 #include "cairo.h"
+#include "usp10.h"
 
 class gfxGDIFont : public gfxFont
 {
@@ -33,8 +34,6 @@ public:
     cairo_scaled_font_t *CairoScaledFont() { return mScaledFont; }
 
     /* overrides for the pure virtual methods in gfxFont */
-    virtual const gfxFont::Metrics& GetMetrics();
-
     virtual uint32_t GetSpaceGlyph();
 
     virtual bool SetupCairoFont(gfxContext *aContext);
@@ -44,12 +43,21 @@ public:
                                uint32_t aStart, uint32_t aEnd,
                                BoundingBoxType aBoundingBoxType,
                                gfxContext *aContextForTightBoundingBox,
-                               Spacing *aSpacing);
+                               Spacing *aSpacing,
+                               uint16_t aOrientation);
 
     /* required for MathML to suppress effects of ClearType "padding" */
     virtual gfxFont* CopyWithAntialiasOption(AntialiasOption anAAOption);
 
-    virtual bool ProvidesGlyphWidths() { return true; }
+    // If the font has a cmap table, we handle it purely with harfbuzz;
+    // but if not (e.g. .fon fonts), we'll use a GDI callback to get glyphs.
+    virtual bool ProvidesGetGlyph() const {
+        return !mFontEntry->HasCmapTable();
+    }
+
+    virtual uint32_t GetGlyph(uint32_t aUnicode, uint32_t aVarSelector);
+
+    virtual bool ProvidesGlyphWidths() const { return true; }
 
     // get hinted glyph width in pixels as 16.16 fixed-point value
     virtual int32_t GetGlyphWidth(gfxContext *aCtx, uint16_t aGID);
@@ -62,16 +70,16 @@ public:
     virtual FontType GetType() const { return FONT_TYPE_GDI; }
 
 protected:
-    virtual void CreatePlatformShaper();
+    virtual const Metrics& GetHorizontalMetrics();
 
-    /* override to check for uniscribe failure and fall back to GDI */
-    virtual bool ShapeText(gfxContext      *aContext,
-                           const PRUnichar *aText,
-                           uint32_t         aOffset,
-                           uint32_t         aLength,
-                           int32_t          aScript,
-                           gfxShapedText   *aShapedText,
-                           bool             aPreferPlatformShaping);
+    /* override to ensure the cairo font is set up properly */
+    virtual bool ShapeText(gfxContext     *aContext,
+                           const char16_t *aText,
+                           uint32_t        aOffset,
+                           uint32_t        aLength,
+                           int32_t         aScript,
+                           bool            aVertical,
+                           gfxShapedText  *aShapedText);
 
     void Initialize(); // creates metrics and Cairo fonts
 
@@ -80,10 +88,6 @@ protected:
     // italics.
     void FillLogFont(LOGFONTW& aLogFont, gfxFloat aSize, bool aUseGDIFakeItalic);
 
-    // mPlatformShaper is used for the GDI shaper, mUniscribeShaper
-    // for the Uniscribe version if needed
-    nsAutoPtr<gfxFontShaper>   mUniscribeShaper;
-
     HFONT                 mFont;
     cairo_font_face_t    *mFontFace;
 
@@ -91,6 +95,10 @@ protected:
     uint32_t              mSpaceGlyph;
 
     bool                  mNeedsBold;
+
+    // cache of glyph IDs (used for non-sfnt fonts only)
+    nsAutoPtr<nsDataHashtable<nsUint32HashKey,uint32_t> > mGlyphIDs;
+    SCRIPT_CACHE          mScriptCache;
 
     // cache of glyph widths in 16.16 fixed-point pixels
     nsAutoPtr<nsDataHashtable<nsUint32HashKey,int32_t> > mGlyphWidths;

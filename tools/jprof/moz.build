@@ -6,7 +6,7 @@
 
 DIRS += ['stub']
 
-PROGRAM = 'jprof'
+Program('jprof')
 
 SOURCES += [
     'bfd.cpp',
@@ -15,4 +15,14 @@ SOURCES += [
     'intcnt.cpp',
     'leaky.cpp',
     'strset.cpp',
+]
+
+LOCAL_INCLUDES += [
+    'stub',
+]
+
+OS_LIBS += [
+    'dl',
+    'bfd',
+    'iberty',
 ]

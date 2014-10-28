@@ -11,12 +11,7 @@
 
 extern "C" {
 #include <gtk/gtk.h>
-#if (MOZ_WIDGET_GTK == 2)
-#include <gtk/gtkprinter.h>
-#include <gtk/gtkprintjob.h>
-#else
 #include <gtk/gtkunixprint.h>
-#endif
 }
 
 #define NS_PRINTSETTINGSGTK_IID \
@@ -34,7 +29,6 @@ public:
   NS_DECLARE_STATIC_IID_ACCESSOR(NS_PRINTSETTINGSGTK_IID)
 
   nsPrintSettingsGTK();
-  virtual ~nsPrintSettingsGTK();
 
   // We're overriding these methods because we want to read/write with GTK objects,
   // not local variables. This allows a simpler settings implementation between
@@ -74,13 +68,13 @@ public:
   NS_IMETHOD GetOrientation(int32_t *aOrientation);
   NS_IMETHOD SetOrientation(int32_t aOrientation);
 
-  NS_IMETHOD GetToFileName(PRUnichar * *aToFileName);
-  NS_IMETHOD SetToFileName(const PRUnichar * aToFileName);
+  NS_IMETHOD GetToFileName(char16_t * *aToFileName);
+  NS_IMETHOD SetToFileName(const char16_t * aToFileName);
 
   // Gets/Sets the printer name in the GtkPrintSettings. If no printer name is specified there,
   // you will get back the name of the current internal GtkPrinter.
-  NS_IMETHOD GetPrinterName(PRUnichar * *aPrinter);
-  NS_IMETHOD SetPrinterName(const PRUnichar * aPrinter);
+  NS_IMETHOD GetPrinterName(char16_t * *aPrinter);
+  NS_IMETHOD SetPrinterName(const char16_t * aPrinter);
 
   // Number of copies is stored/gotten from the GtkPrintSettings.
   NS_IMETHOD GetNumCopies(int32_t *aNumCopies);
@@ -90,8 +84,8 @@ public:
   NS_IMETHOD SetScaling(double aScaling);
 
   // A name recognised by GTK is strongly advised here, as this is used to create a GtkPaperSize.
-  NS_IMETHOD GetPaperName(PRUnichar * *aPaperName);
-  NS_IMETHOD SetPaperName(const PRUnichar * aPaperName);
+  NS_IMETHOD GetPaperName(char16_t * *aPaperName);
+  NS_IMETHOD SetPaperName(const char16_t * aPaperName);
 
   NS_IMETHOD SetUnwriteableMarginInTwips(nsIntMargin& aUnwriteableMargin);
   NS_IMETHOD SetUnwriteableMarginTop(double aUnwriteableMarginTop);
@@ -120,6 +114,8 @@ public:
   NS_IMETHOD SetDuplex(int32_t aDuplex);
 
 protected:
+  virtual ~nsPrintSettingsGTK();
+
   nsPrintSettingsGTK(const nsPrintSettingsGTK& src);
   nsPrintSettingsGTK& operator=(const nsPrintSettingsGTK& rhs);
 

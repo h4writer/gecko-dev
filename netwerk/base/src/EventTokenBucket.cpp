@@ -34,16 +34,17 @@ public:
   NS_DECL_THREADSAFE_ISUPPORTS
   NS_DECL_NSICANCELABLE
 
-  TokenBucketCancelable(class ATokenBucketEvent *event);
-  virtual ~TokenBucketCancelable() {}
+  explicit TokenBucketCancelable(class ATokenBucketEvent *event);
   void Fire();
 
 private:
+  virtual ~TokenBucketCancelable() {}
+
   friend class EventTokenBucket;
   ATokenBucketEvent *mEvent;
 };
 
-NS_IMPL_ISUPPORTS1(TokenBucketCancelable, nsICancelable)
+NS_IMPL_ISUPPORTS(TokenBucketCancelable, nsICancelable)
 
 TokenBucketCancelable::TokenBucketCancelable(ATokenBucketEvent *event)
   : mEvent(event)
@@ -73,7 +74,7 @@ TokenBucketCancelable::Fire()
 // EventTokenBucket
 ////////////////////////////////////////////
 
-NS_IMPL_ISUPPORTS1(EventTokenBucket, nsITimerCallback)
+NS_IMPL_ISUPPORTS(EventTokenBucket, nsITimerCallback)
 
 // by default 1hz with no burst
 EventTokenBucket::EventTokenBucket(uint32_t eventsPerSecond,
@@ -228,7 +229,7 @@ EventTokenBucket::SubmitEvent(ATokenBucketEvent *event, nsICancelable **cancelab
   if (mPaused || !TryImmediateDispatch(cancelEvent.get())) {
     // queue it
     SOCKET_LOG(("   queued\n"));
-    mEvents.Push(cancelEvent.forget().get());
+    mEvents.Push(cancelEvent.forget().take());
     UpdateTimer();
   }
   else {

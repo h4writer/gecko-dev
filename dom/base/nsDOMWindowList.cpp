@@ -38,8 +38,7 @@ NS_INTERFACE_MAP_END
 NS_IMETHODIMP
 nsDOMWindowList::SetDocShell(nsIDocShell* aDocShell)
 {
-  nsCOMPtr<nsIDocShellTreeNode> docShellAsNode(do_QueryInterface(aDocShell));
-  mDocShellNode = docShellAsNode; // Weak Reference
+  mDocShellNode = aDocShell; // Weak Reference
 
   return NS_OK;
 }
@@ -92,7 +91,7 @@ nsDOMWindowList::IndexedGetter(uint32_t aIndex, bool& aFound)
     return nullptr;
   }
 
-  nsCOMPtr<nsIDOMWindow> window = do_GetInterface(item);
+  nsCOMPtr<nsIDOMWindow> window = item->GetWindow();
   MOZ_ASSERT(window);
 
   aFound = true;

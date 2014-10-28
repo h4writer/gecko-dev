@@ -36,9 +36,7 @@
  */
 
 #include <map>
-#include "SharedPtr.h"
 #include "prlock.h"
-#include "base/lock.h"
 #include "mozilla/Assertions.h"
 
 /*
@@ -71,7 +69,7 @@ private:
 
 class AutoLockNSPR {
 public:
-  AutoLockNSPR(LockNSPR& lock) : lock_(lock) {
+  explicit AutoLockNSPR(LockNSPR& lock) : lock_(lock) {
     lock_.Acquire();
   }
   ~AutoLockNSPR() {

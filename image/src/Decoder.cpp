@@ -20,6 +20,7 @@ Decoder::Decoder(RasterImage &aImage)
   , mImageData(nullptr)
   , mColormap(nullptr)
   , mDecodeFlags(0)
+  , mBytesDecoded(0)
   , mDecodeDone(false)
   , mDataError(false)
   , mFrameCount(0)
@@ -29,7 +30,6 @@ Decoder::Decoder(RasterImage &aImage)
   , mSizeDecode(false)
   , mInFrame(false)
   , mIsAnimated(false)
-  , mSynchronous(false)
 {
 }
 
@@ -86,13 +86,19 @@ Decoder::InitSharedDecoder(uint8_t* imageData, uint32_t imageDataLength,
 }
 
 void
-Decoder::Write(const char* aBuffer, uint32_t aCount)
+Decoder::Write(const char* aBuffer, uint32_t aCount, DecodeStrategy aStrategy)
 {
-  PROFILER_LABEL("ImageDecoder", "Write");
+  PROFILER_LABEL("ImageDecoder", "Write",
+    js::ProfileEntry::Category::GRAPHICS);
+
+  MOZ_ASSERT(NS_IsMainThread() || aStrategy == DECODE_ASYNC);
 
   // We're strict about decoder errors
-  NS_ABORT_IF_FALSE(!HasDecoderError(),
-                    "Not allowed to make more decoder calls after error!");
+  MOZ_ASSERT(!HasDecoderError(),
+             "Not allowed to make more decoder calls after error!");
+
+  // Keep track of the total number of bytes written.
+  mBytesDecoded += aCount;
 
   // If a data error occured, just ignore future data
   if (HasDataError())
@@ -104,16 +110,16 @@ Decoder::Write(const char* aBuffer, uint32_t aCount)
   }
 
   // Pass the data along to the implementation
-  WriteInternal(aBuffer, aCount);
+  WriteInternal(aBuffer, aCount, aStrategy);
 
   // If we're a synchronous decoder and we need a new frame to proceed, let's
   // create one and call it again.
-  while (mSynchronous && NeedsNewFrame() && !HasDataError()) {
+  while (aStrategy == DECODE_SYNC && NeedsNewFrame() && !HasDataError()) {
     nsresult rv = AllocateFrame();
 
     if (NS_SUCCEEDED(rv)) {
       // Tell the decoder to use the data it saved when it asked for a new frame.
-      WriteInternal(nullptr, 0);
+      WriteInternal(nullptr, 0, aStrategy);
     }
   }
 }
@@ -121,6 +127,8 @@ Decoder::Write(const char* aBuffer, uint32_t aCount)
 void
 Decoder::Finish(RasterImage::eShutdownIntent aShutdownIntent)
 {
+  MOZ_ASSERT(NS_IsMainThread());
+
   // Implementation-specific finalization
   if (!HasError())
     FinishInternal();
@@ -153,7 +161,7 @@ Decoder::Finish(RasterImage::eShutdownIntent aShutdownIntent)
       }
     }
 
-    bool usable = true;
+    bool usable = !HasDecoderError();
     if (aShutdownIntent != RasterImage::eShutdownIntent_NotNeeded && !HasDecoderError()) {
       // If we only have a data error, we're usable if we have at least one complete frame.
       if (GetCompleteFrameCount() == 0) {
@@ -186,6 +194,8 @@ Decoder::Finish(RasterImage::eShutdownIntent aShutdownIntent)
 void
 Decoder::FinishSharedDecoder()
 {
+  MOZ_ASSERT(NS_IsMainThread());
+
   if (!HasError()) {
     FinishInternal();
   }
@@ -197,22 +207,22 @@ Decoder::AllocateFrame()
   MOZ_ASSERT(mNeedsNewFrame);
   MOZ_ASSERT(NS_IsMainThread());
 
-  MarkFrameDirty();
-
   nsresult rv;
-  imgFrame* frame = nullptr;
+  nsRefPtr<imgFrame> frame;
   if (mNewFrameData.mPaletteDepth) {
     rv = mImage.EnsureFrame(mNewFrameData.mFrameNum, mNewFrameData.mOffsetX,
                             mNewFrameData.mOffsetY, mNewFrameData.mWidth,
                             mNewFrameData.mHeight, mNewFrameData.mFormat,
                             mNewFrameData.mPaletteDepth,
                             &mImageData, &mImageDataLength,
-                            &mColormap, &mColormapSize, &frame);
+                            &mColormap, &mColormapSize,
+                            getter_AddRefs(frame));
   } else {
     rv = mImage.EnsureFrame(mNewFrameData.mFrameNum, mNewFrameData.mOffsetX,
                             mNewFrameData.mOffsetY, mNewFrameData.mWidth,
                             mNewFrameData.mHeight, mNewFrameData.mFormat,
-                            &mImageData, &mImageDataLength, &frame);
+                            &mImageData, &mImageDataLength,
+                            getter_AddRefs(frame));
   }
 
   if (NS_SUCCEEDED(rv)) {
@@ -280,7 +290,7 @@ Decoder::SetSizeOnImage()
  */
 
 void Decoder::InitInternal() { }
-void Decoder::WriteInternal(const char* aBuffer, uint32_t aCount) { }
+void Decoder::WriteInternal(const char* aBuffer, uint32_t aCount, DecodeStrategy aStrategy) { }
 void Decoder::FinishInternal() { }
 
 /*
@@ -415,7 +425,7 @@ Decoder::PostDecoderError(nsresult aFailureCode)
 void
 Decoder::NeedNewFrame(uint32_t framenum, uint32_t x_offset, uint32_t y_offset,
                       uint32_t width, uint32_t height,
-                      gfxImageFormat format,
+                      gfx::SurfaceFormat format,
                       uint8_t palette_depth /* = 0 */)
 {
   // Decoders should never call NeedNewFrame without yielding back to Write().
@@ -426,16 +436,6 @@ Decoder::NeedNewFrame(uint32_t framenum, uint32_t x_offset, uint32_t y_offset,
 
   mNewFrameData = NewFrameData(framenum, x_offset, y_offset, width, height, format, palette_depth);
   mNeedsNewFrame = true;
-}
-
-void
-Decoder::MarkFrameDirty()
-{
-  MOZ_ASSERT(NS_IsMainThread());
-
-  if (mCurrentFrame) {
-    mCurrentFrame->ApplyDirtToSurfaces();
-  }
 }
 
 } // namespace image

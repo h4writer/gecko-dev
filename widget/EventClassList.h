@@ -22,10 +22,10 @@ NS_EVENT_CLASS(Internal, UIEvent)
 
 // TextEvents.h
 NS_EVENT_CLASS(Widget, KeyboardEvent)
-NS_EVENT_CLASS(Widget, TextEvent)
 NS_EVENT_CLASS(Widget, CompositionEvent)
 NS_EVENT_CLASS(Widget, QueryContentEvent)
 NS_EVENT_CLASS(Widget, SelectionEvent)
+NS_EVENT_CLASS(Internal, EditorInputEvent)
 
 // MouseEvents.h
 NS_EVENT_CLASS(Widget, MouseEventBase)
@@ -41,7 +41,6 @@ NS_EVENT_CLASS(Widget, SimpleGestureEvent)
 NS_EVENT_CLASS(Widget, TouchEvent)
 
 // ContentEvents.h
-NS_EVENT_CLASS(Internal, ScriptErrorEvent)
 NS_EVENT_CLASS(Internal, ScrollPortEvent)
 NS_EVENT_CLASS(Internal, ScrollAreaEvent)
 NS_EVENT_CLASS(Internal, FormEvent)
@@ -49,11 +48,13 @@ NS_EVENT_CLASS(Internal, ClipboardEvent)
 NS_EVENT_CLASS(Internal, FocusEvent)
 NS_EVENT_CLASS(Internal, TransitionEvent)
 NS_EVENT_CLASS(Internal, AnimationEvent)
+NS_EVENT_CLASS(Internal, SVGZoomEvent)
+NS_EVENT_CLASS(Internal, SMILTimeEvent)
 
 // MiscEvents.h
 NS_EVENT_CLASS(Widget, CommandEvent)
 NS_EVENT_CLASS(Widget, ContentCommandEvent)
 NS_EVENT_CLASS(Widget, PluginEvent)
 
-// MutationEvent.h (content/events/public)
+// InternalMutationEvent.h (dom/events)
 NS_EVENT_CLASS(Internal, MutationEvent)

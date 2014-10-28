@@ -4,8 +4,12 @@
 
 let Ci = Components.interfaces, Cc = Components.classes, Cu = Components.utils;
 
+Cu.import("resource://gre/modules/Messaging.jsm");
 Cu.import("resource://gre/modules/Services.jsm")
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "UITelemetry",
+                                  "resource://gre/modules/UITelemetry.jsm");
 
 XPCOMUtils.defineLazyGetter(window, "gChromeWin", function ()
   window.QueryInterface(Ci.nsIInterfaceRequestor)
@@ -29,11 +33,10 @@ let AboutReader = function(doc, win) {
   this._winRef = Cu.getWeakReference(win);
 
   Services.obs.addObserver(this, "Reader:FaviconReturn", false);
-  Services.obs.addObserver(this, "Reader:Add", false);
-  Services.obs.addObserver(this, "Reader:Remove", false);
-  Services.obs.addObserver(this, "Reader:ListCountReturn", false);
-  Services.obs.addObserver(this, "Reader:ListCountUpdated", false);
+  Services.obs.addObserver(this, "Reader:Added", false);
+  Services.obs.addObserver(this, "Reader:Removed", false);
   Services.obs.addObserver(this, "Reader:ListStatusReturn", false);
+  Services.obs.addObserver(this, "Gesture:DoubleTap", false);
 
   this._article = null;
 
@@ -59,9 +62,10 @@ let AboutReader = function(doc, win) {
   win.addEventListener("popstate", this, false);
   win.addEventListener("resize", this, false);
 
+  doc.addEventListener("visibilitychange", this, false);
+
   this._setupAllDropdowns();
   this._setupButton("toggle-button", this._onReaderToggle.bind(this));
-  this._setupButton("list-button", this._onList.bind(this));
   this._setupButton("share-button", this._onShare.bind(this));
 
   let colorSchemeOptions = [
@@ -123,11 +127,6 @@ let AboutReader = function(doc, win) {
   // Track status of reader toolbar add/remove toggle button
   this._isReadingListItem = -1;
   this._updateToggleButton();
-
-  // Track status of reader toolbar list button
-  this._readingListCount = -1;
-  this._updateListButton();
-  this._requestReadingListCount();
 
   let url = queryArgs.url;
   let tabId = queryArgs.tabId;
@@ -191,9 +190,9 @@ AboutReader.prototype = {
         break;
       }
 
-      case "Reader:Add": {
-        let args = JSON.parse(aData);
-        if (args.url == this._article.url) {
+      case "Reader:Added": {
+        // Page can be added by long-press pageAction, or by tap on banner icon.
+        if (aData == this._article.url) {
           if (this._isReadingListItem != 1) {
             this._isReadingListItem = 1;
             this._updateToggleButton();
@@ -202,32 +201,11 @@ AboutReader.prototype = {
         break;
       }
 
-      case "Reader:Remove": {
+      case "Reader:Removed": {
         if (aData == this._article.url) {
           if (this._isReadingListItem != 0) {
             this._isReadingListItem = 0;
             this._updateToggleButton();
-          }
-        }
-        break;
-      }
-
-      case "Reader:ListCountReturn":
-      case "Reader:ListCountUpdated": {
-        let count = parseInt(aData);
-        if (this._readingListCount != count) {
-          let isInitialStateChange = (this._readingListCount == -1);
-          this._readingListCount = count;
-          this._updateListButton();
-
-          // Display the toolbar when all its initial component states are known
-          if (isInitialStateChange) {
-            this._setToolbarVisibility(true);
-          }
-
-          // Initial readinglist count is requested before any page is displayed
-          if (this._article) {
-            this._requestReadingListStatus();
           }
         }
         break;
@@ -249,6 +227,19 @@ AboutReader.prototype = {
         }
         break;
       }
+
+      case "Gesture:DoubleTap": {
+        let args = JSON.parse(aData);
+        let scrollBy;
+        // Arbitary choice of innerHeight - 50 to give some context after scroll
+        if (args.y < (this._win.innerHeight / 2)) {
+          scrollBy = -this._win.innerHeight + 50;
+        } else {
+          scrollBy = this._win.innerHeight - 50;
+        }
+        this._scrollPage(scrollBy);
+        break;
+      }
     }
   },
 
@@ -266,8 +257,9 @@ AboutReader.prototype = {
         break;
       case "scroll":
         if (!this._scrolled) {
-          this._scrolled = true;
-          this._setToolbarVisibility(false);
+          let isScrollingUp = this._scrollOffset > aEvent.pageY;
+          this._setToolbarVisibility(isScrollingUp);
+          this._scrollOffset = aEvent.pageY;
         }
         break;
       case "popstate":
@@ -282,14 +274,28 @@ AboutReader.prototype = {
         this._handleDeviceLight(aEvent.value);
         break;
 
+      case "visibilitychange":
+        this._handleVisibilityChange();
+        break;
+
       case "unload":
-        Services.obs.removeObserver(this, "Reader:Add");
-        Services.obs.removeObserver(this, "Reader:Remove");
-        Services.obs.removeObserver(this, "Reader:ListCountReturn");
-        Services.obs.removeObserver(this, "Reader:ListCountUpdated");
+        Services.obs.removeObserver(this, "Reader:Added");
+        Services.obs.removeObserver(this, "Reader:Removed");
         Services.obs.removeObserver(this, "Reader:ListStatusReturn");
+        Services.obs.removeObserver(this, "Gesture:DoubleTap");
         break;
     }
+  },
+
+  _scrollPage: function Reader_scrollPage(scrollByPixels) {
+    let viewport = BrowserApp.selectedTab.getViewport();
+    let newY = Math.min(Math.max(viewport.cssY + scrollByPixels, viewport.cssPageTop), viewport.cssPageBottom);
+    let newRect = new Rect(viewport.cssX, newY, viewport.cssWidth, viewport.cssHeight);
+
+    this._setToolbarVisibility(false);
+    this._setBrowserToolbarVisiblity(false);
+    this._scrolled  = true;
+    ZoomHelper.zoomToRect(newRect, -1);
   },
 
   _updateToggleButton: function Reader_updateToggleButton() {
@@ -302,22 +308,8 @@ AboutReader.prototype = {
     }
   },
 
-  _updateListButton: function Reader_updateListButton() {
-    let classes = this._doc.getElementById("list-button").classList;
-
-    if (this._readingListCount > 0) {
-      classes.add("on");
-    } else {
-      classes.remove("on");
-    }
-  },
-
-  _requestReadingListCount: function Reader_requestReadingListCount() {
-    gChromeWin.sendMessageToJava({ type: "Reader:ListCountRequest" });
-  },
-
   _requestReadingListStatus: function Reader_requestReadingListStatus() {
-    gChromeWin.sendMessageToJava({
+    Messaging.sendRequest({
       type: "Reader:ListStatusRequest",
       url: this._article.url
     });
@@ -327,56 +319,47 @@ AboutReader.prototype = {
     if (!this._article)
       return;
 
-    this._isReadingListItem = (this._isReadingListItem == 1) ? 0 : 1;
-    this._updateToggleButton();
-
-    if (this._isReadingListItem == 1) {
+    if (this._isReadingListItem == 0) {
+      let uptime = UITelemetry.uptimeMillis();
       gChromeWin.Reader.storeArticleInCache(this._article, function(success) {
-        dump("Reader:Add (in reader) success=" + success);
-
-        let result = (success ? gChromeWin.Reader.READER_ADD_SUCCESS :
-            gChromeWin.Reader.READER_ADD_FAILED);
+        let result = gChromeWin.Reader.READER_ADD_FAILED;
+        if (success) {
+          result = gChromeWin.Reader.READER_ADD_SUCCESS;
+          UITelemetry.addEvent("save.1", "button", uptime, "reader");
+        }
 
         let json = JSON.stringify({ fromAboutReader: true, url: this._article.url });
-        Services.obs.notifyObservers(null, "Reader:Add", json);
 
-        gChromeWin.sendMessageToJava({
-          type: "Reader:Added",
+        Messaging.sendRequest({
+          type: "Reader:AddToList",
           result: result,
           title: this._article.title,
           url: this._article.url,
+          length: this._article.length,
+          excerpt: this._article.excerpt
         });
       }.bind(this));
     } else {
-      gChromeWin.Reader.removeArticleFromCache(this._article.url , function(success) {
-        dump("Reader:Remove (in reader) success=" + success);
+      Messaging.sendRequest({
+        type: "Reader:RemoveFromList",
+        url: this._article.url
+      });
 
-        Services.obs.notifyObservers(null, "Reader:Remove", this._article.url);
-
-        gChromeWin.sendMessageToJava({
-          type: "Reader:Removed",
-          url: this._article.url
-        });
-      }.bind(this));
+      UITelemetry.addEvent("unsave.1", "button", null, "reader");
     }
-  },
-
-  _onList: function Reader_onList() {
-    if (!this._article || this._readingListCount < 1)
-      return;
-
-    gChromeWin.sendMessageToJava({ type: "Reader:GoToReadingList" });
   },
 
   _onShare: function Reader_onShare() {
     if (!this._article)
       return;
 
-    gChromeWin.sendMessageToJava({
+    Messaging.sendRequest({
       type: "Reader:Share",
       url: this._article.url,
       title: this._article.title
     });
+
+    UITelemetry.addEvent("share.1", "list", null);
   },
 
   _setFontSize: function Reader_setFontSize(newFontSize) {
@@ -417,6 +400,29 @@ AboutReader.prototype = {
     this._totalLux -= oldLux;
   },
 
+  _handleVisibilityChange: function Reader_handleVisibilityChange() {
+    let colorScheme = Services.prefs.getCharPref("reader.color_scheme");
+    if (colorScheme != "auto") {
+      return;
+    }
+
+    // Turn off the ambient light sensor if the page is hidden
+    this._enableAmbientLighting(!this._doc.hidden);
+  },
+
+  // Setup or teardown the ambient light tracking system.
+  _enableAmbientLighting: function Reader_enableAmbientLighting(enable) {
+    if (enable) {
+      this._win.addEventListener("devicelight", this, false);
+      this._luxValues = [];
+      this._totalLux = 0;
+    } else {
+      this._win.removeEventListener("devicelight", this, false);
+      delete this._luxValues;
+      delete this._totalLux;
+    }
+  },
+
   _updateColorScheme: function Reader_updateColorScheme(luxValue) {
     // Upper bound value for "dark" color scheme beyond which it changes to "light".
     let upperBoundDark = 50;
@@ -437,7 +443,8 @@ AboutReader.prototype = {
   },
 
   _setColorScheme: function Reader_setColorScheme(newColorScheme) {
-    if (this._colorScheme === newColorScheme)
+    // "auto" is not a real color scheme
+    if (this._colorScheme === newColorScheme || newColorScheme === "auto")
       return;
 
     let bodyClasses = this._doc.body.classList;
@@ -452,16 +459,8 @@ AboutReader.prototype = {
   // Pref values include "dark", "light", and "auto", which automatically switches
   // between light and dark color schemes based on the ambient light level.
   _setColorSchemePref: function Reader_setColorSchemePref(colorSchemePref) {
-    if (colorSchemePref === "auto") {
-      this._win.addEventListener("devicelight", this, false);
-      this._luxValues = [];
-      this._totalLux = 0;
-    } else {
-      this._win.removeEventListener("devicelight", this, false);
-      this._setColorScheme(colorSchemePref);
-      delete this._luxValues;
-      delete this._totalLux;
-    }
+    this._enableAmbientLighting(colorSchemePref === "auto");
+    this._setColorScheme(colorSchemePref);
 
     Services.prefs.setCharPref("reader.color_scheme", colorSchemePref);
   },
@@ -494,13 +493,14 @@ AboutReader.prototype = {
       return;
 
     // Don't allow visible toolbar until banner state is known
-    if (this._readingListCount == -1 || this._isReadingListItem == -1)
+    if (this._isReadingListItem == -1)
       return;
 
     if (this._getToolbarVisibility() === visible)
       return;
 
     this._toolbarElement.classList.toggle("toolbar-hidden");
+    this._setSystemUIVisibility(visible);
 
     if (!visible && !this._hasUsedToolbar) {
       this._hasUsedToolbar = Services.prefs.getBoolPref("reader.has_used_toolbar");
@@ -513,8 +513,22 @@ AboutReader.prototype = {
     }
   },
 
-  _toggleToolbarVisibility: function Reader_toggleToolbarVisibility(visible) {
+  _toggleToolbarVisibility: function Reader_toggleToolbarVisibility() {
     this._setToolbarVisibility(!this._getToolbarVisibility());
+  },
+
+  _setBrowserToolbarVisiblity: function Reader_setBrowserToolbarVisiblity(visible) {
+    Messaging.sendRequest({
+      type: "BrowserToolbar:Visibility",
+      visible: visible
+    });
+  },
+
+  _setSystemUIVisibility: function Reader_setSystemUIVisibility(visible) {
+    Messaging.sendRequest({
+      type: "SystemUI:Visibility",
+      visible: visible
+    });
   },
 
   _loadFromURL: function Reader_loadFromURL(url) {
@@ -524,7 +538,7 @@ AboutReader.prototype = {
       if (article)
         this._showContent(article);
       else
-        this._showError(gStrings.GetStringFromName("aboutReader.loadError"));
+        this._win.location.href = url;
     }.bind(this));
   },
 
@@ -540,7 +554,7 @@ AboutReader.prototype = {
   },
 
   _requestFavicon: function Reader_requestFavicon() {
-    gChromeWin.sendMessageToJava({
+    Messaging.sendRequest({
       type: "Reader:FaviconRequest",
       url: this._article.url
     });
@@ -735,6 +749,10 @@ AboutReader.prototype = {
           return;
 
         aEvent.stopPropagation();
+
+        // Just pass the ID of the button as an extra and hope the ID doesn't change
+        // unless the context changes
+        UITelemetry.addEvent("action.1", "button", null, id);
 
         let items = segmentedButton.children;
         for (let j = items.length - 1; j >= 0; j--) {

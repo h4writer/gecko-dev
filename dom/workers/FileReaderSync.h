@@ -9,8 +9,6 @@
 
 #include "Workers.h"
 
-#include "nsICharsetDetectionObserver.h"
-
 class nsIInputStream;
 class nsIDOMBlob;
 
@@ -18,6 +16,7 @@ namespace mozilla {
 class ErrorResult;
 
 namespace dom {
+class File;
 class GlobalObject;
 template<typename> class Optional;
 }
@@ -25,34 +24,32 @@ template<typename> class Optional;
 
 BEGIN_WORKERS_NAMESPACE
 
-class FileReaderSync MOZ_FINAL : public nsICharsetDetectionObserver
+class FileReaderSync MOZ_FINAL
 {
-  nsCString mCharset;
+  NS_INLINE_DECL_REFCOUNTING(FileReaderSync)
+
+private:
+  // Private destructor, to discourage deletion outside of Release():
+  ~FileReaderSync()
+  {
+  }
+
   nsresult ConvertStream(nsIInputStream *aStream, const char *aCharset,
                          nsAString &aResult);
-  nsresult GuessCharset(nsIInputStream *aStream, nsACString &aCharset);
 
 public:
   static already_AddRefed<FileReaderSync>
   Constructor(const GlobalObject& aGlobal, ErrorResult& aRv);
 
-  JSObject* WrapObject(JSContext* aCx, JS::Handle<JSObject*> aScope);
+  JSObject* WrapObject(JSContext* aCx);
 
-  NS_DECL_ISUPPORTS
-
-  JSObject* ReadAsArrayBuffer(JSContext* aCx, JS::Handle<JSObject*> aScopeObj,
-                              JS::Handle<JSObject*> aBlob,
-                              ErrorResult& aRv);
-  void ReadAsBinaryString(JS::Handle<JSObject*> aBlob, nsAString& aResult,
-                          ErrorResult& aRv);
-  void ReadAsText(JS::Handle<JSObject*> aBlob,
-                  const Optional<nsAString>& aEncoding,
+  void ReadAsArrayBuffer(JSContext* aCx, JS::Handle<JSObject*> aScopeObj,
+                         File& aBlob, JS::MutableHandle<JSObject*> aRetval,
+                         ErrorResult& aRv);
+  void ReadAsBinaryString(File& aBlob, nsAString& aResult, ErrorResult& aRv);
+  void ReadAsText(File& aBlob, const Optional<nsAString>& aEncoding,
                   nsAString& aResult, ErrorResult& aRv);
-  void ReadAsDataURL(JS::Handle<JSObject*> aBlob, nsAString& aResult,
-                     ErrorResult& aRv);
-
-  // From nsICharsetDetectionObserver
-  NS_IMETHOD Notify(const char *aCharset, nsDetectionConfident aConf) MOZ_OVERRIDE;
+  void ReadAsDataURL(File& aBlob, nsAString& aResult, ErrorResult& aRv);
 };
 
 END_WORKERS_NAMESPACE

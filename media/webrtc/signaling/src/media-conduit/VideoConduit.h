@@ -5,15 +5,27 @@
 #ifndef VIDEO_SESSION_H_
 #define VIDEO_SESSION_H_
 
+#include "nsAutoPtr.h"
 #include "mozilla/Attributes.h"
 
 #include "MediaConduitInterface.h"
+#include "MediaEngineWrapper.h"
+#include "CodecStatistics.h"
+#include "LoadManagerFactory.h"
+#include "LoadManager.h"
 
+// conflicts with #include of scoped_ptr.h
+#undef FF
 // Video Engine Includes
 #include "webrtc/common_types.h"
+#ifdef FF
+#undef FF // Avoid name collision between scoped_ptr.h and nsCRTGlue.h.
+#endif
+#include "webrtc/modules/video_coding/codecs/interface/video_codec_interface.h"
 #include "webrtc/video_engine/include/vie_base.h"
 #include "webrtc/video_engine/include/vie_capture.h"
 #include "webrtc/video_engine/include/vie_codec.h"
+#include "webrtc/video_engine/include/vie_external_codec.h"
 #include "webrtc/video_engine/include/vie_render.h"
 #include "webrtc/video_engine/include/vie_network.h"
 #include "webrtc/video_engine/include/vie_rtp_rtcp.h"
@@ -28,11 +40,21 @@
  using  webrtc::ViECapture;
  using  webrtc::ViERender;
  using  webrtc::ViEExternalCapture;
-
+ using  webrtc::ViEExternalCodec;
 
 namespace mozilla {
 
 class WebrtcAudioConduit;
+
+// Interface of external video encoder for WebRTC.
+class WebrtcVideoEncoder:public VideoEncoder
+                         ,public webrtc::VideoEncoder
+{};
+
+// Interface of external video decoder for WebRTC.
+class WebrtcVideoDecoder:public VideoDecoder
+                         ,public webrtc::VideoDecoder
+{};
 
 /**
  * Concrete class for Video session. Hooks up
@@ -126,6 +148,19 @@ public:
                                                 VideoType video_type,
                                                 uint64_t capture_time);
 
+  /**
+   * Set an external encoder object |encoder| to the payload type |pltype|
+   * for sender side codec.
+   */
+  virtual MediaConduitErrorCode SetExternalSendCodec(VideoCodecConfig* config,
+                                                     VideoEncoder* encoder);
+
+  /**
+   * Set an external decoder object |decoder| to the payload type |pltype|
+   * for receiver side codec.
+   */
+  virtual MediaConduitErrorCode SetExternalRecvCodec(VideoCodecConfig* config,
+                                                     VideoDecoder* decoder);
 
 
   /**
@@ -153,9 +188,18 @@ public:
   /**
    * Does DeliverFrame() support a null buffer and non-null handle
    * (video texture)?
-   * XXX Investigate!  Especially for Android/B2G
+   * B2G support it (when using HW video decoder with graphic buffer output).
+   * XXX Investigate!  Especially for Android
    */
-  virtual bool IsTextureSupported() { return false; }
+  virtual bool IsTextureSupported() {
+#ifdef WEBRTC_GONK
+    return true;
+#else
+    return false;
+#endif
+  }
+
+  virtual uint64_t CodecPluginID();
 
   unsigned short SendingWidth() {
     return mSendingWidth;
@@ -179,35 +223,39 @@ public:
     return 0;
   }
 
-  WebrtcVideoConduit():
-                      mOtherDirection(nullptr),
-                      mShutDown(false),
-                      mVideoEngine(nullptr),
-                      mTransport(nullptr),
-                      mRenderer(nullptr),
-                      mPtrViEBase(nullptr),
-                      mPtrViECapture(nullptr),
-                      mPtrViECodec(nullptr),
-                      mPtrViENetwork(nullptr),
-                      mPtrViERender(nullptr),
-                      mPtrExtCapture(nullptr),
-                      mPtrRTP(nullptr),
-                      mEngineTransmitting(false),
-                      mEngineReceiving(false),
-                      mChannel(-1),
-                      mCapId(-1),
-                      mCurSendCodecConfig(nullptr),
-                      mSendingWidth(0),
-                      mSendingHeight(0)
-  {
-  }
-
-  virtual ~WebrtcVideoConduit() ;
+  WebrtcVideoConduit();
+  virtual ~WebrtcVideoConduit();
 
   MediaConduitErrorCode Init(WebrtcVideoConduit *other);
 
   int GetChannel() { return mChannel; }
   webrtc::VideoEngine* GetVideoEngine() { return mVideoEngine; }
+  bool GetLocalSSRC(unsigned int* ssrc);
+  bool GetRemoteSSRC(unsigned int* ssrc);
+  bool GetVideoEncoderStats(double* framerateMean,
+                            double* framerateStdDev,
+                            double* bitrateMean,
+                            double* bitrateStdDev,
+                            uint32_t* droppedFrames);
+  bool GetVideoDecoderStats(double* framerateMean,
+                            double* framerateStdDev,
+                            double* bitrateMean,
+                            double* bitrateStdDev,
+                            uint32_t* discardedPackets);
+  bool GetAVStats(int32_t* jitterBufferDelayMs,
+                  int32_t* playoutBufferDelayMs,
+                  int32_t* avSyncOffsetMs);
+  bool GetRTPStats(unsigned int* jitterMs, unsigned int* cumulativeLost);
+  bool GetRTCPReceiverReport(DOMHighResTimeStamp* timestamp,
+                             uint32_t* jitterMs,
+                             uint32_t* packetsReceived,
+                             uint64_t* bytesReceived,
+                             uint32_t* cumulativeLost,
+                             int32_t* rttMs);
+  bool GetRTCPSenderReport(DOMHighResTimeStamp* timestamp,
+                           unsigned int* packetsSent,
+                           uint64_t* bytesSent);
+  uint64_t MozVideoLatencyAvg();
 
 private:
 
@@ -236,6 +284,9 @@ private:
   //Utility function to dump recv codec database
   void DumpCodecDB() const;
 
+  // Video Latency Test averaging filter
+  void VideoLatencyUpdate(uint64_t new_sample);
+
   // The two sides of a send/receive pair of conduits each keep a pointer to the other.
   // They also share a single VideoEngine and mChannel.  Shutdown must be coordinated
   // carefully to avoid double-freeing or accessing after one frees.
@@ -249,13 +300,15 @@ private:
   mozilla::RefPtr<TransportInterface> mTransport;
   mozilla::RefPtr<VideoRenderer> mRenderer;
 
-  webrtc::ViEBase* mPtrViEBase;
-  webrtc::ViECapture* mPtrViECapture;
-  webrtc::ViECodec* mPtrViECodec;
-  webrtc::ViENetwork* mPtrViENetwork;
-  webrtc::ViERender* mPtrViERender;
-  webrtc::ViEExternalCapture*  mPtrExtCapture; // shared
-  webrtc::ViERTP_RTCP* mPtrRTP;
+  ScopedCustomReleasePtr<webrtc::ViEBase> mPtrViEBase;
+  ScopedCustomReleasePtr<webrtc::ViECapture> mPtrViECapture;
+  ScopedCustomReleasePtr<webrtc::ViECodec> mPtrViECodec;
+  ScopedCustomReleasePtr<webrtc::ViENetwork> mPtrViENetwork;
+  ScopedCustomReleasePtr<webrtc::ViERender> mPtrViERender;
+  ScopedCustomReleasePtr<webrtc::ViERTP_RTCP> mPtrRTP;
+  ScopedCustomReleasePtr<webrtc::ViEExternalCodec> mPtrExtCodec;
+
+  webrtc::ViEExternalCapture* mPtrExtCapture; // shared
 
   // Engine state we are concerned with.
   bool mEngineTransmitting; //If true ==> Transmit Sub-system is up and running
@@ -267,8 +320,29 @@ private:
   VideoCodecConfig* mCurSendCodecConfig;
   unsigned short mSendingWidth;
   unsigned short mSendingHeight;
+  unsigned short mReceivingWidth;
+  unsigned short mReceivingHeight;
+  bool mVideoLatencyTestEnable;
+  uint64_t mVideoLatencyAvg;
+  uint32_t mMinBitrate;
+  uint32_t mStartBitrate;
+  uint32_t mMaxBitrate;
+
+  static const unsigned int sAlphaNum = 7;
+  static const unsigned int sAlphaDen = 8;
+  static const unsigned int sRoundingPadding = 1024;
 
   mozilla::RefPtr<WebrtcAudioConduit> mSyncedTo;
+
+  nsAutoPtr<VideoCodecConfig> mExternalSendCodec;
+  nsAutoPtr<VideoCodecConfig> mExternalRecvCodec;
+  nsAutoPtr<VideoEncoder> mExternalSendCodecHandle;
+  nsAutoPtr<VideoDecoder> mExternalRecvCodecHandle;
+
+  // statistics object for video codec;
+  nsAutoPtr<VideoCodecStatistics> mVideoCodecStat;
+
+  nsAutoPtr<LoadManager> mLoadManager;
 };
 
 } // end namespace

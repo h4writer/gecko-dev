@@ -11,8 +11,8 @@
 #include "mozilla/Assertions.h"
 #include "mozilla/unused.h"
 #include "nsDebug.h"
+#include "nsISupportsImpl.h"
 #include "nsThreadUtils.h"
-#include "nsTraceRefcnt.h"
 
 #include "BluetoothReplyRunnable.h"
 #include "BluetoothService.h"
@@ -24,7 +24,7 @@ USING_BLUETOOTH_NAMESPACE
  * BluetoothRequestParent::ReplyRunnable
  ******************************************************************************/
 
-class BluetoothRequestParent::ReplyRunnable : public BluetoothReplyRunnable
+class BluetoothRequestParent::ReplyRunnable MOZ_FINAL : public BluetoothReplyRunnable
 {
   BluetoothRequestParent* mRequest;
 
@@ -59,14 +59,21 @@ public:
   void
   Revoke()
   {
-    MOZ_ASSERT(NS_IsMainThread());
-    mRequest = nullptr;
+    ReleaseMembers();
   }
 
   virtual bool
   ParseSuccessfulReply(JS::MutableHandle<JS::Value> aValue) MOZ_OVERRIDE
   {
     MOZ_CRASH("This should never be called!");
+  }
+
+  virtual void
+  ReleaseMembers() MOZ_OVERRIDE
+  {
+    MOZ_ASSERT(NS_IsMainThread());
+    mRequest = nullptr;
+    BluetoothReplyRunnable::ReleaseMembers();
   }
 };
 
@@ -211,6 +218,8 @@ BluetoothParent::RecvPBluetoothRequestConstructor(
       return actor->DoRequest(aRequest.get_ConnectRequest());
     case Request::TDisconnectRequest:
       return actor->DoRequest(aRequest.get_DisconnectRequest());
+    case Request::TIsConnectedRequest:
+      return actor->DoRequest(aRequest.get_IsConnectedRequest());
     case Request::TSendFileRequest:
       return actor->DoRequest(aRequest.get_SendFileRequest());
     case Request::TStopSendingFileRequest:
@@ -403,7 +412,7 @@ BluetoothRequestParent::DoRequest(const ConnectedDevicePropertiesRequest& aReque
   MOZ_ASSERT(mRequestType == Request::TConnectedDevicePropertiesRequest);
   nsresult rv =
     mService->GetConnectedDevicePropertiesInternal(aRequest.serviceUuid(),
-                                                mReplyRunnable.get());
+                                                   mReplyRunnable.get());
   NS_ENSURE_SUCCESS(rv, false);
 
   return true;
@@ -498,6 +507,18 @@ BluetoothRequestParent::DoRequest(const DisconnectRequest& aRequest)
   mService->Disconnect(aRequest.address(),
                        aRequest.serviceUuid(),
                        mReplyRunnable.get());
+
+  return true;
+}
+
+bool
+BluetoothRequestParent::DoRequest(const IsConnectedRequest& aRequest)
+{
+  MOZ_ASSERT(mService);
+  MOZ_ASSERT(mRequestType == Request::TIsConnectedRequest);
+
+  mService->IsConnected(aRequest.serviceUuid(),
+                        mReplyRunnable.get());
 
   return true;
 }

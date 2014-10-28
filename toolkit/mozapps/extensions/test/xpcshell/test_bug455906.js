@@ -247,12 +247,7 @@ function run_test() {
 
   // Copy the initial blocklist into the profile to check add-ons start in the
   // right state.
-  var blocklistFile = gProfD.clone();
-  blocklistFile.append("blocklist.xml");
-  if (blocklistFile.exists())
-    blocklistFile.remove(false);
-  var blocklist = do_get_file("data/bug455906_start.xml")
-  blocklist.copyTo(gProfD, "blocklist.xml");
+  copyBlocklistToProfile(do_get_file("data/bug455906_start.xml"));
 
   createAppInfo("xpcshell@tests.mozilla.org", "XPCShell", "3", "8");
   startupManager();
@@ -461,11 +456,11 @@ function check_test_pt3() {
     do_check_eq(check_addon_state(addons[3]), "false,false,true");
 
     // Check blockIDs are correct
-    do_check_eq(blocklist.getAddonBlocklistURL(addons[0].id,''),create_blocklistURL(addons[0].id));
-    do_check_eq(blocklist.getAddonBlocklistURL(addons[1].id,''),create_blocklistURL(addons[1].id));
-    do_check_eq(blocklist.getAddonBlocklistURL(addons[2].id,''),create_blocklistURL(addons[2].id));
-    do_check_eq(blocklist.getAddonBlocklistURL(addons[3].id,''),create_blocklistURL(addons[3].id));
-    do_check_eq(blocklist.getAddonBlocklistURL(addons[4].id,''),create_blocklistURL(addons[4].id));
+    do_check_eq(blocklist.getAddonBlocklistURL(addons[0]),create_blocklistURL(addons[0].id));
+    do_check_eq(blocklist.getAddonBlocklistURL(addons[1]),create_blocklistURL(addons[1].id));
+    do_check_eq(blocklist.getAddonBlocklistURL(addons[2]),create_blocklistURL(addons[2].id));
+    do_check_eq(blocklist.getAddonBlocklistURL(addons[3]),create_blocklistURL(addons[3].id));
+    do_check_eq(blocklist.getAddonBlocklistURL(addons[4]),create_blocklistURL(addons[4].id));
 
     // All plugins have the same blockID on the test
     do_check_eq(blocklist.getPluginBlocklistURL(PLUGINS[0]), create_blocklistURL('test_bug455906_plugin'));

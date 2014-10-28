@@ -41,22 +41,31 @@ var Bookmarks = {
     });
   },
 
+  _isMetroBookmark: function(aItemId) {
+    return PlacesUtils.bookmarks.getFolderIdForItem(aItemId) == Bookmarks.metroRoot;
+  },
+
   isURIBookmarked: function bh_isURIBookmarked(aURI, callback) {
     if (!callback)
       return;
-    PlacesUtils.asyncGetBookmarkIds(aURI, function(aItemIds) {
-      callback(aItemIds && aItemIds.length > 0);
-    }, this);
+    PlacesUtils.asyncGetBookmarkIds(aURI, aItemIds => {
+      callback(aItemIds && aItemIds.length > 0 && aItemIds.some(this._isMetroBookmark));
+    });
   },
 
   removeForURI: function bh_removeForURI(aURI, callback) {
     // XXX blargle xpconnect! might not matter, but a method on
     // nsINavBookmarksService that takes an array of items to
     // delete would be faster. better yet, a method that takes a URI!
-    PlacesUtils.asyncGetBookmarkIds(aURI, function(aItemIds) {
-      aItemIds.forEach(PlacesUtils.bookmarks.removeItem);
+    PlacesUtils.asyncGetBookmarkIds(aURI, (aItemIds) => {
+      aItemIds.forEach((aItemId) => {
+        if (this._isMetroBookmark(aItemId)) {
+          PlacesUtils.bookmarks.removeItem(aItemId);
+        }
+      });
+
       if (callback)
-        callback(aURI, aItemIds);
+        callback();
 
       // XXX Used for browser-chrome tests
       let event = document.createEvent("Events");

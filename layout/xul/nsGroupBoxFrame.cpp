@@ -6,10 +6,16 @@
 // YY need to pass isMultiple before create called
 
 #include "nsBoxFrame.h"
+
+#include "mozilla/gfx/2D.h"
 #include "nsCSSRendering.h"
+#include "nsLayoutUtils.h"
 #include "nsRenderingContext.h"
 #include "nsStyleContext.h"
 #include "nsDisplayList.h"
+
+using namespace mozilla;
+using namespace mozilla::gfx;
 
 class nsGroupBoxFrame : public nsBoxFrame {
 public:
@@ -18,14 +24,14 @@ public:
   nsGroupBoxFrame(nsIPresShell* aShell, nsStyleContext* aContext):
     nsBoxFrame(aShell, aContext) {}
 
-  NS_IMETHOD GetBorderAndPadding(nsMargin& aBorderAndPadding);
+  virtual nsresult GetBorderAndPadding(nsMargin& aBorderAndPadding);
 
   virtual void BuildDisplayList(nsDisplayListBuilder*   aBuilder,
                                 const nsRect&           aDirtyRect,
                                 const nsDisplayListSet& aLists) MOZ_OVERRIDE;
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const {
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const {
     return MakeFrameName(NS_LITERAL_STRING("GroupBoxFrame"), aResult);
   }
 #endif
@@ -54,7 +60,7 @@ public:
       nsBoxFrame(aShell, aContext) {}
 
 
-#ifdef DEBUG
+#ifdef DEBUG_FRAME_DUMP
   NS_IMETHOD GetFrameName(nsString& aResult) const {
     return MakeFrameName("GroupBoxFrameInner", aResult);
   }
@@ -123,7 +129,11 @@ nsGroupBoxFrame::BuildDisplayList(nsDisplayListBuilder*   aBuilder,
 void
 nsGroupBoxFrame::PaintBorderBackground(nsRenderingContext& aRenderingContext,
     nsPoint aPt, const nsRect& aDirtyRect) {
-  int skipSides = 0;
+
+  DrawTarget* drawTarget = aRenderingContext.GetDrawTarget();
+  gfxContext* gfx = aRenderingContext.ThebesContext();
+
+  Sides skipSides;
   const nsStyleBorder* borderStyleData = StyleBorder();
   const nsMargin& border = borderStyleData->GetComputedBorder();
   nscoord yoff = 0;
@@ -152,6 +162,7 @@ nsGroupBoxFrame::PaintBorderBackground(nsRenderingContext& aRenderingContext,
                                   nsCSSRendering::PAINTBG_SYNC_DECODE_IMAGES);
 
   if (groupBox) {
+    int32_t appUnitsPerDevPixel = PresContext()->AppUnitsPerDevPixel();
 
     // we should probably use PaintBorderEdges to do this but for now just use clipping
     // to achieve the same effect.
@@ -161,13 +172,11 @@ nsGroupBoxFrame::PaintBorderBackground(nsRenderingContext& aRenderingContext,
     clipRect.width = groupRect.x - rect.x;
     clipRect.height = border.top;
 
-    aRenderingContext.PushState();
-    aRenderingContext.IntersectClip(clipRect);
+    gfx->Save();
+    gfx->Clip(NSRectToSnappedRect(clipRect, appUnitsPerDevPixel, *drawTarget));
     nsCSSRendering::PaintBorder(presContext, aRenderingContext, this,
                                 aDirtyRect, rect, mStyleContext, skipSides);
-
-    aRenderingContext.PopState();
-
+    gfx->Restore();
 
     // draw right side
     clipRect = rect;
@@ -175,14 +184,11 @@ nsGroupBoxFrame::PaintBorderBackground(nsRenderingContext& aRenderingContext,
     clipRect.width = rect.XMost() - groupRect.XMost();
     clipRect.height = border.top;
 
-    aRenderingContext.PushState();
-    aRenderingContext.IntersectClip(clipRect);
+    gfx->Save();
+    gfx->Clip(NSRectToSnappedRect(clipRect, appUnitsPerDevPixel, *drawTarget));
     nsCSSRendering::PaintBorder(presContext, aRenderingContext, this,
                                 aDirtyRect, rect, mStyleContext, skipSides);
-
-    aRenderingContext.PopState();
-
-    
+    gfx->Restore();
   
     // draw bottom
 
@@ -190,12 +196,11 @@ nsGroupBoxFrame::PaintBorderBackground(nsRenderingContext& aRenderingContext,
     clipRect.y += border.top;
     clipRect.height = mRect.height - (yoff + border.top);
   
-    aRenderingContext.PushState();
-    aRenderingContext.IntersectClip(clipRect);
+    gfx->Save();
+    gfx->Clip(NSRectToSnappedRect(clipRect, appUnitsPerDevPixel, *drawTarget));
     nsCSSRendering::PaintBorder(presContext, aRenderingContext, this,
                                 aDirtyRect, rect, mStyleContext, skipSides);
-
-    aRenderingContext.PopState();
+    gfx->Restore();
     
   } else {
     nsCSSRendering::PaintBorder(presContext, aRenderingContext, this,
@@ -208,21 +213,21 @@ nsIFrame*
 nsGroupBoxFrame::GetCaptionBox(nsPresContext* aPresContext, nsRect& aCaptionRect)
 {
     // first child is our grouped area
-    nsIFrame* box = GetChildBox();
+    nsIFrame* box = nsBox::GetChildBox(this);
 
     // no area fail.
     if (!box)
       return nullptr;
 
     // get the first child in the grouped area, that is the caption
-    box = box->GetChildBox();
+    box = nsBox::GetChildBox(box);
 
     // nothing in the area? fail
     if (!box)
       return nullptr;
 
     // now get the caption itself. It is in the caption frame.
-    nsIFrame* child = box->GetChildBox();
+    nsIFrame* child = nsBox::GetChildBox(box);
 
     if (child) {
        // convert to our coordinates.
@@ -235,7 +240,7 @@ nsGroupBoxFrame::GetCaptionBox(nsPresContext* aPresContext, nsRect& aCaptionRect
     return child;
 }
 
-NS_IMETHODIMP
+nsresult
 nsGroupBoxFrame::GetBorderAndPadding(nsMargin& aBorderAndPadding)
 {
   aBorderAndPadding.SizeTo(0,0,0,0);

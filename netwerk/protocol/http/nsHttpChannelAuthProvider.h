@@ -17,8 +17,11 @@
 
 class nsIHttpAuthenticableChannel;
 class nsIHttpAuthenticator;
-class nsHttpHandler;
 class nsIURI;
+
+namespace mozilla { namespace net {
+
+class nsHttpHandler;
 
 class nsHttpChannelAuthProvider : public nsIHttpChannelAuthProvider
                                 , public nsIAuthPromptCallback
@@ -30,9 +33,10 @@ public:
     NS_DECL_NSIAUTHPROMPTCALLBACK
 
     nsHttpChannelAuthProvider();
-    virtual ~nsHttpChannelAuthProvider();
 
 private:
+    virtual ~nsHttpChannelAuthProvider();
+
     const char *ProxyHost() const
     { return mProxyInfo ? mProxyInfo->Host().get() : nullptr; }
 
@@ -44,7 +48,7 @@ private:
     bool        UsingSSL() const  { return mUsingSSL; }
 
     bool        UsingHttpProxy() const
-    { return !!(mProxyInfo && !nsCRT::strcmp(mProxyInfo->Type(), "http")); }
+    { return mProxyInfo && (mProxyInfo->IsHTTP() || mProxyInfo->IsHTTPS()); }
 
     nsresult PrepareForAuthentication(bool proxyAuth);
     nsresult GenCredsAndSetEntry(nsIHttpAuthenticator *, bool proxyAuth,
@@ -146,5 +150,7 @@ private:
 
     nsRefPtr<nsHttpHandler>           mHttpHandler;  // keep gHttpHandler alive
 };
+
+}} // namespace mozilla::net
 
 #endif // nsHttpChannelAuthProvider_h__

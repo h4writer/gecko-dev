@@ -28,7 +28,7 @@
     }
 
     worker.onerror = function(event) {
-      ok(false, "Worker had an error: " + event.data);
+      ok(false, "Worker had an error: " + event.message);
       SimpleTest.finish();
     };
 
@@ -36,7 +36,7 @@
   }
 
   SimpleTest.waitForExplicitFinish();
-  SpecialPowers.pushPrefEnv({"set": [["dom.promise.enabled", true]]}, runTest);
+  runTest();
 </script>
 </pre>
 </body>

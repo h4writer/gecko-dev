@@ -7,17 +7,25 @@
 // HttpLog.h should generally be included first
 #include "HttpLog.h"
 
+// Log on level :5, instead of default :4.
+#undef LOG
+#define LOG(args) LOG5(args)
+#undef LOG_ENABLED
+#define LOG_ENABLED() LOG5_ENABLED()
+
 #include "mozilla/Telemetry.h"
 #include "mozilla/Preferences.h"
 #include "nsHttp.h"
 #include "nsHttpHandler.h"
 #include "nsHttpConnection.h"
 #include "nsILoadGroup.h"
+#include "nsISupportsPriority.h"
 #include "prprf.h"
 #include "prnetdb.h"
 #include "SpdyPush31.h"
 #include "SpdySession31.h"
 #include "SpdyStream31.h"
+#include "SpdyZlibReporter.h"
 
 #include <algorithm>
 
@@ -38,47 +46,44 @@ NS_INTERFACE_MAP_BEGIN(SpdySession31)
 NS_INTERFACE_MAP_ENTRY_AMBIGUOUS(nsISupports, nsAHttpConnection)
 NS_INTERFACE_MAP_END
 
-SpdySession31::SpdySession31(nsAHttpTransaction *aHttpTransaction,
-                             nsISocketTransport *aSocketTransport,
-                             int32_t firstPriority)
-  : mSocketTransport(aSocketTransport),
-  mSegmentReader(nullptr),
-  mSegmentWriter(nullptr),
-  mNextStreamID(1),
-  mConcurrentHighWater(0),
-  mDownstreamState(BUFFERING_FRAME_HEADER),
-  mInputFrameBufferSize(kDefaultBufferSize),
-  mInputFrameBufferUsed(0),
-  mInputFrameDataLast(false),
-  mInputFrameDataStream(nullptr),
-  mNeedsCleanup(nullptr),
-  mShouldGoAway(false),
-  mClosed(false),
-  mCleanShutdown(false),
-  mDataPending(false),
-  mGoAwayID(0),
-  mMaxConcurrent(kDefaultMaxConcurrent),
-  mConcurrent(0),
-  mServerPushedResources(0),
-  mServerInitialStreamWindow(kDefaultRwin),
-  mLocalSessionWindow(kDefaultRwin),
-  mRemoteSessionWindow(kDefaultRwin),
-  mOutputQueueSize(kDefaultQueueSize),
-  mOutputQueueUsed(0),
-  mOutputQueueSent(0),
-  mLastReadEpoch(PR_IntervalNow()),
-  mPingSentEpoch(0),
-  mNextPingID(1)
+SpdySession31::SpdySession31(nsISocketTransport *aSocketTransport)
+  : mSocketTransport(aSocketTransport)
+  , mSegmentReader(nullptr)
+  , mSegmentWriter(nullptr)
+  , mNextStreamID(1)
+  , mConcurrentHighWater(0)
+  , mDownstreamState(BUFFERING_FRAME_HEADER)
+  , mInputFrameBufferSize(kDefaultBufferSize)
+  , mInputFrameBufferUsed(0)
+  , mInputFrameDataLast(false)
+  , mInputFrameDataStream(nullptr)
+  , mNeedsCleanup(nullptr)
+  , mShouldGoAway(false)
+  , mClosed(false)
+  , mCleanShutdown(false)
+  , mDataPending(false)
+  , mGoAwayID(0)
+  , mMaxConcurrent(kDefaultMaxConcurrent)
+  , mConcurrent(0)
+  , mServerPushedResources(0)
+  , mServerInitialStreamWindow(kDefaultRwin)
+  , mLocalSessionWindow(kDefaultRwin)
+  , mRemoteSessionWindow(kDefaultRwin)
+  , mOutputQueueSize(kDefaultQueueSize)
+  , mOutputQueueUsed(0)
+  , mOutputQueueSent(0)
+  , mLastReadEpoch(PR_IntervalNow())
+  , mPingSentEpoch(0)
+  , mNextPingID(1)
+  , mPreviousUsed(false)
 {
   MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
 
   static uint64_t sSerial;
   mSerial = ++sSerial;
 
-  LOG3(("SpdySession31::SpdySession31 %p transaction 1 = %p serial=0x%X\n",
-        this, aHttpTransaction, mSerial));
+  LOG3(("SpdySession31::SpdySession31 %p serial=0x%X\n", this, mSerial));
 
-  mConnection = aHttpTransaction->Connection();
   mInputFrameBuffer = new char[mInputFrameBufferSize];
   mOutputQueueBuffer = new char[mOutputQueueSize];
   zlibInit();
@@ -88,17 +93,15 @@ SpdySession31::SpdySession31(nsAHttpTransaction *aHttpTransaction,
   mSendingChunkSize = gHttpHandler->SpdySendingChunkSize();
   GenerateSettings();
 
-  if (!aHttpTransaction->IsNullTransaction())
-    AddStream(aHttpTransaction, firstPriority);
   mLastDataReadEpoch = mLastReadEpoch;
 
   mPingThreshold = gHttpHandler->SpdyPingThreshold();
 }
 
 PLDHashOperator
-  SpdySession31::ShutdownEnumerator(nsAHttpTransaction *key,
-                                    nsAutoPtr<SpdyStream31> &stream,
-                                    void *closure)
+SpdySession31::ShutdownEnumerator(nsAHttpTransaction *key,
+                                  nsAutoPtr<SpdyStream31> &stream,
+                                  void *closure)
 {
   SpdySession31 *self = static_cast<SpdySession31 *>(closure);
 
@@ -211,7 +214,7 @@ SpdySession31::IdleTime()
   return PR_IntervalNow() - mLastDataReadEpoch;
 }
 
-void
+uint32_t
 SpdySession31::ReadTimeoutTick(PRIntervalTime now)
 {
   MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
@@ -221,13 +224,21 @@ SpdySession31::ReadTimeoutTick(PRIntervalTime now)
        this, PR_IntervalToSeconds(now - mLastReadEpoch)));
 
   if (!mPingThreshold)
-    return;
+    return UINT32_MAX;
 
   if ((now - mLastReadEpoch) < mPingThreshold) {
     // recent activity means ping is not an issue
-    if (mPingSentEpoch)
+    if (mPingSentEpoch) {
       mPingSentEpoch = 0;
-    return;
+      if (mPreviousUsed) {
+        // restore the former value
+        mPingThreshold = mPreviousPingThreshold;
+        mPreviousUsed = false;
+      }
+    }
+
+    return PR_IntervalToSeconds(mPingThreshold) -
+      PR_IntervalToSeconds(now - mLastReadEpoch);
   }
 
   if (mPingSentEpoch) {
@@ -237,8 +248,9 @@ SpdySession31::ReadTimeoutTick(PRIntervalTime now)
            this));
       mPingSentEpoch = 0;
       Close(NS_ERROR_NET_TIMEOUT);
+      return UINT32_MAX;
     }
-    return;
+    return 1; // run the tick aggressively while ping is outstanding
   }
 
   LOG(("SpdySession31::ReadTimeoutTick %p generating ping 0x%X\n",
@@ -247,7 +259,7 @@ SpdySession31::ReadTimeoutTick(PRIntervalTime now)
   if (mNextPingID == 0xffffffff) {
     LOG(("SpdySession31::ReadTimeoutTick %p cannot form ping - ids exhausted\n",
          this));
-    return;
+    return UINT32_MAX;
   }
 
   mPingSentEpoch = PR_IntervalNow();
@@ -291,6 +303,7 @@ SpdySession31::ReadTimeoutTick(PRIntervalTime now)
          "ping ids exhausted marking goaway\n", this));
     mShouldGoAway = true;
   }
+  return 1; // run the tick aggressively while ping is outstanding
 }
 
 uint32_t
@@ -333,7 +346,9 @@ SpdySession31::RegisterStreamID(SpdyStream31 *stream, uint32_t aNewID)
 
 bool
 SpdySession31::AddStream(nsAHttpTransaction *aHttpTransaction,
-                           int32_t aPriority)
+                         int32_t aPriority,
+                         bool aUseTunnel,
+                         nsIInterfaceRequestor *aCallbacks)
 {
   MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
 
@@ -344,11 +359,23 @@ SpdySession31::AddStream(nsAHttpTransaction *aHttpTransaction,
     return false;
   }
 
+  if (!mConnection) {
+    mConnection = aHttpTransaction->Connection();
+  }
+
   aHttpTransaction->SetConnection(this);
+
+  if (aUseTunnel) {
+    LOG3(("SpdySession31::AddStream session=%p trans=%p OnTunnel",
+          this, aHttpTransaction));
+    DispatchOnTunnel(aHttpTransaction, aCallbacks);
+    return true;
+  }
+
   SpdyStream31 *stream = new SpdyStream31(aHttpTransaction, this, aPriority);
 
-  LOG3(("SpdySession31::AddStream session=%p stream=%p NextID=0x%X (tentative)",
-        this, stream, mNextStreamID));
+  LOG3(("SpdySession31::AddStream session=%p stream=%p serial=%u "
+        "NextID=0x%X (tentative)", this, stream, mSerial, mNextStreamID));
 
   mStreamTransactionHash.Put(aHttpTransaction, stream);
 
@@ -362,7 +389,8 @@ SpdySession31::AddStream(nsAHttpTransaction *aHttpTransaction,
     mQueuedStreams.Push(stream);
   }
 
-  if (!(aHttpTransaction->Caps() & NS_HTTP_ALLOW_KEEPALIVE)) {
+  if (!(aHttpTransaction->Caps() & NS_HTTP_ALLOW_KEEPALIVE) &&
+      !aHttpTransaction->IsNullTransaction()) {
     LOG3(("SpdySession31::AddStream %p transaction %p forces keep-alive off.\n",
           this, aHttpTransaction));
     DontReuse();
@@ -378,12 +406,16 @@ SpdySession31::ActivateStream(SpdyStream31 *stream)
   MOZ_ASSERT(!stream->StreamID() || (stream->StreamID() & 1),
              "Do not activate pushed streams");
 
-  ++mConcurrent;
-  if (mConcurrent > mConcurrentHighWater)
-    mConcurrentHighWater = mConcurrent;
-  LOG3(("SpdySession31::AddStream %p activating stream %p Currently %d "
-        "streams in session, high water mark is %d",
-        this, stream, mConcurrent, mConcurrentHighWater));
+  nsAHttpTransaction *trans = stream->Transaction();
+  if (!trans || !trans->IsNullTransaction() || trans->QuerySpdyConnectTransaction()) {
+    ++mConcurrent;
+    if (mConcurrent > mConcurrentHighWater) {
+      mConcurrentHighWater = mConcurrent;
+    }
+    LOG3(("SpdySession31::AddStream %p activating stream %p Currently %d "
+          "streams in session, high water mark is %d",
+          this, stream, mConcurrent, mConcurrentHighWater));
+  }
 
   mReadyForWrite.Push(stream);
   SetWriteCallbacks();
@@ -504,7 +536,7 @@ SpdySession31::ChangeDownstreamState(enum stateType newState)
 {
   MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
 
-  LOG3(("SpdyStream31::ChangeDownstreamState() %p from %X to %X",
+  LOG3(("SpdySession31::ChangeDownstreamState() %p from %X to %X",
         this, mDownstreamState, newState));
   mDownstreamState = newState;
 }
@@ -514,7 +546,7 @@ SpdySession31::ResetDownstreamState()
 {
   MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
 
-  LOG3(("SpdyStream31::ResetDownstreamState() %p", this));
+  LOG3(("SpdySession31::ResetDownstreamState() %p", this));
   ChangeDownstreamState(BUFFERING_FRAME_HEADER);
 
   if (mInputFrameDataLast && mInputFrameDataStream) {
@@ -528,40 +560,6 @@ SpdySession31::ResetDownstreamState()
   mInputFrameBufferUsed = 0;
   mInputFrameDataStream = nullptr;
 }
-
-template<typename T> void
-SpdySession31::EnsureBuffer(nsAutoArrayPtr<T> &buf,
-                            uint32_t newSize,
-                            uint32_t preserve,
-                            uint32_t &objSize)
-{
-  if (objSize >= newSize)
-    return;
-
-  // Leave a little slop on the new allocation - add 2KB to
-  // what we need and then round the result up to a 4KB (page)
-  // boundary.
-
-  objSize = (newSize + 2048 + 4095) & ~4095;
-
-  static_assert(sizeof(T) == 1, "sizeof(T) must be 1");
-  nsAutoArrayPtr<T> tmp(new T[objSize]);
-  memcpy(tmp, buf, preserve);
-  buf = tmp;
-}
-
-// Instantiate supported templates explicitly.
-template void
-SpdySession31::EnsureBuffer(nsAutoArrayPtr<char> &buf,
-                            uint32_t newSize,
-                            uint32_t preserve,
-                            uint32_t &objSize);
-
-template void
-SpdySession31::EnsureBuffer(nsAutoArrayPtr<uint8_t> &buf,
-                            uint32_t newSize,
-                            uint32_t preserve,
-                            uint32_t &objSize);
 
 void
 SpdySession31::DecrementConcurrent(SpdyStream31 *aStream)
@@ -581,14 +579,14 @@ SpdySession31::DecrementConcurrent(SpdyStream31 *aStream)
 void
 SpdySession31::zlibInit()
 {
-  mDownstreamZlib.zalloc = SpdyStream31::zlib_allocator;
-  mDownstreamZlib.zfree = SpdyStream31::zlib_destructor;
+  mDownstreamZlib.zalloc = SpdyZlibReporter::Alloc;
+  mDownstreamZlib.zfree = SpdyZlibReporter::Free;
   mDownstreamZlib.opaque = Z_NULL;
 
   inflateInit(&mDownstreamZlib);
 
-  mUpstreamZlib.zalloc = SpdyStream31::zlib_allocator;
-  mUpstreamZlib.zfree = SpdyStream31::zlib_destructor;
+  mUpstreamZlib.zalloc = SpdyZlibReporter::Alloc;
+  mUpstreamZlib.zfree = SpdyZlibReporter::Free;
   mUpstreamZlib.opaque = Z_NULL;
 
   // mixing carte blanche compression with tls subjects us to traffic
@@ -746,7 +744,7 @@ SpdySession31::GenerateSettings()
   // 2nd entry is bytes 20 to 27
   // 3rd entry is bytes 28 to 35
 
-  if (!gHttpHandler->AllowSpdyPush()) {
+  if (!gHttpHandler->AllowPush()) {
     // announcing that we accept 0 incoming streams is done to
     // disable server push
     packet[15 + 8 * numberOfEntries] = SETTINGS_TYPE_MAX_CONCURRENT;
@@ -803,7 +801,7 @@ SpdySession31::GenerateSettings()
 
   LOG3(("Session Window increase at start of session %p %u\n",
         this, PR_ntohl(sessionWindowBump)));
-  LogIO(this, nullptr, "Session Window Bump ", packet, 12);
+  LogIO(this, nullptr, "Session Window Bump ", packet, 16);
 
 generateSettings_complete:
   FlushOutputQueue();
@@ -874,7 +872,10 @@ SpdySession31::CleanupStream(SpdyStream31 *aStream, nsresult aResult,
 {
   MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
   LOG3(("SpdySession31::CleanupStream %p %p 0x%X %X\n",
-        this, aStream, aStream->StreamID(), aResult));
+        this, aStream, aStream ? aStream->StreamID() : 0, aResult));
+  if (!aStream) {
+    return;
+  }
 
   SpdyPushedStream31 *pushSource = nullptr;
 
@@ -958,6 +959,10 @@ SpdySession31::CloseStream(SpdyStream31 *aStream, nsresult aResult)
 
   RemoveStreamFromQueues(aStream);
 
+  if (aStream->IsTunnel()) {
+    UnRegisterTunnel(aStream);
+  }
+
   // Send the stream the close() indication
   aStream->Close(aResult);
 }
@@ -1017,7 +1022,7 @@ SpdySession31::HandleSynStream(SpdySession31 *self)
     LOG3(("SpdySession31::HandleSynStream %p associated ID of 0 failed.\n", self));
     self->GenerateRstStream(RST_PROTOCOL_ERROR, streamID);
 
-  } else if (!gHttpHandler->AllowSpdyPush()) {
+  } else if (!gHttpHandler->AllowPush()) {
     // MAX_CONCURRENT_STREAMS of 0 in settings should have disabled push,
     // but some servers are buggy about that.. or the config could have
     // been updated after the settings frame was sent. In both cases just
@@ -1079,7 +1084,13 @@ SpdySession31::HandleSynStream(SpdySession31 *self)
   self->mPushedStreams.AppendElement(pushedStream);
 
   // The pushed stream is unidirectional so it is fully open immediately
-  pushedStream->SetFullyOpen();
+  rv = pushedStream->SetFullyOpen();
+  if (NS_FAILED(rv)) {
+    LOG(("SpdySession31::HandleSynStream pushedstream fully open failed\n"));
+    self->CleanupStream(pushedStream, rv, RST_CANCEL);
+    self->ResetDownstreamState();
+    return NS_OK;
+  }
 
   // Uncompress the response headers into a stream specific buffer, leaving them
   // in spdy format for the time being.
@@ -1152,10 +1163,10 @@ SpdySession31::HandleSynReply(SpdySession31 *self)
     return NS_ERROR_ILLEGAL_VALUE;
   }
 
-  LOG3(("SpdySession31::HandleSynReply %p lookup via streamID in syn_reply.\n",
-        self));
   uint32_t streamID =
     PR_ntohl(reinterpret_cast<uint32_t *>(self->mInputFrameBuffer.get())[2]);
+  LOG3(("SpdySession31::HandleSynReply %p lookup via streamID 0x%X in syn_reply.\n",
+        self, streamID));
   nsresult rv = self->SetInputFrameDataStream(streamID);
   if (NS_FAILED(rv))
     return rv;
@@ -1218,7 +1229,19 @@ SpdySession31::HandleSynReply(SpdySession31 *self)
     self->ResetDownstreamState();
     return NS_OK;
   }
-  self->mInputFrameDataStream->SetFullyOpen();
+
+  rv = self->mInputFrameDataStream->SetFullyOpen();
+  if (NS_FAILED(rv)) {
+    LOG(("SpdySession31::HandleSynReply SetFullyOpen failed\n"));
+    if (self->mInputFrameDataStream->IsTunnel()) {
+      gHttpHandler->ConnMgr()->CancelTransactions(
+        self->mInputFrameDataStream->Transaction()->ConnectionInfo(),
+        NS_ERROR_CONNECTION_REFUSED);
+    }
+    self->CleanupStream(self->mInputFrameDataStream, rv, RST_CANCEL);
+    self->ResetDownstreamState();
+    return NS_OK;
+  }
 
   self->mInputFrameDataLast = self->mInputFrameBuffer[4] & kFlag_Data_FIN;
   self->mInputFrameDataStream->UpdateTransportReadEvents(self->mInputFrameDataSize);
@@ -1809,10 +1832,17 @@ SpdySession31::ReadSegments(nsAHttpSegmentReader *reader,
   }
 
   if (NS_FAILED(rv)) {
-    LOG3(("SpdySession31::ReadSegments %p returning FAIL code %X",
+    LOG3(("SpdySession31::ReadSegments %p may return FAIL code %X",
           this, rv));
-    if (rv != NS_BASE_STREAM_WOULD_BLOCK)
-      CleanupStream(stream, rv, RST_CANCEL);
+    if (rv == NS_BASE_STREAM_WOULD_BLOCK) {
+      return rv;
+    }
+
+    CleanupStream(stream, rv, RST_CANCEL);
+    if (SoftStreamError(rv)) {
+      LOG3(("SpdySession31::ReadSegments %p soft error override\n", this));
+      rv = NS_OK;
+    }
     return rv;
   }
 
@@ -2047,11 +2077,16 @@ SpdySession31::WriteSegments(nsAHttpSegmentWriter *writer,
   if (mDownstreamState == PROCESSING_CONTROL_RST_STREAM) {
     if (mDownstreamRstReason == RST_REFUSED_STREAM)
       rv = NS_ERROR_NET_RESET;            //we can retry this 100% safely
-    else if (mDownstreamRstReason == RST_CANCEL ||
-             mDownstreamRstReason == RST_PROTOCOL_ERROR ||
+    else if (mDownstreamRstReason == RST_CANCEL) {
+      rv = mInputFrameDataStream->RecvdData() ?
+        NS_ERROR_NET_PARTIAL_TRANSFER :
+        NS_ERROR_NET_INTERRUPT;
+    }
+    else if (mDownstreamRstReason == RST_PROTOCOL_ERROR ||
              mDownstreamRstReason == RST_INTERNAL_ERROR ||
-             mDownstreamRstReason == RST_UNSUPPORTED_VERSION)
+             mDownstreamRstReason == RST_UNSUPPORTED_VERSION) {
       rv = NS_ERROR_NET_INTERRUPT;
+    }
     else if (mDownstreamRstReason == RST_FRAME_TOO_LARGE)
       rv = NS_ERROR_FILE_TOO_BIG;
     else
@@ -2079,16 +2114,17 @@ SpdySession31::WriteSegments(nsAHttpSegmentWriter *writer,
     MOZ_ASSERT(!mNeedsCleanup, "cleanup stream set unexpectedly");
     mNeedsCleanup = nullptr;                     /* just in case */
 
+    SpdyStream31 *stream = mInputFrameDataStream;
     mSegmentWriter = writer;
     rv = mInputFrameDataStream->WriteSegments(this, count, countWritten);
     mSegmentWriter = nullptr;
 
     mLastDataReadEpoch = mLastReadEpoch;
 
-    if (rv == NS_BASE_STREAM_CLOSED) {
+    if (SoftStreamError(rv)) {
       // This will happen when the transaction figures out it is EOF, generally
-      // due to a content-length match being made
-      SpdyStream31 *stream = mInputFrameDataStream;
+      // due to a content-length match being made. Return OK from this function
+      // otherwise the whole session would be torn down.
 
       // if we were doing PROCESSING_COMPLETE_HEADERS need to pop the state
       // back to PROCESSING_DATA_FRAME where we came from
@@ -2098,12 +2134,12 @@ SpdySession31::WriteSegments(nsAHttpSegmentWriter *writer,
         ResetDownstreamState();
       LOG3(("SpdySession31::WriteSegments session=%p stream=%p 0x%X "
             "needscleanup=%p. cleanup stream based on "
-            "stream->writeSegments returning BASE_STREAM_CLOSED\n",
+            "stream->writeSegments returning code %X\n",
             this, stream, stream ? stream->StreamID() : 0,
-            mNeedsCleanup));
+            mNeedsCleanup, rv));
       CleanupStream(stream, NS_OK, RST_CANCEL);
-      MOZ_ASSERT(!mNeedsCleanup, "double cleanup out of data frame");
-      mNeedsCleanup = nullptr;                     /* just in case */
+      MOZ_ASSERT(!mNeedsCleanup || mNeedsCleanup == stream);
+      mNeedsCleanup = nullptr;
       return NS_OK;
     }
 
@@ -2357,6 +2393,14 @@ SpdySession31::Close(nsresult aReason)
   mSegmentWriter = nullptr;
 }
 
+nsHttpConnectionInfo *
+SpdySession31::ConnectionInfo()
+{
+  nsRefPtr<nsHttpConnectionInfo> ci;
+  GetConnectionInfo(getter_AddRefs(ci));
+  return ci.get();
+}
+
 void
 SpdySession31::CloseTransaction(nsAHttpTransaction *aTransaction,
                                 nsresult aResult)
@@ -2373,7 +2417,7 @@ SpdySession31::CloseTransaction(nsAHttpTransaction *aTransaction,
           this, aTransaction, aResult));
     return;
   }
-  LOG3(("SpdySession31::CloseTranscation probably a cancel. "
+  LOG3(("SpdySession31::CloseTransaction probably a cancel. "
         "this=%p, trans=%p, result=%x, streamID=0x%X stream=%p",
         this, aTransaction, aResult, stream->StreamID(), stream));
   CleanupStream(stream, aResult, RST_CANCEL);
@@ -2582,6 +2626,96 @@ SpdySession31::ConnectPushedStream(SpdyStream31 *stream)
   ForceRecv();
 }
 
+uint32_t
+SpdySession31::FindTunnelCount(nsHttpConnectionInfo *aConnInfo)
+{
+  MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
+  uint32_t rv = 0;
+  mTunnelHash.Get(aConnInfo->HashKey(), &rv);
+  return rv;
+}
+
+void
+SpdySession31::RegisterTunnel(SpdyStream31 *aTunnel)
+{
+  MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
+  nsHttpConnectionInfo *ci = aTunnel->Transaction()->ConnectionInfo();
+  uint32_t newcount = FindTunnelCount(ci) + 1;
+  mTunnelHash.Remove(ci->HashKey());
+  mTunnelHash.Put(ci->HashKey(), newcount);
+  LOG3(("SpdySession31::RegisterTunnel %p stream=%p tunnels=%d [%s]",
+        this, aTunnel, newcount, ci->HashKey().get()));
+}
+
+void
+SpdySession31::UnRegisterTunnel(SpdyStream31 *aTunnel)
+{
+  MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
+  nsHttpConnectionInfo *ci = aTunnel->Transaction()->ConnectionInfo();
+  MOZ_ASSERT(FindTunnelCount(ci));
+  uint32_t newcount = FindTunnelCount(ci) - 1;
+  mTunnelHash.Remove(ci->HashKey());
+  if (newcount) {
+    mTunnelHash.Put(ci->HashKey(), newcount);
+  }
+  LOG3(("SpdySession31::UnRegisterTunnel %p stream=%p tunnels=%d [%s]",
+        this, aTunnel, newcount, ci->HashKey().get()));
+}
+
+void
+SpdySession31::DispatchOnTunnel(nsAHttpTransaction *aHttpTransaction,
+                                nsIInterfaceRequestor *aCallbacks)
+{
+  MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
+  nsHttpTransaction *trans = aHttpTransaction->QueryHttpTransaction();
+  nsHttpConnectionInfo *ci = aHttpTransaction->ConnectionInfo();
+  MOZ_ASSERT(trans);
+
+  LOG3(("SpdySession31::DispatchOnTunnel %p trans=%p", this, trans));
+
+  aHttpTransaction->SetConnection(nullptr);
+
+  // this transaction has done its work of setting up a tunnel, let
+  // the connection manager queue it if necessary
+  trans->SetDontRouteViaWildCard(true);
+  trans->EnableKeepAlive();
+
+  if (FindTunnelCount(ci) < gHttpHandler->MaxConnectionsPerOrigin()) {
+    LOG3(("SpdySession31::DispatchOnTunnel %p create on new tunnel %s",
+          this, ci->HashKey().get()));
+    // The connect transaction will hold onto the underlying http
+    // transaction so that an auth created by the connect can be mappped
+    // to the correct security callbacks
+    nsRefPtr<SpdyConnectTransaction> connectTrans =
+      new SpdyConnectTransaction(ci, aCallbacks,
+                                 trans->Caps(), trans, this);
+    AddStream(connectTrans, nsISupportsPriority::PRIORITY_NORMAL,
+              false, nullptr);
+    SpdyStream31 *tunnel = mStreamTransactionHash.Get(connectTrans);
+    MOZ_ASSERT(tunnel);
+    RegisterTunnel(tunnel);
+  } else {
+    // requeue it. The connection manager is responsible for actually putting
+    // this on the tunnel connection with the specific ci now that it
+    // has DontRouteViaWildCard set.
+    LOG3(("SpdySession31::DispatchOnTunnel %p trans=%p queue in connection manager",
+          this, trans));
+    gHttpHandler->InitiateTransaction(trans, trans->Priority());
+  }
+}
+
+nsresult
+SpdySession31::BufferOutput(const char *buf,
+                            uint32_t count,
+                            uint32_t *countRead)
+{
+  nsAHttpSegmentReader *old = mSegmentReader;
+  mSegmentReader = nullptr;
+  nsresult rv = OnReadSegment(buf, count, countRead);
+  mSegmentReader = old;
+  return rv;
+}
+
 //-----------------------------------------------------------------------------
 // Modified methods of nsAHttpConnection
 //-----------------------------------------------------------------------------
@@ -2606,6 +2740,12 @@ SpdySession31::TransactionHasDataToWrite(nsAHttpTransaction *caller)
         this, stream->StreamID()));
 
   mReadyForWrite.Push(stream);
+  SetWriteCallbacks();
+
+  // NSPR poll will not poll the network if there are non system PR_FileDesc's
+  // that are ready - so we can get into a deadlock waiting for the system IO
+  // to come back here if we don't force the send loop manually.
+  ForceSend();
 }
 
 void
@@ -2617,6 +2757,7 @@ SpdySession31::TransactionHasDataToWrite(SpdyStream31 *stream)
 
   mReadyForWrite.Push(stream);
   SetWriteCallbacks();
+  ForceSend();
 }
 
 bool
@@ -2656,10 +2797,17 @@ SpdySession31::Classification()
   return mConnection->Classification();
 }
 
+void
+SpdySession31::GetSecurityCallbacks(nsIInterfaceRequestor **aOut)
+{
+  *aOut = nullptr;
+}
+
 //-----------------------------------------------------------------------------
 // unused methods of nsAHttpTransaction
 // We can be sure of this because SpdySession31 is only constructed in
-// nsHttpConnection and is never passed out of that object
+// nsHttpConnection and is never passed out of that object or a TLSFilterTransaction
+// TLS tunnel
 //-----------------------------------------------------------------------------
 
 void
@@ -2667,13 +2815,6 @@ SpdySession31::SetConnection(nsAHttpConnection *)
 {
   // This is unexpected
   MOZ_ASSERT(false, "SpdySession31::SetConnection()");
-}
-
-void
-SpdySession31::GetSecurityCallbacks(nsIInterfaceRequestor **)
-{
-  // This is unexpected
-  MOZ_ASSERT(false, "SpdySession31::GetSecurityCallbacks()");
 }
 
 void
@@ -2833,6 +2974,34 @@ nsresult
 SpdySession31::PushBack(const char *buf, uint32_t len)
 {
   return mConnection->PushBack(buf, len);
+}
+
+void
+SpdySession31::SendPing()
+{
+  MOZ_ASSERT(PR_GetCurrentThread() == gSocketThread);
+
+  if (mPreviousUsed) {
+    // alredy in progress, get out
+    return;
+  }
+
+  mPingSentEpoch = PR_IntervalNow();
+  if (!mPingSentEpoch) {
+    mPingSentEpoch = 1; // avoid the 0 sentinel value
+  }
+  if (!mPingThreshold ||
+      (mPingThreshold >  gHttpHandler->NetworkChangedTimeout())) {
+    mPreviousPingThreshold = mPingThreshold;
+    mPreviousUsed = true;
+    mPingThreshold = gHttpHandler->NetworkChangedTimeout();
+  }
+
+  GeneratePing(mNextPingID);
+  mNextPingID += 2;
+  ResumeRecv();
+
+  gHttpHandler->ConnMgr()->ActivateTimeoutTick();
 }
 
 } // namespace mozilla::net

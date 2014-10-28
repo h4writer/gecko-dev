@@ -7,6 +7,7 @@
 #include "nsDebug.h"
 #include "nsString.h"
 #include "nsCUPSShim.h"
+#include "mozilla/ArrayUtils.h"
 #include "prlink.h"
 
 
@@ -21,7 +22,7 @@ static const char gSymName[][sizeof("cupsPrintFile")] = {
     { "cupsPrintFile" },
     { "cupsTempFd" },
 };
-static const int gSymNameCt = NS_ARRAY_LENGTH(gSymName);
+static const int gSymNameCt = mozilla::ArrayLength(gSymName);
 
 
 bool
@@ -46,7 +47,7 @@ nsCUPSShim::Init()
         if (! *(symAddr[i])) {
 #ifdef DEBUG
             nsAutoCString msg(gSymName[i]);
-            msg.Append(" not found in CUPS library");
+            msg.AppendLiteral(" not found in CUPS library");
             NS_WARNING(msg.get());
 #endif
             PR_UnloadLibrary(mCupsLib);

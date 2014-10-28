@@ -8,6 +8,10 @@
 
 #include <stdint.h>                     // for uint32_t
 #include "nsPoint.h"                    // for nsIntPoint
+#include "nsRegion.h"
+
+#include "mozilla/TypedEnum.h"
+#include "mozilla/TypedEnumBits.h"
 
 #ifdef MOZ_WIDGET_GONK
 #include <ui/GraphicBuffer.h>
@@ -28,6 +32,8 @@ struct PRLogModuleInfo;
 #  define MOZ_LAYERS_LOG_IF_SHADOWABLE(layer, _args)
 #endif  // if defined(DEBUG) || defined(PR_LOGGING)
 
+#define INVALID_OVERLAY -1
+
 namespace android {
 class GraphicBuffer;
 }
@@ -35,10 +41,12 @@ class GraphicBuffer;
 namespace mozilla {
 namespace layers {
 
+class TextureHost;
 
-typedef uint32_t TextureFlags;
+#undef NONE
+#undef OPAQUE
 
-enum LayersBackend {
+MOZ_BEGIN_ENUM_CLASS(LayersBackend, int8_t)
   LAYERS_NONE = 0,
   LAYERS_BASIC,
   LAYERS_OPENGL,
@@ -47,56 +55,74 @@ enum LayersBackend {
   LAYERS_D3D11,
   LAYERS_CLIENT,
   LAYERS_LAST
-};
+MOZ_END_ENUM_CLASS(LayersBackend)
 
-enum BufferMode {
+MOZ_BEGIN_ENUM_CLASS(BufferMode, int8_t)
   BUFFER_NONE,
-  BUFFER_BUFFERED
-};
+  BUFFERED
+MOZ_END_ENUM_CLASS(BufferMode)
 
-enum DrawRegionClip {
-  CLIP_DRAW,
-  CLIP_DRAW_SNAPPED,
-  CLIP_NONE,
-};
+MOZ_BEGIN_ENUM_CLASS(DrawRegionClip, int8_t)
+  DRAW,
+  NONE
+MOZ_END_ENUM_CLASS(DrawRegionClip)
+
+MOZ_BEGIN_ENUM_CLASS(SurfaceMode, int8_t)
+  SURFACE_NONE = 0,
+  SURFACE_OPAQUE,
+  SURFACE_SINGLE_CHANNEL_ALPHA,
+  SURFACE_COMPONENT_ALPHA
+MOZ_END_ENUM_CLASS(SurfaceMode)
 
 // LayerRenderState for Composer2D
 // We currently only support Composer2D using gralloc. If we want to be backed
 // by other surfaces we will need a more generic LayerRenderState.
-enum LayerRenderStateFlags {
-  LAYER_RENDER_STATE_Y_FLIPPED = 1 << 0,
-  LAYER_RENDER_STATE_BUFFER_ROTATION = 1 << 1,
+MOZ_BEGIN_ENUM_CLASS(LayerRenderStateFlags, int8_t)
+  LAYER_RENDER_STATE_DEFAULT = 0,
+  Y_FLIPPED = 1 << 0,
+  BUFFER_ROTATION = 1 << 1,
   // Notify Composer2D to swap the RB pixels of gralloc buffer
-  LAYER_RENDER_STATE_FORMAT_RB_SWAP = 1 << 2
-};
+  FORMAT_RB_SWAP = 1 << 2
+MOZ_END_ENUM_CLASS(LayerRenderStateFlags)
+MOZ_MAKE_ENUM_CLASS_BITWISE_OPERATORS(LayerRenderStateFlags)
 
 // The 'ifdef MOZ_WIDGET_GONK' sadness here is because we don't want to include
 // android::sp unless we have to.
 struct LayerRenderState {
   LayerRenderState()
 #ifdef MOZ_WIDGET_GONK
-    : mSurface(nullptr), mFlags(0), mHasOwnOffset(false)
+    : mFlags(LayerRenderStateFlags::LAYER_RENDER_STATE_DEFAULT)
+    , mHasOwnOffset(false)
+    , mSurface(nullptr)
+    , mOverlayId(INVALID_OVERLAY)
+    , mTexture(nullptr)
 #endif
   {}
 
 #ifdef MOZ_WIDGET_GONK
   LayerRenderState(android::GraphicBuffer* aSurface,
                    const nsIntSize& aSize,
-                   uint32_t aFlags)
-    : mSurface(aSurface)
-    , mSize(aSize)
-    , mFlags(aFlags)
+                   LayerRenderStateFlags aFlags,
+                   TextureHost* aTexture)
+    : mFlags(aFlags)
     , mHasOwnOffset(false)
+    , mSurface(aSurface)
+    , mOverlayId(INVALID_OVERLAY)
+    , mSize(aSize)
+    , mTexture(aTexture)
   {}
 
   bool YFlipped() const
-  { return mFlags & LAYER_RENDER_STATE_Y_FLIPPED; }
+  { return bool(mFlags & LayerRenderStateFlags::Y_FLIPPED); }
 
   bool BufferRotated() const
-  { return mFlags & LAYER_RENDER_STATE_BUFFER_ROTATION; }
+  { return bool(mFlags & LayerRenderStateFlags::BUFFER_ROTATION); }
 
   bool FormatRBSwapped() const
-  { return mFlags & LAYER_RENDER_STATE_FORMAT_RB_SWAP; }
+  { return bool(mFlags & LayerRenderStateFlags::FORMAT_RB_SWAP); }
+
+  void SetOverlayId(const int32_t& aId)
+  { mOverlayId = aId; }
 #endif
 
   void SetOffset(const nsIntPoint& aOffset)
@@ -105,25 +131,50 @@ struct LayerRenderState {
     mHasOwnOffset = true;
   }
 
+  // see LayerRenderStateFlags
+  LayerRenderStateFlags mFlags;
+  // true if mOffset is applicable
+  bool mHasOwnOffset;
+  // the location of the layer's origin on mSurface
+  nsIntPoint mOffset;
 #ifdef MOZ_WIDGET_GONK
   // surface to render
   android::sp<android::GraphicBuffer> mSurface;
-  // size of mSurface 
+  int32_t mOverlayId;
+  // size of mSurface
   nsIntSize mSize;
+  TextureHost* mTexture;
 #endif
-  // see LayerRenderStateFlags
-  uint32_t mFlags;
-  // the location of the layer's origin on mSurface
-  nsIntPoint mOffset;
-  // true if mOffset is applicable
-  bool mHasOwnOffset;
 };
 
-enum ScaleMode {
+MOZ_BEGIN_ENUM_CLASS(ScaleMode, int8_t)
   SCALE_NONE,
-  SCALE_STRETCH,
-  SCALE_SENTINEL
-// Unimplemented - SCALE_PRESERVE_ASPECT_RATIO_CONTAIN
+  STRETCH,
+  SENTINEL
+// Unimplemented - PRESERVE_ASPECT_RATIO_CONTAIN
+MOZ_END_ENUM_CLASS(ScaleMode)
+
+struct EventRegions {
+  nsIntRegion mHitRegion;
+  nsIntRegion mDispatchToContentHitRegion;
+
+  bool operator==(const EventRegions& aRegions) const
+  {
+    return mHitRegion == aRegions.mHitRegion &&
+           mDispatchToContentHitRegion == aRegions.mDispatchToContentHitRegion;
+  }
+  bool operator!=(const EventRegions& aRegions) const
+  {
+    return !(*this == aRegions);
+  }
+
+  nsCString ToString() const
+  {
+    nsCString result = mHitRegion.ToString();
+    result.AppendLiteral(";dispatchToContent=");
+    result.Append(mDispatchToContentHitRegion.ToString());
+    return result;
+  }
 };
 
 } // namespace

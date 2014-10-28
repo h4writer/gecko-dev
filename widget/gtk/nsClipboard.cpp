@@ -13,7 +13,6 @@
 #include "nsReadableUtils.h"
 #include "nsXPIDLString.h"
 #include "nsPrimitiveHelpers.h"
-#include "nsICharsetConverterManager.h"
 #include "nsIServiceManager.h"
 #include "nsImageToPixbuf.h"
 #include "nsStringStream.h"
@@ -34,6 +33,10 @@
 #include <errno.h>
 #include <unistd.h>
 
+#include "mozilla/dom/EncodingUtils.h"
+#include "nsIUnicodeDecoder.h"
+
+using mozilla::dom::EncodingUtils;
 using namespace mozilla;
 
 // Callback when someone asks us for the data
@@ -51,7 +54,7 @@ clipboard_clear_cb(GtkClipboard *aGtkClipboard,
 static void
 ConvertHTMLtoUCS2          (guchar             *data,
                             int32_t             dataLength,
-                            PRUnichar         **unicodeData,
+                            char16_t         **unicodeData,
                             int32_t            &outUnicodeLen);
 
 static void
@@ -85,7 +88,7 @@ nsClipboard::~nsClipboard()
     }
 }
 
-NS_IMPL_ISUPPORTS1(nsClipboard, nsIClipboard)
+NS_IMPL_ISUPPORTS(nsClipboard, nsIClipboard)
 
 nsresult
 nsClipboard::Init(void)
@@ -100,7 +103,7 @@ nsClipboard::Init(void)
 }
 
 NS_IMETHODIMP
-nsClipboard::Observe(nsISupports *aSubject, const char *aTopic, const PRUnichar *aData)
+nsClipboard::Observe(nsISupports *aSubject, const char *aTopic, const char16_t *aData)
 {
     if (strcmp(aTopic, "quit-application") == 0) {
         // application is going to quit, save clipboard content
@@ -134,14 +137,6 @@ nsClipboard::SetData(nsITransferable *aTransferable,
         return NS_OK;
     }
 
-    nsresult rv;
-    if (!mPrivacyHandler) {
-        rv = NS_NewClipboardPrivacyHandler(getter_AddRefs(mPrivacyHandler));
-        NS_ENSURE_SUCCESS(rv, rv);
-    }
-    rv = mPrivacyHandler->PrepareDataForClipboard(aTransferable);
-    NS_ENSURE_SUCCESS(rv, rv);
-
     // Clear out the clipboard in order to set the new data
     EmptyClipboard(aWhichClipboard);
 
@@ -151,7 +146,8 @@ nsClipboard::SetData(nsITransferable *aTransferable,
     // Get the types of supported flavors
     nsCOMPtr<nsISupportsArray> flavors;
 
-    rv = aTransferable->FlavorsTransferableCanExport(getter_AddRefs(flavors));
+    nsresult rv =
+        aTransferable->FlavorsTransferableCanExport(getter_AddRefs(flavors));
     if (!flavors || NS_FAILED(rv))
         return NS_ERROR_FAILURE;
 
@@ -324,7 +320,7 @@ nsClipboard::GetData(nsITransferable *aTransferable, int32_t aWhichClipboard)
                 length = gtk_selection_data_get_length(selectionData);
                 // Special case text/html since we can convert into UCS2
                 if (!strcmp(flavorStr, kHTMLMime)) {
-                    PRUnichar* htmlBody= nullptr;
+                    char16_t* htmlBody= nullptr;
                     int32_t htmlBodyLen = 0;
                     // Convert text/html into our unicode format
                     ConvertHTMLtoUCS2(const_cast<guchar*>(clipboardData), length,
@@ -446,6 +442,13 @@ nsClipboard::SupportsSelectionClipboard(bool *_retval)
 {
     *_retval = true; // yeah, unix supports the selection clipboard
     return NS_OK;
+}
+
+NS_IMETHODIMP
+nsClipboard::SupportsFindClipboard(bool* _retval)
+{
+  *_retval = false;
+  return NS_OK;
 }
 
 /* static */
@@ -606,10 +609,10 @@ nsClipboard::SelectionGetEvent(GtkClipboard     *aClipboard,
              * detect mozilla use UCS2 encoding when copy-paste.
              */
             guchar *buffer = (guchar *)
-                    nsMemory::Alloc((len * sizeof(guchar)) + sizeof(PRUnichar));
+                    nsMemory::Alloc((len * sizeof(guchar)) + sizeof(char16_t));
             if (!buffer)
                 return;
-            PRUnichar prefix = 0xFEFF;
+            char16_t prefix = 0xFEFF;
             memcpy(buffer, &prefix, sizeof(prefix));
             memcpy(buffer + sizeof(prefix), primitive_data, len);
             nsMemory::Free((guchar *)primitive_data);
@@ -681,18 +684,18 @@ clipboard_clear_cb(GtkClipboard *aGtkClipboard,
  * bodyLength: pass to Mozilla
  */
 void ConvertHTMLtoUCS2(guchar * data, int32_t dataLength,
-                       PRUnichar** unicodeData, int32_t& outUnicodeLen)
+                       char16_t** unicodeData, int32_t& outUnicodeLen)
 {
     nsAutoCString charset;
     GetHTMLCharset(data, dataLength, charset);// get charset of HTML
     if (charset.EqualsLiteral("UTF-16")) {//current mozilla
         outUnicodeLen = (dataLength / 2) - 1;
-        *unicodeData = reinterpret_cast<PRUnichar*>
+        *unicodeData = reinterpret_cast<char16_t*>
                                        (nsMemory::Alloc((outUnicodeLen + sizeof('\0')) *
-                       sizeof(PRUnichar)));
+                       sizeof(char16_t)));
         if (*unicodeData) {
-            memcpy(*unicodeData, data + sizeof(PRUnichar),
-                   outUnicodeLen * sizeof(PRUnichar));
+            memcpy(*unicodeData, data + sizeof(char16_t),
+                   outUnicodeLen * sizeof(char16_t));
             (*unicodeData)[outUnicodeLen] = '\0';
         }
     } else if (charset.EqualsLiteral("UNKNOWN")) {
@@ -701,32 +704,24 @@ void ConvertHTMLtoUCS2(guchar * data, int32_t dataLength,
     } else {
         // app which use "text/html" to copy&paste
         nsCOMPtr<nsIUnicodeDecoder> decoder;
-        nsresult rv;
         // get the decoder
-        nsCOMPtr<nsICharsetConverterManager> ccm =
-            do_GetService(NS_CHARSETCONVERTERMANAGER_CONTRACTID, &rv);
-        if (NS_FAILED(rv)) {
-#ifdef DEBUG_CLIPBOARD
-            g_print("        can't get CHARSET CONVERTER MANAGER service\n");
-#endif
-            outUnicodeLen = 0;
-            return;
-        }
-        rv = ccm->GetUnicodeDecoder(charset.get(), getter_AddRefs(decoder));
-        if (NS_FAILED(rv)) {
+        nsAutoCString encoding;
+        if (!EncodingUtils::FindEncodingForLabelNoReplacement(charset,
+                                                              encoding)) {
 #ifdef DEBUG_CLIPBOARD
             g_print("        get unicode decoder error\n");
 #endif
             outUnicodeLen = 0;
             return;
         }
+        decoder = EncodingUtils::DecoderForEncoding(encoding);
         // converting
         decoder->GetMaxLength((const char *)data, dataLength, &outUnicodeLen);
         // |outUnicodeLen| is number of chars
         if (outUnicodeLen) {
-            *unicodeData = reinterpret_cast<PRUnichar*>
+            *unicodeData = reinterpret_cast<char16_t*>
                                            (nsMemory::Alloc((outUnicodeLen + sizeof('\0')) *
-                           sizeof(PRUnichar)));
+                           sizeof(char16_t)));
             if (*unicodeData) {
                 int32_t numberTmp = dataLength;
                 decoder->Convert((const char *)data, &numberTmp,
@@ -752,7 +747,7 @@ void ConvertHTMLtoUCS2(guchar * data, int32_t dataLength,
 void GetHTMLCharset(guchar * data, int32_t dataLength, nsCString& str)
 {
     // if detect "FFFE" or "FEFF", assume UTF-16
-    PRUnichar* beginChar =  (PRUnichar*)data;
+    char16_t* beginChar =  (char16_t*)data;
     if ((beginChar[0] == 0xFFFE) || (beginChar[0] == 0xFEFF)) {
         str.AssignLiteral("UTF-16");
         return;
@@ -869,15 +864,17 @@ static GtkSelectionData* CopyRetrievedData(GtkSelectionData *aData)
         gtk_selection_data_copy(aData) : nullptr;
 }
 
-class RetrievalContext : public RefCounted<RetrievalContext> {
-public:
-    enum State { INITIAL, COMPLETED, TIMED_OUT };
-
-    RetrievalContext() : mState(INITIAL), mData(nullptr) {}
+class RetrievalContext {
     ~RetrievalContext()
     {
         MOZ_ASSERT(!mData, "Wait() wasn't called");
     }
+
+public:
+    NS_INLINE_DECL_REFCOUNTING(RetrievalContext)
+    enum State { INITIAL, COMPLETED, TIMED_OUT };
+
+    RetrievalContext() : mState(INITIAL), mData(nullptr) {}
 
     /**
      * Call this when data has been retrieved.

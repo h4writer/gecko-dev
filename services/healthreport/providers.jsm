@@ -12,16 +12,18 @@
  * up.
  */
 
-"use strict";
-
 #ifndef MERGED_COMPARTMENT
+
+"use strict";
 
 this.EXPORTED_SYMBOLS = [
   "AddonsProvider",
   "AppInfoProvider",
-  "CrashDirectoryService",
+#ifdef MOZ_CRASHREPORTER
   "CrashesProvider",
+#endif
   "HealthReportProvider",
+  "HotfixProvider",
   "PlacesProvider",
   "SearchesProvider",
   "SessionsProvider",
@@ -50,17 +52,18 @@ XPCOMUtils.defineLazyModuleGetter(this, "PlacesDBUtils",
                                   "resource://gre/modules/PlacesDBUtils.jsm");
 
 
+const LAST_NUMERIC_FIELD = {type: Metrics.Storage.FIELD_LAST_NUMERIC};
 const LAST_TEXT_FIELD = {type: Metrics.Storage.FIELD_LAST_TEXT};
 const DAILY_DISCRETE_NUMERIC_FIELD = {type: Metrics.Storage.FIELD_DAILY_DISCRETE_NUMERIC};
 const DAILY_LAST_NUMERIC_FIELD = {type: Metrics.Storage.FIELD_DAILY_LAST_NUMERIC};
+const DAILY_LAST_TEXT_FIELD = {type: Metrics.Storage.FIELD_DAILY_LAST_TEXT};
 const DAILY_COUNTER_FIELD = {type: Metrics.Storage.FIELD_DAILY_COUNTER};
 
-// Preprocess to use the correct telemetry pref.
-#ifdef MOZ_TELEMETRY_ON_BY_DEFAULT
-const TELEMETRY_PREF = "toolkit.telemetry.enabledPreRelease";
-#else
 const TELEMETRY_PREF = "toolkit.telemetry.enabled";
-#endif
+
+function isTelemetryEnabled(prefs) {
+  return prefs.get(TELEMETRY_PREF, false);
+}
 
 /**
  * Represents basic application state.
@@ -356,7 +359,7 @@ AppInfoProvider.prototype = Object.freeze({
   },
 
   _recordIsTelemetryEnabled: function (m) {
-    let enabled = TELEMETRY_PREF && this._prefs.get(TELEMETRY_PREF, false);
+    let enabled = isTelemetryEnabled(this._prefs);
     this._log.debug("Recording telemetry enabled (" + TELEMETRY_PREF + "): " + enabled);
     yield m.setDailyLastNumeric("isTelemetryEnabled", enabled ? 1 : 0);
   },
@@ -415,7 +418,7 @@ SysInfoMeasurement.prototype = Object.freeze({
   __proto__: Metrics.Measurement.prototype,
 
   name: "sysinfo",
-  version: 1,
+  version: 2,
 
   fields: {
     cpuCount: {type: Metrics.Storage.FIELD_LAST_NUMERIC},
@@ -426,6 +429,7 @@ SysInfoMeasurement.prototype = Object.freeze({
     name: LAST_TEXT_FIELD,
     version: LAST_TEXT_FIELD,
     architecture: LAST_TEXT_FIELD,
+    isWow64: LAST_NUMERIC_FIELD,
   },
 });
 
@@ -452,6 +456,7 @@ SysInfoProvider.prototype = Object.freeze({
     name: "name",
     version: "version",
     arch: "architecture",
+    isWow64: "isWow64",
   },
 
   collectConstantData: function () {
@@ -485,9 +490,17 @@ SysInfoProvider.prototype = Object.freeze({
           method = "setLastNumeric";
         }
 
-        // Round memory to mebibytes.
-        if (k == "memsize") {
-          value = Math.round(value / 1048576);
+        switch (k) {
+          case "memsize":
+            // Round memory to mebibytes.
+            value = Math.round(value / 1048576);
+            break;
+          case "isWow64":
+            // Property is only present on Windows. hasKey() skipping from
+            // above ensures undefined or null doesn't creep in here.
+            value = value ? 1 : 0;
+            method = "setLastNumeric";
+            break;
         }
 
         yield m[method](v, value);
@@ -686,8 +699,8 @@ function ActiveAddonsMeasurement() {
 ActiveAddonsMeasurement.prototype = Object.freeze({
   __proto__: Metrics.Measurement.prototype,
 
-  name: "active",
-  version: 1,
+  name: "addons",
+  version: 2,
 
   fields: {
     addons: LAST_TEXT_FIELD,
@@ -695,7 +708,7 @@ ActiveAddonsMeasurement.prototype = Object.freeze({
 
   _serializeJSONSingular: function (data) {
     if (!data.has("addons")) {
-      this._log.warn("Don't have active addons info. Weird.");
+      this._log.warn("Don't have addons info. Weird.");
       return null;
     }
 
@@ -706,6 +719,75 @@ ActiveAddonsMeasurement.prototype = Object.freeze({
   },
 });
 
+/**
+ * Stores the set of active plugins in storage.
+ *
+ * This stores the data in a JSON blob in a text field similar to the
+ * ActiveAddonsMeasurement.
+ */
+function ActivePluginsMeasurement() {
+  Metrics.Measurement.call(this);
+
+  this._serializers = {};
+  this._serializers[this.SERIALIZE_JSON] = {
+    singular: this._serializeJSONSingular.bind(this),
+    // We don't need a daily serializer because we have none of this data.
+  };
+}
+
+ActivePluginsMeasurement.prototype = Object.freeze({
+  __proto__: Metrics.Measurement.prototype,
+
+  name: "plugins",
+  version: 1,
+
+  fields: {
+    plugins: LAST_TEXT_FIELD,
+  },
+
+  _serializeJSONSingular: function (data) {
+    if (!data.has("plugins")) {
+      this._log.warn("Don't have plugins info. Weird.");
+      return null;
+    }
+
+    // Exceptions are caught in the caller.
+    let result = JSON.parse(data.get("plugins")[1]);
+    result._v = this.version;
+    return result;
+  },
+});
+
+function ActiveGMPluginsMeasurement() {
+  Metrics.Measurement.call(this);
+
+  this._serializers = {};
+  this._serializers[this.SERIALIZE_JSON] = {
+    singular: this._serializeJSONSingular.bind(this),
+  };
+}
+
+ActiveGMPluginsMeasurement.prototype = Object.freeze({
+  __proto__: Metrics.Measurement.prototype,
+
+  name: "gm-plugins",
+  version: 1,
+
+  fields: {
+    "gm-plugins": LAST_TEXT_FIELD,
+  },
+
+  _serializeJSONSingular: function (data) {
+    if (!data.has("gm-plugins")) {
+      this._log.warn("Don't have GM plugins info. Weird.");
+      return null;
+    }
+
+    let result = JSON.parse(data.get("gm-plugins")[1]);
+    result._v = this.version;
+    return result;
+  },
+});
 
 function AddonCountsMeasurement() {
   Metrics.Measurement.call(this);
@@ -773,7 +855,6 @@ AddonsProvider.prototype = Object.freeze({
   // Add-on types for which full details are uploaded in the
   // ActiveAddonsMeasurement. All other types are ignored.
   FULL_DETAIL_TYPES: [
-    "plugin",
     "extension",
     "service",
   ],
@@ -782,6 +863,8 @@ AddonsProvider.prototype = Object.freeze({
 
   measurementTypes: [
     ActiveAddonsMeasurement,
+    ActivePluginsMeasurement,
+    ActiveGMPluginsMeasurement,
     AddonCountsMeasurement1,
     AddonCountsMeasurement,
   ],
@@ -813,12 +896,16 @@ AddonsProvider.prototype = Object.freeze({
   _collectAndStoreAddons: function () {
     let deferred = Promise.defer();
 
-    AddonManager.getAllAddons(function onAllAddons(addons) {
+    AddonManager.getAllAddons(function onAllAddons(allAddons) {
       let data;
       let addonsField;
+      let pluginsField;
+      let gmPluginsField;
       try {
-        data = this._createDataStructure(addons);
+        data = this._createDataStructure(allAddons);
         addonsField = JSON.stringify(data.addons);
+        pluginsField = JSON.stringify(data.plugins);
+        gmPluginsField = JSON.stringify(data.gmPlugins);
       } catch (ex) {
         this._log.warn("Exception when populating add-ons data structure: " +
                        CommonUtils.exceptionStr(ex));
@@ -827,7 +914,9 @@ AddonsProvider.prototype = Object.freeze({
       }
 
       let now = new Date();
-      let active = this.getMeasurement("active", 1);
+      let addons = this.getMeasurement("addons", 2);
+      let plugins = this.getMeasurement("plugins", 1);
+      let gmPlugins = this.getMeasurement("gm-plugins", 1);
       let counts = this.getMeasurement(AddonCountsMeasurement.prototype.name,
                                        AddonCountsMeasurement.prototype.version);
 
@@ -843,8 +932,21 @@ AddonsProvider.prototype = Object.freeze({
           counts.setDailyLastNumeric(type, data.counts[type], now);
         }
 
-        return active.setLastText("addons", addonsField).then(
-          function onSuccess() { deferred.resolve(); },
+        return addons.setLastText("addons", addonsField).then(
+          function onSuccess() {
+            return plugins.setLastText("plugins", pluginsField).then(
+              function onSuccess() {
+                return gmPlugins.setLastText("gm-plugins", gmPluginsField).then(
+                  function onSuccess() {
+                    deferred.resolve();
+                  },
+                  function onError(error) {
+                    deferred.reject(error);
+                  });
+              },
+              function onError(error) { deferred.reject(error); }
+            );
+          },
           function onError(error) { deferred.reject(error); }
         );
       }.bind(this));
@@ -853,21 +955,50 @@ AddonsProvider.prototype = Object.freeze({
     return deferred.promise;
   },
 
-  COPY_FIELDS: [
+  COPY_ADDON_FIELDS: [
     "userDisabled",
     "appDisabled",
+    "name",
     "version",
     "type",
     "scope",
+    "description",
     "foreignInstall",
     "hasBinaryComponents",
   ],
 
+  COPY_PLUGIN_FIELDS: [
+    "name",
+    "version",
+    "description",
+    "blocklisted",
+    "disabled",
+    "clicktoplay",
+  ],
+
   _createDataStructure: function (addons) {
-    let data = {addons: {}, counts: {}};
+    let data = {
+      addons: {},
+      plugins: {},
+      gmPlugins: {},
+      counts: {}
+    };
 
     for (let addon of addons) {
       let type = addon.type;
+
+      // We count plugins separately below.
+      if (addon.type == "plugin") {
+        if (addon.isGMPlugin) {
+          data.gmPlugins[addon.id] = {
+            version: addon.version,
+            userDisabled: addon.userDisabled,
+            applyBackgroundUpdates: addon.applyBackgroundUpdates,
+          };
+        }
+        continue;
+      }
+
       data.counts[type] = (data.counts[type] || 0) + 1;
 
       if (this.FULL_DETAIL_TYPES.indexOf(addon.type) == -1) {
@@ -875,7 +1006,7 @@ AddonsProvider.prototype = Object.freeze({
       }
 
       let obj = {};
-      for (let field of this.COPY_FIELDS) {
+      for (let field of this.COPY_ADDON_FIELDS) {
         obj[field] = addon[field];
       }
 
@@ -888,19 +1019,40 @@ AddonsProvider.prototype = Object.freeze({
       }
 
       data.addons[addon.id] = obj;
-
     }
+
+    let pluginTags = Cc["@mozilla.org/plugin/host;1"].
+                       getService(Ci.nsIPluginHost).
+                       getPluginTags({});
+
+    for (let tag of pluginTags) {
+      let obj = {
+        mimeTypes: tag.getMimeTypes({}),
+      };
+
+      for (let field of this.COPY_PLUGIN_FIELDS) {
+        obj[field] = tag[field];
+      }
+
+      // Plugins need to have a filename and a name, so this can't be empty.
+      let id = tag.filename + ":" + tag.name + ":" + tag.version + ":"
+               + tag.description;
+      data.plugins[id] = obj;
+    }
+
+    data.counts["plugin"] = pluginTags.length;
 
     return data;
   },
 });
 
+#ifdef MOZ_CRASHREPORTER
 
-function DailyCrashesMeasurement() {
+function DailyCrashesMeasurement1() {
   Metrics.Measurement.call(this);
 }
 
-DailyCrashesMeasurement.prototype = Object.freeze({
+DailyCrashesMeasurement1.prototype = Object.freeze({
   __proto__: Metrics.Measurement.prototype,
 
   name: "crashes",
@@ -912,8 +1064,113 @@ DailyCrashesMeasurement.prototype = Object.freeze({
   },
 });
 
+function DailyCrashesMeasurement2() {
+  Metrics.Measurement.call(this);
+}
+
+DailyCrashesMeasurement2.prototype = Object.freeze({
+  __proto__: Metrics.Measurement.prototype,
+
+  name: "crashes",
+  version: 2,
+
+  fields: {
+    mainCrash: DAILY_LAST_NUMERIC_FIELD,
+  },
+});
+
+function DailyCrashesMeasurement3() {
+  Metrics.Measurement.call(this);
+}
+
+DailyCrashesMeasurement3.prototype = Object.freeze({
+  __proto__: Metrics.Measurement.prototype,
+
+  name: "crashes",
+  version: 3,
+
+  fields: {
+    "main-crash": DAILY_LAST_NUMERIC_FIELD,
+    "main-hang": DAILY_LAST_NUMERIC_FIELD,
+    "content-crash": DAILY_LAST_NUMERIC_FIELD,
+    "content-hang": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-crash": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-hang": DAILY_LAST_NUMERIC_FIELD,
+  },
+});
+
+function DailyCrashesMeasurement4() {
+  Metrics.Measurement.call(this);
+}
+
+DailyCrashesMeasurement4.prototype = Object.freeze({
+  __proto__: Metrics.Measurement.prototype,
+
+  name: "crashes",
+  version: 4,
+
+  fields: {
+    "main-crash": DAILY_LAST_NUMERIC_FIELD,
+    "main-crash-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "main-crash-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "main-hang": DAILY_LAST_NUMERIC_FIELD,
+    "main-hang-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "main-hang-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "content-crash": DAILY_LAST_NUMERIC_FIELD,
+    "content-crash-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "content-crash-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "content-hang": DAILY_LAST_NUMERIC_FIELD,
+    "content-hang-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "content-hang-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-crash": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-crash-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-crash-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-hang": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-hang-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-hang-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+  },
+});
+
+function DailyCrashesMeasurement5() {
+  Metrics.Measurement.call(this);
+}
+
+DailyCrashesMeasurement5.prototype = Object.freeze({
+  __proto__: Metrics.Measurement.prototype,
+
+  name: "crashes",
+  version: 5,
+
+  fields: {
+    "main-crash": DAILY_LAST_NUMERIC_FIELD,
+    "main-crash-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "main-crash-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "main-hang": DAILY_LAST_NUMERIC_FIELD,
+    "main-hang-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "main-hang-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "content-crash": DAILY_LAST_NUMERIC_FIELD,
+    "content-crash-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "content-crash-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "content-hang": DAILY_LAST_NUMERIC_FIELD,
+    "content-hang-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "content-hang-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-crash": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-crash-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-crash-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-hang": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-hang-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "plugin-hang-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+    "gmplugin-crash": DAILY_LAST_NUMERIC_FIELD,
+    "gmplugin-crash-submission-succeeded": DAILY_LAST_NUMERIC_FIELD,
+    "gmplugin-crash-submission-failed": DAILY_LAST_NUMERIC_FIELD,
+  },
+});
+
 this.CrashesProvider = function () {
   Metrics.Provider.call(this);
+
+  // So we can unit test.
+  this._manager = Services.crashmanager;
 };
 
 CrashesProvider.prototype = Object.freeze({
@@ -921,164 +1178,220 @@ CrashesProvider.prototype = Object.freeze({
 
   name: "org.mozilla.crashes",
 
-  measurementTypes: [DailyCrashesMeasurement],
+  measurementTypes: [
+    DailyCrashesMeasurement1,
+    DailyCrashesMeasurement2,
+    DailyCrashesMeasurement3,
+    DailyCrashesMeasurement4,
+    DailyCrashesMeasurement5,
+  ],
 
   pullOnly: true,
 
-  collectConstantData: function () {
+  collectDailyData: function () {
     return this.storage.enqueueTransaction(this._populateCrashCounts.bind(this));
   },
 
   _populateCrashCounts: function () {
-    let now = new Date();
-    let service = new CrashDirectoryService();
+    this._log.info("Grabbing crash counts from crash manager.");
+    let crashCounts = yield this._manager.getCrashCountsByDay();
 
-    let pending = yield service.getPendingFiles();
-    let submitted = yield service.getSubmittedFiles();
+    // TODO: CrashManager no longer stores submissions as crashes, but we still
+    // want to send the submission data to FHR. As a temporary workaround, we
+    // populate |crashCounts| with the submission data to match past behaviour.
+    // See bug 1056160.
+    let crashes = yield this._manager.getCrashes();
+    for (let crash of crashes) {
+      for (let [submissionID, submission] of crash.submissions) {
+        if (!submission.responseDate) {
+          continue;
+        }
 
-    function getAgeLimit() {
-      return 0;
-    }
+        let day = Metrics.dateToDays(submission.responseDate);
+        if (!crashCounts.has(day)) {
+          crashCounts.set(day, new Map());
+        }
 
-    let lastCheck = yield this.getState("lastCheck");
-    if (!lastCheck) {
-      lastCheck = getAgeLimit();
-    } else {
-      lastCheck = parseInt(lastCheck, 10);
-      if (Number.isNaN(lastCheck)) {
-        lastCheck = getAgeLimit();
+        let succeeded =
+          submission.result == this._manager.SUBMISSION_RESULT_OK;
+        let type = crash.type + "-submission-" + (succeeded ? "succeeded" :
+                                                              "failed");
+
+        let count = (crashCounts.get(day).get(type) || 0) + 1;
+        crashCounts.get(day).set(type, count);
       }
     }
 
-    let m = this.getMeasurement("crashes", 1);
+    let m = this.getMeasurement("crashes", 5);
+    let fields = DailyCrashesMeasurement5.prototype.fields;
 
-    // Aggregate counts locally to avoid excessive storage interaction.
-    let counts = {
-      pending: new Metrics.DailyValues(),
-      submitted: new Metrics.DailyValues(),
-    };
+    for (let [day, types] of crashCounts) {
+      let date = Metrics.daysToDate(day);
+      for (let [type, count] of types) {
+        if (!(type in fields)) {
+          this._log.warn("Unknown crash type encountered: " + type);
+          continue;
+        }
 
-    // FUTURE detect mtimes in the future and react more intelligently.
-    for (let filename in pending) {
-      let modified = pending[filename].modified;
-
-      if (modified.getTime() < lastCheck) {
-        continue;
+        yield m.setDailyLastNumeric(type, count, date);
       }
-
-      counts.pending.appendValue(modified, 1);
     }
-
-    for (let filename in submitted) {
-      let modified = submitted[filename].modified;
-
-      if (modified.getTime() < lastCheck) {
-        continue;
-      }
-
-      counts.submitted.appendValue(modified, 1);
-    }
-
-    for (let [date, values] in counts.pending) {
-      yield m.incrementDailyCounter("pending", date, values.length);
-    }
-
-    for (let [date, values] in counts.submitted) {
-      yield m.incrementDailyCounter("submitted", date, values.length);
-    }
-
-    yield this.setState("lastCheck", "" + now.getTime());
   },
 });
 
+#endif
 
 /**
- * Helper for interacting with the crashes directory.
+ * Records data from update hotfixes.
  *
- * FUTURE Extract to JSM alongside crashreporter. Use in about:crashes.
+ * This measurement has dynamic fields. Field names are of the form
+ * <version>.<thing> where <version> is the hotfix version that produced
+ * the data. e.g. "v20140527". The sub-version of the hotfix is omitted
+ * because hotfixes can go through multiple minor versions during development
+ * and we don't want to introduce more fields than necessary. Furthermore,
+ * the subsequent dots make parsing field names slightly harder. By stripping,
+ * we can just split on the first dot.
  */
-this.CrashDirectoryService = function () {
-  let base = Cc["@mozilla.org/file/directory_service;1"]
-               .getService(Ci.nsIProperties)
-               .get("UAppData", Ci.nsIFile);
+function UpdateHotfixMeasurement1() {
+  Metrics.Measurement.call(this);
+}
 
-  let cr = base.clone();
-  cr.append("Crash Reports");
+UpdateHotfixMeasurement1.prototype = Object.freeze({
+  __proto__: Metrics.Measurement.prototype,
 
-  let submitted = cr.clone();
-  submitted.append("submitted");
+  name: "update",
+  version: 1,
 
-  let pending = cr.clone();
-  pending.append("pending");
+  hotfixFieldTypes: {
+    "upgradedFrom": Metrics.Storage.FIELD_LAST_TEXT,
+    "uninstallReason": Metrics.Storage.FIELD_LAST_TEXT,
+    "downloadAttempts": Metrics.Storage.FIELD_LAST_NUMERIC,
+    "downloadFailures": Metrics.Storage.FIELD_LAST_NUMERIC,
+    "installAttempts": Metrics.Storage.FIELD_LAST_NUMERIC,
+    "installFailures": Metrics.Storage.FIELD_LAST_NUMERIC,
+    "notificationsShown": Metrics.Storage.FIELD_LAST_NUMERIC,
+  },
 
-  this._baseDir = base.path;
-  this._submittedDir = submitted.path;
-  this._pendingDir = pending.path;
+  fields: { },
+
+  // Our fields have dynamic names from the hotfix version that supplied them.
+  // We need to override the default behavior to deal with unknown fields.
+  shouldIncludeField: function (name) {
+    return name.contains(".");
+  },
+
+  fieldType: function (name) {
+    for (let known in this.hotfixFieldTypes) {
+      if (name.endsWith(known)) {
+        return this.hotfixFieldTypes[known];
+      }
+    }
+
+    return Metrics.Measurement.prototype.fieldType.call(this, name);
+  },
+});
+
+this.HotfixProvider = function () {
+  Metrics.Provider.call(this);
 };
 
-CrashDirectoryService.prototype = Object.freeze({
-  RE_SUBMITTED_FILENAME: /^bp-.+\.txt$/,
-  RE_PENDING_FILENAME: /^.+\.dmp$/,
+HotfixProvider.prototype = Object.freeze({
+  __proto__: Metrics.Provider.prototype,
 
-  getPendingFiles: function () {
-    return this._getDirectoryEntries(this._pendingDir,
-                                     this.RE_PENDING_FILENAME);
+  name: "org.mozilla.hotfix",
+  measurementTypes: [
+    UpdateHotfixMeasurement1,
+  ],
+
+  pullOnly: true,
+
+  collectDailyData: function () {
+    return this.storage.enqueueTransaction(this._populateHotfixData.bind(this));
   },
 
-  getSubmittedFiles: function () {
-    return this._getDirectoryEntries(this._submittedDir,
-                                     this.RE_SUBMITTED_FILENAME);
-  },
+  _populateHotfixData: function* () {
+    let m = this.getMeasurement("update", 1);
 
-  _getDirectoryEntries: function (path, re) {
-    let files = {};
+    // The update hotfix retains its JSON state file after uninstall.
+    // The initial update hotfix had a hard-coded filename. We treat it
+    // specially. Subsequent update hotfixes named their files in a
+    // recognizeable pattern so we don't need to update this probe code to
+    // know about them.
+    let files = [
+        ["v20140527", OS.Path.join(OS.Constants.Path.profileDir,
+                                   "hotfix.v20140527.01.json")],
+    ];
 
-    return Task.spawn(function iterateDirectory() {
-      // If the directory doesn't exist, exit immediately. Else, re-throw
-      // any errors.
-      try {
-        yield OS.File.stat(path);
-      } catch (ex if ex instanceof OS.File.Error) {
-        if (ex.becauseNoSuchFile) {
-          throw new Task.Result({});
+    let it = new OS.File.DirectoryIterator(OS.Constants.Path.profileDir);
+    try {
+      yield it.forEach((e, index, it) => {
+        let m = e.name.match(/^updateHotfix\.([a-zA-Z0-9]+)\.json$/);
+        if (m) {
+          files.push([m[1], e.path]);
         }
+      });
+    } finally {
+      it.close();
+    }
 
-        throw ex;
+    let decoder = new TextDecoder();
+    for (let e of files) {
+      let [version, path] = e;
+      let p;
+      try {
+        let data = yield OS.File.read(path);
+        p = JSON.parse(decoder.decode(data));
+      } catch (ex if ex instanceof OS.File.Error && ex.becauseNoSuchFile) {
+        continue;
+      } catch (ex) {
+        this._log.warn("Error loading update hotfix payload: " + ex.message);
       }
 
-      let iterator = new OS.File.DirectoryIterator(path);
-
+      // Wrap just in case.
       try {
-        while (true) {
-          let entry;
-          try {
-            entry = yield iterator.next();
-          } catch (ex if ex == StopIteration) {
-            break;
-          }
-
-          if (!entry.name.match(re)) {
+        for (let k in m.hotfixFieldTypes) {
+          if (!(k in p)) {
             continue;
           }
 
-          let info = yield OS.File.stat(entry.path);
+          let value = p[k];
+          if (value === null && k == "uninstallReason") {
+            value = "STILL_INSTALLED";
+          }
 
-          files[entry.name] = {
-            // Last modified should be adequate, because crash files aren't
-            // modified after they're first written.
-            modified: info.lastModificationDate,
-            size: info.size,
-          };
+          let field = version + "." + k;
+          let fieldType;
+          let storageOp;
+          switch (typeof(value)) {
+            case "string":
+              fieldType = this.storage.FIELD_LAST_TEXT;
+              storageOp = "setLastTextFromFieldID";
+              break;
+            case "number":
+              fieldType = this.storage.FIELD_LAST_NUMERIC;
+              storageOp = "setLastNumericFromFieldID";
+              break;
+            default:
+              this._log.warn("Unknown value in hotfix state: " + k + "=" + value);
+              continue;
+          }
+
+          if (this.storage.hasFieldFromMeasurement(m.id, field, fieldType)) {
+            let fieldID = this.storage.fieldIDFromMeasurement(m.id, field);
+            yield this.storage[storageOp](fieldID, value);
+          } else {
+            let fieldID = yield this.storage.registerField(m.id, field,
+                                                           fieldType);
+            yield this.storage[storageOp](fieldID, value);
+          }
         }
 
-        throw new Task.Result(files);
-      } finally {
-        iterator.close();
+      } catch (ex) {
+        this._log.warn("Error processing update hotfix data: " + ex);
       }
-    });
+    }
   },
 });
-
 
 /**
  * Holds basic statistics about the Places database.
@@ -1232,6 +1545,7 @@ SearchCountMeasurementBase.prototype = Object.freeze({
   SOURCES: [
     "abouthome",
     "contextmenu",
+    "newtab",
     "searchbar",
     "urlbar",
   ],
@@ -1271,8 +1585,25 @@ SearchCountMeasurement3.prototype = Object.freeze({
   },
 });
 
+function SearchEnginesMeasurement1() {
+  Metrics.Measurement.call(this);
+}
+
+SearchEnginesMeasurement1.prototype = Object.freeze({
+  __proto__: Metrics.Measurement.prototype,
+
+  name: "engines",
+  version: 1,
+
+  fields: {
+    default: DAILY_LAST_TEXT_FIELD,
+  },
+});
+
 this.SearchesProvider = function () {
   Metrics.Provider.call(this);
+
+  this._prefs = new Preferences({defaultBranch: null});
 };
 
 this.SearchesProvider.prototype = Object.freeze({
@@ -1283,6 +1614,7 @@ this.SearchesProvider.prototype = Object.freeze({
     SearchCountMeasurement1,
     SearchCountMeasurement2,
     SearchCountMeasurement3,
+    SearchEnginesMeasurement1,
   ],
 
   /**
@@ -1295,6 +1627,36 @@ this.SearchesProvider.prototype = Object.freeze({
       deferred.resolve();
     });
     return deferred.promise;
+  },
+
+  collectDailyData: function () {
+    return this.storage.enqueueTransaction(function getDaily() {
+      // We currently only record this if Telemetry is enabled.
+      if (!isTelemetryEnabled(this._prefs)) {
+        return;
+      }
+
+      let m = this.getMeasurement(SearchEnginesMeasurement1.prototype.name,
+                                  SearchEnginesMeasurement1.prototype.version);
+
+      let engine;
+      try {
+        engine = Services.search.defaultEngine;
+      } catch (e) {}
+      let name;
+
+      if (!engine) {
+        name = "NONE";
+      } else if (engine.identifier) {
+        name = engine.identifier;
+      } else if (engine.name) {
+        name = "other-" + engine.name;
+      } else {
+        name = "UNDEFINED";
+      }
+
+      yield m.setDailyLastText("default", name);
+    }.bind(this));
   },
 
   /**
@@ -1357,6 +1719,27 @@ HealthReportSubmissionMeasurement1.prototype = Object.freeze({
   },
 });
 
+function HealthReportSubmissionMeasurement2() {
+  Metrics.Measurement.call(this);
+}
+
+HealthReportSubmissionMeasurement2.prototype = Object.freeze({
+  __proto__: Metrics.Measurement.prototype,
+
+  name: "submissions",
+  version: 2,
+
+  fields: {
+    firstDocumentUploadAttempt: DAILY_COUNTER_FIELD,
+    continuationUploadAttempt: DAILY_COUNTER_FIELD,
+    uploadSuccess: DAILY_COUNTER_FIELD,
+    uploadTransportFailure: DAILY_COUNTER_FIELD,
+    uploadServerFailure: DAILY_COUNTER_FIELD,
+    uploadClientFailure: DAILY_COUNTER_FIELD,
+    uploadAlreadyInProgress: DAILY_COUNTER_FIELD,
+  },
+});
+
 this.HealthReportProvider = function () {
   Metrics.Provider.call(this);
 }
@@ -1366,10 +1749,13 @@ HealthReportProvider.prototype = Object.freeze({
 
   name: "org.mozilla.healthreport",
 
-  measurementTypes: [HealthReportSubmissionMeasurement1],
+  measurementTypes: [
+    HealthReportSubmissionMeasurement1,
+    HealthReportSubmissionMeasurement2,
+  ],
 
   recordEvent: function (event, date=new Date()) {
-    let m = this.getMeasurement("submissions", 1);
+    let m = this.getMeasurement("submissions", 2);
     return this.enqueueStorageOperation(function recordCounter() {
       return m.incrementDailyCounter(event, date);
     });

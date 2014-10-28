@@ -3,19 +3,17 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-let WebConsoleUtils, gDevTools, TargetFactory, console, promise, require;
+"use strict";
 
-(() => {
-  gDevTools = Cu.import("resource:///modules/devtools/gDevTools.jsm", {}).gDevTools;
-  console = Cu.import("resource://gre/modules/devtools/Console.jsm", {}).console;
-  promise = Cu.import("resource://gre/modules/commonjs/sdk/core/promise.js", {}).Promise;
+let {gDevTools} = Cu.import("resource:///modules/devtools/gDevTools.jsm", {});
+let {console} = Cu.import("resource://gre/modules/devtools/Console.jsm", {});
+let {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
+let {Task} = Cu.import("resource://gre/modules/Task.jsm", {});
+let {devtools} = Cu.import("resource://gre/modules/devtools/Loader.jsm", {});
+let {require, TargetFactory} = devtools;
+let {Utils: WebConsoleUtils} = require("devtools/toolkit/webconsole/utils");
+let {Messages} = require("devtools/webconsole/console-output");
 
-  let tools = Cu.import("resource://gre/modules/devtools/Loader.jsm", {}).devtools;
-  let utils = tools.require("devtools/toolkit/webconsole/utils");
-  TargetFactory = tools.TargetFactory;
-  WebConsoleUtils = utils.Utils;
-  require = tools.require;
-})();
 // promise._reportErrors = true; // please never leave me.
 
 let gPendingOutputTest = 0;
@@ -40,6 +38,18 @@ const GROUP_INDENT = 12;
 
 const WEBCONSOLE_STRINGS_URI = "chrome://browser/locale/devtools/webconsole.properties";
 let WCU_l10n = new WebConsoleUtils.l10n(WEBCONSOLE_STRINGS_URI);
+
+gDevTools.testing = true;
+SimpleTest.registerCleanupFunction(() => {
+  gDevTools.testing = false;
+});
+
+/**
+ * Define an async test based on a generator function
+ */
+function asyncTest(generator) {
+  return () => Task.spawn(generator).then(null, ok.bind(null, false)).then(finishTest);
+}
 
 function log(aMsg)
 {
@@ -67,6 +77,46 @@ function addTab(aURL)
   browser = gBrowser.getBrowserForTab(tab);
 }
 
+function loadTab(url) {
+  let deferred = promise.defer();
+
+  let tab = gBrowser.selectedTab = gBrowser.addTab(url);
+  let browser = gBrowser.getBrowserForTab(tab);
+
+  browser.addEventListener("load", function onLoad() {
+    browser.removeEventListener("load", onLoad, true);
+    deferred.resolve({tab: tab, browser: browser});
+  }, true);
+
+  return deferred.promise;
+}
+
+function loadBrowser(browser) {
+  let deferred = promise.defer();
+
+  browser.addEventListener("load", function onLoad() {
+    browser.removeEventListener("load", onLoad, true);
+    deferred.resolve(null)
+  }, true);
+
+  return deferred.promise;
+}
+
+function closeTab(tab) {
+  let deferred = promise.defer();
+
+  let container = gBrowser.tabContainer;
+
+  container.addEventListener("TabClose", function onTabClose() {
+    container.removeEventListener("TabClose", onTabClose, true);
+    deferred.resolve(null);
+  }, true);
+
+  gBrowser.removeTab(tab);
+
+  return deferred.promise;
+}
+
 function afterAllTabsLoaded(callback, win) {
   win = win || window;
 
@@ -81,7 +131,7 @@ function afterAllTabsLoaded(callback, win) {
 
   for (let a = 0; a < win.gBrowser.tabs.length; a++) {
     let browser = win.gBrowser.tabs[a].linkedBrowser;
-    if (browser.contentDocument.readyState != "complete") {
+    if (browser.webProgress.isLoadingDocument) {
       stillToLoad++;
       browser.addEventListener("load", onLoad, true);
     }
@@ -152,15 +202,20 @@ function findLogEntry(aString)
  * @param function [aCallback]
  *        Optional function to invoke after the Web Console completes
  *        initialization (web-console-created).
+ * @return object
+ *         A promise that is resolved once the web console is open.
  */
 function openConsole(aTab, aCallback = function() { })
 {
+  let deferred = promise.defer();
   let target = TargetFactory.forTab(aTab || tab);
   gDevTools.showToolbox(target, "webconsole").then(function(toolbox) {
     let hud = toolbox.getCurrentPanel().hud;
     hud.jsterm._lazyVariablesView = false;
     aCallback(hud);
+    deferred.resolve(hud);
   });
+  return deferred.promise;
 }
 
 /**
@@ -172,6 +227,8 @@ function openConsole(aTab, aCallback = function() { })
  * @param function [aCallback]
  *        Optional function to invoke after the Web Console completes
  *        closing (web-console-destroyed).
+ * @return object
+ *         A promise that is resolved once the web console is closed.
  */
 function closeConsole(aTab, aCallback = function() { })
 {
@@ -181,15 +238,13 @@ function closeConsole(aTab, aCallback = function() { })
     let panel = toolbox.getPanel("webconsole");
     if (panel) {
       let hudId = panel.hud.hudId;
-      toolbox.destroy().then(aCallback.bind(null, hudId)).then(null, console.debug);
+      return toolbox.destroy().then(aCallback.bind(null, hudId)).then(null, console.debug);
     }
-    else {
-      toolbox.destroy().then(aCallback.bind(null));
-    }
+    return toolbox.destroy().then(aCallback.bind(null));
   }
-  else {
-    aCallback();
-  }
+
+  aCallback();
+  return promise.resolve(null);
 }
 
 /**
@@ -264,7 +319,7 @@ function dumpConsoles()
 function dumpMessageElement(aMessage)
 {
   let text = aMessage.textContent;
-  let repeats = aMessage.querySelector(".repeats");
+  let repeats = aMessage.querySelector(".message-repeats");
   if (repeats) {
     repeats = repeats.getAttribute("value");
   }
@@ -280,7 +335,7 @@ function dumpMessageElement(aMessage)
 
 function finishTest()
 {
-  browser = hudId = hud = filterBox = outputNode = cs = null;
+  browser = hudId = hud = filterBox = outputNode = cs = hudBox = null;
 
   dumpConsoles();
 
@@ -293,19 +348,19 @@ function finishTest()
     return;
   }
 
-  let hud = HUDService.getHudByWindow(content);
-  if (!hud) {
+  let contentHud = HUDService.getHudByWindow(content);
+  if (!contentHud) {
     finish();
     return;
   }
 
-  if (hud.jsterm) {
-    hud.jsterm.clearOutput(true);
+  if (contentHud.jsterm) {
+    contentHud.jsterm.clearOutput(true);
   }
 
-  closeConsole(hud.target.tab, finish);
+  closeConsole(contentHud.target.tab, finish);
 
-  hud = null;
+  contentHud = null;
 }
 
 function tearDown()
@@ -735,10 +790,10 @@ function updateVariablesViewProperty(aOptions)
 
   switch (aOptions.field) {
     case "name":
-      EventUtils.synthesizeKey("VK_ENTER", { shiftKey: true }, view.window);
+      EventUtils.synthesizeKey("VK_RETURN", { shiftKey: true }, view.window);
       break;
     case "value":
-      EventUtils.synthesizeKey("VK_ENTER", {}, view.window);
+      EventUtils.synthesizeKey("VK_RETURN", {}, view.window);
       break;
     default:
       throw new Error("options.field is incorrect");
@@ -756,7 +811,7 @@ function updateVariablesViewProperty(aOptions)
       aOptions.webconsole.jsterm.once("variablesview-fetched", aOptions.callback);
     }
 
-    EventUtils.synthesizeKey("VK_ENTER", {}, view.window);
+    EventUtils.synthesizeKey("VK_RETURN", {}, view.window);
 
     if (!aOptions.webconsole) {
       executeSoon(aOptions.callback);
@@ -796,7 +851,6 @@ function openDebugger(aOptions = {})
     let panelWin = panel.panelWin;
 
     panel._view.Variables.lazyEmpty = false;
-    panel._view.Variables.lazyAppend = false;
 
     let resolveObject = {
       target: target,
@@ -858,8 +912,12 @@ function openDebugger(aOptions = {})
  *            message.
  *            - consoleGroup: boolean, set to |true| to match a console.group()
  *            message.
+ *            - consoleTable: boolean, set to |true| to match a console.table()
+ *            message.
  *            - longString: boolean, set to |true} to match long strings in the
  *            message.
+ *            - collapsible: boolean, set to |true| to match messages that can
+ *            be collapsed/expanded.
  *            - type: match messages that are instances of the given object. For
  *            example, you can point to Messages.NavigationMarker to match any
  *            such message.
@@ -868,6 +926,8 @@ function openDebugger(aOptions = {})
  *            - source: object of the shape { url, line }. This is used to
  *            match the source URL and line number of the error message or
  *            console API call.
+ *            - stacktrace: array of objects of the form { file, fn, line } that
+ *            can match frames in the stacktrace associated with the message.
  *            - groupDepth: number used to check the depth of the message in
  *            a group.
  *            - url: URL to match for network requests.
@@ -886,6 +946,8 @@ function openDebugger(aOptions = {})
  */
 function waitForMessages(aOptions)
 {
+  info("Waiting for messages...");
+
   gPendingOutputTest++;
   let webconsole = aOptions.webconsole;
   let rules = WebConsoleUtils.cloneObject(aOptions.messages, true);
@@ -896,7 +958,7 @@ function waitForMessages(aOptions)
 
   function checkText(aRule, aText)
   {
-    let result;
+    let result = false;
     if (Array.isArray(aRule)) {
       result = aRule.every((s) => checkText(s, aText));
     }
@@ -906,7 +968,26 @@ function waitForMessages(aOptions)
     else if (aRule instanceof RegExp) {
       result = aRule.test(aText);
     }
+    else {
+      result = aRule == aText;
+    }
     return result;
+  }
+
+  function checkConsoleTable(aRule, aElement)
+  {
+    let elemText = aElement.textContent;
+    let table = aRule.consoleTable;
+
+    if (!checkText("console.table():", elemText)) {
+      return false;
+    }
+
+    aRule.category = CATEGORY_WEBDEV;
+    aRule.severity = SEVERITY_LOG;
+    aRule.type = Messages.ConsoleTable;
+
+    return true;
   }
 
   function checkConsoleTrace(aRule, aElement)
@@ -914,44 +995,21 @@ function waitForMessages(aOptions)
     let elemText = aElement.textContent;
     let trace = aRule.consoleTrace;
 
-    if (!checkText("Stack trace from ", elemText)) {
-      return false;
-    }
-
-    let clickable = aElement.querySelector(".body a");
-    if (!clickable) {
-      ok(false, "console.trace() message is missing .hud-clickable");
-      displayErrorContext(aRule, aElement);
-      return false;
-    }
-    aRule.clickableElements = [clickable];
-
-    if (trace.file &&
-        !checkText("from " + trace.file + ", ", elemText)) {
-      ok(false, "console.trace() message is missing the file name: " +
-                trace.file);
-      displayErrorContext(aRule, aElement);
-      return false;
-    }
-
-    if (trace.fn &&
-        !checkText(", function " + trace.fn + ", ", elemText)) {
-      ok(false, "console.trace() message is missing the function name: " +
-                trace.fn);
-      displayErrorContext(aRule, aElement);
-      return false;
-    }
-
-    if (trace.line &&
-        !checkText(", line " + trace.line + ".", elemText)) {
-      ok(false, "console.trace() message is missing the line number: " +
-                trace.line);
-      displayErrorContext(aRule, aElement);
+    if (!checkText("console.trace():", elemText)) {
       return false;
     }
 
     aRule.category = CATEGORY_WEBDEV;
     aRule.severity = SEVERITY_LOG;
+    aRule.type = Messages.ConsoleTrace;
+
+    if (!aRule.stacktrace && typeof trace == "object" && trace !== true) {
+      if (Array.isArray(trace)) {
+        aRule.stacktrace = trace;
+      } else {
+        aRule.stacktrace = [trace];
+      }
+    }
 
     return true;
   }
@@ -975,7 +1033,7 @@ function waitForMessages(aOptions)
   {
     let elemText = aElement.textContent;
     let time = aRule.consoleTimeEnd;
-    let regex = new RegExp(time + ": -?\\d+ms");
+    let regex = new RegExp(time + ": -?\\d+([,.]\\d+)?ms");
 
     if (!checkText(regex, elemText)) {
       return false;
@@ -1020,7 +1078,7 @@ function waitForMessages(aOptions)
 
   function checkSource(aRule, aElement)
   {
-    let location = aElement.querySelector(".location");
+    let location = aElement.querySelector(".message-location");
     if (!location) {
       return false;
     }
@@ -1036,6 +1094,66 @@ function waitForMessages(aOptions)
     return true;
   }
 
+  function checkCollapsible(aRule, aElement)
+  {
+    let msg = aElement._messageObject;
+    if (!msg || !!msg.collapsible != aRule.collapsible) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function checkStacktrace(aRule, aElement)
+  {
+    let stack = aRule.stacktrace;
+    let frames = aElement.querySelectorAll(".stacktrace > li");
+    if (!frames.length) {
+      return false;
+    }
+
+    for (let i = 0; i < stack.length; i++) {
+      let frame = frames[i];
+      let expected = stack[i];
+      if (!frame) {
+        ok(false, "expected frame #" + i + " but didnt find it");
+        return false;
+      }
+
+      if (expected.file) {
+        let file = frame.querySelector(".message-location").title;
+        if (!checkText(expected.file, file)) {
+          ok(false, "frame #" + i + " does not match file name: " +
+                    expected.file);
+          displayErrorContext(aRule, aElement);
+          return false;
+        }
+      }
+
+      if (expected.fn) {
+        let fn = frame.querySelector(".function").textContent;
+        if (!checkText(expected.fn, fn)) {
+          ok(false, "frame #" + i + " does not match the function name: " +
+                    expected.fn);
+          displayErrorContext(aRule, aElement);
+          return false;
+        }
+      }
+
+      if (expected.line) {
+        let line = frame.querySelector(".message-location").sourceLine;
+        if (!checkText(expected.line, line)) {
+          ok(false, "frame #" + i + " does not match the line number: " +
+                    expected.line);
+          displayErrorContext(aRule, aElement);
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
   function checkMessage(aRule, aElement)
   {
     let elemText = aElement.textContent;
@@ -1045,6 +1163,10 @@ function waitForMessages(aOptions)
     }
 
     if (aRule.noText && checkText(aRule.noText, elemText)) {
+      return false;
+    }
+
+    if (aRule.consoleTable && !checkConsoleTable(aRule, aElement)) {
       return false;
     }
 
@@ -1072,15 +1194,26 @@ function waitForMessages(aOptions)
       return false;
     }
 
-    // The rule tries to match the newer types of messages, based on their
-    // object constructor.
-    if (aRule.type && (!aElement._messageObject ||
-                       !(aElement._messageObject instanceof aRule.type))) {
+    if ("collapsible" in aRule && !checkCollapsible(aRule, aElement)) {
       return false;
     }
 
     let partialMatch = !!(aRule.consoleTrace || aRule.consoleTime ||
-                          aRule.consoleTimeEnd || aRule.type);
+                          aRule.consoleTimeEnd);
+
+    // The rule tries to match the newer types of messages, based on their
+    // object constructor.
+    if (aRule.type) {
+      if (!aElement._messageObject ||
+          !(aElement._messageObject instanceof aRule.type)) {
+        if (partialMatch) {
+          ok(false, "message type for rule: " + displayRule(aRule));
+          displayErrorContext(aRule, aElement);
+        }
+        return false;
+      }
+      partialMatch = true;
+    }
 
     if ("category" in aRule && aElement.category != aRule.category) {
       if (partialMatch) {
@@ -1100,23 +1233,35 @@ function waitForMessages(aOptions)
       return false;
     }
 
+    if (aRule.text) {
+      partialMatch = true;
+    }
+
+    if (aRule.stacktrace && !checkStacktrace(aRule, aElement)) {
+      if (partialMatch) {
+        ok(false, "failed to match stacktrace for rule: " + displayRule(aRule));
+        displayErrorContext(aRule, aElement);
+      }
+      return false;
+    }
+
     if (aRule.category == CATEGORY_NETWORK && "url" in aRule &&
         !checkText(aRule.url, aElement.url)) {
       return false;
     }
 
     if ("repeats" in aRule) {
-      let repeats = aElement.querySelector(".repeats");
+      let repeats = aElement.querySelector(".message-repeats");
       if (!repeats || repeats.getAttribute("value") != aRule.repeats) {
         return false;
       }
     }
 
     if ("groupDepth" in aRule) {
-      let timestamp = aElement.querySelector(".timestamp");
-      let indent = (GROUP_INDENT * aRule.groupDepth) + "px";
-      if (!timestamp || timestamp.style.marginRight != indent) {
-        is(timestamp.style.marginRight, indent,
+      let indentNode = aElement.querySelector(".indent");
+      let indent = (GROUP_INDENT * aRule.groupDepth)  + "px";
+      if (!indentNode || indentNode.style.width != indent) {
+        is(indentNode.style.width, indent,
            "group depth check failed for message rule: " + displayRule(aRule));
         return false;
       }
@@ -1137,7 +1282,7 @@ function waitForMessages(aOptions)
     }
 
     if ("objects" in aRule) {
-      let clickables = aElement.querySelectorAll(".body a");
+      let clickables = aElement.querySelectorAll(".message-body a");
       if (aRule.objects != !!clickables[0]) {
         if (partialMatch) {
           is(!!clickables[0], aRule.objects,
@@ -1159,10 +1304,11 @@ function waitForMessages(aOptions)
     return aRule.matched.size == count;
   }
 
-  function onMessagesAdded(aEvent, aNewElements)
+  function onMessagesAdded(aEvent, aNewMessages)
   {
-    for (let elem of aNewElements) {
-      let location = elem.querySelector(".location");
+    for (let msg of aNewMessages) {
+      let elem = msg.node;
+      let location = elem.querySelector(".message-location");
       if (location) {
         let url = location.title;
         // Prevent recursion with the browser console and any potential
@@ -1200,8 +1346,7 @@ function waitForMessages(aOptions)
   {
     if (allRulesMatched()) {
       if (listenerAdded) {
-        webconsole.ui.off("messages-added", onMessagesAdded);
-        webconsole.ui.off("messages-updated", onMessagesAdded);
+        webconsole.ui.off("new-messages", onMessagesAdded);
       }
       gPendingOutputTest--;
       deferred.resolve(rules);
@@ -1216,7 +1361,7 @@ function waitForMessages(aOptions)
     }
 
     if (webconsole.ui) {
-      webconsole.ui.off("messages-added", onMessagesAdded);
+      webconsole.ui.off("new-messages", onMessagesAdded);
     }
 
     for (let rule of rules) {
@@ -1239,12 +1384,21 @@ function waitForMessages(aOptions)
   }
 
   executeSoon(() => {
-    onMessagesAdded("messages-added", webconsole.outputNode.childNodes);
+
+    let messages = [];
+    for (let elem of webconsole.outputNode.childNodes) {
+      messages.push({
+        node: elem,
+        update: false,
+      });
+    }
+
+    onMessagesAdded("new-messages", messages);
+
     if (!allRulesMatched()) {
       listenerAdded = true;
       registerCleanupFunction(testCleanup);
-      webconsole.ui.on("messages-added", onMessagesAdded);
-      webconsole.ui.on("messages-updated", onMessagesAdded);
+      webconsole.ui.on("new-messages", onMessagesAdded);
     }
   });
 
@@ -1260,3 +1414,252 @@ function whenDelayedStartupFinished(aWindow, aCallback)
     }
   }, "browser-delayed-startup-finished", false);
 }
+
+/**
+ * Check the web console output for the given inputs. Each input is checked for
+ * the expected JS eval result, the result of calling print(), the result of
+ * console.log(). The JS eval result is also checked if it opens the variables
+ * view on click.
+ *
+ * @param object hud
+ *        The web console instance to work with.
+ * @param array inputTests
+ *        An array of input tests. An input test element is an object. Each
+ *        object has the following properties:
+ *        - input: string, JS input value to execute.
+ *
+ *        - output: string|RegExp, expected JS eval result.
+ *
+ *        - inspectable: boolean, when true, the test runner expects the JS eval
+ *        result is an object that can be clicked for inspection.
+ *
+ *        - noClick: boolean, when true, the test runner does not click the JS
+ *        eval result. Some objects, like |window|, have a lot of properties and
+ *        opening vview for them is very slow (they can cause timeouts in debug
+ *        builds).
+ *
+ *        - printOutput: string|RegExp, optional, expected output for
+ *        |print(input)|. If this is not provided, printOutput = output.
+ *
+ *        - variablesViewLabel: string|RegExp, optional, the expected variables
+ *        view label when the object is inspected. If this is not provided, then
+ *        |output| is used.
+ *
+ *        - inspectorIcon: boolean, when true, the test runner expects the
+ *        result widget to contain an inspectorIcon element (className
+ *        open-inspector).
+ *
+ *        - expectedTab: string, optional, the full URL of the new tab which must
+ *        open. If this is not provided, any new tabs that open will cause a test
+ *        failure.
+ */
+function checkOutputForInputs(hud, inputTests)
+{
+  let container = gBrowser.tabContainer;
+
+  function* runner()
+  {
+    for (let [i, entry] of inputTests.entries()) {
+      info("checkInput(" + i + "): " + entry.input);
+      yield checkInput(entry);
+    }
+    container = null;
+  }
+
+  function* checkInput(entry)
+  {
+    yield checkConsoleLog(entry);
+    yield checkPrintOutput(entry);
+    yield checkJSEval(entry);
+  }
+
+  function* checkConsoleLog(entry)
+  {
+    info("Logging: " + entry.input);
+    hud.jsterm.clearOutput();
+    hud.jsterm.execute("console.log(" + entry.input + ")");
+
+    let [result] = yield waitForMessages({
+      webconsole: hud,
+      messages: [{
+        name: "console.log() output: " + entry.output,
+        text: entry.output,
+        category: CATEGORY_WEBDEV,
+        severity: SEVERITY_LOG,
+      }],
+    });
+
+    if (typeof entry.inspectorIcon == "boolean") {
+      let msg = [...result.matched][0];
+      yield checkLinkToInspector(entry, msg);
+    }
+  }
+
+  function checkPrintOutput(entry)
+  {
+    info("Printing: " + entry.input);
+    hud.jsterm.clearOutput();
+    hud.jsterm.execute("print(" + entry.input + ")");
+
+    let printOutput = entry.printOutput || entry.output;
+
+    return waitForMessages({
+      webconsole: hud,
+      messages: [{
+        name: "print() output: " + printOutput,
+        text: printOutput,
+        category: CATEGORY_OUTPUT,
+      }],
+    });
+  }
+
+  function* checkJSEval(entry)
+  {
+    info("Evaluating: " + entry.input);
+    hud.jsterm.clearOutput();
+    hud.jsterm.execute(entry.input);
+
+    let [result] = yield waitForMessages({
+      webconsole: hud,
+      messages: [{
+        name: "JS eval output: " + entry.output,
+        text: entry.output,
+        category: CATEGORY_OUTPUT,
+      }],
+    });
+
+    let msg = [...result.matched][0];
+    if (!entry.noClick) {
+      yield checkObjectClick(entry, msg);
+    }
+    if (typeof entry.inspectorIcon == "boolean") {
+      yield checkLinkToInspector(entry, msg);
+    }
+  }
+
+  function* checkObjectClick(entry, msg)
+  {
+    info("Clicking: " + entry.input);
+    let body = msg.querySelector(".message-body a") ||
+               msg.querySelector(".message-body");
+    ok(body, "the message body");
+
+    let deferredVariablesView = promise.defer();
+    entry._onVariablesViewOpen = onVariablesViewOpen.bind(null, entry, deferredVariablesView);
+    hud.jsterm.on("variablesview-open", entry._onVariablesViewOpen);
+
+    let deferredTab = promise.defer();
+    entry._onTabOpen = onTabOpen.bind(null, entry, deferredTab);
+    container.addEventListener("TabOpen", entry._onTabOpen, true);
+
+    body.scrollIntoView();
+    EventUtils.synthesizeMouse(body, 2, 2, {}, hud.iframeWindow);
+
+    if (entry.inspectable) {
+      info("message body tagName '" + body.tagName +  "' className '" + body.className + "'");
+      yield deferredVariablesView.promise;
+    } else {
+      hud.jsterm.off("variablesview-open", entry._onVariablesView);
+      entry._onVariablesView = null;
+    }
+
+    if (entry.expectedTab) {
+      yield deferredTab.promise;
+    } else {
+      container.removeEventListener("TabOpen", entry._onTabOpen, true);
+      entry._onTabOpen = null;
+    }
+
+    yield promise.resolve(null);
+  }
+
+  function checkLinkToInspector(entry, msg)
+  {
+    info("Checking Inspector Link: " + entry.input);
+    let elementNodeWidget = [...msg._messageObject.widgets][0];
+    if (!elementNodeWidget) {
+      ok(!entry.inspectorIcon, "The message has no ElementNode widget");
+      return;
+    }
+
+    return elementNodeWidget.linkToInspector().then(() => {
+      // linkToInspector resolved, check for the .open-inspector element
+      if (entry.inspectorIcon) {
+        ok(msg.querySelectorAll(".open-inspector").length,
+          "The ElementNode widget is linked to the inspector");
+      } else {
+        ok(!msg.querySelectorAll(".open-inspector").length,
+          "The ElementNode widget isn't linked to the inspector");
+      }
+    }, () => {
+      // linkToInspector promise rejected, node not linked to inspector
+      ok(!entry.inspectorIcon, "The ElementNode widget isn't linked to the inspector");
+    });
+  }
+
+  function onVariablesViewOpen(entry, {resolve, reject}, event, view, options)
+  {
+    info("Variables view opened: " + entry.input);
+    let label = entry.variablesViewLabel || entry.output;
+    if (typeof label == "string" && options.label != label) {
+      return;
+    }
+    if (label instanceof RegExp && !label.test(options.label)) {
+      return;
+    }
+
+    hud.jsterm.off("variablesview-open", entry._onVariablesViewOpen);
+    entry._onVariablesViewOpen = null;
+    ok(entry.inspectable, "variables view was shown");
+
+    resolve(null);
+  }
+
+  function onTabOpen(entry, {resolve, reject}, event)
+  {
+    container.removeEventListener("TabOpen", entry._onTabOpen, true);
+    entry._onTabOpen = null;
+
+    let tab = event.target;
+    let browser = gBrowser.getBrowserForTab(tab);
+    loadBrowser(browser).then(() => {
+      let uri = content.location.href;
+      ok(entry.expectedTab && entry.expectedTab == uri,
+        "opened tab '" + uri +  "', expected tab '" + entry.expectedTab + "'");
+      return closeTab(tab);
+    }).then(resolve, reject);
+  }
+
+  return Task.spawn(runner);
+}
+
+/**
+ * Wait for eventName on target.
+ * @param {Object} target An observable object that either supports on/off or
+ * addEventListener/removeEventListener
+ * @param {String} eventName
+ * @param {Boolean} useCapture Optional, for addEventListener/removeEventListener
+ * @return A promise that resolves when the event has been handled
+ */
+function once(target, eventName, useCapture=false) {
+  info("Waiting for event: '" + eventName + "' on " + target + ".");
+
+  let deferred = promise.defer();
+
+  for (let [add, remove] of [
+    ["addEventListener", "removeEventListener"],
+    ["addListener", "removeListener"],
+    ["on", "off"]
+  ]) {
+    if ((add in target) && (remove in target)) {
+      target[add](eventName, function onEvent(...aArgs) {
+        target[remove](eventName, onEvent, useCapture);
+        deferred.resolve.apply(deferred, aArgs);
+      }, useCapture);
+      break;
+    }
+  }
+
+  return deferred.promise;
+}
+

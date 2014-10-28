@@ -16,9 +16,7 @@ class nsIAtom;
 class nsIContent;
 class nsIFrame;
 class nsIPresShell;
-class nsRenderingContext;
 class nsStyleContext;
-class nsSVGFilterPaintCallback;
 class nsSVGIntegerPair;
 class nsSVGLength2;
 
@@ -37,7 +35,7 @@ class nsSVGFilterFrame : public nsSVGFilterFrameBase
   friend nsIFrame*
   NS_NewSVGFilterFrame(nsIPresShell* aPresShell, nsStyleContext* aContext);
 protected:
-  nsSVGFilterFrame(nsStyleContext* aContext)
+  explicit nsSVGFilterFrame(nsStyleContext* aContext)
     : nsSVGFilterFrameBase(aContext),
       mLoopFlag(false),
       mNoHRefURI(false)
@@ -53,56 +51,14 @@ public:
                                 const nsRect&           aDirtyRect,
                                 const nsDisplayListSet& aLists) MOZ_OVERRIDE {}
 
-  NS_IMETHOD AttributeChanged(int32_t         aNameSpaceID,
-                              nsIAtom*        aAttribute,
-                              int32_t         aModType) MOZ_OVERRIDE;
-
-  /**
-   * Paint the given filtered frame.
-   * @param aDirtyArea The area than needs to be painted, in aFilteredFrame's
-   *   frame space (i.e. relative to its origin, the top-left corner of its
-   *   border box).
-   */
-  nsresult PaintFilteredFrame(nsRenderingContext *aContext,
-                              nsIFrame *aFilteredFrame,
-                              nsSVGFilterPaintCallback *aPaintCallback,
-                              const nsRect* aDirtyArea,
-                              nsIFrame* aTransformRoot);
-
-  /**
-   * Returns the post-filter area that could be dirtied when the given
-   * pre-filter area of aFilteredFrame changes.
-   * @param aPreFilterDirtyRect The pre-filter area of aFilteredFrame that has
-   *   changed, relative to aFilteredFrame, in app units.
-   */
-  nsRect GetPostFilterDirtyArea(nsIFrame *aFilteredFrame,
-                                const nsRect& aPreFilterDirtyRect);
-
-  /**
-   * Returns the pre-filter area that is needed from aFilteredFrame when the
-   * given post-filter area needs to be repainted.
-   * @param aPostFilterDirtyRect The post-filter area that is dirty, relative
-   *   to aFilteredFrame, in app units.
-   */
-  nsRect GetPreFilterNeededArea(nsIFrame *aFilteredFrame,
-                                const nsRect& aPostFilterDirtyRect);
-
-  /**
-   * Returns the post-filter visual overflow rect (paint bounds) of
-   * aFilteredFrame.
-   * @param aOverrideBBox A user space rect, in user units, that should be used
-   *   as aFilteredFrame's bbox ('bbox' is a specific SVG term), if non-null.
-   * @param aPreFilterBounds The pre-filter visual overflow rect of
-   *   aFilteredFrame, if non-null.
-   */
-  nsRect GetPostFilterBounds(nsIFrame *aFilteredFrame,
-                             const gfxRect *aOverrideBBox = nullptr,
-                             const nsRect *aPreFilterBounds = nullptr);
+  virtual nsresult AttributeChanged(int32_t         aNameSpaceID,
+                                    nsIAtom*        aAttribute,
+                                    int32_t         aModType) MOZ_OVERRIDE;
 
 #ifdef DEBUG
-  virtual void Init(nsIContent*      aContent,
-                    nsIFrame*        aParent,
-                    nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 #endif
 
   /**
@@ -117,7 +73,7 @@ private:
   // reference another filter and we don't have a property. Return
   // the referenced filter's frame if available, null otherwise.
   class AutoFilterReferencer;
-  friend class nsAutoFilterInstance;
+  friend class nsSVGFilterInstance;
   nsSVGFilterFrame* GetReferencedFilter();
   nsSVGFilterFrame* GetReferencedFilterIfNotInUse();
 
@@ -126,11 +82,6 @@ private:
   uint16_t GetEnumValue(uint32_t aIndex)
   {
     return GetEnumValue(aIndex, mContent);
-  }
-  const nsSVGIntegerPair *GetIntegerPairValue(uint32_t aIndex, nsIContent *aDefault);
-  const nsSVGIntegerPair *GetIntegerPairValue(uint32_t aIndex)
-  {
-    return GetIntegerPairValue(aIndex, mContent);
   }
   const nsSVGLength2 *GetLengthValue(uint32_t aIndex, nsIContent *aDefault);
   const nsSVGLength2 *GetLengthValue(uint32_t aIndex)

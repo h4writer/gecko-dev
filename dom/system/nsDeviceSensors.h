@@ -6,14 +6,11 @@
 #define nsDeviceSensors_h
 
 #include "nsIDeviceSensors.h"
-#include "nsIDOMDeviceMotionEvent.h"
 #include "nsCOMArray.h"
 #include "nsTArray.h"
 #include "nsCOMPtr.h"
 #include "nsITimer.h"
-#include "nsIDOMDeviceOrientationEvent.h"
-#include "nsIDOMDeviceMotionEvent.h"
-#include "nsDOMDeviceMotionEvent.h"
+#include "mozilla/dom/DeviceMotionEvent.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/HalSensor.h"
 #include "nsDataHashtable.h"
@@ -28,17 +25,19 @@ class EventTarget;
 
 class nsDeviceSensors : public nsIDeviceSensors, public mozilla::hal::ISensorObserver
 {
+  typedef mozilla::dom::DeviceAccelerationInit DeviceAccelerationInit;
+  typedef mozilla::dom::DeviceRotationRateInit DeviceRotationRateInit;
 public:
   NS_DECL_ISUPPORTS
   NS_DECL_NSIDEVICESENSORS
 
   nsDeviceSensors();
 
-  virtual ~nsDeviceSensors();
-
   void Notify(const mozilla::hal::SensorData& aSensorData);
 
 private:
+  virtual ~nsDeviceSensors();
+
   // sensor -> window listener
   nsTArray<nsTArray<nsIDOMWindow*>* > mWindowListeners;
 
@@ -53,8 +52,7 @@ private:
   void FireDOMUserProximityEvent(mozilla::dom::EventTarget* aTarget,
                                  bool aNear);
 
-  void FireDOMOrientationEvent(class nsIDOMDocument *domDoc,
-                               mozilla::dom::EventTarget* target,
+  void FireDOMOrientationEvent(mozilla::dom::EventTarget* target,
                                double alpha,
                                double beta,
                                double gamma);
@@ -74,9 +72,9 @@ private:
 
   mozilla::TimeStamp mLastDOMMotionEventTime;
   bool mIsUserProximityNear;
-  nsRefPtr<nsDOMDeviceAcceleration> mLastAcceleration;
-  nsRefPtr<nsDOMDeviceAcceleration> mLastAccelerationIncluduingGravity;
-  nsRefPtr<nsDOMDeviceRotationRate> mLastRotationRate;
+  mozilla::Maybe<DeviceAccelerationInit> mLastAcceleration;
+  mozilla::Maybe<DeviceAccelerationInit> mLastAccelerationIncluduingGravity;
+  mozilla::Maybe<DeviceRotationRateInit> mLastRotationRate;
 };
 
 #endif

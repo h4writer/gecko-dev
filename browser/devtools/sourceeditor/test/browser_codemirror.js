@@ -6,30 +6,20 @@
 
 const HOST = 'mochi.test:8888';
 const URI  = "http://" + HOST + "/browser/browser/devtools/sourceeditor/test/codemirror.html";
+loadHelperScript("helper_codemirror_runner.js");
 
 function test() {
-  requestLongerTimeout(2);
+  requestLongerTimeout(3);
   waitForExplicitFinish();
 
   let tab = gBrowser.addTab();
   gBrowser.selectedTab = tab;
 
   let browser = gBrowser.getBrowserForTab(tab);
+  browser.addEventListener("load", function onLoad() {
+    browser.removeEventListener("load", onLoad, true);
+    runCodeMirrorTest(browser);
+  }, true);
+
   browser.loadURI(URI);
-
-  function check() {
-    var win = browser.contentWindow.wrappedJSObject;
-    var doc = win.document;
-    var out = doc.getElementById("status");
-
-    if (!out || !out.classList.contains("done"))
-      return void setTimeout(check, 100);
-
-    ok(!win.failed, "CodeMirror tests all passed");
-
-    while (gBrowser.tabs.length > 1) gBrowser.removeCurrentTab();
-    finish();
-  }
-
-  setTimeout(check, 100);
 }

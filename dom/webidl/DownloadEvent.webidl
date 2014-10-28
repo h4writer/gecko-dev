@@ -5,7 +5,8 @@
  */
 
 [Constructor(DOMString type, optional DownloadEventInit eventInitDict),
- Pref="dom.mozDownloads.enabled"]
+ Pref="dom.mozDownloads.enabled",
+ CheckPermissions="downloads"]
 interface DownloadEvent : Event
 {
   readonly attribute DOMDownload? download;

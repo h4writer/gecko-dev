@@ -1,10 +1,12 @@
-# -*- Mode: javascript; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- 
+# -*- indent-tabs-mode: nil; js-indent-level: 2 -*- 
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 Components.utils.import("resource://gre/modules/XPCOMUtils.jsm");
 
+XPCOMUtils.defineLazyModuleGetter(this, "BrowserUtils",
+                                  "resource://gre/modules/BrowserUtils.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "Downloads",
                                   "resource://gre/modules/Downloads.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "DownloadLastDir",
@@ -16,7 +18,7 @@ XPCOMUtils.defineLazyModuleGetter(this, "OS",
 XPCOMUtils.defineLazyModuleGetter(this, "PrivateBrowsingUtils",
                                   "resource://gre/modules/PrivateBrowsingUtils.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "Promise",
-                                  "resource://gre/modules/commonjs/sdk/core/promise.js");
+                                  "resource://gre/modules/Promise.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "Services",
                                   "resource://gre/modules/Services.jsm");
 XPCOMUtils.defineLazyModuleGetter(this, "Task",
@@ -35,42 +37,9 @@ var ContentAreaUtils = {
   }
 }
 
-/**
- * urlSecurityCheck: JavaScript wrapper for checkLoadURIWithPrincipal
- * and checkLoadURIStrWithPrincipal.
- * If |aPrincipal| is not allowed to link to |aURL|, this function throws with
- * an error message.
- *
- * @param aURL
- *        The URL a page has linked to. This could be passed either as a string
- *        or as a nsIURI object.
- * @param aPrincipal
- *        The principal of the document from which aURL came.
- * @param aFlags
- *        Flags to be passed to checkLoadURIStr. If undefined,
- *        nsIScriptSecurityManager.STANDARD will be passed.
- */
 function urlSecurityCheck(aURL, aPrincipal, aFlags)
 {
-  var secMan = Services.scriptSecurityManager;
-  if (aFlags === undefined) {
-    aFlags = secMan.STANDARD;
-  }
-
-  try {
-    if (aURL instanceof Components.interfaces.nsIURI)
-      secMan.checkLoadURIWithPrincipal(aPrincipal, aURL, aFlags);
-    else
-      secMan.checkLoadURIStrWithPrincipal(aPrincipal, aURL, aFlags);
-  } catch (e) {
-    let principalStr = "";
-    try {
-      principalStr = " from " + aPrincipal.URI.spec;
-    }
-    catch(e2) { }
-
-    throw "Load of " + aURL + principalStr + " denied.";
-  }
+  return BrowserUtils.urlSecurityCheck(aURL, aPrincipal, aFlags);
 }
 
 /**
@@ -83,7 +52,6 @@ function isContentFrame(aFocusedWindow)
 
   return (aFocusedWindow.top == window.content);
 }
-
 
 // Clientele: (Make sure you don't break any of these)
 //  - File    ->  Save Page/Frame As...
@@ -679,6 +647,54 @@ function uniqueFile(aLocalFile)
   return aLocalFile;
 }
 
+#ifdef MOZ_JSDOWNLOADS
+/**
+ * Download a URL using the new jsdownloads API.
+ *
+ * @param aURL
+ *        the url to download
+ * @param [optional] aFileName
+ *        the destination file name, if omitted will be obtained from the url.
+ * @param aInitiatingDocument
+ *        The document from which the download was initiated.
+ */
+function DownloadURL(aURL, aFileName, aInitiatingDocument) {
+  // For private browsing, try to get document out of the most recent browser
+  // window, or provide our own if there's no browser window.
+  let isPrivate = aInitiatingDocument.defaultView
+                                     .QueryInterface(Ci.nsIInterfaceRequestor)
+                                     .getInterface(Ci.nsIWebNavigation)
+                                     .QueryInterface(Ci.nsILoadContext)
+                                     .usePrivateBrowsing;
+
+  let fileInfo = new FileInfo(aFileName);
+  initFileInfo(fileInfo, aURL, null, null, null, null);
+
+  let filepickerParams = {
+    fileInfo: fileInfo,
+    saveMode: SAVEMODE_FILEONLY
+  };
+
+  Task.spawn(function* () {
+    let accepted = yield promiseTargetFile(filepickerParams, true, fileInfo.uri);
+    if (!accepted)
+      return;
+
+    let file = filepickerParams.file;
+    let download = yield Downloads.createDownload({
+      source: { url: aURL, isPrivate: isPrivate },
+      target: { path: file.path, partFilePath: file.path + ".part" }
+    });
+    download.tryToKeepPartialData = true;
+    download.start();
+
+    // Add the download to the list, allowing it to be managed.
+    let list = yield Downloads.getList(Downloads.ALL);
+    list.add(download);
+  }).then(null, Components.utils.reportError);
+}
+#endif
+
 // We have no DOM, and can only save the URL as is.
 const SAVEMODE_FILEONLY      = 0x00;
 // We have a DOM and can save as complete.
@@ -789,21 +805,14 @@ function makeWebBrowserPersist()
   return Components.classes[persistContractID].createInstance(persistIID);
 }
 
-/**
- * Constructs a new URI, using nsIIOService.
- * @param aURL The URI spec.
- * @param aOriginCharset The charset of the URI.
- * @param aBaseURI Base URI to resolve aURL, or null.
- * @return an nsIURI object based on aURL.
- */
 function makeURI(aURL, aOriginCharset, aBaseURI)
 {
-  return Services.io.newURI(aURL, aOriginCharset, aBaseURI);
+  return BrowserUtils.makeURI(aURL, aOriginCharset, aBaseURI);
 }
 
 function makeFileURI(aFile)
 {
-  return Services.io.newFileURI(aFile);
+  return BrowserUtils.makeFileURI(aFile);
 }
 
 function makeFilePicker()

@@ -50,6 +50,8 @@ Volume::EventObserverList Volume::mEventObserverList;
 // be locked until we get our first update from nsVolume (MainThread).
 static int32_t sMountGeneration = 0;
 
+static uint32_t sNextId = 1;
+
 // We don't get media inserted/removed events at startup. So we
 // assume it's present, and we'll be told that it's missing.
 Volume::Volume(const nsCSubstring& aName)
@@ -59,10 +61,14 @@ Volume::Volume(const nsCSubstring& aName)
     mMountGeneration(-1),
     mMountLocked(true),  // Needs to agree with nsVolume::nsVolume
     mSharingEnabled(false),
+    mFormatRequested(false),
+    mMountRequested(false),
+    mUnmountRequested(false),
     mCanBeShared(true),
     mIsSharing(false),
-    mFormatRequested(false),
-    mIsFormatting(false)
+    mIsFormatting(false),
+    mIsUnmounting(false),
+    mId(sNextId++)
 {
   DBG("Volume %s: created", NameStr());
 }
@@ -76,9 +82,7 @@ Volume::SetIsSharing(bool aIsSharing)
   mIsSharing = aIsSharing;
   LOG("Volume %s: IsSharing set to %d state %s",
       NameStr(), (int)mIsSharing, StateStr(mState));
-  if (mIsSharing) {
-    mEventObserverList.Broadcast(this);
-  }
+  mEventObserverList.Broadcast(this);
 }
 
 void
@@ -93,6 +97,18 @@ Volume::SetIsFormatting(bool aIsFormatting)
   if (mIsFormatting) {
     mEventObserverList.Broadcast(this);
   }
+}
+
+void
+Volume::SetIsUnmounting(bool aIsUnmounting)
+{
+  if (aIsUnmounting == mIsUnmounting) {
+    return;
+  }
+  mIsUnmounting = aIsUnmounting;
+  LOG("Volume %s: IsUnmounting set to %d state %s",
+      NameStr(), (int)mIsUnmounting, StateStr(mState));
+  mEventObserverList.Broadcast(this);
 }
 
 void
@@ -140,6 +156,7 @@ Volume::SetSharingEnabled(bool aSharingEnabled)
 
   LOG("SetSharingMode for volume %s to %d canBeShared = %d",
       NameStr(), (int)mSharingEnabled, (int)mCanBeShared);
+  mEventObserverList.Broadcast(this);
 }
 
 void
@@ -152,6 +169,24 @@ Volume::SetFormatRequested(bool aFormatRequested)
 }
 
 void
+Volume::SetMountRequested(bool aMountRequested)
+{
+  mMountRequested = aMountRequested;
+
+  LOG("SetMountRequested for volume %s to %d CanBeMounted = %d",
+      NameStr(), (int)mMountRequested, (int)CanBeMounted());
+}
+
+void
+Volume::SetUnmountRequested(bool aUnmountRequested)
+{
+  mUnmountRequested = aUnmountRequested;
+
+  LOG("SetUnmountRequested for volume %s to %d CanBeMounted = %d",
+      NameStr(), (int)mUnmountRequested, (int)CanBeMounted());
+}
+
+void
 Volume::SetState(Volume::STATE aNewState)
 {
   MOZ_ASSERT(XRE_GetProcessType() == GeckoProcessType_Default);
@@ -161,14 +196,14 @@ Volume::SetState(Volume::STATE aNewState)
   }
   if (aNewState == nsIVolume::STATE_MOUNTED) {
     mMountGeneration = ++sMountGeneration;
-    LOG("Volume %s: changing state from %s to %s @ '%s' (%d observers) "
+    LOG("Volume %s (%u): changing state from %s to %s @ '%s' (%d observers) "
         "mountGeneration = %d, locked = %d",
-        NameStr(), StateStr(mState),
+        NameStr(), mId, StateStr(mState),
         StateStr(aNewState), mMountPoint.get(), mEventObserverList.Length(),
         mMountGeneration, (int)mMountLocked);
   } else {
-    LOG("Volume %s: changing state from %s to %s (%d observers)",
-        NameStr(), StateStr(mState),
+    LOG("Volume %s (%u): changing state from %s to %s (%d observers)",
+        NameStr(), mId, StateStr(mState),
         StateStr(aNewState), mEventObserverList.Length());
   }
 
@@ -177,16 +212,22 @@ Volume::SetState(Volume::STATE aNewState)
        // Cover the startup case where we don't get insertion/removal events
        mMediaPresent = false;
        mIsSharing = false;
+       mUnmountRequested = false;
+       mMountRequested = false;
+       mIsUnmounting = false;
        break;
 
      case nsIVolume::STATE_MOUNTED:
+       mMountRequested = false;
        mIsFormatting = false;
        mIsSharing = false;
+       mIsUnmounting = false;
        break;
      case nsIVolume::STATE_FORMATTING:
        mFormatRequested = false;
        mIsFormatting = true;
        mIsSharing = false;
+       mIsUnmounting = false;
        break;
 
      case nsIVolume::STATE_SHARED:
@@ -196,8 +237,18 @@ Volume::SetState(Volume::STATE aNewState)
        // it's conceivable that a volume could already be in a shared state
        // when b2g starts.
        mIsSharing = true;
+       mIsUnmounting = false;
+       mIsFormatting = false;
        break;
 
+     case nsIVolume::STATE_UNMOUNTING:
+       mIsUnmounting = true;
+       mIsFormatting = false;
+       mIsSharing = false;
+       break;
+
+     case nsIVolume::STATE_IDLE:
+       break;
      default:
        break;
   }
@@ -327,7 +378,7 @@ Volume::HandleVoldResponse(int aResponseCode, nsCWhitespaceTokenizer& aTokenizer
   // The volume name will have already been parsed, and the tokenizer will point
   // to the token after the volume name
   switch (aResponseCode) {
-    case ResponseCode::VolumeListResult: {
+    case ::ResponseCode::VolumeListResult: {
       // Each line will look something like:
       //
       //  sdcard /mnt/sdcard 1
@@ -346,7 +397,7 @@ Volume::HandleVoldResponse(int aResponseCode, nsCWhitespaceTokenizer& aTokenizer
       break;
     }
 
-    case ResponseCode::VolumeStateChange: {
+    case ::ResponseCode::VolumeStateChange: {
       // Format of the line looks something like:
       //
       //  Volume sdcard /mnt/sdcard state changed from 7 (Shared-Unmounted) to 1 (Idle-Unmounted)
@@ -354,7 +405,7 @@ Volume::HandleVoldResponse(int aResponseCode, nsCWhitespaceTokenizer& aTokenizer
       // So we parse out the state after the string " to "
       while (aTokenizer.hasMoreTokens()) {
         nsAutoCString token(aTokenizer.nextToken());
-        if (token.Equals("to")) {
+        if (token.EqualsLiteral("to")) {
           nsresult errCode;
           token = aTokenizer.nextToken();
           SetState((STATE)token.ToInteger(&errCode));
@@ -364,12 +415,12 @@ Volume::HandleVoldResponse(int aResponseCode, nsCWhitespaceTokenizer& aTokenizer
       break;
     }
 
-    case ResponseCode::VolumeDiskInserted:
+    case ::ResponseCode::VolumeDiskInserted:
       SetMediaPresent(true);
       break;
 
-    case ResponseCode::VolumeDiskRemoved: // fall-thru
-    case ResponseCode::VolumeBadRemoval:
+    case ::ResponseCode::VolumeDiskRemoved: // fall-thru
+    case ::ResponseCode::VolumeBadRemoval:
       SetMediaPresent(false);
       break;
 

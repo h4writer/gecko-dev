@@ -9,7 +9,6 @@
 #include "nsIConsoleService.h"
 #include "nsIDiskSpaceWatcher.h"
 #include "nsIFile.h"
-#include "nsIFileStorage.h"
 #include "nsIObserverService.h"
 #include "nsIScriptError.h"
 
@@ -17,14 +16,21 @@
 #include "mozilla/ClearOnShutdown.h"
 #include "mozilla/CondVar.h"
 #include "mozilla/ContentEvents.h"
+#include "mozilla/dom/ContentChild.h"
+#include "mozilla/dom/DOMError.h"
+#include "mozilla/dom/ErrorEventBinding.h"
+#include "mozilla/dom/PBlobChild.h"
 #include "mozilla/dom/quota/OriginOrPatternString.h"
 #include "mozilla/dom/quota/QuotaManager.h"
 #include "mozilla/dom/quota/Utilities.h"
 #include "mozilla/dom/TabContext.h"
+#include "mozilla/EventDispatcher.h"
+#include "mozilla/ipc/BackgroundChild.h"
+#include "mozilla/ipc/PBackgroundChild.h"
 #include "mozilla/Services.h"
+#include "mozilla/Preferences.h"
 #include "mozilla/storage.h"
 #include "nsContentUtils.h"
-#include "nsEventDispatcher.h"
 #include "nsThreadUtils.h"
 
 #include "IDBEvents.h"
@@ -36,9 +42,9 @@
 #include "mozilla/dom/IDBCursorBinding.h"
 #include "mozilla/dom/IDBDatabaseBinding.h"
 #include "mozilla/dom/IDBFactoryBinding.h"
-#include "mozilla/dom/IDBFileHandleBinding.h"
-#include "mozilla/dom/IDBKeyRangeBinding.h"
 #include "mozilla/dom/IDBIndexBinding.h"
+#include "mozilla/dom/IDBKeyRangeBinding.h"
+#include "mozilla/dom/IDBMutableFileBinding.h"
 #include "mozilla/dom/IDBObjectStoreBinding.h"
 #include "mozilla/dom/IDBOpenDBRequestBinding.h"
 #include "mozilla/dom/IDBRequestBinding.h"
@@ -52,11 +58,11 @@
 #define LOW_DISK_SPACE_DATA_FULL "full"
 #define LOW_DISK_SPACE_DATA_FREE "free"
 
-USING_INDEXEDDB_NAMESPACE
-using namespace mozilla::dom;
-USING_QUOTA_NAMESPACE
+namespace mozilla {
+namespace dom {
+namespace indexedDB {
 
-BEGIN_INDEXEDDB_NAMESPACE
+using namespace mozilla::dom::quota;
 
 class FileManagerInfo
 {
@@ -101,14 +107,15 @@ private:
   nsTArray<nsRefPtr<FileManager> > mTemporaryStorageFileManagers;
 };
 
-END_INDEXEDDB_NAMESPACE
-
 namespace {
+
+const char kTestingPref[] = "dom.indexedDB.testing";
 
 mozilla::StaticRefPtr<IndexedDatabaseManager> gDBManager;
 
-mozilla::Atomic<int32_t> gInitialized(0);
-mozilla::Atomic<int32_t> gClosed(0);
+mozilla::Atomic<bool> gInitialized(false);
+mozilla::Atomic<bool> gClosed(false);
+mozilla::Atomic<bool> gTestingMode(false);
 
 class AsyncDeleteFileRunnable MOZ_FINAL : public nsIRunnable
 {
@@ -119,6 +126,8 @@ public:
   AsyncDeleteFileRunnable(FileManager* aFileManager, int64_t aFileId);
 
 private:
+  ~AsyncDeleteFileRunnable() {}
+
   nsRefPtr<FileManager> mFileManager;
   int64_t mFileId;
 };
@@ -153,6 +162,8 @@ public:
                                   bool* aResult);
 
 private:
+  ~GetFileReferencesHelper() {}
+
   PersistenceType mPersistenceType;
   nsCString mOrigin;
   nsString mDatabaseName;
@@ -177,6 +188,16 @@ struct MOZ_STACK_CLASS InvalidateInfo
   const nsACString& pattern;
 };
 
+void
+TestingPrefChangedCallback(const char* aPrefName, void* aClosure)
+{
+  MOZ_ASSERT(NS_IsMainThread());
+  MOZ_ASSERT(!strcmp(aPrefName, kTestingPref));
+  MOZ_ASSERT(!aClosure);
+
+  gTestingMode = Preferences::GetBool(aPrefName);
+}
+
 } // anonymous namespace
 
 IndexedDatabaseManager::IndexedDatabaseManager()
@@ -191,7 +212,7 @@ IndexedDatabaseManager::~IndexedDatabaseManager()
 }
 
 bool IndexedDatabaseManager::sIsMainProcess = false;
-mozilla::Atomic<int32_t> IndexedDatabaseManager::sLowDiskSpaceMode(0);
+mozilla::Atomic<bool> IndexedDatabaseManager::sLowDiskSpaceMode(false);
 
 // static
 IndexedDatabaseManager*
@@ -207,14 +228,14 @@ IndexedDatabaseManager::GetOrCreate()
   if (!gDBManager) {
     sIsMainProcess = XRE_GetProcessType() == GeckoProcessType_Default;
 
-    if (sIsMainProcess) {
+    if (sIsMainProcess && Preferences::GetBool("disk_space_watcher.enabled", false)) {
       // See if we're starting up in low disk space conditions.
       nsCOMPtr<nsIDiskSpaceWatcher> watcher =
         do_GetService(DISKSPACEWATCHER_CONTRACTID);
       if (watcher) {
         bool isDiskFull;
         if (NS_SUCCEEDED(watcher->GetIsDiskFull(&isDiskFull))) {
-          sLowDiskSpaceMode = isDiskFull ? 1 : 0;
+          sLowDiskSpaceMode = isDiskFull;
         }
         else {
           NS_WARNING("GetIsDiskFull failed!");
@@ -230,7 +251,7 @@ IndexedDatabaseManager::GetOrCreate()
     nsresult rv = instance->Init();
     NS_ENSURE_SUCCESS(rv, nullptr);
 
-    if (gInitialized.exchange(1)) {
+    if (gInitialized.exchange(true)) {
       NS_ERROR("Initialized more than once?!");
     }
 
@@ -248,17 +269,6 @@ IndexedDatabaseManager::Get()
 {
   // Does not return an owning reference.
   return gDBManager;
-}
-
-// static
-IndexedDatabaseManager*
-IndexedDatabaseManager::FactoryCreate()
-{
-  // Returns a raw pointer that carries an owning reference! Lame, but the
-  // singleton factory macros force this.
-  IndexedDatabaseManager* mgr = GetOrCreate();
-  NS_IF_ADDREF(mgr);
-  return mgr;
 }
 
 nsresult
@@ -286,6 +296,9 @@ IndexedDatabaseManager::Init()
     NS_ENSURE_SUCCESS(rv, rv);
   }
 
+  Preferences::RegisterCallbackAndCall(TestingPrefChangedCallback,
+                                       kTestingPref);
+
   return NS_OK;
 }
 
@@ -294,9 +307,11 @@ IndexedDatabaseManager::Destroy()
 {
   // Setting the closed flag prevents the service from being recreated.
   // Don't set it though if there's no real instance created.
-  if (!!gInitialized && gClosed.exchange(1)) {
+  if (gInitialized && gClosed.exchange(true)) {
     NS_ERROR("Shutdown more than once?!");
   }
+
+  Preferences::UnregisterCallback(TestingPrefChangedCallback, kTestingPref);
 
   delete this;
 }
@@ -304,7 +319,7 @@ IndexedDatabaseManager::Destroy()
 // static
 nsresult
 IndexedDatabaseManager::FireWindowOnError(nsPIDOMWindow* aOwner,
-                                          nsEventChainPostVisitor& aVisitor)
+                                          EventChainPostVisitor& aVisitor)
 {
   NS_ENSURE_TRUE(aVisitor.mDOMEvent, NS_ERROR_UNEXPECTED);
   if (!aOwner) {
@@ -319,7 +334,7 @@ IndexedDatabaseManager::FireWindowOnError(nsPIDOMWindow* aOwner,
   nsresult rv = aVisitor.mDOMEvent->GetType(type);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  if (!type.EqualsLiteral(ERROR_EVT_STR)) {
+  if (nsDependentString(kErrorEventType) != type) {
     return NS_OK;
   }
 
@@ -340,19 +355,19 @@ IndexedDatabaseManager::FireWindowOnError(nsPIDOMWindow* aOwner,
     error->GetName(errorName);
   }
 
-  mozilla::InternalScriptErrorEvent event(true, NS_LOAD_ERROR);
-  request->FillScriptErrorEvent(&event);
-  NS_ABORT_IF_FALSE(event.fileName,
-                    "FillScriptErrorEvent should give us a non-null string "
-                    "for our error's fileName");
+  ThreadsafeAutoJSContext cx;
+  RootedDictionary<ErrorEventInit> init(cx);
+  request->FillScriptErrorEvent(init);
 
-  event.errorMsg = errorName.get();
+  init.mMessage = errorName;
+  init.mCancelable = true;
+  init.mBubbles = true;
 
   nsCOMPtr<nsIScriptGlobalObject> sgo(do_QueryInterface(aOwner));
   NS_ASSERTION(sgo, "How can this happen?!");
 
   nsEventStatus status = nsEventStatus_eIgnore;
-  if (NS_FAILED(sgo->HandleScriptError(&event, &status))) {
+  if (NS_FAILED(sgo->HandleScriptError(init, &status))) {
     NS_WARNING("Failed to dispatch script error event");
     status = nsEventStatus_eIgnore;
   }
@@ -368,8 +383,8 @@ IndexedDatabaseManager::FireWindowOnError(nsPIDOMWindow* aOwner,
   NS_ENSURE_SUCCESS(rv, rv);
 
   if (NS_FAILED(scriptError->InitWithWindowID(errorName,
-                                              nsDependentString(event.fileName),
-                                              EmptyString(), event.lineNr,
+                                              init.mFilename,
+                                              EmptyString(), init.mLineno,
                                               0, 0,
                                               "IndexedDB",
                                               aOwner->WindowID()))) {
@@ -417,9 +432,9 @@ IndexedDatabaseManager::DefineIndexedDB(JSContext* aCx,
       !IDBCursorWithValueBinding::GetConstructorObject(aCx, aGlobal) ||
       !IDBDatabaseBinding::GetConstructorObject(aCx, aGlobal) ||
       !IDBFactoryBinding::GetConstructorObject(aCx, aGlobal) ||
-      !IDBFileHandleBinding::GetConstructorObject(aCx, aGlobal) ||
       !IDBIndexBinding::GetConstructorObject(aCx, aGlobal) ||
       !IDBKeyRangeBinding::GetConstructorObject(aCx, aGlobal) ||
+      !IDBMutableFileBinding::GetConstructorObject(aCx, aGlobal) ||
       !IDBObjectStoreBinding::GetConstructorObject(aCx, aGlobal) ||
       !IDBOpenDBRequestBinding::GetConstructorObject(aCx, aGlobal) ||
       !IDBRequestBinding::GetConstructorObject(aCx, aGlobal) ||
@@ -430,27 +445,28 @@ IndexedDatabaseManager::DefineIndexedDB(JSContext* aCx,
   }
 
   nsRefPtr<IDBFactory> factory;
-  if (NS_FAILED(IDBFactory::Create(aCx, aGlobal, nullptr,
-                                   getter_AddRefs(factory)))) {
+  if (NS_FAILED(IDBFactory::CreateForChromeJS(aCx,
+                                              aGlobal,
+                                              getter_AddRefs(factory)))) {
     return false;
   }
 
   MOZ_ASSERT(factory, "This should never fail for chrome!");
 
   JS::Rooted<JS::Value> indexedDB(aCx);
-  if (!WrapNewBindingObject(aCx, aGlobal, factory, &indexedDB)) {
+  js::AssertSameCompartment(aCx, aGlobal);
+  if (!WrapNewBindingObject(aCx, factory, &indexedDB)) {
     return false;
   }
 
-  return JS_DefineProperty(aCx, aGlobal, IDB_STR, indexedDB, nullptr, nullptr,
-                           JSPROP_ENUMERATE);
+  return JS_DefineProperty(aCx, aGlobal, IDB_STR, indexedDB, JSPROP_ENUMERATE);
 }
 
 // static
 bool
 IndexedDatabaseManager::IsClosed()
 {
-  return !!gClosed;
+  return gClosed;
 }
 
 #ifdef DEBUG
@@ -472,9 +488,19 @@ IndexedDatabaseManager::InLowDiskSpaceMode()
   NS_ASSERTION(gDBManager,
                "InLowDiskSpaceMode() called before indexedDB has been "
                "initialized!");
-  return !!sLowDiskSpaceMode;
+  return sLowDiskSpaceMode;
 }
 #endif
+
+// static
+bool
+IndexedDatabaseManager::InTestingMode()
+{
+  MOZ_ASSERT(gDBManager,
+             "InTestingMode() called before indexedDB has been initialized!");
+
+  return gTestingMode;
+}
 
 already_AddRefed<FileManager>
 IndexedDatabaseManager::GetFileManager(PersistenceType aPersistenceType,
@@ -604,7 +630,9 @@ IndexedDatabaseManager::AsyncDeleteFile(FileManager* aFileManager,
 
   // See if we're currently clearing the storages for this origin. If so then
   // we pretend that we've already deleted everything.
-  if (quotaManager->IsClearOriginPending(aFileManager->Origin())) {
+  if (quotaManager->IsClearOriginPending(
+                             aFileManager->Origin(),
+                             Nullable<PersistenceType>(aFileManager->Type()))) {
     return NS_OK;
   }
 
@@ -629,53 +657,49 @@ IndexedDatabaseManager::BlockAndGetFileReferences(
                                                int32_t* aSliceRefCnt,
                                                bool* aResult)
 {
-  nsRefPtr<GetFileReferencesHelper> helper =
-    new GetFileReferencesHelper(aPersistenceType, aOrigin, aDatabaseName,
-                                aFileId);
+  if (NS_WARN_IF(!InTestingMode())) {
+    return NS_ERROR_UNEXPECTED;
+  }
 
-  nsresult rv = helper->DispatchAndReturnFileReferences(aRefCnt, aDBRefCnt,
-                                                        aSliceRefCnt, aResult);
-  NS_ENSURE_SUCCESS(rv, rv);
+  if (IsMainProcess()) {
+    nsRefPtr<GetFileReferencesHelper> helper =
+      new GetFileReferencesHelper(aPersistenceType, aOrigin, aDatabaseName,
+                                  aFileId);
+
+    nsresult rv =
+      helper->DispatchAndReturnFileReferences(aRefCnt, aDBRefCnt,
+                                              aSliceRefCnt, aResult);
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+      return rv;
+    }
+  } else {
+    ContentChild* contentChild = ContentChild::GetSingleton();
+    if (NS_WARN_IF(!contentChild)) {
+      return NS_ERROR_FAILURE;
+    }
+
+    if (!contentChild->SendGetFileReferences(aPersistenceType,
+                                             nsCString(aOrigin),
+                                             nsString(aDatabaseName),
+                                             aFileId,
+                                             aRefCnt,
+                                             aDBRefCnt,
+                                             aSliceRefCnt,
+                                             aResult)) {
+      return NS_ERROR_FAILURE;
+    }
+  }
 
   return NS_OK;
 }
 
 NS_IMPL_ADDREF(IndexedDatabaseManager)
 NS_IMPL_RELEASE_WITH_DESTROY(IndexedDatabaseManager, Destroy())
-NS_IMPL_QUERY_INTERFACE2(IndexedDatabaseManager, nsIIndexedDatabaseManager,
-                                                 nsIObserver)
-
-NS_IMETHODIMP
-IndexedDatabaseManager::InitWindowless(const jsval& aGlobal, JSContext* aCx)
-{
-  NS_ENSURE_TRUE(nsContentUtils::IsCallerChrome(), NS_ERROR_NOT_AVAILABLE);
-
-  JS::Rooted<JSObject*> global(aCx, JSVAL_TO_OBJECT(aGlobal));
-  if (!(js::GetObjectClass(global)->flags & JSCLASS_DOM_GLOBAL)) {
-    NS_WARNING("Passed object is not a global object!");
-    return NS_ERROR_FAILURE;
-  }
-
-  bool hasIndexedDB;
-  if (!JS_HasProperty(aCx, global, IDB_STR, &hasIndexedDB)) {
-    return NS_ERROR_FAILURE;
-  }
-
-  if (hasIndexedDB) {
-    NS_WARNING("Passed object already has an 'indexedDB' property!");
-    return NS_ERROR_FAILURE;
-  }
-
-  if (!DefineIndexedDB(aCx, global)) {
-    return NS_ERROR_FAILURE;
-  }
-
-  return NS_OK;
-}
+NS_IMPL_QUERY_INTERFACE(IndexedDatabaseManager, nsIObserver)
 
 NS_IMETHODIMP
 IndexedDatabaseManager::Observe(nsISupports* aSubject, const char* aTopic,
-                                const PRUnichar* aData)
+                                const char16_t* aData)
 {
   NS_ASSERTION(IsMainProcess(), "Wrong process!");
   NS_ASSERTION(NS_IsMainThread(), "Wrong thread!");
@@ -686,10 +710,10 @@ IndexedDatabaseManager::Observe(nsISupports* aSubject, const char* aTopic,
     const nsDependentString data(aData);
 
     if (data.EqualsLiteral(LOW_DISK_SPACE_DATA_FULL)) {
-      sLowDiskSpaceMode = 1;
+      sLowDiskSpaceMode = true;
     }
     else if (data.EqualsLiteral(LOW_DISK_SPACE_DATA_FREE)) {
-      sLowDiskSpaceMode = 0;
+      sLowDiskSpaceMode = false;
     }
     else {
       NS_NOTREACHED("Unknown data value!");
@@ -807,8 +831,8 @@ AsyncDeleteFileRunnable::AsyncDeleteFileRunnable(FileManager* aFileManager,
 {
 }
 
-NS_IMPL_ISUPPORTS1(AsyncDeleteFileRunnable,
-                   nsIRunnable)
+NS_IMPL_ISUPPORTS(AsyncDeleteFileRunnable,
+                  nsIRunnable)
 
 NS_IMETHODIMP
 AsyncDeleteFileRunnable::Run()
@@ -881,8 +905,8 @@ GetFileReferencesHelper::DispatchAndReturnFileReferences(int32_t* aMemRefCnt,
   return NS_OK;
 }
 
-NS_IMPL_ISUPPORTS1(GetFileReferencesHelper,
-                   nsIRunnable)
+NS_IMPL_ISUPPORTS(GetFileReferencesHelper,
+                  nsIRunnable)
 
 NS_IMETHODIMP
 GetFileReferencesHelper::Run()
@@ -918,3 +942,7 @@ GetFileReferencesHelper::Run()
 
   return NS_OK;
 }
+
+} // namespace indexedDB
+} // namespace dom
+} // namespace mozilla

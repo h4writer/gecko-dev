@@ -15,6 +15,7 @@
 
 namespace sandbox {
   class BrokerServices;
+  class TargetPolicy;
 }
 
 namespace mozilla {
@@ -23,12 +24,27 @@ class SANDBOX_EXPORT SandboxBroker
 {
 public:
   SandboxBroker();
-  bool LaunchApp(const wchar_t *aPath, const wchar_t *aArguments,
+  bool LaunchApp(const wchar_t *aPath,
+                 const wchar_t *aArguments,
                  void **aProcessHandle);
   virtual ~SandboxBroker();
 
+  // Security levels for different types of processes
+#if defined(MOZ_CONTENT_SANDBOX)
+  bool SetSecurityLevelForContentProcess(bool inWarnOnlyMode);
+#endif
+  bool SetSecurityLevelForPluginProcess();
+  bool SetSecurityLevelForIPDLUnitTestProcess();
+  bool SetSecurityLevelForGMPlugin();
+
+  // File system permissions
+  bool AllowReadFile(wchar_t const *file);
+  bool AllowReadWriteFile(wchar_t const *file);
+  bool AllowDirectory(wchar_t const *dir);
+
 private:
   static sandbox::BrokerServices *sBrokerService;
+  sandbox::TargetPolicy *mPolicy;
 };
 
 } // mozilla

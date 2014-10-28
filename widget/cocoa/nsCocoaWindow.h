@@ -20,9 +20,6 @@ class nsChildView;
 class nsMenuBarX;
 @class ChildView;
 
-// Value copied from BITMAP_MAX_AREA, used in nsNativeThemeCocoa.mm
-#define CUIDRAW_MAX_AREA 500000
-
 // If we are using an SDK older than 10.7, define bits we need that are missing
 // from it.
 #if !defined(MAC_OS_X_VERSION_10_7) || \
@@ -70,6 +67,9 @@ typedef struct _nsCocoaWindowList {
   // Shadow
   BOOL mScheduledShadowInvalidation;
 
+  // Invalidation disabling
+  BOOL mDisabledNeedsDisplay;
+
   // DPI cache. Getting the physical screen size (CGDisplayScreenSize)
   // is ridiculously slow, so we cache it in the toplevel window for all
   // descendants to use.
@@ -78,6 +78,7 @@ typedef struct _nsCocoaWindowList {
   NSTrackingArea* mTrackingArea;
 
   BOOL mBeingShown;
+  BOOL mDrawTitle;
 }
 
 - (void)importState:(NSDictionary*)aState;
@@ -98,11 +99,18 @@ typedef struct _nsCocoaWindowList {
 - (NSView*)trackingAreaView;
 
 - (void)setBeingShown:(BOOL)aValue;
+- (BOOL)isBeingShown;
 - (BOOL)isVisibleOrBeingShown;
 
 - (ChildView*)mainChildView;
 
 - (NSArray*)titlebarControls;
+
+- (void)setWantsTitleDrawn:(BOOL)aDrawTitle;
+- (BOOL)wantsTitleDrawn;
+
+- (void)disableSetNeedsDisplay;
+- (void)enableSetNeedsDisplay;
 
 @end
 
@@ -225,7 +233,6 @@ private:
 public:
 
     nsCocoaWindow();
-    virtual ~nsCocoaWindow();
 
     NS_DECL_ISUPPORTS_INHERITED
     NS_DECL_NSPIWIDGETCOCOA
@@ -280,7 +287,7 @@ public:
     NS_IMETHOD Invalidate(const nsIntRect &aRect);
     virtual nsresult ConfigureChildren(const nsTArray<Configuration>& aConfigurations);
     virtual LayerManager* GetLayerManager(PLayerTransactionChild* aShadowManager = nullptr,
-                                          LayersBackend aBackendHint = mozilla::layers::LAYERS_NONE,
+                                          LayersBackend aBackendHint = mozilla::layers::LayersBackend::LAYERS_NONE,
                                           LayerManagerPersistence aPersistence = LAYER_MANAGER_CURRENT,
                                           bool* aAllowRetaining = nullptr);
     NS_IMETHOD DispatchEvent(mozilla::WidgetGUIEvent* aEvent,
@@ -294,16 +301,16 @@ public:
     virtual void SetShowsToolbarButton(bool aShow);
     virtual void SetShowsFullScreenButton(bool aShow);
     virtual void SetWindowAnimationType(WindowAnimationType aType);
+    virtual void SetDrawsTitle(bool aDrawTitle);
     NS_IMETHOD SetNonClientMargins(nsIntMargin &margins);
     NS_IMETHOD SetWindowTitlebarColor(nscolor aColor, bool aActive);
     virtual void SetDrawsInTitlebar(bool aState);
+    virtual void UpdateThemeGeometries(const nsTArray<ThemeGeometry>& aThemeGeometries);
     virtual nsresult SynthesizeNativeMouseEvent(nsIntPoint aPoint,
                                                 uint32_t aNativeMessage,
                                                 uint32_t aModifierFlags);
 
     void DispatchSizeModeEvent();
-
-    virtual gfxASurface* GetThebesSurface();
 
     // be notified that a some form of drag event needs to go into Gecko
     virtual bool DragEvent(unsigned int aMessage, Point aMouseGlobal, UInt16 aKeyModifiers);
@@ -314,7 +321,7 @@ public:
     void SetMenuBar(nsMenuBarX* aMenuBar);
     nsMenuBarX *GetMenuBar();
 
-    NS_IMETHOD NotifyIME(NotificationToIME aNotification) MOZ_OVERRIDE;
+    NS_IMETHOD NotifyIME(const IMENotification& aIMENotification) MOZ_OVERRIDE;
     NS_IMETHOD_(void) SetInputContext(
                         const InputContext& aContext,
                         const InputContextAction& aAction) MOZ_OVERRIDE;
@@ -332,14 +339,17 @@ public:
       }
       return mInputContext;
     }
+    NS_IMETHOD_(bool) ExecuteNativeKeyBinding(
+                        NativeKeyBindingsType aType,
+                        const mozilla::WidgetKeyboardEvent& aEvent,
+                        DoCommandCallback aCallback,
+                        void* aCallbackData) MOZ_OVERRIDE;
 
     void SetPopupWindowLevel();
 
-    bool IsChildInFailingLeftClickThrough(NSView *aChild);
-    bool ShouldFocusPlugin();
-
     NS_IMETHOD         ReparentNativeWidget(nsIWidget* aNewParent);
 protected:
+  virtual ~nsCocoaWindow();
 
   nsresult             CreateNativeWindow(const NSRect &aRect,
                                           nsBorderStyle aBorderStyle,
@@ -348,8 +358,7 @@ protected:
                                               nsDeviceContext *aContext);
   void                 DestroyNativeWindow();
   void                 AdjustWindowShadow();
-  void                 SetUpWindowFilter();
-  void                 CleanUpWindowFilter();
+  void                 SetWindowBackgroundBlur();
   void                 UpdateBounds();
 
   nsresult             DoResize(double aX, double aY, double aWidth, double aHeight,
@@ -370,7 +379,6 @@ protected:
   NSWindow*            mSheetWindowParent; // if this is a sheet, this is the NSWindow it's attached to
   nsChildView*         mPopupContentView; // if this is a popup, this is its content widget
   int32_t              mShadowStyle;
-  NSUInteger           mWindowFilter;
 
   CGFloat              mBackingScaleFactor;
 
@@ -389,6 +397,7 @@ protected:
   bool                 mIsAnimationSuppressed;
 
   bool                 mInReportMoveEvent; // true if in a call to ReportMoveEvent().
+  bool                 mInResize; // true if in a call to DoResize().
 
   int32_t              mNumModalDescendents;
   InputContext         mInputContext;

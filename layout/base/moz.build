@@ -8,12 +8,6 @@ XPIDL_SOURCES += [
     'nsIStyleSheetService.idl',
 ]
 
-if CONFIG['IBMBIDI']:
-    UNIFIED_SOURCES += [
-        'nsBidi.cpp',
-        'nsBidiPresUtils.cpp',
-    ]
-
 if CONFIG['MOZ_DEBUG']:
     UNIFIED_SOURCES += [
         'nsAutoLayoutPhase.cpp',
@@ -23,10 +17,12 @@ XPIDL_MODULE = 'layout_base'
 
 EXPORTS += [
     'ActiveLayerTracker.h',
+    'CaretAssociationHint.h',
     'DisplayItemClip.h',
     'DisplayListClipState.h',
     'FrameLayerBuilder.h',
     'FramePropertyTable.h',
+    'LayerState.h',
     'nsArenaMemoryStats.h',
     'nsBidi.h',
     'nsBidiPresUtils.h',
@@ -56,10 +52,14 @@ EXPORTS += [
     'ScrollbarStyles.h',
     'StackArena.h',
     'Units.h',
+    'UnitTransforms.h',
+    'WordMovementType.h',
 ]
 
 EXPORTS.mozilla += [
+    'GeometryUtils.h',
     'PaintTracker.h',
+    'RestyleLogging.h',
 ]
 
 UNIFIED_SOURCES += [
@@ -68,7 +68,10 @@ UNIFIED_SOURCES += [
     'DisplayListClipState.cpp',
     'FrameLayerBuilder.cpp',
     'FramePropertyTable.cpp',
+    'GeometryUtils.cpp',
     'MaskLayerImageCache.cpp',
+    'nsBidi.cpp',
+    'nsBidiPresUtils.cpp',
     'nsCaret.cpp',
     'nsCounterManager.cpp',
     'nsCSSColorUtils.cpp',
@@ -77,6 +80,7 @@ UNIFIED_SOURCES += [
     'nsCSSRenderingBorders.cpp',
     'nsDisplayList.cpp',
     'nsDisplayListInvalidation.cpp',
+    'nsDocumentViewer.cpp',
     'nsFrameManager.cpp',
     'nsFrameTraversal.cpp',
     'nsGenConList.cpp',
@@ -84,6 +88,7 @@ UNIFIED_SOURCES += [
     'nsLayoutHistoryState.cpp',
     'nsLayoutUtils.cpp',
     'nsPresContext.cpp',
+    'nsPresShell.cpp',
     'nsQuoteList.cpp',
     'nsStyleChangeList.cpp',
     'nsStyleSheetService.cpp',
@@ -91,17 +96,15 @@ UNIFIED_SOURCES += [
     'PositionedEventTargeting.cpp',
     'RestyleManager.cpp',
     'RestyleTracker.cpp',
+    'SelectionCarets.cpp',
     'StackArena.cpp',
+    'TouchCaret.cpp',
 ]
 
-# nsDocumentViewer.cpp and nsPresShell.cpp need to be built separately
-# because they force NSPR logging.
 # nsPresArena.cpp needs to be built separately because it uses plarena.h.
 # nsRefreshDriver.cpp needs to be built separately because of name clashes in the OS X headers
 SOURCES += [
-    'nsDocumentViewer.cpp',
     'nsPresArena.cpp',
-    'nsPresShell.cpp',
     'nsRefreshDriver.cpp',
 ]
 
@@ -112,13 +115,6 @@ MSVC_ENABLE_PGO = True
 include('/ipc/chromium/chromium-config.mozbuild')
 
 LOCAL_INCLUDES += [
-    '../../content/base/src',
-    '../../content/events/src',
-    '../../content/html/content/src',
-    '../../content/svg/content/src',
-    '../../content/xbl/src',
-    '../../dom/base',
-    '../../view/src',
     '../forms',
     '../generic',
     '../mathml',
@@ -129,11 +125,17 @@ LOCAL_INCLUDES += [
     '../xul',
     '../xul/tree/',
     '/docshell/base',
-    '/xpcom/ds',
+    '/dom/base',
+    '/dom/html',
+    '/dom/svg',
+    '/dom/xbl',
+    '/view',
 ]
 
-FINAL_LIBRARY = 'gklayout'
+FINAL_LIBRARY = 'xul'
 
 MOCHITEST_MANIFESTS += ['tests/mochitest.ini']
 MOCHITEST_CHROME_MANIFESTS += ['tests/chrome/chrome.ini']
 BROWSER_CHROME_MANIFESTS += ['tests/browser.ini']
+
+CXXFLAGS += CONFIG['MOZ_CAIRO_CFLAGS']

@@ -22,7 +22,7 @@ interface HTMLMediaElement : HTMLElement {
   readonly attribute DOMString currentSrc;
 
   [SetterThrows]
-           attribute DOMString crossOrigin;
+           attribute DOMString? crossOrigin;
   const unsigned short NETWORK_EMPTY = 0;
   const unsigned short NETWORK_IDLE = 1;
   const unsigned short NETWORK_LOADING = 2;
@@ -47,7 +47,8 @@ interface HTMLMediaElement : HTMLElement {
   // playback state
   [SetterThrows]
            attribute double currentTime;
-  // TODO: Bug 847375 - void fastSeek(double time);
+  [Throws]
+  void fastSeek(double time);
   readonly attribute unrestricted double duration;
   // TODO: Bug 847376 - readonly attribute any startDate;
   readonly attribute boolean paused;
@@ -85,8 +86,10 @@ interface HTMLMediaElement : HTMLElement {
 
   // TODO: Bug 847379
   // tracks
-  //readonly attribute AudioTrackList audioTracks;
-  //readonly attribute VideoTrackList videoTracks;
+  [Pref="media.track.enabled"]
+  readonly attribute AudioTrackList audioTracks;
+  [Pref="media.track.enabled"]
+  readonly attribute VideoTrackList videoTracks;
   [Pref="media.webvtt.enabled"]
   readonly attribute TextTrackList textTracks;
   [Pref="media.webvtt.enabled"]
@@ -101,25 +104,17 @@ partial interface HTMLMediaElement {
   attribute boolean mozPreservesPitch;
   readonly attribute boolean mozAutoplayEnabled;
 
+  // NB: for internal use with the video controls:
+  [Func="IsChromeOrXBL"] attribute boolean mozMediaStatisticsShowing;
+  [Func="IsChromeOrXBL"] attribute boolean mozAllowCasting;
+  [Func="IsChromeOrXBL"] attribute boolean mozIsCasting;
+
   // Mozilla extension: stream capture
   [Throws]
   MediaStream mozCaptureStream();
   [Throws]
   MediaStream mozCaptureStreamUntilEnded();
   readonly attribute boolean mozAudioCaptured;
-
-  // Mozilla extension: extra stream metadata information, used as part
-  // of MozAudioAvailable events and the mozWriteAudio() method.  The
-  // mozFrameBufferLength method allows for the size of the framebuffer
-  // used within MozAudioAvailable events to be changed.  The new size must
-  // be between 512 and 16384.  The default size, for a  media element with
-  // audio is (mozChannels * 1024).
-  [Pref="media.audio_data.enabled", GetterThrows]
-  readonly attribute unsigned long mozChannels;
-  [Pref="media.audio_data.enabled", GetterThrows]
-  readonly attribute unsigned long mozSampleRate;
-  [Pref="media.audio_data.enabled", Throws]
-           attribute unsigned long mozFrameBufferLength;
 
   // Mozilla extension: return embedded metadata from the stream as a
   // JSObject with key:value pairs for each tag. This can be used by
@@ -142,3 +137,27 @@ partial interface HTMLMediaElement {
   //   because of the audiochannel manager.
   // * onmozinterruptend - called when the interruption is concluded
 };
+
+enum MediaWaitingFor {
+  "none",
+  "data",
+  "key"
+};
+
+#ifdef MOZ_EME
+// Encrypted Media Extensions
+partial interface HTMLMediaElement {
+  [Pref="media.eme.enabled"]
+  readonly attribute MediaKeys? mediaKeys;
+
+  // void, not any: https://www.w3.org/Bugs/Public/show_bug.cgi?id=26457
+  [Pref="media.eme.enabled", Throws, NewObject]
+  Promise<void> setMediaKeys(MediaKeys? mediaKeys);
+
+  [Pref="media.eme.enabled"]
+  attribute EventHandler onencrypted;
+
+  [Pref="media.eme.enabled"]
+  readonly attribute MediaWaitingFor waitingFor;
+};
+#endif

@@ -61,14 +61,6 @@ class MochitestOptions(optparse.OptionParser):
           "help": "absolute path to directory containing certificate store to use testing profile",
           "default": os.path.join(build_obj.topsrcdir, 'build', 'pgo', 'certs') if build_obj is not None else None,
         }],
-        [["--log-file"],
-        { "action": "store",
-          "type": "string",
-          "dest": "logFile",
-          "metavar": "FILE",
-          "help": "file to which logging occurs",
-          "default": "",
-        }],
         [["--autorun"],
         { "action": "store_true",
           "dest": "autorun",
@@ -99,6 +91,12 @@ class MochitestOptions(optparse.OptionParser):
           "help": "group tests together in the same chunk that are in the same top chunkByDir directories",
           "default": 0,
         }],
+        [["--run-by-dir"],
+        { "action": "store_true",
+          "dest": "runByDir",
+          "help": "Run each directory in a single browser instance with a fresh profile",
+          "default": False,
+        }],
         [["--shuffle"],
         { "dest": "shuffle",
           "action": "store_true",
@@ -114,17 +112,6 @@ class MochitestOptions(optparse.OptionParser):
           "help": "one of %s to determine the level of console "
                   "logging" % LEVEL_STRING,
           "default": None,
-        }],
-        [["--file-level"],
-        { "action": "store",
-          "type": "choice",
-          "dest": "fileLevel",
-          "choices": LOG_LEVELS,
-          "metavar": "LEVEL",
-          "help": "one of %s to determine the level of file "
-                 "logging if a file has been specified, defaulting "
-                 "to INFO" % LEVEL_STRING,
-          "default": "INFO",
         }],
         [["--chrome"],
         { "action": "store_true",
@@ -145,6 +132,13 @@ class MochitestOptions(optparse.OptionParser):
           "help": "start in the given directory's tests",
           "default": "",
         }],
+        [["--bisect-chunk"],
+        { "action": "store",
+          "type": "string",
+          "dest": "bisectChunk",
+          "help": "Specify the failing test name to find the previous tests that may be causing the failure.",
+          "default": None,
+        }],
         [["--start-at"],
         { "action": "store",
           "type": "string",
@@ -163,6 +157,24 @@ class MochitestOptions(optparse.OptionParser):
         { "action": "store_true",
           "dest": "browserChrome",
           "help": "run browser chrome Mochitests",
+          "default": False,
+        }],
+        [["--subsuite"],
+        { "action": "store",
+          "dest": "subsuite",
+          "help": "subsuite of tests to run",
+          "default": "",
+        }],
+        [["--jetpack-package"],
+        { "action": "store_true",
+          "dest": "jetpackPackage",
+          "help": "run jetpack package tests",
+          "default": False,
+        }],
+        [["--jetpack-addon"],
+        { "action": "store_true",
+          "dest": "jetpackAddon",
+          "help": "run jetpack addon tests",
           "default": False,
         }],
         [["--webapprt-content"],
@@ -211,12 +223,12 @@ class MochitestOptions(optparse.OptionParser):
         [["--leak-threshold"],
         { "action": "store",
           "type": "int",
-          "dest": "leakThreshold",
+          "dest": "defaultLeakThreshold",
           "metavar": "THRESHOLD",
-          "help": "fail if the number of bytes leaked through "
-                 "refcounted objects (or bytes in classes with "
-                 "MOZ_COUNT_CTOR and MOZ_COUNT_DTOR) is greater "
-                 "than the given number",
+          "help": "fail if the number of bytes leaked in default "
+                 "processes through refcounted objects (or bytes "
+                 "in classes with MOZ_COUNT_CTOR and MOZ_COUNT_DTOR) "
+                 "is greater than the given number",
           "default": 0,
         }],
         [["--fatal-assertions"],
@@ -247,7 +259,7 @@ class MochitestOptions(optparse.OptionParser):
           "dest": "profilePath",
           "help": "Directory where the profile will be stored."
                  "This directory will be deleted after the tests are finished",
-          "default": tempfile.mkdtemp(),
+          "default": None,
         }],
         [["--testing-modules-dir"],
         { "action": "store",
@@ -351,6 +363,12 @@ class MochitestOptions(optparse.OptionParser):
           "dest": "e10s",
           "help": "Run tests with electrolysis preferences and test filtering enabled.",
         }],
+        [["--content-sandbox"],
+        { "choices": ["off", "warn", "on"],
+          "default": "off",
+          "dest": "contentSandbox",
+          "help": "Run tests with the content sandbox enabled or in warn only mode (Windows only). --e10s is assumed.",
+        }],
         [["--dmd-path"],
          { "action": "store",
            "default": None,
@@ -377,18 +395,67 @@ class MochitestOptions(optparse.OptionParser):
            "help": "Produce a DMD dump after each test in the directory specified "
                   "by --dump-output-directory."
         }],
+        [["--slowscript"],
+         { "action": "store_true",
+           "default": False,
+           "dest": "slowscript",
+           "help": "Do not set the JS_DISABLE_SLOW_SCRIPT_SIGNALS env variable; "
+                   "when not set, recoverable but misleading SIGSEGV instances "
+                   "may occur in Ion/Odin JIT code."
+        }],
+        [["--screenshot-on-fail"],
+         { "action": "store_true",
+           "default": False,
+           "dest": "screenshotOnFail",
+           "help": "Take screenshots on all test failures. Set $MOZ_UPLOAD_DIR to a directory for storing the screenshots."
+        }],
+        [["--quiet"],
+         { "action": "store_true",
+           "default": False,
+           "dest": "quiet",
+           "help": "Do not print test log lines unless a failure occurs."
+         }],
+        [["--pidfile"],
+        { "action": "store",
+          "type": "string",
+          "dest": "pidFile",
+          "help": "name of the pidfile to generate",
+          "default": "",
+        }],
+        [["--use-test-media-devices"],
+        { "action": "store_true",
+          "default": False,
+          "dest": "useTestMediaDevices",
+          "help": "Use test media device drivers for media testing.",
+        }],
+        [["--gmp-path"],
+        { "action": "store",
+          "default": None,
+          "dest": "gmp_path",
+          "help": "Path to fake GMP plugin. Will be deduced from the binary if not passed.",
+        }],
     ]
 
     def __init__(self, **kwargs):
 
         optparse.OptionParser.__init__(self, **kwargs)
         for option, value in self.mochitest_options:
+            # Allocate new lists so references to original don't get mutated.
+            # allowing multiple uses within a single process.
+            if "default" in value and isinstance(value["default"], list):
+                value["default"] = []
             self.add_option(*option, **value)
         addCommonOptions(self)
         self.set_usage(self.__doc__)
 
     def verifyOptions(self, options, mochitest):
         """ verify correct options and cleanup paths """
+
+        if options.contentSandbox != 'off':
+            options.e10s = True
+
+        mozinfo.update({"e10s": options.e10s}) # for test manifest parsing.
+        mozinfo.update({"contentSandbox": options.contentSandbox}) # for test manifest parsing.
 
         if options.app is None:
             if build_obj is not None:
@@ -408,6 +475,8 @@ class MochitestOptions(optparse.OptionParser):
             # but only if an app path was explicitly provided
             if options.app != self.defaults['app']:
                 options.xrePath = os.path.dirname(options.app)
+                if mozinfo.isMac:
+                    options.xrePath = os.path.join(os.path.dirname(options.xrePath), "Resources")
             elif build_obj is not None:
                 # otherwise default to dist/bin
                 options.xrePath = build_obj.bindir
@@ -416,7 +485,8 @@ class MochitestOptions(optparse.OptionParser):
 
         # allow relative paths
         options.xrePath = mochitest.getFullPath(options.xrePath)
-        options.profilePath = mochitest.getFullPath(options.profilePath)
+        if options.profilePath:
+            options.profilePath = mochitest.getFullPath(options.profilePath)
         options.app = mochitest.getFullPath(options.app)
         if options.dmdPath is not None:
             options.dmdPath = mochitest.getFullPath(options.dmdPath)
@@ -460,7 +530,7 @@ class MochitestOptions(optparse.OptionParser):
             self.error("Please use --test-manifest only and not --run-only-tests")
 
         if options.runOnlyTests:
-            if not os.path.exists(os.path.abspath(options.runOnlyTests)):
+            if not os.path.exists(os.path.abspath(os.path.join(here, options.runOnlyTests))):
                 self.error("unable to find --run-only-tests file '%s'" % options.runOnlyTests)
             options.runOnly = True
             options.testManifest = options.runOnlyTests
@@ -491,7 +561,7 @@ class MochitestOptions(optparse.OptionParser):
         # should always set the flag that populates this variable. If buildbot ever
         # passes this argument, this code can be deleted.
         if options.testingModulesDir is None:
-            possible = os.path.join(os.getcwd(), os.path.pardir, 'modules')
+            possible = os.path.join(here, os.path.pardir, 'modules')
 
             if os.path.isdir(possible):
                 options.testingModulesDir = possible
@@ -533,6 +603,23 @@ class MochitestOptions(optparse.OptionParser):
                 self.error('--dump-output-directory not a directory: %s' %
                            options.dumpOutputDirectory)
 
+        if options.useTestMediaDevices:
+            if not mozinfo.isLinux:
+                self.error('--use-test-media-devices is only supported on Linux currently')
+            for f in ['/usr/bin/gst-launch-0.10', '/usr/bin/pactl']:
+                if not os.path.isfile(f):
+                    self.error('Missing binary %s required for --use-test-media-devices')
+
+        options.leakThresholds = {
+            "default": options.defaultLeakThreshold,
+            "tab": 2000000, # See dependencies of bug 1051230.
+            "geckomediaplugin": 1000, # GMP rarely gets a log, but when it does, it leaks a little.
+        }
+
+        # Bug 1051230 - Leak logging does not yet work for tab processes on desktop.
+        # Bug 1065098 - The geckomediaplugin process fails to produce a leak log for some reason.
+        options.ignoreMissingLeaks = ["tab", "geckomediaplugin"]
+
         return options
 
 
@@ -564,6 +651,13 @@ class B2GOptions(MochitestOptions):
           "dest": "emulator",
           "help": "Architecture of emulator to use: x86 or arm",
           "default": None,
+        }],
+        [["--wifi"],
+        { "action": "store",
+          "type": "string",
+          "dest": "wifi",
+          "help": "Devine wifi configuration for on device mochitest",
+          "default": False,
         }],
         [["--sdcard"],
         { "action": "store",
@@ -628,13 +722,6 @@ class B2GOptions(MochitestOptions):
           "help": "ip address where the remote web server is hosted at",
           "default": None,
         }],
-        [["--pidfile"],
-        { "action": "store",
-          "type": "string",
-          "dest": "pidFile",
-          "help": "name of the pidfile to generate",
-          "default": "",
-        }],
         [["--gecko-path"],
         { "action": "store",
           "type": "string",
@@ -651,11 +738,11 @@ class B2GOptions(MochitestOptions):
                    gaia profile to use",
           "default": None,
         }],
-        [["--logcat-dir"],
+        [["--logdir"],
         { "action": "store",
           "type": "string",
-          "dest": "logcat_dir",
-          "help": "directory to store logcat dump files",
+          "dest": "logdir",
+          "help": "directory to store log files",
           "default": None,
         }],
         [['--busybox'],
@@ -684,12 +771,13 @@ class B2GOptions(MochitestOptions):
         defaults = {}
         defaults["httpPort"] = DEFAULT_PORTS['http']
         defaults["sslPort"] = DEFAULT_PORTS['https']
-        defaults["remoteTestRoot"] = "/data/local/tests"
         defaults["logFile"] = "mochitest.log"
         defaults["autorun"] = True
         defaults["closeWhenDone"] = True
         defaults["testPath"] = ""
         defaults["extensionsToExclude"] = ["specialpowers"]
+        # See dependencies of bug 1038943.
+        defaults["defaultLeakThreshold"] = 5180
         self.set_defaults(**defaults)
 
     def verifyRemoteOptions(self, options):
@@ -703,8 +791,8 @@ class B2GOptions(MochitestOptions):
         if options.geckoPath and not options.emulator:
             self.error("You must specify --emulator if you specify --gecko-path")
 
-        if options.logcat_dir and not options.emulator:
-            self.error("You must specify --emulator if you specify --logcat-dir")
+        if options.logdir and not options.emulator:
+            self.error("You must specify --emulator if you specify --logdir")
 
         if not os.path.isdir(options.xrePath):
             self.error("--xre-path '%s' is not a directory" % options.xrePath)
@@ -735,6 +823,12 @@ class B2GOptions(MochitestOptions):
         options.app = temp
         options.sslPort = tempSSL
         options.httpPort = tempPort
+
+        # Bug 1071866 - B2G Mochitests do not always produce a leak log.
+        options.ignoreMissingLeaks.append("default")
+
+        # Bug 1070068 - Leak logging does not work for tab processes on B2G.
+        assert "tab" in options.ignoreMissingLeaks, "Ignore failures for tab processes on B2G"
 
         return options
 

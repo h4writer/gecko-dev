@@ -26,14 +26,11 @@ public:
                     ContentType aContentType,
                     GLContext* aContext,
                     TextureImage::Flags aFlags = TextureImage::NoFlags,
-                    TextureImage::ImageFormat aImageFormat = gfxImageFormatUnknown);
+                    TextureImage::ImageFormat aImageFormat = gfxImageFormat::Unknown);
 
     ~TextureImageCGL();
 
 protected:
-    already_AddRefed<gfxASurface>
-    GetSurfaceForUpdate(const gfxIntSize& aSize, ImageFormat aFmt);
-
     bool FinishedSurfaceUpdate();
 
     void FinishedSurfaceUpload();
@@ -41,13 +38,12 @@ protected:
 private:
 
     GLuint mPixelBuffer;
-    int32_t mPixelBufferSize;
     bool mBoundPixelBuffer;
 };
 
 already_AddRefed<TextureImage>
 CreateTextureImageCGL(GLContext *gl,
-                      const nsIntSize& aSize,
+                      const gfx::IntSize& aSize,
                       TextureImage::ContentType aContentType,
                       GLenum aWrapMode,
                       TextureImage::Flags aFlags,

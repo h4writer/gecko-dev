@@ -5,37 +5,30 @@
 
 package org.mozilla.gecko.prompts;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
-
-import org.mozilla.gecko.R;
+import org.mozilla.gecko.AppConstants.Versions;
 import org.mozilla.gecko.GeckoAppShell;
+import org.mozilla.gecko.R;
 import org.mozilla.gecko.gfx.BitmapUtils;
-import org.mozilla.gecko.util.ThreadUtils;
 
-import android.app.Activity;
-import android.app.ActivityManager;
 import android.content.Context;
 import android.graphics.drawable.Drawable;
-import android.os.Build;
 import android.text.TextUtils;
 import android.view.Display;
+import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewGroup.LayoutParams;
-import android.view.LayoutInflater;
 import android.view.WindowManager;
 import android.widget.AdapterView;
 import android.widget.AdapterView.OnItemClickListener;
 import android.widget.ArrayAdapter;
 import android.widget.GridView;
-import android.widget.TextView;
 import android.widget.ImageView;
-import android.widget.ListView;
-import android.util.Log;
-
-import java.util.ArrayList;
-import java.util.List;
+import android.widget.TextView;
 
 public class IconGridInput extends PromptInput implements OnItemClickListener {
     public static final String INPUT_TYPE = "icongrid";
@@ -46,8 +39,8 @@ public class IconGridInput extends PromptInput implements OnItemClickListener {
     private static int mColumnWidth = -1;  // The maximum width of columns
     private static int mMaxColumns = -1;  // The maximum number of columns to show
     private static int mIconSize = -1;    // Size of icons in the grid
-    private int mSelected = -1;           // Current selection
-    private JSONArray mArray;
+    private int mSelected;                // Current selection
+    private final JSONArray mArray;
 
     public IconGridInput(JSONObject obj) {
         super(obj);
@@ -84,12 +77,17 @@ public class IconGridInput extends PromptInput implements OnItemClickListener {
             items.add(item);
             if (item.selected) {
                 mSelected = i;
-                view.setSelection(i);
             }
         }
 
         view.setNumColumns(Math.min(items.size(), maxColumns));
         view.setOnItemClickListener(this);
+        // Despite what the docs say, setItemChecked was not moved into the AbsListView class until sometime between
+        // Android 2.3.7 and Android 4.0.3. For other versions the item won't be visually highlighted, BUT we really only
+        // mSelected will still be set so that we default to its behavior.
+        if (Versions.feature11Plus && mSelected > -1) {
+            view.setItemChecked(mSelected, true);
+        }
 
         mAdapter = new IconGridAdapter(context, -1, items);
         view.setAdapter(mAdapter);
@@ -100,11 +98,12 @@ public class IconGridInput extends PromptInput implements OnItemClickListener {
     @Override
     public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
         mSelected = position;
+        notifyListeners(Integer.toString(position));
     }
 
     @Override
-    public String getValue() {
-        return Integer.toString(mSelected);
+    public Object getValue() {
+        return mSelected;
     }
 
     @Override
@@ -160,6 +159,7 @@ public class IconGridInput extends PromptInput implements OnItemClickListener {
             selected = obj.optBoolean("selected");
 
             BitmapUtils.getDrawable(context, iconUrl, new BitmapUtils.BitmapLoader() {
+                @Override
                 public void onBitmapFound(Drawable d) {
                     icon = d;
                     if (mAdapter != null) {

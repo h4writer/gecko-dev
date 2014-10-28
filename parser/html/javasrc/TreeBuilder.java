@@ -173,7 +173,7 @@ public abstract class TreeBuilder<T> implements TokenHandler,
 
     final static int RUBY_OR_SPAN_OR_SUB_OR_SUP_OR_VAR = 52;
 
-    final static int RT_OR_RP = 53;
+    final static int RB_OR_RTC = 53;
 
     final static int PARAM_OR_SOURCE_OR_TRACK = 55;
 
@@ -202,6 +202,8 @@ public abstract class TreeBuilder<T> implements TokenHandler,
     final static int TEMPLATE = 67;
 
     final static int IMG = 68;
+
+    final static int RT_OR_RP = 69;
 
     // start insertion modes
 
@@ -609,31 +611,104 @@ public abstract class TreeBuilder<T> implements TokenHandler,
             } else {
                 elt = createHtmlElementSetAsRoot(tokenizer.emptyAttributes());
             }
-            StackNode<T> node = new StackNode<T>(ElementName.HTML, elt
-            // [NOCPP[
-                    , errorHandler == null ? null : new TaintableLocatorImpl(tokenizer)
-            // ]NOCPP]
-            );
-            currentPtr++;
-            stack[currentPtr] = node;
-            if ("template" == contextName) {
-                pushTemplateMode(IN_TEMPLATE);
-            }
-            resetTheInsertionMode();
-            if ("title" == contextName || "textarea" == contextName) {
-                tokenizer.setStateAndEndTagExpectation(Tokenizer.RCDATA, contextName);
-            } else if ("style" == contextName || "xmp" == contextName
-                    || "iframe" == contextName || "noembed" == contextName
-                    || "noframes" == contextName
-                    || (scriptingEnabled && "noscript" == contextName)) {
-                tokenizer.setStateAndEndTagExpectation(Tokenizer.RAWTEXT, contextName);
-            } else if ("plaintext" == contextName) {
-                tokenizer.setStateAndEndTagExpectation(Tokenizer.PLAINTEXT, contextName);
-            } else if ("script" == contextName) {
-                tokenizer.setStateAndEndTagExpectation(Tokenizer.SCRIPT_DATA,
+            // When the context node is not in the HTML namespace, contrary
+            // to the spec, the first node on the stack is not set to "html"
+            // in the HTML namespace. Instead, it is set to a node that has
+            // the characteristics of the appropriate "adjusted current node".
+            // This way, there is no need to perform "adjusted current node"
+            // checks during tree construction. Instead, it's sufficient to
+            // just look at the current node. However, this also means that it
+            // is not safe to treat "html" in the HTML namespace as a sentinel
+            // that ends stack popping. Instead, stack popping loops that are
+            // meant not to pop the first element on the stack need to check
+            // for currentPos becoming zero.
+            if (contextNamespace == "http://www.w3.org/2000/svg") {
+                ElementName elementName = ElementName.SVG;
+                if ("title" == contextName || "desc" == contextName
+                        || "foreignObject" == contextName) {
+                    // These elements are all alike and we don't care about
+                    // the exact name.
+                    elementName = ElementName.FOREIGNOBJECT;
+                }
+                // This is the SVG variant of the StackNode constructor.
+                StackNode<T> node = new StackNode<T>(elementName,
+                        elementName.camelCaseName, elt
+                        // [NOCPP[
+                        , errorHandler == null ? null
+                                : new TaintableLocatorImpl(tokenizer)
+                // ]NOCPP]
+                );
+                currentPtr++;
+                stack[currentPtr] = node;
+                tokenizer.setStateAndEndTagExpectation(Tokenizer.DATA,
                         contextName);
-            } else {
-                tokenizer.setStateAndEndTagExpectation(Tokenizer.DATA, contextName);
+                // The frameset-ok flag is set even though <frameset> never
+                // ends up being allowed as HTML frameset in the fragment case.
+                mode = FRAMESET_OK;
+            } else if (contextNamespace == "http://www.w3.org/1998/Math/MathML") {
+                ElementName elementName = ElementName.MATH;
+                if ("mi" == contextName || "mo" == contextName
+                        || "mn" == contextName || "ms" == contextName
+                        || "mtext" == contextName) {
+                    // These elements are all alike and we don't care about
+                    // the exact name.
+                    elementName = ElementName.MTEXT;
+                } else if ("annotation-xml" == contextName) {
+                    elementName = ElementName.ANNOTATION_XML;
+                    // Blink does not check the encoding attribute of the
+                    // annotation-xml element innerHTML is being set on.
+                    // Let's do the same at least until
+                    // https://www.w3.org/Bugs/Public/show_bug.cgi?id=26783
+                    // is resolved.
+                }
+                // This is the MathML variant of the StackNode constructor.
+                StackNode<T> node = new StackNode<T>(elementName, elt,
+                        elementName.name, false
+                        // [NOCPP[
+                        , errorHandler == null ? null
+                                : new TaintableLocatorImpl(tokenizer)
+                // ]NOCPP]
+                );
+                currentPtr++;
+                stack[currentPtr] = node;
+                tokenizer.setStateAndEndTagExpectation(Tokenizer.DATA,
+                        contextName);
+                // The frameset-ok flag is set even though <frameset> never
+                // ends up being allowed as HTML frameset in the fragment case.
+                mode = FRAMESET_OK;
+            } else { // html
+                StackNode<T> node = new StackNode<T>(ElementName.HTML, elt
+                // [NOCPP[
+                        , errorHandler == null ? null
+                                : new TaintableLocatorImpl(tokenizer)
+                // ]NOCPP]
+                );
+                currentPtr++;
+                stack[currentPtr] = node;
+                if ("template" == contextName) {
+                    pushTemplateMode(IN_TEMPLATE);
+                }
+                resetTheInsertionMode();
+                formPointer = getFormPointerForContext(contextNode);
+                if ("title" == contextName || "textarea" == contextName) {
+                    tokenizer.setStateAndEndTagExpectation(Tokenizer.RCDATA,
+                            contextName);
+                } else if ("style" == contextName || "xmp" == contextName
+                        || "iframe" == contextName || "noembed" == contextName
+                        || "noframes" == contextName
+                        || (scriptingEnabled && "noscript" == contextName)) {
+                    tokenizer.setStateAndEndTagExpectation(Tokenizer.RAWTEXT,
+                            contextName);
+                } else if ("plaintext" == contextName) {
+                    tokenizer.setStateAndEndTagExpectation(Tokenizer.PLAINTEXT,
+                            contextName);
+                } else if ("script" == contextName) {
+                    tokenizer.setStateAndEndTagExpectation(
+                            Tokenizer.SCRIPT_DATA, contextName);
+                } else {
+                    tokenizer.setStateAndEndTagExpectation(Tokenizer.DATA,
+                            contextName);
+                }
             }
             contextName = null;
             contextNode = null;
@@ -1280,7 +1355,7 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                     if (start < i) {
                                         accumulateCharacters(buf, start, i
                                                 - start);
-                                        start = i;
+                                        // start index is adjusted below.
                                     }
                                     /*
                                      * Parse error.
@@ -1295,7 +1370,7 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                     if (start < i) {
                                         accumulateCharacters(buf, start, i
                                                 - start);
-                                        start = i;
+                                        // start index is adjusted below.
                                     }
                                     /*
                                      * Parse error.
@@ -1319,13 +1394,19 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                     i--;
                                     continue;
                                 case AFTER_AFTER_FRAMESET:
+                                    if (start < i) {
+                                        accumulateCharacters(buf, start, i
+                                                - start);
+                                        // start index is adjusted below.
+                                    }
+                                    /*
+                                     * Parse error.
+                                     */
                                     errNonSpaceInTrailer();
                                     /*
-                                     * Switch back to the main mode and
-                                     * reprocess the token.
+                                     * Ignore the token.
                                      */
-                                    mode = IN_FRAMESET;
-                                    i--;
+                                    start = i + 1;
                                     continue;
                             }
                     }
@@ -1445,7 +1526,8 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                 case IN_CELL:
                 case IN_BODY:
                     // [NOCPP[
-                    openelementloop: for (int i = currentPtr; i >= 0; i--) {
+                    // i > 0 to stop in time in the foreign fragment case.
+                    openelementloop: for (int i = currentPtr; i > 0; i--) {
                         int group = stack[i].getGroup();
                         switch (group) {
                             case DD_OR_DT:
@@ -1612,20 +1694,17 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                         case P:
                         case PRE_OR_LISTING:
                         case TABLE:
-                            errHtmlStartTagInForeignContext(name);
-                            while (!isSpecialParentInForeign(stack[currentPtr])) {
-                                pop();
-                            }
-                            continue starttagloop;
                         case FONT:
-                            if (attributes.contains(AttributeName.COLOR)
-                                    || attributes.contains(AttributeName.FACE)
-                                    || attributes.contains(AttributeName.SIZE)) {
+                            // re-check FONT to deal with the special case
+                            if (!(group == FONT && !(attributes.contains(AttributeName.COLOR)
+                                    || attributes.contains(AttributeName.FACE) || attributes.contains(AttributeName.SIZE)))) {
                                 errHtmlStartTagInForeignContext(name);
-                                while (!isSpecialParentInForeign(stack[currentPtr])) {
-                                    pop();
-                                }
-                                continue starttagloop;
+                                if (!fragment) {
+                                    while (!isSpecialParentInForeign(stack[currentPtr])) {
+                                        pop();
+                                    }
+                                    continue starttagloop;
+                                } // else fall thru
                             }
                             // else fall thru
                         default:
@@ -1892,7 +1971,7 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                 attributes = null; // CPP
                                 break starttagloop;
                             case FORM:
-                                if (formPointer != null) {
+                                if (formPointer != null || isTemplateContents()) {
                                     errFormWhenFormOpen();
                                     break starttagloop;
                                 } else {
@@ -2078,7 +2157,7 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                 attributes = null; // CPP
                                 break starttagloop;
                             case FORM:
-                                if (formPointer != null) {
+                                if (formPointer != null && !isTemplateContents()) {
                                     errFormWhenFormOpen();
                                     break starttagloop;
                                 } else {
@@ -2255,7 +2334,7 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                 break starttagloop;
                             case ISINDEX:
                                 errIsindex();
-                                if (formPointer != null) {
+                                if (formPointer != null && !isTemplateContents()) {
                                     break starttagloop;
                                 }
                                 implicitlyCloseP();
@@ -2319,6 +2398,11 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                         ElementName.HR,
                                         HtmlAttributes.EMPTY_ATTRIBUTES);
                                 pop(); // form
+
+                                if (!isTemplateContents()) {
+                                    formPointer = null;
+                                }
+
                                 selfClosing = false;
                                 // Portability.delete(formAttrs);
                                 // Portability.delete(inputAttributes);
@@ -2396,16 +2480,35 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                         attributes);
                                 attributes = null; // CPP
                                 break starttagloop;
-                            case RT_OR_RP:
+                            case RB_OR_RTC:
                                 eltPos = findLastInScope("ruby");
                                 if (eltPos != NOT_FOUND_ON_STACK) {
                                     generateImpliedEndTags();
                                 }
                                 if (eltPos != currentPtr) {
-                                    if (eltPos != NOT_FOUND_ON_STACK) {
+                                    if (eltPos == NOT_FOUND_ON_STACK) {
                                         errStartTagSeenWithoutRuby(name);
                                     } else {
                                         errUnclosedChildrenInRuby();
+                                    }
+                                }
+                                appendToCurrentNodeAndPushElementMayFoster(
+                                        elementName,
+                                        attributes);
+                                attributes = null; // CPP
+                                break starttagloop;
+                            case RT_OR_RP:
+                                eltPos = findLastInScope("ruby");
+                                if (eltPos != NOT_FOUND_ON_STACK) {
+                                    generateImpliedEndTagsExceptFor("rtc");
+                                }
+                                if (eltPos != currentPtr) {
+                                    if (!isCurrent("rtc")) {
+                                        if (eltPos == NOT_FOUND_ON_STACK) {
+                                            errStartTagSeenWithoutRuby(name);
+                                        } else {
+                                            errUnclosedChildrenInRuby();
+                                        }
                                     }
                                 }
                                 appendToCurrentNodeAndPushElementMayFoster(
@@ -3021,9 +3124,9 @@ public abstract class TreeBuilder<T> implements TokenHandler,
         if (selfClosing) {
             errSelfClosing();
         }
-        if (attributes != HtmlAttributes.EMPTY_ATTRIBUTES) {
-            Portability.delete(attributes);
-        }
+        // CPPONLY: if (mBuilder == null && attributes != HtmlAttributes.EMPTY_ATTRIBUTES) {
+        // CPPONLY:    Portability.delete(attributes);
+        // CPPONLY: }
     }
 
     private void startTagTitleInHead(ElementName elementName, HtmlAttributes attributes) throws SAXException {
@@ -3275,10 +3378,18 @@ public abstract class TreeBuilder<T> implements TokenHandler,
         endtagloop: for (;;) {
             if (isInForeign()) {
                 if (stack[currentPtr].name != name) {
-                    errEndTagDidNotMatchCurrentOpenElement(name, stack[currentPtr].popName);
+                    if (currentPtr == 0) {
+                        errStrayEndTag(name);
+                    } else {
+                        errEndTagDidNotMatchCurrentOpenElement(name, stack[currentPtr].popName);
+                    }
                 }
                 eltPos = currentPtr;
                 for (;;) {
+                    if (eltPos == 0) {
+                        assert fragment: "We can get this close to the root of the stack in foreign content only in the fragment case.";
+                        break endtagloop;
+                    }
                     if (stack[eltPos].name == name) {
                         while (currentPtr >= eltPos) {
                             pop();
@@ -3517,6 +3628,7 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                         case OPTGROUP:
                                         case OPTION: // is this possible?
                                         case P:
+                                        case RB_OR_RTC:
                                         case RT_OR_RP:
                                         case TD_OR_TH:
                                         case TBODY_OR_THEAD_OR_TFOOT:
@@ -3541,6 +3653,8 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                         case DD_OR_DT:
                                         case LI:
                                         case P:
+                                        case RB_OR_RTC:
+                                        case RT_OR_RP:
                                         case TBODY_OR_THEAD_OR_TFOOT:
                                         case TD_OR_TH:
                                         case BODY:
@@ -3574,22 +3688,38 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                             }
                             break endtagloop;
                         case FORM:
-                            if (formPointer == null) {
-                                errStrayEndTag(name);
+                            if (!isTemplateContents()) {
+                                if (formPointer == null) {
+                                    errStrayEndTag(name);
+                                    break endtagloop;
+                                }
+                                formPointer = null;
+                                eltPos = findLastInScope(name);
+                                if (eltPos == TreeBuilder.NOT_FOUND_ON_STACK) {
+                                    errStrayEndTag(name);
+                                    break endtagloop;
+                                }
+                                generateImpliedEndTags();
+                                if (errorHandler != null && !isCurrent(name)) {
+                                    errUnclosedElements(eltPos, name);
+                                }
+                                removeFromStack(eltPos);
+                                break endtagloop;
+                            } else {
+                                eltPos = findLastInScope(name);
+                                if (eltPos == TreeBuilder.NOT_FOUND_ON_STACK) {
+                                    errStrayEndTag(name);
+                                    break endtagloop;
+                                }
+                                generateImpliedEndTags();
+                                if (errorHandler != null && !isCurrent(name)) {
+                                    errUnclosedElements(eltPos, name);
+                                }
+                                while (currentPtr >= eltPos) {
+                                    pop();
+                                }
                                 break endtagloop;
                             }
-                            formPointer = null;
-                            eltPos = findLastInScope(name);
-                            if (eltPos == TreeBuilder.NOT_FOUND_ON_STACK) {
-                                errStrayEndTag(name);
-                                break endtagloop;
-                            }
-                            generateImpliedEndTags();
-                            if (errorHandler != null && !isCurrent(name)) {
-                                errUnclosedElements(eltPos, name);
-                            }
-                            removeFromStack(eltPos);
-                            break endtagloop;
                         case P:
                             eltPos = findLastInButtonScope("p");
                             if (eltPos == TreeBuilder.NOT_FOUND_ON_STACK) {
@@ -3597,7 +3727,9 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                                 // XXX Can the 'in foreign' case happen anymore?
                                 if (isInForeign()) {
                                     errHtmlStartTagInForeignContext(name);
-                                    while (stack[currentPtr].ns != "http://www.w3.org/1999/xhtml") {
+                                    // Check for currentPtr for the fragment
+                                    // case.
+                                    while (currentPtr >= 0 && stack[currentPtr].ns != "http://www.w3.org/1999/xhtml") {
                                         pop();
                                     }
                                 }
@@ -3678,8 +3810,11 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                         case BR:
                             errEndTagBr();
                             if (isInForeign()) {
+                                // XXX can this happen anymore?
                                 errHtmlStartTagInForeignContext(name);
-                                while (stack[currentPtr].ns != "http://www.w3.org/1999/xhtml") {
+                                // Check for currentPtr for the fragment
+                                // case.
+                                while (currentPtr >= 0 && stack[currentPtr].ns != "http://www.w3.org/1999/xhtml") {
                                     pop();
                                 }
                             }
@@ -4142,6 +4277,7 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                 case DD_OR_DT:
                 case OPTION:
                 case OPTGROUP:
+                case RB_OR_RTC:
                 case RT_OR_RP:
                     if (node.ns == "http://www.w3.org/1999/xhtml" && node.name == name) {
                         return;
@@ -4162,6 +4298,7 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                 case DD_OR_DT:
                 case OPTION:
                 case OPTGROUP:
+                case RB_OR_RTC:
                 case RT_OR_RP:
                     pop();
                     continue;
@@ -4538,14 +4675,36 @@ public abstract class TreeBuilder<T> implements TokenHandler,
         listPtr--;
     }
 
+    /**
+     * Adoption agency algorithm.
+     *
+     * @param name subject as described in the specified algorithm.
+     * @return Returns true if the algorithm has completed and there is nothing remaining to
+     * be done. Returns false if the algorithm needs to "act as described in the 'any other
+     * end tag' entry" as described in the specified algorithm.
+     * @throws SAXException
+     */
     private boolean adoptionAgencyEndTag(@Local String name) throws SAXException {
+        // This check intends to ensure that for properly nested tags, closing tags will match
+        // against the stack instead of the listOfActiveFormattingElements.
+        if (stack[currentPtr].ns == "http://www.w3.org/1999/xhtml" &&
+                stack[currentPtr].name == name &&
+                findInListOfActiveFormattingElements(stack[currentPtr]) == -1) {
+            // If the current element matches the name but isn't on the list of active
+            // formatting elements, then it is possible that the list was mangled by the Noah's Ark
+            // clause. In this case, we want to match the end tag against the stack instead of
+            // proceeding with the AAA algorithm that may match against the list of
+            // active formatting elements (and possibly mangle the tree in unexpected ways).
+            pop();
+            return true;
+        }
+
         // If you crash around here, perhaps some stack node variable claimed to
         // be a weak ref isn't.
         for (int i = 0; i < 8; ++i) {
             int formattingEltListPos = listPtr;
             while (formattingEltListPos > -1) {
-                StackNode<T> listNode = listOfActiveFormattingElements[formattingEltListPos]; // weak
-                                                                                              // ref
+                StackNode<T> listNode = listOfActiveFormattingElements[formattingEltListPos]; // weak ref
                 if (listNode == null) {
                     formattingEltListPos = -1;
                     break;
@@ -4557,18 +4716,8 @@ public abstract class TreeBuilder<T> implements TokenHandler,
             if (formattingEltListPos == -1) {
                 return false;
             }
-            StackNode<T> formattingElt = listOfActiveFormattingElements[formattingEltListPos]; // this
-            // *looks*
-            // like
-            // a
-            // weak
-            // ref
-            // to
-            // the
-            // list
-            // of
-            // formatting
-            // elements
+            // this *looks* like a weak ref to the list of formatting elements
+            StackNode<T> formattingElt = listOfActiveFormattingElements[formattingEltListPos];
             int formattingEltStackPos = currentPtr;
             boolean inScope = true;
             while (formattingEltStackPos > -1) {
@@ -4609,30 +4758,47 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                 removeFromListOfActiveFormattingElements(formattingEltListPos);
                 return true;
             }
-            StackNode<T> commonAncestor = stack[formattingEltStackPos - 1]; // weak
-            // ref
+            StackNode<T> commonAncestor = stack[formattingEltStackPos - 1]; // weak ref
             StackNode<T> furthestBlock = stack[furthestBlockPos]; // weak ref
             // detachFromParent(furthestBlock.node); XXX AAA CHANGE
             int bookmark = formattingEltListPos;
             int nodePos = furthestBlockPos;
             StackNode<T> lastNode = furthestBlock; // weak ref
-            for (int j = 0; j < 3; ++j) {
+            int j = 0;
+            for (;;) {
+                ++j;
                 nodePos--;
+                if (nodePos == formattingEltStackPos) {
+                    break;
+                }
                 StackNode<T> node = stack[nodePos]; // weak ref
                 int nodeListPos = findInListOfActiveFormattingElements(node);
+
+                if (j > 3 && nodeListPos != -1) {
+                    removeFromListOfActiveFormattingElements(nodeListPos);
+
+                    // Adjust the indices into the list to account
+                    // for the removal of nodeListPos.
+                    if (nodeListPos <= formattingEltListPos) {
+                        formattingEltListPos--;
+                    }
+                    if (nodeListPos <= bookmark) {
+                        bookmark--;
+                    }
+
+                    // Update position to reflect removal from list.
+                    nodeListPos = -1;
+                }
+
                 if (nodeListPos == -1) {
                     assert formattingEltStackPos < nodePos;
                     assert bookmark < nodePos;
                     assert furthestBlockPos > nodePos;
-                    removeFromStack(nodePos); // node is now a bad pointer in
-                    // C++
+                    removeFromStack(nodePos); // node is now a bad pointer in C++
                     furthestBlockPos--;
                     continue;
                 }
                 // now node is both on stack and in the list
-                if (nodePos == formattingEltStackPos) {
-                    break;
-                }
                 if (nodePos == furthestBlockPos) {
                     bookmark = nodeListPos + 1;
                 }
@@ -4645,12 +4811,8 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                         node.name, clone, node.popName, node.attributes
                         // [NOCPP[
                         , node.getLocator()
-                // ]NOCPP]
-                ); // creation
-                // ownership
-                // goes
-                // to
-                // stack
+                        // ]NOCPP]
+                ); // creation ownership goes to stack
                 node.dropAttributes(); // adopt ownership to newNode
                 stack[nodePos] = newNode;
                 newNode.retain(); // retain for list
@@ -4680,12 +4842,8 @@ public abstract class TreeBuilder<T> implements TokenHandler,
                     formattingElt.attributes
                     // [NOCPP[
                     , errorHandler == null ? null : new TaintableLocatorImpl(tokenizer)
-            // ]NOCPP]
-            ); // Ownership
-            // transfers
-            // to
-            // stack
-            // below
+                    // ]NOCPP]
+            ); // Ownership transfers to stack below
             formattingElt.dropAttributes(); // transfer ownership to
                                             // formattingClone
             appendChildrenToNewParent(furthestBlock.node, clone);
@@ -5078,7 +5236,11 @@ public abstract class TreeBuilder<T> implements TokenHandler,
         // ]NOCPP]
         T elt = createElement("http://www.w3.org/1999/xhtml", "form",
                 attributes);
-        formPointer = elt;
+
+        if (!isTemplateContents()) {
+            formPointer = elt;
+        }
+
         StackNode<T> current = stack[currentPtr];
         if (current.isFosterParenting()) {
             fatal();
@@ -5102,6 +5264,9 @@ public abstract class TreeBuilder<T> implements TokenHandler,
         checkAttributes(attributes, "http://www.w3.org/1999/xhtml");
         // ]NOCPP]
         // This method can't be called for custom elements
+        HtmlAttributes clone = attributes.cloneAttributes(null);
+        // Attributes must not be read after calling createElement, because
+        // createElement may delete attributes in C++.
         T elt = createElement("http://www.w3.org/1999/xhtml", elementName.name, attributes);
         StackNode<T> current = stack[currentPtr];
         if (current.isFosterParenting()) {
@@ -5110,7 +5275,7 @@ public abstract class TreeBuilder<T> implements TokenHandler,
         } else {
             appendElement(elt, current.node);
         }
-        StackNode<T> node = new StackNode<T>(elementName, elt, attributes.cloneAttributes(null)
+        StackNode<T> node = new StackNode<T>(elementName, elt, clone
                 // [NOCPP[
                 , errorHandler == null ? null : new TaintableLocatorImpl(tokenizer)
         // ]NOCPP]
@@ -5176,6 +5341,13 @@ public abstract class TreeBuilder<T> implements TokenHandler,
             popName = checkPopName(popName);
         }
         // ]NOCPP]
+        boolean markAsHtmlIntegrationPoint = false;
+        if (ElementName.ANNOTATION_XML == elementName
+                && annotationXmlEncodingPermitsHtml(attributes)) {
+            markAsHtmlIntegrationPoint = true;
+        }
+        // Attributes must not be read after calling createElement(), since
+        // createElement may delete the object in C++.
         T elt = createElement("http://www.w3.org/1998/Math/MathML", popName,
                 attributes);
         StackNode<T> current = stack[currentPtr];
@@ -5184,11 +5356,6 @@ public abstract class TreeBuilder<T> implements TokenHandler,
             insertIntoFosterParent(elt);
         } else {
             appendElement(elt, current.node);
-        }
-        boolean markAsHtmlIntegrationPoint = false;
-        if (ElementName.ANNOTATION_XML == elementName
-                && annotationXmlEncodingPermitsHtml(attributes)) {
-            markAsHtmlIntegrationPoint = true;
         }
         StackNode<T> node = new StackNode<T>(elementName, elt, popName,
                 markAsHtmlIntegrationPoint
@@ -5202,6 +5369,10 @@ public abstract class TreeBuilder<T> implements TokenHandler,
     // [NOCPP[
     T getDocumentFragmentForTemplate(T template) {
         return template;
+    }
+
+    T getFormPointerForContext(T context) {
+        return null;
     }
     // ]NOCPP]
 
@@ -5555,6 +5726,15 @@ public abstract class TreeBuilder<T> implements TokenHandler,
      */
     public final void setFragmentContext(@Local String context,
             @NsUri String ns, T node, boolean quirks) {
+        // [NOCPP[
+        if (!((context == null && ns == null)
+                || "http://www.w3.org/1999/xhtml" == ns
+                || "http://www.w3.org/2000/svg" == ns || "http://www.w3.org/1998/Math/MathML" == ns)) {
+            throw new IllegalArgumentException(
+                    "The namespace must be the HTML, SVG or MathML namespace (or null when the local name is null). Got: "
+                            + ns);
+        }
+        // ]NOCPP]
         this.contextName = context;
         this.contextNamespace = ns;
         this.contextNode = node;

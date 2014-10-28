@@ -1,6 +1,7 @@
 package org.mozilla.gecko.tests;
 
-import org.mozilla.gecko.*;
+import org.mozilla.gecko.Actions;
+import org.mozilla.gecko.PaintedSurface;
 
 abstract class PixelTest extends BaseTest {
     private static final long PAINT_CLEAR_DELAY = 10000; // milliseconds
@@ -28,8 +29,8 @@ abstract class PixelTest extends BaseTest {
         Actions.RepeatedEventExpecter paintExpecter = mActions.expectPaint();
 
         mActions.sendSpecialKey(Actions.SpecialKey.MENU);
-        waitForText("Reload");
-        mSolo.clickOnText("Reload");
+        waitForText(StringHelper.RELOAD_LABEL);
+        mSolo.clickOnText(StringHelper.RELOAD_LABEL);
 
         paintExpecter.blockUntilClear(PAINT_CLEAR_DELAY);
         paintExpecter.unregisterListener();

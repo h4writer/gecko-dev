@@ -5,9 +5,7 @@
 "use strict";
 
 let { classes: Cc, interfaces: Ci, results: Cr, utils: Cu }  = Components;
-Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
-Cu.import("resource://gre/modules/Geometry.jsm");
 
 function debug(msg) {
   //dump("BrowserElementChild - " + msg + "\n");
@@ -16,12 +14,6 @@ function debug(msg) {
 // NB: this must happen before we process any messages from
 // mozbrowser API clients.
 docShell.isActive = true;
-
-let infos = sendSyncMessage('browser-element-api:call',
-                            { 'msg_name': 'hello' })[0];
-docShell.QueryInterface(Ci.nsIDocShellTreeItem).name = infos.name;
-docShell.setFullscreenAllowed(infos.fullscreenAllowed);
-
 
 function parentDocShell(docshell) {
   if (!docshell) {
@@ -49,11 +41,6 @@ if (!('BrowserElementIsPreloaded' in this)) {
     } catch (e) {
     }
   }
-  // Those are produc-specific files that's sometimes unavailable.
-  try {
-    Services.scriptloader.loadSubScript("chrome://browser/content/ErrorPage.js");
-  } catch (e) {
-  }
 
   Services.scriptloader.loadSubScript("chrome://global/content/BrowserElementPanning.js");
   ContentPanning.init();
@@ -64,3 +51,15 @@ if (!('BrowserElementIsPreloaded' in this)) {
 }
 
 var BrowserElementIsReady = true;
+
+let infos = sendSyncMessage('browser-element-api:call',
+                            { 'msg_name': 'hello' })[0];
+docShell.QueryInterface(Ci.nsIDocShellTreeItem).name = infos.name;
+docShell.setFullscreenAllowed(infos.fullscreenAllowed);
+if (infos.isPrivate) {
+  if (docShell.hasLoadedNonBlankURI) {
+    Cu.reportError("We should not switch to Private Browsing after loading a document.");
+  } else {
+    docShell.QueryInterface(Ci.nsILoadContext).usePrivateBrowsing = true;
+  }
+}

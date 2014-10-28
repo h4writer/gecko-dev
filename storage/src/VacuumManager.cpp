@@ -75,7 +75,7 @@ BaseCallback::HandleError(mozIStorageError *aError)
   nsAutoCString warnMsg;
   warnMsg.AppendLiteral("An error occured during async execution: ");
   warnMsg.AppendInt(result);
-  warnMsg.AppendLiteral(" ");
+  warnMsg.Append(' ');
   warnMsg.Append(message);
   NS_WARNING(warnMsg.get());
 #endif
@@ -96,7 +96,7 @@ BaseCallback::HandleCompletion(uint16_t aReason)
   return NS_OK;
 }
 
-NS_IMPL_ISUPPORTS1(
+NS_IMPL_ISUPPORTS(
   BaseCallback
 , mozIStorageStatementCallback
 )
@@ -109,7 +109,7 @@ class Vacuumer : public BaseCallback
 public:
   NS_DECL_MOZISTORAGESTATEMENTCALLBACK
 
-  Vacuumer(mozIStorageVacuumParticipant *aParticipant);
+  explicit Vacuumer(mozIStorageVacuumParticipant *aParticipant);
 
   bool execute();
   nsresult notifyCompletion(bool aSucceeded);
@@ -206,7 +206,7 @@ Vacuumer::execute()
   rv = mDBConn->CreateAsyncStatement(pageSizeQuery,
                                      getter_AddRefs(pageSizeStmt));
   NS_ENSURE_SUCCESS(rv, false);
-  nsCOMPtr<BaseCallback> callback = new BaseCallback();
+  nsRefPtr<BaseCallback> callback = new BaseCallback();
   nsCOMPtr<mozIStoragePendingStatement> ps;
   rv = pageSizeStmt->ExecuteAsync(callback, getter_AddRefs(ps));
   NS_ENSURE_SUCCESS(rv, false);
@@ -241,7 +241,7 @@ Vacuumer::HandleError(mozIStorageError *aError)
   warnMsg.Append(mDBFilename);
   warnMsg.AppendLiteral(" - ");
   warnMsg.AppendInt(result);
-  warnMsg.AppendLiteral(" ");
+  warnMsg.Append(' ');
   warnMsg.Append(message);
   NS_WARNING(warnMsg.get());
 #endif
@@ -307,7 +307,7 @@ Vacuumer::notifyCompletion(bool aSucceeded)
 ////////////////////////////////////////////////////////////////////////////////
 //// VacuumManager
 
-NS_IMPL_ISUPPORTS1(
+NS_IMPL_ISUPPORTS(
   VacuumManager
 , nsIObserver
 )
@@ -359,7 +359,7 @@ VacuumManager::~VacuumManager()
 NS_IMETHODIMP
 VacuumManager::Observe(nsISupports *aSubject,
                        const char *aTopic,
-                       const PRUnichar *aData)
+                       const char16_t *aData)
 {
   if (strcmp(aTopic, OBSERVER_TOPIC_IDLE_DAILY) == 0) {
     // Try to run vacuum on all registered entries.  Will stop at the first
@@ -375,7 +375,7 @@ VacuumManager::Observe(nsISupports *aSubject,
     }
     int32_t index;
     for (index = startIndex; index < entries.Count(); ++index) {
-      nsCOMPtr<Vacuumer> vacuum = new Vacuumer(entries[index]);
+      nsRefPtr<Vacuumer> vacuum = new Vacuumer(entries[index]);
       // Only vacuum one database per day.
       if (vacuum->execute()) {
         break;

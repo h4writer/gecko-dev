@@ -45,7 +45,18 @@ enum BlendMode
   BLEND_MODE_MULTIPLY = 0,
   BLEND_MODE_SCREEN,
   BLEND_MODE_DARKEN,
-  BLEND_MODE_LIGHTEN
+  BLEND_MODE_LIGHTEN,
+  BLEND_MODE_OVERLAY,
+  BLEND_MODE_COLOR_DODGE,
+  BLEND_MODE_COLOR_BURN,
+  BLEND_MODE_HARD_LIGHT,
+  BLEND_MODE_SOFT_LIGHT,
+  BLEND_MODE_DIFFERENCE,
+  BLEND_MODE_EXCLUSION,
+  BLEND_MODE_HUE,
+  BLEND_MODE_SATURATION,
+  BLEND_MODE_COLOR,
+  BLEND_MODE_LUMINOSITY
 };
 
 enum BlendFilterInputs
@@ -466,6 +477,7 @@ enum UnpremultiplyInputs
 class FilterNode : public RefCounted<FilterNode>
 {
 public:
+  MOZ_DECLARE_REFCOUNTED_VIRTUAL_TYPENAME(FilterNode)
   virtual ~FilterNode() {}
 
   virtual FilterBackend GetBackendType() = 0;

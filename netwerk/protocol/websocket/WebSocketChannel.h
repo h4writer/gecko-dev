@@ -14,12 +14,16 @@
 #include "nsIAsyncOutputStream.h"
 #include "nsITimer.h"
 #include "nsIDNSListener.h"
+#include "nsIObserver.h"
+#include "nsIProtocolProxyCallback.h"
 #include "nsIChannelEventSink.h"
 #include "nsIHttpChannelInternal.h"
+#include "nsIStringStream.h"
 #include "BaseWebSocketChannel.h"
 
 #ifdef MOZ_WIDGET_GONK
 #include "nsINetworkManager.h"
+#include "nsProxyRelease.h"
 #endif
 
 #include "nsCOMPtr.h"
@@ -60,6 +64,8 @@ class WebSocketChannel : public BaseWebSocketChannel,
                          public nsIOutputStreamCallback,
                          public nsITimerCallback,
                          public nsIDNSListener,
+                         public nsIObserver,
+                         public nsIProtocolProxyCallback,
                          public nsIInterfaceRequestor,
                          public nsIChannelEventSink
 {
@@ -72,8 +78,10 @@ public:
   NS_DECL_NSIOUTPUTSTREAMCALLBACK
   NS_DECL_NSITIMERCALLBACK
   NS_DECL_NSIDNSLISTENER
+  NS_DECL_NSIPROTOCOLPROXYCALLBACK
   NS_DECL_NSIINTERFACEREQUESTOR
   NS_DECL_NSICHANNELEVENTSINK
+  NS_DECL_NSIOBSERVER
 
   // nsIWebSocketChannel methods BaseWebSocketChannel didn't implement for us
   //
@@ -89,6 +97,11 @@ public:
 
   WebSocketChannel();
   static void Shutdown();
+  bool IsOnTargetThread();
+
+  // Off main thread URI access.
+  void GetEffectiveURL(nsAString& aEffectiveURL) const MOZ_OVERRIDE;
+  bool IsEncrypted() const MOZ_OVERRIDE;
 
   enum {
     // Non Control Frames
@@ -133,6 +146,7 @@ private:
   nsresult HandleExtensions();
   nsresult SetupRequest();
   nsresult ApplyForAdmission();
+  nsresult DoAdmissionDNS();
   nsresult StartWebsocketData();
   uint16_t ResultToCloseCode(nsresult resultCode);
   void     ReportConnectionTelemetry();
@@ -155,8 +169,8 @@ private:
 
   inline void ResetPingTimer()
   {
+    mPingOutstanding = 0;
     if (mPingTimer) {
-      mPingOutstanding = 0;
       mPingTimer->SetDelay(mPingInterval);
     }
   }
@@ -164,7 +178,7 @@ private:
   nsCOMPtr<nsIEventTarget>                 mSocketThread;
   nsCOMPtr<nsIHttpChannelInternal>         mChannel;
   nsCOMPtr<nsIHttpChannel>                 mHttpChannel;
-  nsCOMPtr<nsICancelable>                  mDNSRequest;
+  nsCOMPtr<nsICancelable>                  mCancelable;
   nsCOMPtr<nsIAsyncVerifyRedirectCallback> mRedirectCallback;
   nsCOMPtr<nsIRandomGenerator>             mRandomGenerator;
 
@@ -174,6 +188,10 @@ private:
   // then to IP address (unless we're leaving DNS resolution to a proxy server)
   nsCString                       mAddress;
   int32_t                         mPort;          // WS server port
+
+  // Used for off main thread access to the URI string.
+  nsCString                       mHost;
+  nsString                        mEffectiveURL;
 
   nsCOMPtr<nsISocketTransport>    mTransport;
   nsCOMPtr<nsIAsyncInputStream>   mSocketIn;
@@ -261,7 +279,7 @@ private:
   uint64_t                        mCountSent;
   uint32_t                        mAppId;
 #ifdef MOZ_WIDGET_GONK
-  nsCOMPtr<nsINetworkInterface>   mActiveNetwork;
+  nsMainThreadPtrHandle<nsINetworkInterface> mActiveNetwork;
 #endif
   nsresult                        SaveNetworkStats(bool);
   void                            CountRecvBytes(uint64_t recvBytes)

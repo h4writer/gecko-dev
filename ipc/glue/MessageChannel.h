@@ -11,16 +11,16 @@
 #include "base/basictypes.h"
 #include "base/message_loop.h"
 
-#include "mozilla/WeakPtr.h"
+#include "mozilla/DebugOnly.h"
 #include "mozilla/Monitor.h"
+#include "mozilla/Vector.h"
+#include "mozilla/WeakPtr.h"
 #include "mozilla/ipc/Transport.h"
 #include "MessageLink.h"
 #include "nsAutoPtr.h"
-#include "mozilla/DebugOnly.h"
 
 #include <deque>
 #include <stack>
-#include <vector>
 #include <math.h>
 
 namespace mozilla {
@@ -36,6 +36,9 @@ class RefCountedMonitor : public Monitor
     {}
 
     NS_INLINE_DECL_THREADSAFE_REFCOUNTING(RefCountedMonitor)
+
+  private:
+    ~RefCountedMonitor() {}
 };
 
 class MessageChannel : HasResultCodes
@@ -43,6 +46,9 @@ class MessageChannel : HasResultCodes
     friend class ProcessLink;
     friend class ThreadLink;
     friend class AutoEnterRPCTransaction;
+
+    class CxxStackFrame;
+    class InterruptFrame;
 
     typedef mozilla::Monitor Monitor;
 
@@ -52,19 +58,19 @@ class MessageChannel : HasResultCodes
     typedef IPC::Message Message;
     typedef mozilla::ipc::Transport Transport;
 
-    MessageChannel(MessageListener *aListener);
+    explicit MessageChannel(MessageListener *aListener);
     ~MessageChannel();
 
     // "Open" from the perspective of the transport layer; the underlying
     // socketpair/pipe should already be created.
     //
-    // Returns true iff the transport layer was successfully connected,
+    // Returns true if the transport layer was successfully connected,
     // i.e., mChannelState == ChannelConnected.
     bool Open(Transport* aTransport, MessageLoop* aIOLoop=0, Side aSide=UnknownSide);
 
     // "Open" a connection to another thread in the same process.
     //
-    // Returns true iff the transport layer was successfully connected,
+    // Returns true if the transport layer was successfully connected,
     // i.e., mChannelState == ChannelConnected.
     //
     // For more details on the process of opening a channel between
@@ -79,6 +85,31 @@ class MessageChannel : HasResultCodes
     // for process links only, not thread links.
     void CloseWithError();
 
+    void SetAbortOnError(bool abort)
+    {
+        mAbortOnError = true;
+    }
+
+    // Misc. behavioral traits consumers can request for this channel
+    enum ChannelFlags {
+      REQUIRE_DEFAULT                         = 0,
+      // Windows: if this channel operates on the UI thread, indicates
+      // WindowsMessageLoop code should enable deferred native message
+      // handling to prevent deadlocks. Should only be used for protocols
+      // that manage child processes which might create native UI, like
+      // plugins.
+      REQUIRE_DEFERRED_MESSAGE_PROTECTION     = 1 << 0
+    };
+    void SetChannelFlags(ChannelFlags aFlags) { mFlags = aFlags; }
+    ChannelFlags GetChannelFlags() { return mFlags; }
+
+    void BlockScripts();
+
+    bool ShouldBlockScripts() const
+    {
+        return mBlockScripts;
+    }
+
     // Asynchronously send a message to the other side of the channel
     bool Send(Message* aMsg);
 
@@ -91,6 +122,8 @@ class MessageChannel : HasResultCodes
 
     // Make an Interrupt call to the other side of the channel
     bool Call(Message* aMsg, Message* aReply);
+
+    bool CanSend() const;
 
     void SetReplyTimeoutMs(int32_t aTimeoutMs);
 
@@ -151,6 +184,8 @@ class MessageChannel : HasResultCodes
     // The deepest sync stack frame for this channel.
     SyncStackFrame* mTopFrame;
 
+    bool mIsSyncWaitingOnNonMainThread;
+
     // The deepest sync stack frame on any channel.
     static SyncStackFrame* sStaticTopFrame;
 
@@ -170,12 +205,12 @@ class MessageChannel : HasResultCodes
     void OnNotifyMaybeChannelError();
     void ReportConnectionError(const char* aChannelName) const;
     void ReportMessageRouteError(const char* channelName) const;
-    bool MaybeHandleError(Result code, const char* channelName);
+    bool MaybeHandleError(Result code, const Message& aMsg, const char* channelName);
 
     void Clear();
 
     // Send OnChannelConnected notification to listeners.
-    void DispatchOnChannelConnected(int32_t peer_pid);
+    void DispatchOnChannelConnected();
 
     // Any protocol that requires blocking until a reply arrives, will send its
     // outgoing message through this function. Currently, two protocols do this:
@@ -191,14 +226,9 @@ class MessageChannel : HasResultCodes
     // up to process urgent calls from the parent.
     bool SendAndWait(Message* aMsg, Message* aReply);
 
-    bool RPCCall(Message* aMsg, Message* aReply);
-    bool InterruptCall(Message* aMsg, Message* aReply);
-    bool UrgentCall(Message* aMsg, Message* aReply);
-
     bool InterruptEventOccurred();
 
-    bool ProcessPendingUrgentRequest();
-    bool ProcessPendingRPCCall();
+    bool ProcessPendingRequest(Message aUrgent);
 
     void MaybeUndeferIncall();
     void EnqueuePendingMessages();
@@ -274,78 +304,6 @@ class MessageChannel : HasResultCodes
         return mListener.get();
     }
 
-    enum Direction { IN_MESSAGE, OUT_MESSAGE };
-    struct InterruptFrame {
-        InterruptFrame(Direction direction, const Message* msg)
-          : mDirection(direction), mMsg(msg)
-        { }
-
-        bool IsInterruptIncall() const {
-            return mMsg->is_interrupt() && IN_MESSAGE == mDirection;
-        }
-        bool IsInterruptOutcall() const {
-            return mMsg->is_interrupt() && OUT_MESSAGE == mDirection;
-        }
-
-        void Describe(int32_t* id, const char** dir, const char** sems,
-                      const char** name) const
-        {
-            *id = mMsg->routing_id();
-            *dir = (IN_MESSAGE == mDirection) ? "in" : "out";
-            *sems = mMsg->is_interrupt() ? "intr" : mMsg->is_sync() ? "sync" : "async";
-            *name = mMsg->name();
-        }
-
-        Direction mDirection;
-        const Message* mMsg;
-    };
-
-    class MOZ_STACK_CLASS CxxStackFrame
-    {
-      public:
-        CxxStackFrame(MessageChannel& that, Direction direction, const Message* msg)
-          : mThat(that)
-        {
-            mThat.AssertWorkerThread();
-
-            if (mThat.mCxxStackFrames.empty())
-                mThat.EnteredCxxStack();
-
-            mThat.mCxxStackFrames.push_back(InterruptFrame(direction, msg));
-            const InterruptFrame& frame = mThat.mCxxStackFrames.back();
-
-            if (frame.IsInterruptIncall())
-                mThat.EnteredCall();
-
-            mThat.mSawInterruptOutMsg |= frame.IsInterruptOutcall();
-        }
-
-        ~CxxStackFrame() {
-            bool exitingCall = mThat.mCxxStackFrames.back().IsInterruptIncall();
-            mThat.mCxxStackFrames.pop_back();
-            bool exitingStack = mThat.mCxxStackFrames.empty();
-
-            // mListener could have gone away if Close() was called while
-            // MessageChannel code was still on the stack
-            if (!mThat.mListener)
-                return;
-
-            mThat.AssertWorkerThread();
-            if (exitingCall)
-                mThat.ExitedCall();
-
-            if (exitingStack)
-                mThat.ExitedCxxStack();
-        }
-      private:
-        MessageChannel& mThat;
-
-        // disable harmful methods
-        CxxStackFrame();
-        CxxStackFrame(const CxxStackFrame&);
-        CxxStackFrame& operator=(const CxxStackFrame&);
-    };
-
     void DebugAbort(const char* file, int line, const char* cond,
                     const char* why,
                     bool reply=false) const;
@@ -364,15 +322,11 @@ class MessageChannel : HasResultCodes
     // Returns true if we're blocking waiting for a reply.
     bool AwaitingSyncReply() const {
         mMonitor->AssertCurrentThreadOwns();
-        return mPendingSyncReplies > 0;
+        return mAwaitingSyncReply;
     }
-    bool AwaitingUrgentReply() const {
+    int AwaitingSyncReplyPriority() const {
         mMonitor->AssertCurrentThreadOwns();
-        return mPendingUrgentReplies > 0;
-    }
-    bool AwaitingRPCReply() const {
-        mMonitor->AssertCurrentThreadOwns();
-        return mPendingRPCReplies > 0;
+        return mAwaitingSyncReplyPriority;
     }
     bool AwaitingInterruptReply() const {
         mMonitor->AssertCurrentThreadOwns();
@@ -381,7 +335,13 @@ class MessageChannel : HasResultCodes
 
     // Returns true if we're dispatching a sync message's callback.
     bool DispatchingSyncMessage() const {
+        AssertWorkerThread();
         return mDispatchingSyncMessage;
+    }
+
+    int DispatchingSyncMessagePriority() const {
+        AssertWorkerThread();
+        return mDispatchingSyncMessagePriority;
     }
 
     bool Connected() const;
@@ -399,6 +359,7 @@ class MessageChannel : HasResultCodes
     // Tell the IO thread to close the channel and wait for it to ACK.
     void SynchronouslyClose();
 
+    bool ShouldDeferMessage(const Message& aMsg);
     void OnMessageReceivedFromLink(const Message& aMsg);
     void OnChannelErrorFromLink();
 
@@ -434,10 +395,12 @@ class MessageChannel : HasResultCodes
     class RefCountedTask
     {
       public:
-        RefCountedTask(CancelableTask* aTask)
+        explicit RefCountedTask(CancelableTask* aTask)
           : mTask(aTask)
         { }
+      private:
         ~RefCountedTask() { delete mTask; }
+      public:
         void Run() { mTask->Run(); }
         void Cancel() { mTask->Cancel(); }
 
@@ -452,7 +415,7 @@ class MessageChannel : HasResultCodes
     class DequeueTask : public Task
     {
       public:
-        DequeueTask(RefCountedTask* aTask)
+        explicit DequeueTask(RefCountedTask* aTask)
           : mTask(aTask)
         { }
         void Run() { mTask->Run(); }
@@ -490,29 +453,30 @@ class MessageChannel : HasResultCodes
 
     static bool sIsPumpingMessages;
 
-    class AutoEnterPendingReply {
+    template<class T>
+    class AutoSetValue {
       public:
-        AutoEnterPendingReply(size_t &replyVar)
-          : mReplyVar(replyVar)
+        explicit AutoSetValue(T &var, const T &newValue)
+          : mVar(var), mPrev(var)
         {
-            mReplyVar++;
+            mVar = newValue;
         }
-        ~AutoEnterPendingReply() {
-            mReplyVar--;
+        ~AutoSetValue() {
+            mVar = mPrev;
         }
       private:
-        size_t& mReplyVar;
+        T& mVar;
+        T mPrev;
     };
 
-    // Worker-thread only; type we're expecting for the reply to a sync
-    // out-message. This will never be greater than 1.
-    size_t mPendingSyncReplies;
+    // Worker thread only.
+    bool mAwaitingSyncReply;
+    int mAwaitingSyncReplyPriority;
 
-    // Worker-thread only; Number of urgent and rpc replies we're waiting on.
-    // These are mutually exclusive since one channel cannot have outcalls of
-    // both kinds.
-    size_t mPendingUrgentReplies;
-    size_t mPendingRPCReplies;
+    // Set while we are dispatching a synchronous message. Only for use on the
+    // worker thread.
+    bool mDispatchingSyncMessage;
+    int mDispatchingSyncMessagePriority;
 
     // When we send an urgent request from the parent process, we could race
     // with an RPC message that was issued by the child beforehand. In this
@@ -528,40 +492,40 @@ class MessageChannel : HasResultCodes
     // messages the parent receives, not apart of this transaction, are
     // deferred. When issuing RPC/urgent requests on top of a started
     // transaction, the initiating transaction ID is used.
-    // 
+    //
     // To ensure IDs are unique, we use sequence numbers for transaction IDs,
     // which grow in opposite directions from child to parent.
 
     // The current transaction ID.
-    int32_t mCurrentRPCTransaction;
+    int32_t mCurrentTransaction;
 
-    class AutoEnterRPCTransaction
+    class AutoEnterTransaction
     {
       public:
-       AutoEnterRPCTransaction(MessageChannel *aChan)
+       explicit AutoEnterTransaction(MessageChannel *aChan)
         : mChan(aChan),
-          mOldTransaction(mChan->mCurrentRPCTransaction)
+          mOldTransaction(mChan->mCurrentTransaction)
        {
            mChan->mMonitor->AssertCurrentThreadOwns();
-           if (mChan->mCurrentRPCTransaction == 0)
-               mChan->mCurrentRPCTransaction = mChan->NextSeqno();
+           if (mChan->mCurrentTransaction == 0)
+               mChan->mCurrentTransaction = mChan->NextSeqno();
        }
-       AutoEnterRPCTransaction(MessageChannel *aChan, Message *message)
+       explicit AutoEnterTransaction(MessageChannel *aChan, Message *message)
         : mChan(aChan),
-          mOldTransaction(mChan->mCurrentRPCTransaction)
+          mOldTransaction(mChan->mCurrentTransaction)
        {
            mChan->mMonitor->AssertCurrentThreadOwns();
 
-           if (!message->is_rpc() && !message->is_urgent())
+           if (!message->is_sync())
                return;
 
-           MOZ_ASSERT_IF(mChan->mSide == ParentSide,
-                         !mOldTransaction || mOldTransaction == message->transaction_id());
-           mChan->mCurrentRPCTransaction = message->transaction_id();
+           MOZ_ASSERT_IF(mChan->mSide == ParentSide && mOldTransaction != message->transaction_id(),
+                         !mOldTransaction || message->priority() > mChan->AwaitingSyncReplyPriority());
+           mChan->mCurrentTransaction = message->transaction_id();
        }
-       ~AutoEnterRPCTransaction() {
+       ~AutoEnterTransaction() {
            mChan->mMonitor->AssertCurrentThreadOwns();
-           mChan->mCurrentRPCTransaction = mOldTransaction;
+           mChan->mCurrentTransaction = mOldTransaction;
        }
 
       private:
@@ -572,9 +536,6 @@ class MessageChannel : HasResultCodes
     // If waiting for the reply to a sync out-message, it will be saved here
     // on the I/O thread and then read and cleared by the worker thread.
     nsAutoPtr<Message> mRecvd;
-
-    // Set while we are dispatching a synchronous message.
-    bool mDispatchingSyncMessage;
 
     // Queue of all incoming messages, except for replies to sync and urgent
     // messages, which are delivered directly to mRecvd, and any pending urgent
@@ -613,18 +574,6 @@ class MessageChannel : HasResultCodes
     // another blocking message, because it's blocked on a reply from us.
     //
     MessageQueue mPending;
-
-    // Note that these two pointers are mutually exclusive. One channel cannot
-    // send both urgent requests (parent -> child) and RPC calls (child->parent).
-    // Also note that since initiating either requires blocking, they cannot
-    // queue up on the other side. One message slot is enough.
-    //
-    // Normally, all other message types are deferred into into mPending, and
-    // only these two types have special treatment (since they wake up blocked
-    // requests). However, when an RPC in-call races with an urgent out-call,
-    // the RPC message will be put into mPending instead of its slot below.
-    nsAutoPtr<Message> mPendingUrgentRequest;
-    nsAutoPtr<Message> mPendingRPCCall;
 
     // Stack of all the out-calls on which this channel is awaiting responses.
     // Each stack refers to a different protocol and the stacks are mutually
@@ -665,7 +614,7 @@ class MessageChannel : HasResultCodes
     // This member is only accessed on the worker thread, and so is not
     // protected by mMonitor.  It is managed exclusively by the helper
     // |class CxxStackFrame|.
-    std::vector<InterruptFrame> mCxxStackFrames;
+    mozilla::Vector<InterruptFrame> mCxxStackFrames;
 
     // Did we process an Interrupt out-call during this stack?  Only meaningful in
     // ExitedCxxStack(), from which this variable is reset.
@@ -683,7 +632,27 @@ class MessageChannel : HasResultCodes
 #ifdef OS_WIN
     HANDLE mEvent;
 #endif
+
+    // Should the channel abort the process from the I/O thread when
+    // a channel error occurs?
+    bool mAbortOnError;
+
+    // Should we prevent scripts from running while dispatching urgent messages?
+    bool mBlockScripts;
+
+    // See SetChannelFlags
+    ChannelFlags mFlags;
+
+    // Task and state used to asynchronously notify channel has been connected
+    // safely.  This is necessary to be able to cancel notification if we are
+    // closed at the same time.
+    nsRefPtr<RefCountedTask> mOnChannelConnectedTask;
+    DebugOnly<bool> mPeerPidSet;
+    int32_t mPeerPid;
 };
+
+bool
+ParentProcessIsBlocked();
 
 } // namespace ipc
 } // namespace mozilla

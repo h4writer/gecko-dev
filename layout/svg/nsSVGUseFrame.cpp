@@ -21,7 +21,7 @@ class nsSVGUseFrame : public nsSVGUseFrameBase,
   NS_NewSVGUseFrame(nsIPresShell* aPresShell, nsStyleContext* aContext);
 
 protected:
-  nsSVGUseFrame(nsStyleContext* aContext) :
+  explicit nsSVGUseFrame(nsStyleContext* aContext) :
     nsSVGUseFrameBase(aContext),
     mHasValidDimensions(true)
   {}
@@ -32,40 +32,40 @@ public:
 
   
   // nsIFrame interface:
-  virtual void Init(nsIContent*      aContent,
-                    nsIFrame*        aParent,
-                    nsIFrame*        aPrevInFlow) MOZ_OVERRIDE;
+  virtual void Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow) MOZ_OVERRIDE;
 
-  NS_IMETHOD  AttributeChanged(int32_t         aNameSpaceID,
-                               nsIAtom*        aAttribute,
-                               int32_t         aModType);
+  virtual nsresult  AttributeChanged(int32_t         aNameSpaceID,
+                                     nsIAtom*        aAttribute,
+                                     int32_t         aModType) MOZ_OVERRIDE;
 
-  virtual void DestroyFrom(nsIFrame* aDestructRoot);
+  virtual void DestroyFrom(nsIFrame* aDestructRoot) MOZ_OVERRIDE;
 
   /**
    * Get the "type" of the frame
    *
    * @see nsGkAtoms::svgUseFrame
    */
-  virtual nsIAtom* GetType() const;
+  virtual nsIAtom* GetType() const MOZ_OVERRIDE;
 
-  virtual bool IsLeaf() const;
+  virtual bool IsLeaf() const MOZ_OVERRIDE;
 
-#ifdef DEBUG
-  NS_IMETHOD GetFrameName(nsAString& aResult) const
+#ifdef DEBUG_FRAME_DUMP
+  virtual nsresult GetFrameName(nsAString& aResult) const MOZ_OVERRIDE
   {
     return MakeFrameName(NS_LITERAL_STRING("SVGUse"), aResult);
   }
 #endif
 
   // nsISVGChildFrame interface:
-  virtual void ReflowSVG();
-  virtual void NotifySVGChanged(uint32_t aFlags);
+  virtual void ReflowSVG() MOZ_OVERRIDE;
+  virtual void NotifySVGChanged(uint32_t aFlags) MOZ_OVERRIDE;
 
   // nsIAnonymousContentCreator
-  virtual nsresult CreateAnonymousContent(nsTArray<ContentInfo>& aElements);
-  virtual void AppendAnonymousContentTo(nsBaseContentList& aElements,
-                                        uint32_t aFilter);
+  virtual nsresult CreateAnonymousContent(nsTArray<ContentInfo>& aElements) MOZ_OVERRIDE;
+  virtual void AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
+                                        uint32_t aFilter) MOZ_OVERRIDE;
 
 private:
   bool mHasValidDimensions;
@@ -99,9 +99,9 @@ NS_QUERYFRAME_TAIL_INHERITING(nsSVGUseFrameBase)
 // nsIFrame methods:
 
 void
-nsSVGUseFrame::Init(nsIContent* aContent,
-                    nsIFrame* aParent,
-                    nsIFrame* aPrevInFlow)
+nsSVGUseFrame::Init(nsIContent*       aContent,
+                    nsContainerFrame* aParent,
+                    nsIFrame*         aPrevInFlow)
 {
   NS_ASSERTION(aContent->IsSVG(nsGkAtoms::use),
                "Content is not an SVG use!");
@@ -112,7 +112,7 @@ nsSVGUseFrame::Init(nsIContent* aContent,
   nsSVGUseFrameBase::Init(aContent, aParent, aPrevInFlow);
 }
 
-NS_IMETHODIMP
+nsresult
 nsSVGUseFrame::AttributeChanged(int32_t         aNameSpaceID,
                                 nsIAtom*        aAttribute,
                                 int32_t         aModType)
@@ -187,6 +187,13 @@ nsSVGUseFrame::ReflowSVG()
   mRect.MoveTo(nsLayoutUtils::RoundGfxRectToAppRect(
                  gfxRect(x, y, 0.0, 0.0),
                  PresContext()->AppUnitsPerCSSPixel()).TopLeft());
+
+  // If we have a filter, we need to invalidate ourselves because filter
+  // output can change even if none of our descendants need repainting.
+  if (StyleSVGReset()->HasFilters()) {
+    InvalidateFrame();
+  }
+
   nsSVGUseFrameBase::ReflowSVG();
 }
 
@@ -236,10 +243,12 @@ nsSVGUseFrame::CreateAnonymousContent(nsTArray<ContentInfo>& aElements)
 }
 
 void
-nsSVGUseFrame::AppendAnonymousContentTo(nsBaseContentList& aElements,
+nsSVGUseFrame::AppendAnonymousContentTo(nsTArray<nsIContent*>& aElements,
                                         uint32_t aFilter)
 {
   SVGUseElement *use = static_cast<SVGUseElement*>(mContent);
   nsIContent* clone = use->GetAnonymousContent();
-  aElements.MaybeAppendElement(clone);
+  if (clone) {
+    aElements.AppendElement(clone);
+  }
 }

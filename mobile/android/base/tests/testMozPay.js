@@ -1,4 +1,4 @@
-// -*- Mode: js2; tab-width: 2; indent-tabs-mode: nil; js2-basic-offset: 2; js2-skip-preprocessor-directives: t; -*-
+// -*- indent-tabs-mode: nil; js-indent-level: 2 -*-
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,7 +8,7 @@ let Ci = Components.interfaces;
 let Cu = Components.utils;
 
 Components.utils.import("resource://gre/modules/SharedPreferences.jsm");
-Components.utils.import("resource://gre/modules/commonjs/sdk/core/promise.js");
+Components.utils.import("resource://gre/modules/Promise.jsm");
 
 let ppmm = Cc["@mozilla.org/parentprocessmessagemanager;1"].getService(Ci.nsIMessageListenerManager);
 let deferred = 0;
@@ -81,7 +81,7 @@ add_task(function test_default() {
   yield deferred.promise;
 
   deferred = Promise.defer();
-  let id = getRequestId(1);
+  id = getRequestId(1);
   shouldPass = false;
   ui.showPaymentFlow(id,
                      {

@@ -41,9 +41,8 @@ public:
   nsJSScriptTimeoutHandler(JSContext* aCx, nsGlobalWindow *aWindow,
                            const nsAString& aExpression, bool* aAllowEval,
                            ErrorResult& aError);
-  ~nsJSScriptTimeoutHandler();
 
-  virtual const PRUnichar *GetHandlerText();
+  virtual const char16_t *GetHandlerText();
   virtual Function* GetCallback()
   {
     return mFunction;
@@ -65,6 +64,8 @@ public:
   void ReleaseJSObjects();
 
 private:
+  ~nsJSScriptTimeoutHandler();
+
   // filename, line number and JS language version string of the
   // caller of setTimeout()
   nsCString mFileName;
@@ -100,15 +101,15 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INTERNAL(nsJSScriptTimeoutHandler)
           name.AppendLiteral(" [");
           name.Append(funIdName);
           delete[] funIdName;
-          name.AppendLiteral("]");
+          name.Append(']');
         }
       }
     } else {
       name.AppendLiteral(" [");
       name.Append(tmp->mFileName);
-      name.AppendLiteral(":");
+      name.Append(':');
       name.AppendInt(tmp->mLineNo);
-      name.AppendLiteral("]");
+      name.Append(']');
     }
     cb.DescribeRefCountedNode(tmp->mRefCnt.get(), name.get());
   }
@@ -181,7 +182,8 @@ CheckCSPForEval(JSContext* aCx, nsGlobalWindow* aWindow, ErrorResult& aError)
     }
 
     csp->LogViolationDetails(nsIContentSecurityPolicy::VIOLATION_TYPE_EVAL,
-                             fileNameString, scriptSample, lineNum, EmptyString());
+                             fileNameString, scriptSample, lineNum,
+                             EmptyString(), EmptyString());
   }
 
   return allowsEval;
@@ -309,15 +311,15 @@ nsJSScriptTimeoutHandler::Init(nsGlobalWindow *aWindow, bool *aIsInterval,
     *aIsInterval = false;
   }
 
-  switch (::JS_TypeOfValue(cx, argv[0])) {
+  JS::Rooted<JS::Value> arg(cx, argv[0]);
+  switch (::JS_TypeOfValue(cx, arg)) {
   case JSTYPE_FUNCTION:
-    funobj = JSVAL_TO_OBJECT(argv[0]);
+    funobj = &arg.toObject();
     break;
 
   case JSTYPE_STRING:
   case JSTYPE_OBJECT:
     {
-      JS::Rooted<JS::Value> arg(cx, argv[0]);
       JSString *str = JS::ToString(cx, arg);
       if (!str)
         return NS_ERROR_OUT_OF_MEMORY;
@@ -326,7 +328,7 @@ nsJSScriptTimeoutHandler::Init(nsGlobalWindow *aWindow, bool *aIsInterval,
       if (!expr)
           return NS_ERROR_OUT_OF_MEMORY;
 
-      argv[0] = STRING_TO_JSVAL(str);
+      argv[0] = JS::StringValue(str);
     }
     break;
 
@@ -347,8 +349,8 @@ nsJSScriptTimeoutHandler::Init(nsGlobalWindow *aWindow, bool *aIsInterval,
       return error.ErrorCode();
     }
 
-    mExpr.Append(JS_GetFlatStringChars(expr),
-                 JS_GetStringLength(JS_FORGET_STRING_FLATNESS(expr)));
+    MOZ_ASSERT(mExpr.IsEmpty());
+    AssignJSFlatString(mExpr, expr);
 
     // Get the calling location.
     const char *filename;
@@ -385,7 +387,7 @@ nsJSScriptTimeoutHandler::Init(nsGlobalWindow *aWindow, bool *aIsInterval,
   return NS_OK;
 }
 
-const PRUnichar *
+const char16_t *
 nsJSScriptTimeoutHandler::GetHandlerText()
 {
   NS_ASSERTION(!mFunction, "No expression, so no handler text!");
@@ -418,7 +420,7 @@ NS_CreateJSTimeoutHandler(nsGlobalWindow *aWindow, Function& aFunction,
   FallibleTArray<JS::Heap<JS::Value> > args;
   if (!args.AppendElements(aArguments)) {
     aError.Throw(NS_ERROR_OUT_OF_MEMORY);
-    return 0;
+    return nullptr;
   }
 
   nsRefPtr<nsJSScriptTimeoutHandler> handler =

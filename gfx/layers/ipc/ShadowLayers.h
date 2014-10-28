@@ -11,7 +11,6 @@
 #include <stddef.h>                     // for size_t
 #include <stdint.h>                     // for uint64_t
 #include "gfxTypes.h"
-#include "gfxPoint.h"                   // for gfxIntSize
 #include "mozilla/Attributes.h"         // for MOZ_OVERRIDE
 #include "mozilla/WidgetUtils.h"        // for ScreenRotation
 #include "mozilla/dom/ScreenOrientation.h"  // for ScreenOrientation
@@ -24,12 +23,11 @@
  
 struct nsIntPoint;
 struct nsIntRect;
-class gfxASurface;
 
 namespace mozilla {
 namespace layers {
 
-class BasicTiledLayerBuffer;
+class ClientTiledLayerBuffer;
 class CanvasClient;
 class CanvasLayerComposite;
 class CanvasSurface;
@@ -49,11 +47,10 @@ class PLayerTransactionParent;
 class LayerTransactionChild;
 class RefLayerComposite;
 class ShadowableLayer;
-class Shmem;
 class ShmemTextureClient;
 class SurfaceDescriptor;
 class TextureClient;
-class ThebesLayerComposite;
+class PaintedLayerComposite;
 class ThebesBuffer;
 class ThebesBufferData;
 class TiledLayerComposer;
@@ -135,8 +132,6 @@ class Transaction;
 
 class ShadowLayerForwarder : public CompositableForwarder
 {
-  friend class AutoOpenSurface;
-  friend class DeprecatedTextureClientShmem;
   friend class ContentClientIncremental;
   friend class ClientLayerManager;
 
@@ -149,22 +144,12 @@ public:
    */
   void Connect(CompositableClient* aCompositable);
 
-  virtual PTextureChild* CreateEmptyTextureChild() MOZ_OVERRIDE;
+  virtual PTextureChild* CreateTexture(const SurfaceDescriptor& aSharedData,
+                                       TextureFlags aFlags) MOZ_OVERRIDE;
 
-  virtual void CreatedSingleBuffer(CompositableClient* aCompositable,
-                                   const SurfaceDescriptor& aDescriptor,
-                                   const TextureInfo& aTextureInfo,
-                                   const SurfaceDescriptor* aDescriptorOnWhite = nullptr) MOZ_OVERRIDE;
   virtual void CreatedIncrementalBuffer(CompositableClient* aCompositable,
                                         const TextureInfo& aTextureInfo,
                                         const nsIntRect& aBufferRect) MOZ_OVERRIDE;
-  virtual void CreatedDoubleBuffer(CompositableClient* aCompositable,
-                                   const SurfaceDescriptor& aFrontDescriptor,
-                                   const SurfaceDescriptor& aBackDescriptor,
-                                   const TextureInfo& aTextureInfo,
-                                   const SurfaceDescriptor* aFrontDescriptorOnWhite = nullptr,
-                                   const SurfaceDescriptor* aBackDescriptorOnWhite = nullptr) MOZ_OVERRIDE;
-  virtual void DestroyThebesBuffer(CompositableClient* aCompositable) MOZ_OVERRIDE;
 
   /**
    * Adds an edit in the layers transaction in order to attach
@@ -191,7 +176,6 @@ public:
    */
   void BeginTransaction(const nsIntRect& aTargetBounds,
                         ScreenRotation aRotation,
-                        const nsIntRect& aClientBounds,
                         mozilla::dom::ScreenOrientation aOrientation);
 
   /**
@@ -205,22 +189,12 @@ public:
    * created, and a corresponding shadow layer should be created in
    * the compositing process.
    */
-  void CreatedThebesLayer(ShadowableLayer* aThebes);
+  void CreatedPaintedLayer(ShadowableLayer* aThebes);
   void CreatedContainerLayer(ShadowableLayer* aContainer);
   void CreatedImageLayer(ShadowableLayer* aImage);
   void CreatedColorLayer(ShadowableLayer* aColor);
   void CreatedCanvasLayer(ShadowableLayer* aCanvas);
   void CreatedRefLayer(ShadowableLayer* aRef);
-
-  /**
-   * The specified layer is destroying its buffers.
-   * |aBackBufferToDestroy| is deallocated when this transaction is
-   * posted to the parent.  During the parent-side transaction, the
-   * shadow is told to destroy its front buffer.  This can happen when
-   * a new front/back buffer pair have been created because of a layer
-   * resize, e.g.
-   */
-  virtual void DestroyedThebesBuffer(const SurfaceDescriptor& aBackBufferToDestroy) MOZ_OVERRIDE;
 
   /**
    * At least one attribute of |aMutant| has changed, and |aMutant|
@@ -255,14 +229,10 @@ public:
                ShadowableLayer* aMaskLayer);
 
   /**
-   * Notify the compositor that a tiled layer buffer has changed
-   * that needs to be synced to the shadow retained copy. The tiled
-   * layer buffer will operate directly on the shadow retained buffer
-   * and is free to choose it's own internal representation (double buffering,
-   * copy on write, tiling).
+   * See CompositableForwarder::UseTiledLayerBuffer
    */
-  virtual void PaintedTiledLayerBuffer(CompositableClient* aCompositable,
-                                       const SurfaceDescriptorTiles& aTileLayerDescriptor) MOZ_OVERRIDE;
+  virtual void UseTiledLayerBuffer(CompositableClient* aCompositable,
+                                   const SurfaceDescriptorTiles& aTileLayerDescriptor) MOZ_OVERRIDE;
 
   /**
    * Notify the compositor that a compositable will be updated asynchronously
@@ -271,22 +241,14 @@ public:
    */
   void AttachAsyncCompositable(PLayerTransactionChild* aLayer, uint64_t aID);
 
-  /**
-   * Communicate to the compositor that the texture identified by aLayer
-   * and aIdentifier has been updated to aImage.
-   */
-  virtual void UpdateTexture(CompositableClient* aCompositable,
-                             TextureIdentifier aTextureId,
-                             SurfaceDescriptor* aDescriptor) MOZ_OVERRIDE;
+  virtual void RemoveTextureFromCompositable(CompositableClient* aCompositable,
+                                             TextureClient* aTexture) MOZ_OVERRIDE;
+
+  virtual void RemoveTextureFromCompositableAsync(AsyncTransactionTracker* aAsyncTransactionTracker,
+                                                  CompositableClient* aCompositable,
+                                                  TextureClient* aTexture) MOZ_OVERRIDE;
 
   virtual void RemoveTexture(TextureClient* aTexture) MOZ_OVERRIDE;
-
-  /**
-   * Same as above, but performs an asynchronous layer transaction
-   */
-  virtual void UpdateTextureNoSwap(CompositableClient* aCompositable,
-                                   TextureIdentifier aTextureId,
-                                   SurfaceDescriptor* aDescriptor) MOZ_OVERRIDE;
 
   /**
    * Communicate to the compositor that aRegion in the texture identified by aLayer
@@ -321,18 +283,43 @@ public:
    */
   virtual void UseTexture(CompositableClient* aCompositable,
                           TextureClient* aClient) MOZ_OVERRIDE;
+  virtual void UseComponentAlphaTextures(CompositableClient* aCompositable,
+                                         TextureClient* aClientOnBlack,
+                                         TextureClient* aClientOnWhite) MOZ_OVERRIDE;
+#ifdef MOZ_WIDGET_GONK
+  virtual void UseOverlaySource(CompositableClient* aCompositable,
+                                const OverlaySource& aOverlay) MOZ_OVERRIDE;
+#endif
+  virtual void SendFenceHandle(AsyncTransactionTracker* aTracker,
+                               PTextureChild* aTexture,
+                               const FenceHandle& aFence) MOZ_OVERRIDE;
 
   /**
    * End the current transaction and forward it to LayerManagerComposite.
    * |aReplies| are directions from the LayerManagerComposite to the
    * caller of EndTransaction().
    */
-  bool EndTransaction(InfallibleTArray<EditReply>* aReplies, bool* aSent);
+  bool EndTransaction(InfallibleTArray<EditReply>* aReplies,
+                      const nsIntRegion& aRegionToClear,
+                      uint64_t aId,
+                      bool aScheduleComposite,
+                      uint32_t aPaintSequenceNumber,
+                      bool aIsRepeatTransaction,
+                      const mozilla::TimeStamp& aTransactionStart,
+                      bool* aSent);
 
   /**
    * Set an actor through which layer updates will be pushed.
    */
   void SetShadowManager(PLayerTransactionChild* aShadowManager);
+
+  void StopReceiveAsyncParentMessge();
+
+  void ClearCachedResources();
+
+  void Composite();
+
+  virtual void SendPendingAsyncMessges();
 
   /**
    * True if this is forwarding to a LayerManagerComposite.
@@ -385,6 +372,7 @@ public:
   virtual void DeallocShmem(mozilla::ipc::Shmem& aShmem) MOZ_OVERRIDE;
 
   virtual bool IPCOpen() const MOZ_OVERRIDE;
+  virtual bool IsSameProcess() const MOZ_OVERRIDE;
 
   /**
    * Construct a shadow of |aLayer| on the "other side", at the
@@ -399,9 +387,6 @@ public:
 
   static void PlatformSyncBeforeUpdate();
 
-  static already_AddRefed<gfxASurface>
-  OpenDescriptor(OpenMode aMode, const SurfaceDescriptor& aSurface);
-
 protected:
   ShadowLayerForwarder();
 
@@ -411,74 +396,14 @@ protected:
   void CheckSurfaceDescriptor(const SurfaceDescriptor* aDescriptor) const {}
 #endif
 
+  bool InWorkerThread();
+
   RefPtr<LayerTransactionChild> mShadowManager;
 
-#ifdef MOZ_HAVE_SURFACEDESCRIPTORGRALLOC
-  // from ISurfaceAllocator
-  virtual PGrallocBufferChild* AllocGrallocBuffer(const gfxIntSize& aSize,
-                                                  uint32_t aFormat,
-                                                  uint32_t aUsage,
-                                                  MaybeMagicGrallocBufferHandle* aHandle) MOZ_OVERRIDE;
-#endif
-
 private:
-  /**
-   * Try to query the content type efficiently, but at worst map the
-   * surface and return it in *aSurface.
-   */
-  static gfxContentType
-  GetDescriptorSurfaceContentType(const SurfaceDescriptor& aDescriptor,
-                                  OpenMode aMode,
-                                  gfxASurface** aSurface);
-  /**
-   * It can be expensive to open a descriptor just to query its
-   * content type.  If the platform impl can do this cheaply, it will
-   * set *aContent and return true.
-   */
-  static bool
-  PlatformGetDescriptorSurfaceContentType(const SurfaceDescriptor& aDescriptor,
-                                          OpenMode aMode,
-                                          gfxContentType* aContent,
-                                          gfxASurface** aSurface);
-  // (Same as above, but for surface size.)
-  static gfxIntSize
-  GetDescriptorSurfaceSize(const SurfaceDescriptor& aDescriptor,
-                           OpenMode aMode,
-                           gfxASurface** aSurface);
-  static bool
-  PlatformGetDescriptorSurfaceSize(const SurfaceDescriptor& aDescriptor,
-                                   OpenMode aMode,
-                                   gfxIntSize* aSize,
-                                   gfxASurface** aSurface);
-  // And again, for the image format.
-  // This function will return gfxImageFormatUnknown only if |aDescriptor|
-  // describes a non-ImageSurface.
-  static gfxImageFormat
-  GetDescriptorSurfaceImageFormat(const SurfaceDescriptor& aDescriptor,
-                                  OpenMode aMode,
-                                  gfxASurface** aSurface);
-  static bool
-  PlatformGetDescriptorSurfaceImageFormat(const SurfaceDescriptor& aDescriptor,
-                                          OpenMode aMode,
-                                          gfxImageFormat* aContent,
-                                          gfxASurface** aSurface);
-
-  static already_AddRefed<gfxASurface>
-  PlatformOpenDescriptor(OpenMode aMode, const SurfaceDescriptor& aDescriptor);
-
-  /**
-   * Make this descriptor unusable for gfxASurface clients. A
-   * private interface with AutoOpenSurface.
-   */
-  static void
-  CloseDescriptor(const SurfaceDescriptor& aDescriptor);
-
-  static bool
-  PlatformCloseDescriptor(const SurfaceDescriptor& aDescriptor);
-
-  bool PlatformDestroySharedSurface(SurfaceDescriptor* aSurface);
 
   Transaction* mTxn;
+  std::vector<AsyncChildMessageData> mPendingAsyncMessages;
   DiagnosticTypes mDiagnosticTypes;
   bool mIsFirstPaint;
   bool mWindowOverlayChanged;

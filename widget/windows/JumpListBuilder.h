@@ -12,6 +12,7 @@
 #define NTDDI_VERSION NTDDI_WIN7
 // Needed for various com interfaces
 #include <shobjidl.h>
+#undef LogSeverity // SetupAPI.h #defines this as DWORD
 
 #include "nsString.h"
 #include "nsIMutableArray.h"
@@ -28,13 +29,14 @@ namespace widget {
 class JumpListBuilder : public nsIJumpListBuilder, 
                         public nsIObserver
 {
+  virtual ~JumpListBuilder();
+
 public:
   NS_DECL_ISUPPORTS
   NS_DECL_NSIJUMPLISTBUILDER
   NS_DECL_NSIOBSERVER
 
   JumpListBuilder();
-  virtual ~JumpListBuilder();
 
 protected:
   static bool sBuildingList; 

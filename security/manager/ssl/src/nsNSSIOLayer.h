@@ -24,19 +24,19 @@ class SharedSSLState;
 
 class nsIObserver;
 
-class nsNSSSocketInfo : public mozilla::psm::TransportSecurityInfo,
-                        public nsISSLSocketControl,
-                        public nsIClientAuthUserDecision
+class nsNSSSocketInfo MOZ_FINAL : public mozilla::psm::TransportSecurityInfo,
+                                  public nsISSLSocketControl,
+                                  public nsIClientAuthUserDecision
 {
 public:
   nsNSSSocketInfo(mozilla::psm::SharedSSLState& aState, uint32_t providerFlags);
-  
+
   NS_DECL_ISUPPORTS_INHERITED
   NS_DECL_NSISSLSOCKETCONTROL
   NS_DECL_NSICLIENTAUTHUSERDECISION
- 
-  nsresult SetForSTARTTLS(bool aForSTARTTLS);
-  nsresult GetForSTARTTLS(bool *aForSTARTTLS);
+
+  void SetForSTARTTLS(bool aForSTARTTLS);
+  bool GetForSTARTTLS();
 
   nsresult GetFileDescPtr(PRFileDesc** aFilePtr);
   nsresult SetFileDescPtr(PRFileDesc* aFilePtr);
@@ -45,17 +45,14 @@ public:
   void SetHandshakeNotPending() { mHandshakePending = false; }
 
   void GetPreviousCert(nsIX509Cert** _result);
-  
-  void SetHasCleartextPhase(bool aHasCleartextPhase);
-  bool GetHasCleartextPhase();
-  
+
   void SetTLSVersionRange(SSLVersionRange range) { mTLSVersionRange = range; }
   SSLVersionRange GetTLSVersionRange() const { return mTLSVersionRange; };
 
   PRStatus CloseSocketAndDestroy(
-                const nsNSSShutDownPreventionLock & proofOfLock);
-  
-  void SetNegotiatedNPN(const char *value, uint32_t length);
+                const nsNSSShutDownPreventionLock& proofOfLock);
+
+  void SetNegotiatedNPN(const char* value, uint32_t length);
 
   void SetHandshakeCompleted();
   void NoteTimeUntilReady();
@@ -87,7 +84,7 @@ public:
   // ignored.
   void SetCertVerificationResult(PRErrorCode errorCode,
               ::mozilla::psm::SSLErrorMessageType errorMessageType);
-  
+
   // for logging only
   PRBool IsWaitingForCertVerification() const
   {
@@ -107,6 +104,34 @@ public:
     return result;
   }
 
+  void SetKEAKeyBits(uint32_t keaBits) { mKEAKeyBits = keaBits; }
+
+  void SetSSLVersionUsed(int16_t version)
+  {
+    mSSLVersionUsed = version;
+  }
+
+  void SetMACAlgorithmUsed(int16_t mac) { mMACAlgorithmUsed = mac; }
+
+  inline bool GetBypassAuthentication()
+  {
+    bool result = false;
+    mozilla::DebugOnly<nsresult> rv = GetBypassAuthentication(&result);
+    MOZ_ASSERT(NS_SUCCEEDED(rv));
+    return result;
+  }
+
+  inline int32_t GetAuthenticationPort()
+  {
+    int32_t result = -1;
+    mozilla::DebugOnly<nsresult> rv = GetAuthenticationPort(&result);
+    MOZ_ASSERT(NS_SUCCEEDED(rv));
+    return result;
+  }
+
+protected:
+  virtual ~nsNSSSocketInfo();
+
 private:
   PRFileDesc* mFd;
 
@@ -116,7 +141,6 @@ private:
   bool mForSTARTTLS;
   SSLVersionRange mTLSVersionRange;
   bool mHandshakePending;
-  bool mHasCleartextPhase;
   bool mRememberClientAuthCertificate;
   bool mPreliminaryHandshakeDone; // after false start items are complete
 
@@ -131,15 +155,22 @@ private:
   bool      mJoined;
   bool      mSentClientCert;
   bool      mNotedTimeUntilReady;
+  bool      mFailedVerification;
 
-  // mKEA* are used in false start detetermination
+  // mKEA* are used in false start and http/2 detetermination
   // Values are from nsISSLSocketControl
   int16_t mKEAUsed;
   int16_t mKEAExpected;
+  uint32_t mKEAKeyBits;
+  int16_t mSSLVersionUsed;
+  int16_t mMACAlgorithmUsed;
+  bool    mBypassAuthentication;
 
   uint32_t mProviderFlags;
   mozilla::TimeStamp mSocketCreationTimestamp;
   uint64_t mPlaintextBytesRead;
+
+  nsCOMPtr<nsIX509Cert> mClientCert;
 };
 
 class nsSSLIOLayerHelpers
@@ -157,7 +188,7 @@ public:
   static PRIOMethods nsSSLIOLayerMethods;
   static PRIOMethods nsSSLPlaintextLayerMethods;
 
-  nsTHashtable<nsCStringHashKey> *mRenegoUnrestrictedSites;
+  nsTHashtable<nsCStringHashKey>* mRenegoUnrestrictedSites;
   bool mTreatUnsafeNegotiationAsBroken;
   int32_t mWarnLevelMissingRFC5746;
 
@@ -171,6 +202,7 @@ private:
   {
     uint16_t tolerant;
     uint16_t intolerant;
+    PRErrorCode intoleranceReason;
 
     void AssertInvariant() const
     {
@@ -179,45 +211,49 @@ private:
   };
   nsDataHashtable<nsCStringHashKey, IntoleranceEntry> mTLSIntoleranceInfo;
 public:
-  void rememberTolerantAtVersion(const nsACString & hostname, int16_t port,
+  void rememberTolerantAtVersion(const nsACString& hostname, int16_t port,
                                  uint16_t tolerant);
-  bool rememberIntolerantAtVersion(const nsACString & hostname, int16_t port,
-                                   uint16_t intolerant, uint16_t minVersion);
-  void adjustForTLSIntolerance(const nsACString & hostname, int16_t port,
-                               /*in/out*/ SSLVersionRange & range);
+  bool rememberIntolerantAtVersion(const nsACString& hostname, int16_t port,
+                                   uint16_t intolerant, uint16_t minVersion,
+                                   PRErrorCode intoleranceReason);
+  void adjustForTLSIntolerance(const nsACString& hostname, int16_t port,
+                               /*in/out*/ SSLVersionRange& range);
+  PRErrorCode getIntoleranceReason(const nsACString& hostname, int16_t port);
 
-  void setRenegoUnrestrictedSites(const nsCString &str);
-  bool isRenegoUnrestrictedSite(const nsCString &str);
+  void setRenegoUnrestrictedSites(const nsCString& str);
+  bool isRenegoUnrestrictedSite(const nsCString& str);
   void clearStoredData();
+  void loadVersionFallbackLimit();
 
   bool mFalseStartRequireNPN;
   bool mFalseStartRequireForwardSecrecy;
+  uint16_t mVersionFallbackLimit;
 private:
   mozilla::Mutex mutex;
   nsCOMPtr<nsIObserver> mPrefObserver;
 };
 
 nsresult nsSSLIOLayerNewSocket(int32_t family,
-                               const char *host,
+                               const char* host,
                                int32_t port,
-                               const char *proxyHost,
+                               const char* proxyHost,
                                int32_t proxyPort,
-                               PRFileDesc **fd,
-                               nsISupports **securityInfo,
+                               PRFileDesc** fd,
+                               nsISupports** securityInfo,
                                bool forSTARTTLS,
                                uint32_t flags);
 
 nsresult nsSSLIOLayerAddToSocket(int32_t family,
-                                 const char *host,
+                                 const char* host,
                                  int32_t port,
-                                 const char *proxyHost,
+                                 const char* proxyHost,
                                  int32_t proxyPort,
-                                 PRFileDesc *fd,
-                                 nsISupports **securityInfo,
+                                 PRFileDesc* fd,
+                                 nsISupports** securityInfo,
                                  bool forSTARTTLS,
                                  uint32_t flags);
 
 nsresult nsSSLIOLayerFreeTLSIntolerantSites();
-nsresult displayUnknownCertErrorAlert(nsNSSSocketInfo *infoObject, int error);
+nsresult displayUnknownCertErrorAlert(nsNSSSocketInfo* infoObject, int error);
 
 #endif /* _NSNSSIOLAYER_H */

@@ -13,20 +13,20 @@
 MOZ_BEGIN_EXTERN_C
 
 /** Register file descriptor to be ignored by poisoning IO interposer */
-void MozillaRegisterDebugFD(int fd);
+void MozillaRegisterDebugFD(int aFd);
 
 /** Register file to be ignored by poisoning IO interposer */
-void MozillaRegisterDebugFILE(FILE *f);
+void MozillaRegisterDebugFILE(FILE* aFile);
 
 /** Unregister file descriptor from being ignored by poisoning IO interposer */
-void MozillaUnRegisterDebugFD(int fd);
+void MozillaUnRegisterDebugFD(int aFd);
 
 /** Unregister file from being ignored by poisoning IO interposer */
-void MozillaUnRegisterDebugFILE(FILE *f);
+void MozillaUnRegisterDebugFILE(FILE* aFile);
 
 MOZ_END_EXTERN_C
 
-#if defined(MOZ_ENABLE_PROFILER_SPS) && (defined(XP_WIN) || defined(XP_MACOSX))
+#if defined(XP_WIN) || defined(XP_MACOSX)
 
 #ifdef __cplusplus
 namespace mozilla {
@@ -63,19 +63,19 @@ void ClearPoisonIOInterposer();
 } // namespace mozilla
 #endif /* __cplusplus */
 
-#else /* MOZ_ENABLE_PROFILER_SPS && (XP_WIN || XP_MACOSX) */
+#else /* XP_WIN || XP_MACOSX */
 
 #ifdef __cplusplus
 namespace mozilla {
-inline bool IsDebugFile(intptr_t aFileID){ return true; }
-inline void InitPoisonIOInterposer(){}
-inline void ClearPoisonIOInterposer(){}
+inline bool IsDebugFile(intptr_t aFileID) { return true; }
+inline void InitPoisonIOInterposer() {}
+inline void ClearPoisonIOInterposer() {}
 #ifdef XP_MACOSX
-inline void OnlyReportDirtyWrites(){}
+inline void OnlyReportDirtyWrites() {}
 #endif /* XP_MACOSX */
 } // namespace mozilla
 #endif /* __cplusplus */
 
-#endif /* MOZ_ENABLE_PROFILER_SPS && (XP_WIN || XP_MACOSX) */
+#endif /* XP_WIN || XP_MACOSX */
 
 #endif // mozilla_PoisonIOInterposer_h

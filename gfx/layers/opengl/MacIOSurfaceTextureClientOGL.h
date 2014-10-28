@@ -16,11 +16,17 @@ namespace layers {
 class MacIOSurfaceTextureClientOGL : public TextureClient
 {
 public:
-  MacIOSurfaceTextureClientOGL(TextureFlags aFlags);
+  explicit MacIOSurfaceTextureClientOGL(TextureFlags aFlags);
 
   virtual ~MacIOSurfaceTextureClientOGL();
 
   void InitWith(MacIOSurface* aSurface);
+
+  virtual bool Lock(OpenMode aMode) MOZ_OVERRIDE;
+
+  virtual void Unlock() MOZ_OVERRIDE;
+
+  virtual bool IsLocked() const MOZ_OVERRIDE;
 
   virtual bool IsAllocated() const MOZ_OVERRIDE { return !!mSurface; }
 
@@ -28,10 +34,17 @@ public:
 
   virtual gfx::IntSize GetSize() const;
 
-  virtual TextureClientData* DropTextureData() MOZ_OVERRIDE;
+  virtual bool HasInternalBuffer() const MOZ_OVERRIDE { return false; }
+
+  // This TextureClient should not be used in a context where we use CreateSimilar
+  // (ex. component alpha) because the underlying texture data is always created by
+  // an external producer.
+  virtual TemporaryRef<TextureClient>
+  CreateSimilar(TextureFlags, TextureAllocationFlags) const MOZ_OVERRIDE { return nullptr; }
 
 protected:
   RefPtr<MacIOSurface> mSurface;
+  bool mIsLocked;
 };
 
 }

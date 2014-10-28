@@ -23,7 +23,7 @@ namespace layers {
 class GLManagerCompositor : public GLManager
 {
 public:
-  GLManagerCompositor(CompositorOGL* aCompositor)
+  explicit GLManagerCompositor(CompositorOGL* aCompositor)
     : mImpl(aCompositor)
   {}
 
@@ -32,14 +32,22 @@ public:
     return mImpl->gl();
   }
 
-  virtual ShaderProgramOGL* GetProgram(ShaderProgramType aType) MOZ_OVERRIDE
+  virtual ShaderProgramOGL* GetProgram(GLenum aTarget, gfx::SurfaceFormat aFormat) MOZ_OVERRIDE
   {
-    return mImpl->GetProgram(aType);
+    ShaderConfigOGL config = ShaderConfigFromTargetAndFormat(aTarget, aFormat);
+    return mImpl->GetShaderProgramFor(config);
   }
 
-  virtual void BindAndDrawQuad(ShaderProgramOGL *aProg) MOZ_OVERRIDE
+  virtual const gfx::Matrix4x4& GetProjMatrix() const MOZ_OVERRIDE
   {
-    mImpl->BindAndDrawQuad(aProg);
+    return mImpl->GetProjMatrix();
+  }
+
+  virtual void BindAndDrawQuad(ShaderProgramOGL *aProg,
+                               const gfx::Rect& aLayerRect,
+                               const gfx::Rect& aTextureRect) MOZ_OVERRIDE
+  {
+    mImpl->BindAndDrawQuad(aProg, aLayerRect, aTextureRect);
   }
 
 private:
@@ -50,7 +58,7 @@ private:
 GLManager::CreateGLManager(LayerManagerComposite* aManager)
 {
   if (aManager &&
-      Compositor::GetBackend() == LAYERS_OPENGL) {
+      Compositor::GetBackend() == LayersBackend::LAYERS_OPENGL) {
     return new GLManagerCompositor(static_cast<CompositorOGL*>(
       aManager->GetCompositor()));
   }

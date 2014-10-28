@@ -3,6 +3,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "prlog.h"
+
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/DebugOnly.h"
 #include "mozilla/MouseEvents.h"
@@ -40,8 +42,105 @@
 #include <winable.h>
 #endif
 
+// In WinUser.h, MAPVK_VK_TO_VSC_EX is defined only when WINVER >= 0x0600
+#ifndef MAPVK_VK_TO_VSC_EX
+#define MAPVK_VK_TO_VSC_EX (4)
+#endif
+
 namespace mozilla {
 namespace widget {
+
+#ifdef PR_LOGGING
+static const char* kVirtualKeyName[] = {
+  "NULL", "VK_LBUTTON", "VK_RBUTTON", "VK_CANCEL",
+  "VK_MBUTTON", "VK_XBUTTON1", "VK_XBUTTON2", "0x07",
+  "VK_BACK", "VK_TAB", "0x0A", "0x0B",
+  "VK_CLEAR", "VK_RETURN", "0x0E", "0x0F",
+
+  "VK_SHIFT", "VK_CONTROL", "VK_MENU", "VK_PAUSE",
+  "VK_CAPITAL", "VK_KANA, VK_HANGUL", "0x16", "VK_JUNJA",
+  "VK_FINAL", "VK_HANJA, VK_KANJI", "0x1A", "VK_ESCAPE",
+  "VK_CONVERT", "VK_NONCONVERT", "VK_ACCEPT", "VK_MODECHANGE",
+
+  "VK_SPACE", "VK_PRIOR", "VK_NEXT", "VK_END",
+  "VK_HOME", "VK_LEFT", "VK_UP", "VK_RIGHT",
+  "VK_DOWN", "VK_SELECT", "VK_PRINT", "VK_EXECUTE",
+  "VK_SNAPSHOT", "VK_INSERT", "VK_DELETE", "VK_HELP",
+
+  "VK_0", "VK_1", "VK_2", "VK_3",
+  "VK_4", "VK_5", "VK_6", "VK_7",
+  "VK_8", "VK_9", "0x3A", "0x3B",
+  "0x3C", "0x3D", "0x3E", "0x3F",
+
+  "0x40", "VK_A", "VK_B", "VK_C",
+  "VK_D", "VK_E", "VK_F", "VK_G",
+  "VK_H", "VK_I", "VK_J", "VK_K",
+  "VK_L", "VK_M", "VK_N", "VK_O",
+
+  "VK_P", "VK_Q", "VK_R", "VK_S",
+  "VK_T", "VK_U", "VK_V", "VK_W",
+  "VK_X", "VK_Y", "VK_Z", "VK_LWIN",
+  "VK_RWIN", "VK_APPS", "0x5E", "VK_SLEEP",
+
+  "VK_NUMPAD0", "VK_NUMPAD1", "VK_NUMPAD2", "VK_NUMPAD3",
+  "VK_NUMPAD4", "VK_NUMPAD5", "VK_NUMPAD6", "VK_NUMPAD7",
+  "VK_NUMPAD8", "VK_NUMPAD9", "VK_MULTIPLY", "VK_ADD",
+  "VK_SEPARATOR", "VK_SUBTRACT", "VK_DECIMAL", "VK_DIVIDE",
+
+  "VK_F1", "VK_F2", "VK_F3", "VK_F4",
+  "VK_F5", "VK_F6", "VK_F7", "VK_F8",
+  "VK_F9", "VK_F10", "VK_F11", "VK_F12",
+  "VK_F13", "VK_F14", "VK_F15", "VK_F16",
+
+  "VK_F17", "VK_F18", "VK_F19", "VK_F20",
+  "VK_F21", "VK_F22", "VK_F23", "VK_F24",
+  "0x88", "0x89", "0x8A", "0x8B",
+  "0x8C", "0x8D", "0x8E", "0x8F",
+
+  "VK_NUMLOCK", "VK_SCROLL", "VK_OEM_NEC_EQUAL, VK_OEM_FJ_JISHO",
+    "VK_OEM_FJ_MASSHOU",
+  "VK_OEM_FJ_TOUROKU", "VK_OEM_FJ_LOYA", "VK_OEM_FJ_ROYA", "0x97",
+  "0x98", "0x99", "0x9A", "0x9B",
+  "0x9C", "0x9D", "0x9E", "0x9F",
+
+  "VK_LSHIFT", "VK_RSHIFT", "VK_LCONTROL", "VK_RCONTROL",
+  "VK_LMENU", "VK_RMENU", "VK_BROWSER_BACK", "VK_BROWSER_FORWARD",
+  "VK_BROWSER_REFRESH", "VK_BROWSER_STOP", "VK_BROWSER_SEARCH",
+    "VK_BROWSER_FAVORITES",
+  "VK_BROWSER_HOME", "VK_VOLUME_MUTE", "VK_VOLUME_DOWN", "VK_VOLUME_UP",
+
+  "VK_MEDIA_NEXT_TRACK", "VK_MEDIA_PREV_TRACK", "VK_MEDIA_STOP",
+    "VK_MEDIA_PLAY_PAUSE",
+  "VK_LAUNCH_MAIL", "VK_LAUNCH_MEDIA_SELECT", "VK_LAUNCH_APP1",
+    "VK_LAUNCH_APP2",
+  "0xB8", "0xB9", "VK_OEM_1", "VK_OEM_PLUS",
+  "VK_OEM_COMMA", "VK_OEM_MINUS", "VK_OEM_PERIOD", "VK_OEM_2",
+
+  "VK_OEM_3", "VK_ABNT_C1", "VK_ABNT_C2", "0xC3",
+  "0xC4", "0xC5", "0xC6", "0xC7",
+  "0xC8", "0xC9", "0xCA", "0xCB",
+  "0xCC", "0xCD", "0xCE", "0xCF",
+
+  "0xD0", "0xD1", "0xD2", "0xD3",
+  "0xD4", "0xD5", "0xD6", "0xD7",
+  "0xD8", "0xD9", "0xDA", "VK_OEM_4",
+  "VK_OEM_5", "VK_OEM_6", "VK_OEM_7", "VK_OEM_8",
+
+  "0xE0", "VK_OEM_AX", "VK_OEM_102", "VK_ICO_HELP",
+  "VK_ICO_00", "VK_PROCESSKEY", "VK_ICO_CLEAR", "VK_PACKET",
+  "0xE8", "VK_OEM_RESET", "VK_OEM_JUMP", "VK_OEM_PA1",
+  "VK_OEM_PA2", "VK_OEM_PA3", "VK_OEM_WSCTRL", "VK_OEM_CUSEL",
+
+  "VK_OEM_ATTN", "VK_OEM_FINISH", "VK_OEM_COPY", "VK_OEM_AUTO",
+  "VK_OEM_ENLW", "VK_OEM_BACKTAB", "VK_ATTN", "VK_CRSEL",
+  "VK_EXSEL", "VK_EREOF", "VK_PLAY", "VK_ZOOM",
+  "VK_NONAME", "VK_PA1", "VK_OEM_CLEAR", "0xFF"
+};
+
+static_assert(sizeof(kVirtualKeyName) / sizeof(const char*) == 0x100,
+  "The virtual key name must be defined just 256 keys");
+
+#endif // #ifdef PR_LOGGING
 
 // Unique id counter associated with a keydown / keypress events. Used in
 // identifing keypress events for removal from async event dispatch queue
@@ -50,8 +149,8 @@ static uint32_t sUniqueKeyEventId = 0;
 
 struct DeadKeyEntry
 {
-  PRUnichar BaseChar;
-  PRUnichar CompositeChar;
+  char16_t BaseChar;
+  char16_t CompositeChar;
 };
 
 
@@ -88,7 +187,7 @@ public:
                     aEntries * sizeof(DeadKeyEntry)));
   }
 
-  PRUnichar GetCompositeChar(PRUnichar aBaseChar) const;
+  char16_t GetCompositeChar(char16_t aBaseChar) const;
 };
 
 
@@ -178,12 +277,12 @@ ModifierKeyState::InitInputEvent(WidgetInputEvent& aInputEvent) const
 {
   aInputEvent.modifiers = mModifiers;
 
-  switch(aInputEvent.eventStructType) {
-    case NS_MOUSE_EVENT:
-    case NS_MOUSE_SCROLL_EVENT:
-    case NS_WHEEL_EVENT:
-    case NS_DRAG_EVENT:
-    case NS_SIMPLE_GESTURE_EVENT:
+  switch(aInputEvent.mClass) {
+    case eMouseEventClass:
+    case eMouseScrollEventClass:
+    case eWheelEventClass:
+    case eDragEventClass:
+    case eSimpleGestureEventClass:
       InitMouseEvent(aInputEvent);
       break;
     default:
@@ -194,11 +293,16 @@ ModifierKeyState::InitInputEvent(WidgetInputEvent& aInputEvent) const
 void
 ModifierKeyState::InitMouseEvent(WidgetInputEvent& aMouseEvent) const
 {
-  NS_ASSERTION(aMouseEvent.eventStructType == NS_MOUSE_EVENT ||
-               aMouseEvent.eventStructType == NS_WHEEL_EVENT ||
-               aMouseEvent.eventStructType == NS_DRAG_EVENT ||
-               aMouseEvent.eventStructType == NS_SIMPLE_GESTURE_EVENT,
+  NS_ASSERTION(aMouseEvent.mClass == eMouseEventClass ||
+               aMouseEvent.mClass == eWheelEventClass ||
+               aMouseEvent.mClass == eDragEventClass ||
+               aMouseEvent.mClass == eSimpleGestureEventClass,
                "called with non-mouse event");
+
+  if (XRE_GetWindowsEnvironment() == WindowsEnvironmentType_Metro) {
+    // Buttons for immersive mode are handled in MetroInput.
+    return;
+  }
 
   WidgetMouseEventBase& mouseEvent = *aMouseEvent.AsMouseEventBase();
   mouseEvent.buttons = 0;
@@ -290,7 +394,7 @@ ModifierKeyState::EnsureAltGr()
  *****************************************************************************/
 
 void
-UniCharsAndModifiers::Append(PRUnichar aUniChar, Modifiers aModifiers)
+UniCharsAndModifiers::Append(char16_t aUniChar, Modifiers aModifiers)
 {
   MOZ_ASSERT(mLength < 5);
   mChars[mLength] = aUniChar;
@@ -312,7 +416,7 @@ UniCharsAndModifiers::UniCharsEqual(const UniCharsAndModifiers& aOther) const
   if (mLength != aOther.mLength) {
     return false;
   }
-  return !memcmp(mChars, aOther.mChars, mLength * sizeof(PRUnichar));
+  return !memcmp(mChars, aOther.mChars, mLength * sizeof(char16_t));
 }
 
 bool
@@ -332,7 +436,7 @@ UniCharsAndModifiers::operator+=(const UniCharsAndModifiers& aOther)
 {
   uint32_t copyCount = std::min(aOther.mLength, 5 - mLength);
   NS_ENSURE_TRUE(copyCount > 0, *this);
-  memcpy(&mChars[mLength], aOther.mChars, copyCount * sizeof(PRUnichar));
+  memcpy(&mChars[mLength], aOther.mChars, copyCount * sizeof(char16_t));
   memcpy(&mModifiers[mLength], aOther.mModifiers,
          copyCount * sizeof(Modifiers));
   mLength += copyCount;
@@ -395,8 +499,8 @@ VirtualKey::ShiftStateToModifiers(ShiftState aShiftState)
   return modifiers;
 }
 
-inline PRUnichar
-VirtualKey::GetCompositeChar(ShiftState aShiftState, PRUnichar aBaseChar) const
+inline char16_t
+VirtualKey::GetCompositeChar(ShiftState aShiftState, char16_t aBaseChar) const
 {
   return mShiftStates[aShiftState].DeadKey.Table->GetCompositeChar(aBaseChar);
 }
@@ -424,7 +528,7 @@ VirtualKey::MatchingDeadKeyTable(const DeadKeyEntry* aDeadKeyArray,
 
 void
 VirtualKey::SetNormalChars(ShiftState aShiftState,
-                           const PRUnichar* aChars,
+                           const char16_t* aChars,
                            uint32_t aNumOfChars)
 {
   NS_ASSERTION(aShiftState < ArrayLength(mShiftStates), "invalid index");
@@ -444,7 +548,7 @@ VirtualKey::SetNormalChars(ShiftState aShiftState,
 }
 
 void
-VirtualKey::SetDeadChar(ShiftState aShiftState, PRUnichar aDeadChar)
+VirtualKey::SetDeadChar(ShiftState aShiftState, char16_t aDeadChar)
 {
   NS_ASSERTION(aShiftState < ArrayLength(mShiftStates), "invalid index");
 
@@ -499,7 +603,7 @@ UniCharsAndModifiers
 VirtualKey::GetNativeUniChars(ShiftState aShiftState) const
 {
 #ifdef DEBUG
-  if (aShiftState < 0 || aShiftState >= ArrayLength(mShiftStates)) {
+  if (aShiftState >= ArrayLength(mShiftStates)) {
     nsPrintfCString warning("Shift state is out of range: "
                             "aShiftState=%d, ArrayLength(mShiftState)=%d",
                             aShiftState, ArrayLength(mShiftStates));
@@ -579,15 +683,25 @@ NativeKey::NativeKey(nsWindowBase* aWidget,
   mKeyboardLayout = keyboardLayout->GetLayout();
   mScanCode = WinUtils::GetScanCode(mMsg.lParam);
   mIsExtended = WinUtils::IsExtendedScanCode(mMsg.lParam);
-  // On WinXP and WinServer2003, we cannot compute the virtual keycode for
-  // extended keys due to the API limitation.
-  bool canComputeVirtualKeyCodeFromScanCode =
-    (!mIsExtended || IsVistaOrLater());
   switch (mMsg.message) {
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
     case WM_KEYUP:
     case WM_SYSKEYUP: {
+      // If the key message is sent from other application like a11y tools, the
+      // scancode value might not be set proper value.  Then, probably the value
+      // is 0.
+      // NOTE: If the virtual keycode can be caused by both non-extended key
+      //       and extended key, the API returns the non-extended key's
+      //       scancode.  E.g., VK_LEFT causes "4" key on numpad.
+      if (!mScanCode) {
+        uint16_t scanCodeEx = ComputeScanCodeExFromVirtualKeyCode(mMsg.wParam);
+        if (scanCodeEx) {
+          mScanCode = static_cast<uint8_t>(scanCodeEx & 0xFF);
+          uint8_t extended = static_cast<uint8_t>((scanCodeEx & 0xFF00) >> 8);
+          mIsExtended = (extended == 0xE0) || (extended == 0xE1);
+        }
+      }
       // First, resolve the IME converted virtual keycode to its original
       // keycode.
       if (mMsg.wParam == VK_PROCESSKEY) {
@@ -643,7 +757,7 @@ NativeKey::NativeKey(nsWindowBase* aWidget,
         break;
       }
 
-      if (!canComputeVirtualKeyCodeFromScanCode) {
+      if (!CanComputeVirtualKeyCodeFromScanCode()) {
         // The right control key and the right alt key are extended keys.
         // Therefore, we never get VK_RCONTRL and VK_RMENU for the result of
         // MapVirtualKeyEx() on WinXP or WinServer2003.
@@ -674,11 +788,9 @@ NativeKey::NativeKey(nsWindowBase* aWidget,
       // Otherwise, compute the virtual keycode with MapVirtualKeyEx().
       mVirtualKeyCode = ComputeVirtualKeyCodeFromScanCodeEx();
 
-      // The result might be unexpected value due to the scan code is
-      // wrong.  For example, any key messages can be generated by
-      // SendMessage() or PostMessage() from applications.  So, it's possible
-      // failure.  Then, let's respect the extended flag even if it might be
-      // set intentionally.
+      // Following code shouldn't be used now because we compute scancode value
+      // if we detect that the sender doesn't set proper scancode.
+      // However, the detection might fail. Therefore, let's keep using this.
       switch (mOriginalVirtualKeyCode) {
         case VK_CONTROL:
           if (mVirtualKeyCode != VK_LCONTROL &&
@@ -706,9 +818,13 @@ NativeKey::NativeKey(nsWindowBase* aWidget,
     case WM_CHAR:
     case WM_UNICHAR:
     case WM_SYSCHAR:
+      // NOTE: If other applications like a11y tools sends WM_*CHAR without
+      //       scancode, we cannot compute virtual keycode.  I.e., with such
+      //       applications, we cannot generate proper KeyboardEvent.code value.
+
       // We cannot compute the virtual key code from WM_CHAR message on WinXP
       // if it's caused by an extended key.
-      if (!canComputeVirtualKeyCodeFromScanCode) {
+      if (!CanComputeVirtualKeyCodeFromScanCode()) {
         break;
       }
       mVirtualKeyCode = mOriginalVirtualKeyCode =
@@ -727,6 +843,9 @@ NativeKey::NativeKey(nsWindowBase* aWidget,
     keyboardLayout->ConvertNativeKeyCodeToDOMKeyCode(mOriginalVirtualKeyCode);
   mKeyNameIndex =
     keyboardLayout->ConvertNativeKeyCodeToKeyNameIndex(mOriginalVirtualKeyCode);
+  mCodeNameIndex =
+    KeyboardLayout::ConvertScanCodeToCodeNameIndex(
+      GetScanCodeWithExtendedFlag());
 
   keyboardLayout->InitNativeKey(*this, mModKeyState);
 
@@ -734,23 +853,6 @@ NativeKey::NativeKey(nsWindowBase* aWidget,
     (IsFollowedByDeadCharMessage() ||
      keyboardLayout->IsDeadKey(mOriginalVirtualKeyCode, mModKeyState));
   mIsPrintableKey = KeyboardLayout::IsPrintableCharKey(mOriginalVirtualKeyCode);
-}
-
-bool
-NativeKey::IsFollowedByCharMessage() const
-{
-  MSG nextMsg;
-  if (mFakeCharMsgs) {
-    nextMsg = mFakeCharMsgs->ElementAt(0).GetCharMsg(mMsg.hwnd);
-  } else {
-    if (!WinUtils::PeekMessage(&nextMsg, mMsg.hwnd, WM_KEYFIRST, WM_KEYLAST,
-                               PM_NOREMOVE | PM_NOYIELD)) {
-      return false;
-    }
-  }
-  return (nextMsg.message == WM_CHAR ||
-          nextMsg.message == WM_SYSCHAR ||
-          nextMsg.message == WM_DEADCHAR);
 }
 
 bool
@@ -765,7 +867,7 @@ NativeKey::IsFollowedByDeadCharMessage() const
       return false;
     }
   }
-  return (nextMsg.message == WM_DEADCHAR);
+  return IsDeadCharMessage(nextMsg);
 }
 
 bool
@@ -882,6 +984,18 @@ NativeKey::GetKeyLocation() const
   }
 }
 
+bool
+NativeKey::CanComputeVirtualKeyCodeFromScanCode() const
+{
+  // Vista or later supports ScanCodeEx.
+  if (IsVistaOrLater()) {
+    return true;
+  }
+  // Otherwise, MapVirtualKeyEx() can compute virtual keycode only with
+  // non-extended key.
+  return !mIsExtended;
+}
+
 uint8_t
 NativeKey::ComputeVirtualKeyCodeFromScanCode() const
 {
@@ -892,18 +1006,28 @@ NativeKey::ComputeVirtualKeyCodeFromScanCode() const
 uint8_t
 NativeKey::ComputeVirtualKeyCodeFromScanCodeEx() const
 {
-  // NOTE: WinXP doesn't support mapping scan code to virtual keycode of
-  //       extended keys.
-  NS_ENSURE_TRUE(!mIsExtended || IsVistaOrLater(), 0);
+  if (NS_WARN_IF(!CanComputeVirtualKeyCodeFromScanCode())) {
+    return 0;
+  }
   return static_cast<uint8_t>(
            ::MapVirtualKeyEx(GetScanCodeWithExtendedFlag(), MAPVK_VSC_TO_VK_EX,
                              mKeyboardLayout));
 }
 
-PRUnichar
+uint16_t
+NativeKey::ComputeScanCodeExFromVirtualKeyCode(UINT aVirtualKeyCode) const
+{
+  return static_cast<uint16_t>(
+           ::MapVirtualKeyEx(aVirtualKeyCode,
+                             IsVistaOrLater() ? MAPVK_VK_TO_VSC_EX :
+                                                MAPVK_VK_TO_VSC,
+                             mKeyboardLayout));
+}
+
+char16_t
 NativeKey::ComputeUnicharFromScanCode() const
 {
-  return static_cast<PRUnichar>(
+  return static_cast<char16_t>(
            ::MapVirtualKeyEx(ComputeVirtualKeyCodeFromScanCode(),
                              MAPVK_VK_TO_CHAR, mKeyboardLayout));
 }
@@ -950,6 +1074,8 @@ NativeKey::InitKeyEvent(WidgetKeyboardEvent& aKeyEvent,
   if (mKeyNameIndex == KEY_NAME_INDEX_USE_STRING) {
     aKeyEvent.mKeyValue = mCommittedCharsAndModifiers.ToString();
   }
+  aKeyEvent.mCodeNameIndex = mCodeNameIndex;
+  MOZ_ASSERT(mCodeNameIndex != CODE_NAME_INDEX_USE_STRING);
   aKeyEvent.location = GetKeyLocation();
   aModKeyState.InitInputEvent(aKeyEvent);
 }
@@ -970,7 +1096,7 @@ NativeKey::DispatchKeyEvent(WidgetKeyboardEvent& aKeyEvent,
     pluginEvent.event = aMsgSentToPlugin->message;
     pluginEvent.wParam = aMsgSentToPlugin->wParam;
     pluginEvent.lParam = aMsgSentToPlugin->lParam;
-    aKeyEvent.pluginEvent = static_cast<void*>(&pluginEvent);
+    aKeyEvent.mPluginEvent.Copy(pluginEvent);
   }
 
   return (mWidget->DispatchKeyboardEvent(&aKeyEvent) || mWidget->Destroyed());
@@ -979,7 +1105,7 @@ NativeKey::DispatchKeyEvent(WidgetKeyboardEvent& aKeyEvent,
 bool
 NativeKey::HandleKeyDownMessage(bool* aEventDispatched) const
 {
-  MOZ_ASSERT(mMsg.message == WM_KEYDOWN || mMsg.message == WM_SYSKEYDOWN);
+  MOZ_ASSERT(IsKeyDownMessage());
 
   if (aEventDispatched) {
     *aEventDispatched = false;
@@ -1080,8 +1206,16 @@ NativeKey::HandleKeyDownMessage(bool* aEventDispatched) const
             DispatchKeyPressEventsWithKeyboardLayout());
   }
 
-  if (IsFollowedByCharMessage()) {
-    return DispatchKeyPressEventForFollowingCharMessage();
+  MSG followingCharMsg;
+  if (GetFollowingCharMessage(followingCharMsg)) {
+    // Even if there was char message, it might be redirected by different
+    // window (perhaps, focus move?).  Then, we shouldn't continue to handle
+    // the message since no input should occur on the window.
+    if (followingCharMsg.message == WM_NULL ||
+        followingCharMsg.hwnd != mMsg.hwnd) {
+      return false;
+    }
+    return DispatchKeyPressEventForFollowingCharMessage(followingCharMsg);
   }
 
   if (!mModKeyState.IsControl() && !mModKeyState.IsAlt() &&
@@ -1103,9 +1237,8 @@ bool
 NativeKey::HandleCharMessage(const MSG& aCharMsg,
                              bool* aEventDispatched) const
 {
-  MOZ_ASSERT(mMsg.message == WM_KEYDOWN || mMsg.message == WM_SYSKEYDOWN ||
-             mMsg.message == WM_CHAR || mMsg.message == WM_SYSCHAR);
-  MOZ_ASSERT(aCharMsg.message == WM_CHAR || aCharMsg.message == WM_SYSCHAR);
+  MOZ_ASSERT(IsKeyDownMessage() || IsPrintableCharMessage(mMsg));
+  MOZ_ASSERT(IsPrintableCharMessage(aCharMsg.message));
 
   if (aEventDispatched) {
     *aEventDispatched = false;
@@ -1127,8 +1260,8 @@ NativeKey::HandleCharMessage(const MSG& aCharMsg,
   //           should cause composition events because they are not caused
   //           by actual keyboard operation.
 
-  static const PRUnichar U_SPACE = 0x20;
-  static const PRUnichar U_EQUAL = 0x3D;
+  static const char16_t U_SPACE = 0x20;
+  static const char16_t U_EQUAL = 0x3D;
 
   // First, handle normal text input or non-printable key case here.
   if ((!mModKeyState.IsAlt() && !mModKeyState.IsControl()) ||
@@ -1160,7 +1293,7 @@ NativeKey::HandleCharMessage(const MSG& aCharMsg,
   //     WM_KEYDOWN.  I think that we don't need to keypress event in such
   //     case especially for shortcut keys.
 
-  PRUnichar uniChar;
+  char16_t uniChar;
   // Ctrl+A Ctrl+Z, see Programming Windows 3.1 page 110 for details
   if (mModKeyState.IsControl() && aCharMsg.wParam <= 0x1A) {
     // Bug 16486: Need to account for shift here.
@@ -1182,7 +1315,7 @@ NativeKey::HandleCharMessage(const MSG& aCharMsg,
   // accesskeys and make sure that numbers are always passed as such.
   if (uniChar && (mModKeyState.IsControl() || mModKeyState.IsAlt())) {
     KeyboardLayout* keyboardLayout = KeyboardLayout::GetInstance();
-    PRUnichar unshiftedCharCode =
+    char16_t unshiftedCharCode =
       (mVirtualKeyCode >= '0' && mVirtualKeyCode <= '9') ?
         mVirtualKeyCode :  mModKeyState.IsShift() ?
                              ComputeUnicharFromScanCode() : 0;
@@ -1215,7 +1348,7 @@ NativeKey::HandleCharMessage(const MSG& aCharMsg,
 bool
 NativeKey::HandleKeyUpMessage(bool* aEventDispatched) const
 {
-  MOZ_ASSERT(mMsg.message == WM_KEYUP || mMsg.message == WM_SYSKEYUP);
+  MOZ_ASSERT(IsKeyUpMessage());
 
   if (aEventDispatched) {
     *aEventDispatched = false;
@@ -1238,7 +1371,7 @@ NativeKey::HandleKeyUpMessage(bool* aEventDispatched) const
 bool
 NativeKey::NeedsToHandleWithoutFollowingCharMessages() const
 {
-  MOZ_ASSERT(mMsg.message == WM_KEYDOWN || mMsg.message == WM_SYSKEYDOWN);
+  MOZ_ASSERT(IsKeyDownMessage());
 
   // Enter and backspace are always handled here to avoid for example the
   // confusion between ctrl-enter and ctrl-J.
@@ -1264,98 +1397,327 @@ NativeKey::NeedsToHandleWithoutFollowingCharMessages() const
   return mIsPrintableKey;
 }
 
-MSG
-NativeKey::RemoveFollowingCharMessage() const
+#ifdef MOZ_CRASHREPORTER
+
+static nsCString
+GetResultOfInSendMessageEx()
 {
-  MOZ_ASSERT(IsFollowedByCharMessage());
-
-  if (mFakeCharMsgs) {
-    MOZ_ASSERT(!mFakeCharMsgs->ElementAt(0).mConsumed,
-      "Doesn't assume that it's used for removing two or more char messages");
-    mFakeCharMsgs->ElementAt(0).mConsumed = true;
-    return mFakeCharMsgs->ElementAt(0).GetCharMsg(mMsg.hwnd);
+  DWORD ret = ::InSendMessageEx(nullptr);
+  if (!ret) {
+    return NS_LITERAL_CSTRING("ISMEX_NOSEND");
   }
-
-  MSG msg;
-  if (!WinUtils::GetMessage(&msg, mMsg.hwnd, WM_KEYFIRST, WM_KEYLAST) ||
-      !(msg.message == WM_CHAR || msg.message == WM_SYSCHAR ||
-        msg.message == WM_DEADCHAR)) {
-    MOZ_CRASH("We lost the following char message");
+  nsAutoCString result;
+  if (ret & ISMEX_CALLBACK) {
+    result = "ISMEX_CALLBACK";
   }
+  if (ret & ISMEX_NOTIFY) {
+    if (!result.IsEmpty()) {
+      result += " | ";
+    }
+    result += "ISMEX_NOTIFY";
+  }
+  if (ret & ISMEX_REPLIED) {
+    if (!result.IsEmpty()) {
+      result += " | ";
+    }
+    result += "ISMEX_REPLIED";
+  }
+  if (ret & ISMEX_SEND) {
+    if (!result.IsEmpty()) {
+      result += " | ";
+    }
+    result += "ISMEX_SEND";
+  }
+  return result;
+}
 
-  return msg;
+static const char*
+GetMessageName(UINT aMessage)
+{
+  switch (aMessage) {
+    case WM_KEYDOWN:     return "WM_KEYDOWN";
+    case WM_SYSKEYDOWN:  return "WM_SYSKEYDOWN";
+    case WM_KEYUP:       return "WM_KEYUP";
+    case WM_SYSKEYUP:    return "WM_SYSKEYUP";
+    case WM_CHAR:        return "WM_CHAR";
+    case WM_DEADCHAR:    return "WM_DEADCHAR";
+    case WM_SYSCHAR:     return "WM_SYSCHAR";
+    case WM_SYSDEADCHAR: return "WM_SYSDEADCHAR";
+    case WM_UNICHAR:     return "WM_UNICHAR";
+    case WM_QUIT:        return "WM_QUIT";
+    case WM_NULL:        return "WM_NULL";
+    default:             return "Unknown";
+  }
+}
+
+#endif // #ifdef MOZ_CRASHREPORTER
+
+bool
+NativeKey::MayBeSameCharMessage(const MSG& aCharMsg1,
+                                const MSG& aCharMsg2) const
+{
+  // NOTE: Although, we don't know when this case occurs, the scan code value
+  //       in lParam may be changed from 0 to something.  The changed value
+  //       is different from the scan code of handling keydown message.
+  static const LPARAM kScanCodeMask = 0x00FF0000;
+  return
+    aCharMsg1.message == aCharMsg2.message &&
+    aCharMsg1.wParam == aCharMsg2.wParam &&
+    (aCharMsg1.lParam & ~kScanCodeMask) == (aCharMsg2.lParam & ~kScanCodeMask);
 }
 
 bool
-NativeKey::RemoveMessageAndDispatchPluginEvent(UINT aFirstMsg,
-                                               UINT aLastMsg) const
+NativeKey::GetFollowingCharMessage(MSG& aCharMsg) const
 {
-  MSG msg;
+  MOZ_ASSERT(IsKeyDownMessage());
+
+  aCharMsg.message = WM_NULL;
+
   if (mFakeCharMsgs) {
-    DebugOnly<bool> found = false;
-    for (uint32_t i = 0; i < mFakeCharMsgs->Length(); i++) {
-      FakeCharMsg& fakeCharMsg = mFakeCharMsgs->ElementAt(i);
-      if (fakeCharMsg.mConsumed) {
-        continue;
-      }
-      MSG fakeMsg = fakeCharMsg.GetCharMsg(mMsg.hwnd);
-      if (fakeMsg.message < aFirstMsg || fakeMsg.message > aLastMsg) {
-        continue;
-      }
-      fakeCharMsg.mConsumed = true;
-      msg = fakeMsg;
-      found = true;
-      break;
+    FakeCharMsg& fakeCharMsg = mFakeCharMsgs->ElementAt(0);
+    if (fakeCharMsg.mConsumed) {
+      return false;
     }
-    MOZ_ASSERT(found, "Fake char message must be found");
-  } else {
-    WinUtils::GetMessage(&msg, mMsg.hwnd, aFirstMsg, aLastMsg);
+    MSG charMsg = fakeCharMsg.GetCharMsg(mMsg.hwnd);
+    fakeCharMsg.mConsumed = true;
+    if (!IsCharMessage(charMsg)) {
+      return false;
+    }
+    aCharMsg = charMsg;
+    return true;
   }
-  if (mWidget->Destroyed()) {
-    MOZ_CRASH("NativeKey tries to dispatch a plugin event on destroyed widget");
+
+  // If next key message is not char message, we should give up to find a
+  // related char message for the handling keydown event for now.
+  // Note that it's possible other applications may send other key message
+  // after we call TranslateMessage(). That may cause PeekMessage() failing
+  // to get char message for the handling keydown message.
+  MSG nextKeyMsg;
+  if (!WinUtils::PeekMessage(&nextKeyMsg, mMsg.hwnd, WM_KEYFIRST, WM_KEYLAST,
+                             PM_NOREMOVE | PM_NOYIELD) ||
+      !IsCharMessage(nextKeyMsg)) {
+    return false;
   }
-  mWidget->DispatchPluginEvent(msg);
-  return mWidget->Destroyed();
+
+  // On Metrofox, PeekMessage() sometimes returns WM_NULL even if we specify
+  // the message range.  So, if it returns WM_NULL, we should retry to get
+  // the following char message it was found above.
+  for (uint32_t i = 0; i < 5; i++) {
+    MSG removedMsg, nextKeyMsgInAllWindows;
+    bool doCrash = false;
+    if (!WinUtils::PeekMessage(&removedMsg, mMsg.hwnd,
+                               nextKeyMsg.message, nextKeyMsg.message,
+                               PM_REMOVE | PM_NOYIELD)) {
+      // We meets unexpected case.  We should collect the message queue state
+      // and crash for reporting the bug.
+      doCrash = true;
+      // The char message is redirected to different thread's window by focus
+      // move or something or just cancelled by external application.
+      if (!WinUtils::PeekMessage(&nextKeyMsgInAllWindows, 0,
+                                 WM_KEYFIRST, WM_KEYLAST,
+                                 PM_NOREMOVE | PM_NOYIELD)) {
+        return true;
+      }
+      if (MayBeSameCharMessage(nextKeyMsgInAllWindows, nextKeyMsg)) {
+        // The char message is redirected to different window created by our
+        // thread.
+        if (nextKeyMsgInAllWindows.hwnd != mMsg.hwnd) {
+          aCharMsg = nextKeyMsgInAllWindows;
+          return true;
+        }
+        // The found char message still in the queue, but PeekMessage() failed
+        // to remove it only with PM_REMOVE.  Although, we don't know why this
+        // occurs.  However, this occurs acctually.
+        // Try to remove the char message with GetMessage() again.
+        if (WinUtils::GetMessage(&removedMsg, mMsg.hwnd,
+                                 nextKeyMsg.message, nextKeyMsg.message)) {
+          // Cancel to crash, but we need to check the removed message value.
+          doCrash = false;
+        }
+      }
+    }
+
+    if (doCrash) {
+#ifdef MOZ_CRASHREPORTER
+      nsPrintfCString info("\nPeekMessage() failed to remove char message! "
+                           "\nHandling message: %s (0x%08X), wParam: 0x%08X, "
+                           "lParam: 0x%08X, hwnd=0x%p, InSendMessageEx()=%s, \n"
+                           "Found message: %s (0x%08X), wParam: 0x%08X, "
+                           "lParam: 0x%08X, hwnd=0x%p, "
+                           "\nWM_NULL has been removed: %d, "
+                           "\nNext key message in all windows: %s (0x%08X), "
+                           "wParam: 0x%08X, lParam: 0x%08X, hwnd=0x%p, "
+                           "time=%d, ",
+                           GetMessageName(mMsg.message),
+                           mMsg.message, mMsg.wParam, mMsg.lParam,
+                           nextKeyMsg.hwnd,
+                           GetResultOfInSendMessageEx().get(),
+                           GetMessageName(nextKeyMsg.message),
+                           nextKeyMsg.message, nextKeyMsg.wParam,
+                           nextKeyMsg.lParam, nextKeyMsg.hwnd, i,
+                           GetMessageName(nextKeyMsgInAllWindows.message),
+                           nextKeyMsgInAllWindows.message,
+                           nextKeyMsgInAllWindows.wParam,
+                           nextKeyMsgInAllWindows.lParam,
+                           nextKeyMsgInAllWindows.hwnd,
+                           nextKeyMsgInAllWindows.time);
+      CrashReporter::AppendAppNotesToCrashReport(info);
+      MSG nextMsg;
+      if (WinUtils::PeekMessage(&nextMsg, 0, 0, 0,
+                                PM_NOREMOVE | PM_NOYIELD)) {
+        nsPrintfCString info("\nNext message in all windows: %s (0x%08X), "
+                             "wParam: 0x%08X, lParam: 0x%08X, hwnd=0x%p, "
+                             "time=%d",
+                             GetMessageName(nextMsg.message),
+                             nextMsg.message, nextMsg.wParam, nextMsg.lParam,
+                             nextMsg.hwnd, nextMsg.time);
+        CrashReporter::AppendAppNotesToCrashReport(info);
+      } else {
+        CrashReporter::AppendAppNotesToCrashReport(
+          NS_LITERAL_CSTRING("\nThere is no message in any window"));
+      }
+#endif // #ifdef MOZ_CRASHREPORTER
+      MOZ_CRASH("We lost the following char message");
+    }
+
+    // Retry for the strange case.
+    if (removedMsg.message == WM_NULL) {
+      continue;
+    }
+
+    // Typically, this case occurs with WM_DEADCHAR.  If the removed message's
+    // wParam becomes 0, that means that the key event shouldn't cause text
+    // input.  So, let's ignore the strange char message.
+    if (removedMsg.message == nextKeyMsg.message && !removedMsg.wParam) {
+      return false;
+    }
+
+    // NOTE: Although, we don't know when this case occurs, the scan code value
+    //       in lParam may be changed from 0 to something.  The changed value
+    //       is different from the scan code of handling keydown message.
+    if (!MayBeSameCharMessage(removedMsg, nextKeyMsg)) {
+#ifdef MOZ_CRASHREPORTER
+      nsPrintfCString info("\nPeekMessage() removed unexpcted char message! "
+                           "\nHandling message: %s (0x%08X), wParam: 0x%08X, "
+                           "lParam: 0x%08X, hwnd=0x%p, InSendMessageEx()=%s, "
+                           "\nFound message: %s (0x%08X), wParam: 0x%08X, "
+                           "lParam: 0x%08X, hwnd=0x%p, "
+                           "\nRemoved message: %s (0x%08X), wParam: 0x%08X, "
+                           "lParam: 0x%08X, hwnd=0x%p, ",
+                           GetMessageName(mMsg.message),
+                           mMsg.message, mMsg.wParam, mMsg.lParam, mMsg.hwnd,
+                           GetResultOfInSendMessageEx().get(),
+                           GetMessageName(nextKeyMsg.message),
+                           nextKeyMsg.message, nextKeyMsg.wParam,
+                           nextKeyMsg.lParam, nextKeyMsg.hwnd,
+                           GetMessageName(removedMsg.message),
+                           removedMsg.message, removedMsg.wParam,
+                           removedMsg.lParam, removedMsg.hwnd);
+      CrashReporter::AppendAppNotesToCrashReport(info);
+      // What's the next key message?
+      MSG nextKeyMsgAfter;
+      if (WinUtils::PeekMessage(&nextKeyMsgAfter, mMsg.hwnd,
+                                WM_KEYFIRST, WM_KEYLAST,
+                                PM_NOREMOVE | PM_NOYIELD)) {
+        nsPrintfCString info("\nNext key message after unexpected char message "
+                             "removed: %s (0x%08X), wParam: 0x%08X, "
+                             "lParam: 0x%08X, hwnd=0x%p, ",
+                             GetMessageName(nextKeyMsgAfter.message),
+                             nextKeyMsgAfter.message, nextKeyMsgAfter.wParam,
+                             nextKeyMsgAfter.lParam, nextKeyMsgAfter.hwnd);
+        CrashReporter::AppendAppNotesToCrashReport(info);
+      } else {
+        CrashReporter::AppendAppNotesToCrashReport(
+          NS_LITERAL_CSTRING("\nThere is no key message after unexpected char "
+                             "message removed, "));
+      }
+      // Another window has a key message?
+      MSG nextKeyMsgInAllWindows;
+      if (WinUtils::PeekMessage(&nextKeyMsgInAllWindows, 0,
+                                WM_KEYFIRST, WM_KEYLAST,
+                                PM_NOREMOVE | PM_NOYIELD)) {
+        nsPrintfCString info("\nNext key message in all windows: %s (0x%08X), "
+                             "wParam: 0x%08X, lParam: 0x%08X, hwnd=0x%p.",
+                             GetMessageName(nextKeyMsgInAllWindows.message),
+                             nextKeyMsgInAllWindows.message,
+                             nextKeyMsgInAllWindows.wParam,
+                             nextKeyMsgInAllWindows.lParam,
+                             nextKeyMsgInAllWindows.hwnd);
+        CrashReporter::AppendAppNotesToCrashReport(info);
+      } else {
+        CrashReporter::AppendAppNotesToCrashReport(
+          NS_LITERAL_CSTRING("\nThere is no key message in any windows."));
+      }
+#endif // #ifdef MOZ_CRASHREPORTER
+      MOZ_CRASH("PeekMessage() removed unexpected message");
+    }
+
+    aCharMsg = removedMsg;
+    return true;
+  }
+#ifdef MOZ_CRASHREPORTER
+  nsPrintfCString info("\nWe lost following char message! "
+                       "\nHandling message: %s (0x%08X), wParam: 0x%08X, "
+                       "lParam: 0x%08X, InSendMessageEx()=%s, \n"
+                       "Found message: %s (0x%08X), wParam: 0x%08X, "
+                       "lParam: 0x%08X, removed a lot of WM_NULL",
+                       GetMessageName(mMsg.message),
+                       mMsg.message, mMsg.wParam, mMsg.lParam,
+                       GetResultOfInSendMessageEx().get(),
+                       GetMessageName(nextKeyMsg.message),
+                       nextKeyMsg.message, nextKeyMsg.wParam,
+                       nextKeyMsg.lParam);
+  CrashReporter::AppendAppNotesToCrashReport(info);
+#endif // #ifdef MOZ_CRASHREPORTER
+  MOZ_CRASH("We lost the following char message");
+  return false;
 }
 
 bool
 NativeKey::DispatchPluginEventsAndDiscardsCharMessages() const
 {
-  MOZ_ASSERT(mMsg.message == WM_KEYDOWN || mMsg.message == WM_SYSKEYDOWN);
-
-  if (mFakeCharMsgs) {
-    for (uint32_t i = 0; i < mFakeCharMsgs->Length(); i++) {
-      if (RemoveMessageAndDispatchPluginEvent(WM_KEYFIRST, WM_KEYLAST)) {
-        return true;
-      }
-    }
-    return false;
-  }
+  MOZ_ASSERT(IsKeyDownMessage());
 
   // Remove a possible WM_CHAR or WM_SYSCHAR messages from the message queue.
   // They can be more than one because of:
   //  * Dead-keys not pairing with base character
   //  * Some keyboard layouts may map up to 4 characters to the single key
-  bool anyCharMessagesRemoved = true;
+  bool anyCharMessagesRemoved = false;
   MSG msg;
-  bool gotMsg =
-    WinUtils::PeekMessage(&msg, mMsg.hwnd, WM_KEYFIRST, WM_KEYLAST,
-                          PM_NOREMOVE | PM_NOYIELD);
-  while (gotMsg &&
-         (msg.message == WM_CHAR || msg.message == WM_SYSCHAR ||
-          msg.message == WM_DEADCHAR)) {
-    if (RemoveMessageAndDispatchPluginEvent(WM_KEYFIRST, WM_KEYLAST)) {
-      return true;
+  while (GetFollowingCharMessage(msg)) {
+    if (msg.message == WM_NULL) {
+      continue;
     }
     anyCharMessagesRemoved = true;
-    gotMsg = WinUtils::PeekMessage(&msg, mMsg.hwnd, WM_KEYFIRST, WM_KEYLAST,
-                                   PM_NOREMOVE | PM_NOYIELD);
+    // If the window handle is changed, focused window must be changed.
+    // So, plugin shouldn't handle it anymore.
+    if (msg.hwnd != mMsg.hwnd) {
+      break;
+    }
+    MOZ_RELEASE_ASSERT(!mWidget->Destroyed(),
+      "NativeKey tries to dispatch a plugin event on destroyed widget");
+    mWidget->DispatchPluginEvent(msg);
+    if (mWidget->Destroyed()) {
+      return true;
+    }
   }
 
-  if (!anyCharMessagesRemoved &&
-      mDOMKeyCode == NS_VK_BACK && IsIMEDoingKakuteiUndo() &&
-      RemoveMessageAndDispatchPluginEvent(WM_CHAR, WM_CHAR)) {
-    return true;
+  if (!mFakeCharMsgs && !anyCharMessagesRemoved &&
+      mDOMKeyCode == NS_VK_BACK && IsIMEDoingKakuteiUndo()) {
+    // This is for a hack for ATOK and WXG.  So, PeekMessage() must scceed!
+    while (WinUtils::PeekMessage(&msg, mMsg.hwnd, WM_CHAR, WM_CHAR,
+                                 PM_REMOVE | PM_NOYIELD)) {
+      if (msg.message != WM_CHAR) {
+        MOZ_RELEASE_ASSERT(msg.message == WM_NULL,
+                           "Unexpected message was removed");
+        continue;
+      }
+      MOZ_RELEASE_ASSERT(!mWidget->Destroyed(),
+        "NativeKey tries to dispatch a plugin event on destroyed widget");
+      mWidget->DispatchPluginEvent(msg);
+      return mWidget->Destroyed();
+    }
+    MOZ_CRASH("NativeKey failed to get WM_CHAR for ATOK or WXG");
   }
 
   return false;
@@ -1364,7 +1726,7 @@ NativeKey::DispatchPluginEventsAndDiscardsCharMessages() const
 bool
 NativeKey::DispatchKeyPressEventsWithKeyboardLayout() const
 {
-  MOZ_ASSERT(mMsg.message == WM_KEYDOWN || mMsg.message == WM_SYSKEYDOWN);
+  MOZ_ASSERT(IsKeyDownMessage());
   MOZ_ASSERT(!mIsDeadKey);
 
   KeyboardLayout* keyboardLayout = KeyboardLayout::GetInstance();
@@ -1495,7 +1857,7 @@ NativeKey::DispatchKeyPressEventsWithKeyboardLayout() const
       // inputs '+' on Thai keyboard layout, a key which is at '=/+'
       // key on ANSI keyboard layout is VK_OEM_PLUS.  Native applications
       // handle it as '+' key if Ctrl key is pressed.
-      PRUnichar charForOEMKeyCode = 0;
+      char16_t charForOEMKeyCode = 0;
       switch (mVirtualKeyCode) {
         case VK_OEM_PLUS:   charForOEMKeyCode = '+'; break;
         case VK_OEM_COMMA:  charForOEMKeyCode = ','; break;
@@ -1526,13 +1888,13 @@ NativeKey::DispatchKeyPressEventsWithKeyboardLayout() const
 }
 
 bool
-NativeKey::DispatchKeyPressEventForFollowingCharMessage() const
+NativeKey::DispatchKeyPressEventForFollowingCharMessage(
+             const MSG& aCharMsg) const
 {
-  MOZ_ASSERT(mMsg.message == WM_KEYDOWN || mMsg.message == WM_SYSKEYDOWN);
+  MOZ_ASSERT(IsKeyDownMessage());
 
-  MSG msg = RemoveFollowingCharMessage();
   if (mFakeCharMsgs) {
-    if (msg.message == WM_DEADCHAR) {
+    if (IsDeadCharMessage(aCharMsg)) {
       return false;
     }
 #ifdef DEBUG
@@ -1546,33 +1908,34 @@ NativeKey::DispatchKeyPressEventForFollowingCharMessage() const
         mCommittedCharsAndModifiers.mChars[2],
         mCommittedCharsAndModifiers.mChars[3],
         mCommittedCharsAndModifiers.mChars[4],
-        mCommittedCharsAndModifiers.mLength, msg.wParam);
+        mCommittedCharsAndModifiers.mLength, aCharMsg.wParam);
       if (mCommittedCharsAndModifiers.IsEmpty()) {
         log.Insert("length is zero: ", 0);
         NS_ERROR(log.get());
         NS_ABORT();
-      } else if (mCommittedCharsAndModifiers.mChars[0] != msg.wParam) {
+      } else if (mCommittedCharsAndModifiers.mChars[0] != aCharMsg.wParam) {
         log.Insert("character mismatch: ", 0);
         NS_ERROR(log.get());
         NS_ABORT();
       }
     }
 #endif // #ifdef DEBUG
-    return HandleCharMessage(msg);
+    return HandleCharMessage(aCharMsg);
   }
 
-  if (msg.message == WM_DEADCHAR) {
+  if (IsDeadCharMessage(aCharMsg)) {
     if (!mWidget->PluginHasFocus()) {
       return false;
     }
-    return (mWidget->DispatchPluginEvent(msg) || mWidget->Destroyed());
+    return (mWidget->DispatchPluginEvent(aCharMsg) || mWidget->Destroyed());
   }
 
-  bool defaultPrevented = HandleCharMessage(msg);
+  bool defaultPrevented = HandleCharMessage(aCharMsg);
   // If a syschar keypress wasn't processed, Windows may want to
   // handle it to activate a native menu.
-  if (!defaultPrevented && msg.message == WM_SYSCHAR) {
-    ::DefWindowProcW(msg.hwnd, msg.message, msg.wParam, msg.lParam);
+  if (!defaultPrevented && IsSysCharMessage(aCharMsg)) {
+    ::DefWindowProcW(aCharMsg.hwnd, aCharMsg.message,
+                     aCharMsg.wParam, aCharMsg.lParam);
   }
   return defaultPrevented;
 }
@@ -1584,16 +1947,25 @@ NativeKey::DispatchKeyPressEventForFollowingCharMessage() const
 KeyboardLayout* KeyboardLayout::sInstance = nullptr;
 nsIIdleServiceInternal* KeyboardLayout::sIdleService = nullptr;
 
+#ifdef PR_LOGGING
+PRLogModuleInfo* sKeyboardLayoutLogger = nullptr;
+#endif // #ifdef PR_LOGGING
+
 // static
 KeyboardLayout*
 KeyboardLayout::GetInstance()
 {
   if (!sInstance) {
+#ifdef PR_LOGGING
+    if (!sKeyboardLayoutLogger) {
+      sKeyboardLayoutLogger = PR_NewLogModule("KeyboardLayoutWidgets");
+    }
+#endif // #ifdef PR_LOGGING
     sInstance = new KeyboardLayout();
     nsCOMPtr<nsIIdleServiceInternal> idleService =
       do_GetService("@mozilla.org/widget/idleservice;1");
-    // The refcount will be decreased at shutting down.
-    sIdleService = idleService.forget().get();
+    // The refcount will be decreased at shut down.
+    sIdleService = idleService.forget().take();
   }
   return sInstance;
 }
@@ -1746,7 +2118,7 @@ KeyboardLayout::InitNativeKey(NativeKey& aNativeKey,
   // Dead-key was active. See if pressed base character does produce
   // valid composite character.
   int32_t activeDeadKeyIndex = GetKeyIndex(mActiveDeadKey);
-  PRUnichar compositeChar = (baseChars.mLength == 1 && baseChars.mChars[0]) ?
+  char16_t compositeChar = (baseChars.mLength == 1 && baseChars.mChars[0]) ?
     mVirtualKeys[activeDeadKeyIndex].GetCompositeChar(mDeadKeyShiftState,
                                                       baseChars.mChars[0]) : 0;
   if (compositeChar) {
@@ -1825,7 +2197,7 @@ KeyboardLayout::LoadLayout(HKL aLayout)
         continue;
       }
       NS_ASSERTION(uint32_t(vki) < ArrayLength(mVirtualKeys), "invalid index");
-      PRUnichar uniChars[5];
+      char16_t uniChars[5];
       int32_t ret =
         ::ToUnicodeEx(virtualKey, 0, kbdState, (LPWSTR)uniChars,
                       ArrayLength(uniChars), 0, mKeyboardLayout);
@@ -1834,7 +2206,7 @@ KeyboardLayout::LoadLayout(HKL aLayout)
         shiftStatesWithDeadKeys |= (1 << shiftState);
         // Repeat dead-key to deactivate it and get its character
         // representation.
-        PRUnichar deadChar[2];
+        char16_t deadChar[2];
         ret = ::ToUnicodeEx(virtualKey, 0, kbdState, (LPWSTR)deadChar,
                             ArrayLength(deadChar), 0, mKeyboardLayout);
         NS_ASSERTION(ret == 2, "Expecting twice repeated dead-key character");
@@ -1877,6 +2249,31 @@ KeyboardLayout::LoadLayout(HKL aLayout)
   }
 
   ::SetKeyboardState(originalKbdState);
+
+#ifdef PR_LOGGING
+  if (PR_LOG_TEST(sKeyboardLayoutLogger, PR_LOG_DEBUG)) {
+    static const UINT kExtendedScanCode[] = { 0x0000, 0xE000 };
+    static const UINT kMapType =
+      IsVistaOrLater() ? MAPVK_VSC_TO_VK_EX : MAPVK_VSC_TO_VK;
+    PR_LOG(sKeyboardLayoutLogger, PR_LOG_DEBUG,
+           ("Logging virtual keycode values for scancode (0x%p)...",
+            mKeyboardLayout));
+    for (uint32_t i = 0; i < ArrayLength(kExtendedScanCode); i++) {
+      for (uint32_t j = 1; j <= 0xFF; j++) {
+        UINT scanCode = kExtendedScanCode[i] + j;
+        UINT virtualKeyCode =
+          ::MapVirtualKeyEx(scanCode, kMapType, mKeyboardLayout);
+        PR_LOG(sKeyboardLayoutLogger, PR_LOG_DEBUG,
+               ("0x%04X, %s", scanCode, kVirtualKeyName[virtualKeyCode]));
+      }
+      // XP and Server 2003 don't support 0xE0 prefix of the scancode.
+      // Therefore, we don't need to continue on them.
+      if (!IsVistaOrLater()) {
+        break;
+      }
+    }
+  }
+#endif // #ifdef PR_LOGGING
 }
 
 inline int32_t
@@ -1988,7 +2385,7 @@ KeyboardLayout::EnsureDeadKeyActive(bool aIsActive,
 {
   int32_t ret;
   do {
-    PRUnichar dummyChars[5];
+    char16_t dummyChars[5];
     ret = ::ToUnicodeEx(aDeadKey, 0, (PBYTE)aDeadKeyKbdState,
                         (LPWSTR)dummyChars, ArrayLength(dummyChars), 0,
                         mKeyboardLayout);
@@ -2021,8 +2418,8 @@ KeyboardLayout::DeactivateDeadKeyState()
 }
 
 bool
-KeyboardLayout::AddDeadKeyEntry(PRUnichar aBaseChar,
-                                PRUnichar aCompositeChar,
+KeyboardLayout::AddDeadKeyEntry(char16_t aBaseChar,
+                                char16_t aCompositeChar,
                                 DeadKeyEntry* aDeadKeyArray,
                                 uint32_t aEntries)
 {
@@ -2073,7 +2470,7 @@ KeyboardLayout::GetDeadKeyCombinations(uint8_t aDeadKey,
         // Depending on the character the followed the dead-key, the keyboard
         // driver can produce one composite character, or a dead-key character
         // followed by a second character.
-        PRUnichar compositeChars[5];
+        char16_t compositeChars[5];
         int32_t ret =
           ::ToUnicodeEx(virtualKey, 0, kbdState, (LPWSTR)compositeChars,
                         ArrayLength(compositeChars), 0, mKeyboardLayout);
@@ -2086,7 +2483,7 @@ KeyboardLayout::GetDeadKeyCombinations(uint8_t aDeadKey,
             // Exactly one composite character produced. Now, when dead-key
             // is not active, repeat the last character one more time to
             // determine the base character.
-            PRUnichar baseChars[5];
+            char16_t baseChars[5];
             ret = ::ToUnicodeEx(virtualKey, 0, kbdState, (LPWSTR)baseChars,
                                 ArrayLength(baseChars), 0, mKeyboardLayout);
             NS_ASSERTION(ret == 1, "One base character expected");
@@ -2395,6 +2792,24 @@ KeyboardLayout::ConvertNativeKeyCodeToKeyNameIndex(uint8_t aVirtualKey) const
   }
 }
 
+// static
+CodeNameIndex
+KeyboardLayout::ConvertScanCodeToCodeNameIndex(UINT aScanCode)
+{
+  switch (aScanCode) {
+
+#define NS_NATIVE_KEY_TO_DOM_CODE_NAME_INDEX(aNativeKey, aCodeNameIndex) \
+    case aNativeKey: return aCodeNameIndex;
+
+#include "NativeKeyToDOMCodeName.h"
+
+#undef NS_NATIVE_KEY_TO_DOM_CODE_NAME_INDEX
+
+    default:
+      return CODE_NAME_INDEX_UNKNOWN;
+  }
+}
+
 nsresult
 KeyboardLayout::SynthesizeNativeKeyEvent(nsWindowBase* aWidget,
                                          int32_t aNativeKeyboardLayout,
@@ -2603,8 +3018,8 @@ KeyboardLayout::SynthesizeNativeKeyEvent(nsWindowBase* aWidget,
  * mozilla::widget::DeadKeyTable
  *****************************************************************************/
 
-PRUnichar
-DeadKeyTable::GetCompositeChar(PRUnichar aBaseChar) const
+char16_t
+DeadKeyTable::GetCompositeChar(char16_t aBaseChar) const
 {
   // Dead-key table is sorted by BaseChar in ascending order.
   // Usually they are too small to use binary search.
@@ -2646,7 +3061,8 @@ RedirectedKeyDownMessageManager::RemoveNextCharMessage(HWND aWnd)
   if (WinUtils::PeekMessage(&msg, aWnd, WM_KEYFIRST, WM_KEYLAST,
                             PM_NOREMOVE | PM_NOYIELD) &&
       (msg.message == WM_CHAR || msg.message == WM_SYSCHAR)) {
-    WinUtils::GetMessage(&msg, aWnd, msg.message, msg.message);
+    WinUtils::PeekMessage(&msg, aWnd, msg.message, msg.message,
+                          PM_REMOVE | PM_NOYIELD);
   }
 }
 

@@ -1,4 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim: set ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -196,7 +196,7 @@ const DownloadsPanel = {
   get panel()
   {
     // If the downloads panel overlay hasn't loaded yet, just return null
-    // without reseting this.panel.
+    // without resetting this.panel.
     let downloadsPanel = document.getElementById("downloadsPanel");
     if (!downloadsPanel)
       return null;
@@ -505,8 +505,7 @@ const DownloadsPanel = {
 
       let uri = NetUtil.newURI(url);
       DownloadsCommon.log("Pasted URL seems valid. Starting download.");
-      saveURL(uri.spec, name || uri.spec, null, true, true,
-              undefined, document);
+      DownloadURL(uri.spec, name, document);
     } catch (ex) {}
   },
 
@@ -557,7 +556,7 @@ const DownloadsPanel = {
 
       // At this point, if the window is minimized, opening the panel could fail
       // without any notification, and there would be no way to either open or
-      // close the panel anymore.  To prevent this, check if the window is
+      // close the panel any more.  To prevent this, check if the window is
       // minimized and in that case force the panel to the closed state.
       if (window.windowState == Ci.nsIDOMChromeWindow.STATE_MINIMIZED) {
         DownloadsButton.releaseAnchor();
@@ -958,8 +957,7 @@ const DownloadsView = {
       return;
     }
 
-    if (aEvent.keyCode == KeyEvent.DOM_VK_ENTER ||
-        aEvent.keyCode == KeyEvent.DOM_VK_RETURN) {
+    if (aEvent.keyCode == KeyEvent.DOM_VK_RETURN) {
       goDoCommand("downloadsCmd_doDefault");
     }
   },
@@ -1649,7 +1647,6 @@ const DownloadsSummary = {
   onKeyDown: function DS_onKeyDown(aEvent)
   {
     if (aEvent.charCode == " ".charCodeAt(0) ||
-        aEvent.keyCode == KeyEvent.DOM_VK_ENTER ||
         aEvent.keyCode == KeyEvent.DOM_VK_RETURN) {
       DownloadsPanel.showDownloadsHistory();
     }

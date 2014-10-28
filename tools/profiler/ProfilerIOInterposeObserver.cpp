@@ -10,34 +10,21 @@ using namespace mozilla;
 
 void ProfilerIOInterposeObserver::Observe(Observation& aObservation)
 {
-  const char* str = nullptr;
-
-  switch (aObservation.ObservedOperation()) {
-    case IOInterposeObserver::OpCreateOrOpen:
-      str = "create/open";
-      break;
-    case IOInterposeObserver::OpRead:
-      str = "read";
-      break;
-    case IOInterposeObserver::OpWrite:
-      str = "write";
-      break;
-    case IOInterposeObserver::OpFSync:
-      str = "fsync";
-      break;
-    case IOInterposeObserver::OpStat:
-      str = "stat";
-      break;
-    case IOInterposeObserver::OpClose:
-      str = "close";
-      break;
-    default:
-      return;
+  if (!IsMainThread()) {
+    return;
   }
+
   ProfilerBacktrace* stack = profiler_get_backtrace();
+
+  nsCString filename;
+  if (aObservation.Filename()) {
+    filename = NS_ConvertUTF16toUTF8(aObservation.Filename());
+  }
+
   IOMarkerPayload* markerPayload = new IOMarkerPayload(aObservation.Reference(),
+                                                       filename.get(),
                                                        aObservation.Start(),
                                                        aObservation.End(),
                                                        stack);
-  PROFILER_MARKER_PAYLOAD(str, markerPayload);
+  PROFILER_MARKER_PAYLOAD(aObservation.ObservedOperationString(), markerPayload);
 }

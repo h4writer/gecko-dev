@@ -27,7 +27,7 @@ class CacheFileInputStream : public nsIAsyncInputStream
   NS_DECL_NSISEEKABLESTREAM
 
 public:
-  CacheFileInputStream(CacheFile *aFile);
+  explicit CacheFileInputStream(CacheFile *aFile);
 
   NS_IMETHOD OnChunkRead(nsresult aResult, CacheFileChunk *aChunk);
   NS_IMETHOD OnChunkWritten(nsresult aResult, CacheFileChunk *aChunk);
@@ -35,11 +35,20 @@ public:
                               CacheFileChunk *aChunk);
   NS_IMETHOD OnChunkUpdated(CacheFileChunk *aChunk);
 
+  // Memory reporting
+  size_t SizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
+
+  uint32_t GetPosition() const { return mPos; };
+
 private:
   virtual ~CacheFileInputStream();
 
+  nsresult CloseWithStatusLocked(nsresult aStatus);
   void ReleaseChunk();
   void EnsureCorrectChunk(bool aReleaseOnly);
+
+  // CanRead returns negative value when output stream truncates the data before
+  // the input stream's mPos.
   void CanRead(int64_t *aCanRead, const char **aBuf);
   void NotifyListener();
   void MaybeNotifyListener();
@@ -51,7 +60,6 @@ private:
   nsresult                 mStatus;
   bool                     mWaitingForUpdate;
   int64_t                  mListeningForChunk;
-  bool                     mInReadSegments;
 
   nsCOMPtr<nsIInputStreamCallback> mCallback;
   uint32_t                         mCallbackFlags;

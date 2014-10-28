@@ -342,9 +342,9 @@ private:
     MOZ_ASSERT(!mFlags.mHasHashedFrames);
     uint32_t count = GetChildCount();
     mFlags.mHasHashedFrames = 1;
-    uint32_t minSize =
-      std::max(kMinChildCountForHashtable, uint32_t(PL_DHASH_MIN_SIZE));
-    mFrames = new nsTHashtable< nsPtrHashKey<nsIFrame> >(std::max(count, minSize));
+    uint32_t minLength = std::max(kMinChildCountForHashtable,
+                                  uint32_t(PL_DHASH_DEFAULT_INITIAL_LENGTH));
+    mFrames = new nsTHashtable< nsPtrHashKey<nsIFrame> >(std::max(count, minLength));
     for (nsIFrame* f = mFirstChild; count-- > 0; f = f->GetNextSibling()) {
       mFrames->PutEntry(f);
     }
@@ -399,7 +399,10 @@ public:
   }
   void SetBreakTypeBefore(uint8_t aBreakType) {
     NS_ASSERTION(IsBlock(), "Only blocks have break-before");
-    NS_ASSERTION(aBreakType <= NS_STYLE_CLEAR_LEFT_AND_RIGHT,
+    NS_ASSERTION(aBreakType == NS_STYLE_CLEAR_NONE ||
+                 aBreakType == NS_STYLE_CLEAR_LEFT ||
+                 aBreakType == NS_STYLE_CLEAR_RIGHT ||
+                 aBreakType == NS_STYLE_CLEAR_BOTH,
                  "Only float break types are allowed before a line");
     mFlags.mBreakType = aBreakType;
   }
@@ -418,16 +421,16 @@ public:
   bool HasFloatBreakAfter() const {
     return !IsBlock() && (NS_STYLE_CLEAR_LEFT == mFlags.mBreakType ||
                           NS_STYLE_CLEAR_RIGHT == mFlags.mBreakType ||
-                          NS_STYLE_CLEAR_LEFT_AND_RIGHT == mFlags.mBreakType);
+                          NS_STYLE_CLEAR_BOTH == mFlags.mBreakType);
   }
   uint8_t GetBreakTypeAfter() const {
     return !IsBlock() ? mFlags.mBreakType : NS_STYLE_CLEAR_NONE;
   }
 
-  // mCarriedOutBottomMargin value
-  nsCollapsingMargin GetCarriedOutBottomMargin() const;
+  // mCarriedOutBEndMargin value
+  nsCollapsingMargin GetCarriedOutBEndMargin() const;
   // Returns true if the margin changed
-  bool SetCarriedOutBottomMargin(nsCollapsingMargin aValue);
+  bool SetCarriedOutBEndMargin(nsCollapsingMargin aValue);
 
   // mFloats
   bool HasFloats() const {
@@ -443,42 +446,87 @@ public:
   // used for painting-related things, but should never be used for
   // layout (except for handling of 'overflow').
   void SetOverflowAreas(const nsOverflowAreas& aOverflowAreas);
+  mozilla::LogicalRect GetOverflowArea(nsOverflowType aType,
+                                       mozilla::WritingMode aWM,
+                                       nscoord aContainerWidth)
+  {
+    return mozilla::LogicalRect(aWM, GetOverflowArea(aType), aContainerWidth);
+  }
   nsRect GetOverflowArea(nsOverflowType aType) {
-    return mData ? mData->mOverflowAreas.Overflow(aType) : mBounds;
+    return mData ? mData->mOverflowAreas.Overflow(aType) : GetPhysicalBounds();
   }
   nsOverflowAreas GetOverflowAreas() {
     if (mData) {
       return mData->mOverflowAreas;
     }
-    return nsOverflowAreas(mBounds, mBounds);
+    nsRect bounds = GetPhysicalBounds();
+    return nsOverflowAreas(bounds, bounds);
   }
   nsRect GetVisualOverflowArea()
     { return GetOverflowArea(eVisualOverflow); }
   nsRect GetScrollableOverflowArea()
     { return GetOverflowArea(eScrollableOverflow); }
 
-  void SlideBy(nscoord aDY) {
-    mBounds.y += aDY;
+  void SlideBy(nscoord aDBCoord, nscoord aContainerWidth) {
+    NS_ASSERTION(aContainerWidth == mContainerWidth || mContainerWidth == -1,
+                 "container width doesn't match");
+    mContainerWidth = aContainerWidth;
+    mBounds.BStart(mWritingMode) += aDBCoord;
     if (mData) {
       NS_FOR_FRAME_OVERFLOW_TYPES(otype) {
-        mData->mOverflowAreas.Overflow(otype).y += aDY;
+        mData->mOverflowAreas.Overflow(otype).y += aDBCoord;
       }
     }
   }
 
+  void IndentBy(nscoord aDICoord, nscoord aContainerWidth) {
+    NS_ASSERTION(aContainerWidth == mContainerWidth || mContainerWidth == -1,
+                 "container width doesn't match");
+    mContainerWidth = aContainerWidth;
+    mBounds.IStart(mWritingMode) += aDICoord;
+  }
+
+  void ExpandBy(nscoord aDISize, nscoord aContainerWidth) {
+    NS_ASSERTION(aContainerWidth == mContainerWidth || mContainerWidth == -1,
+                 "container width doesn't match");
+    mContainerWidth = aContainerWidth;
+    mBounds.ISize(mWritingMode) += aDISize;
+  }
+
   /**
-   * The ascent (distance from top to baseline) of the linebox is the
-   * ascent of the anonymous inline box (for which we don't actually
-   * create a frame) that wraps all the consecutive inline children of a
-   * block.
+   * The logical ascent (distance from block-start to baseline) of the
+   * linebox is the logical ascent of the anonymous inline box (for
+   * which we don't actually create a frame) that wraps all the
+   * consecutive inline children of a block.
    *
    * This is currently unused for block lines.
    */
-  nscoord GetAscent() const { return mAscent; }
-  void SetAscent(nscoord aAscent) { mAscent = aAscent; }
+  nscoord GetLogicalAscent() const { return mAscent; }
+  void SetLogicalAscent(nscoord aAscent) { mAscent = aAscent; }
 
-  nscoord GetHeight() const {
-    return mBounds.height;
+  nscoord BStart() const {
+    return mBounds.BStart(mWritingMode);
+  }
+  nscoord BSize() const {
+    return mBounds.BSize(mWritingMode);
+  }
+  nscoord BEnd() const {
+    return mBounds.BEnd(mWritingMode);
+  }
+  nscoord IStart() const {
+    return mBounds.IStart(mWritingMode);
+  }
+  nscoord ISize() const {
+    return mBounds.ISize(mWritingMode);
+  }
+  nscoord IEnd() const {
+    return mBounds.IEnd(mWritingMode);
+  }
+  void SetBoundsEmpty() {
+    mBounds.IStart(mWritingMode) = 0;
+    mBounds.ISize(mWritingMode) = 0;
+    mBounds.BStart(mWritingMode) = 0;
+    mBounds.BSize(mWritingMode) = 0;
   }
 
   static void DeleteLineList(nsPresContext* aPresContext, nsLineList& aLines,
@@ -496,10 +544,11 @@ public:
                                     nsIFrame* aLastFrameBeforeEnd,
                                     int32_t* aFrameIndexInLine);
 
-#ifdef DEBUG
+#ifdef DEBUG_FRAME_DUMP
   char* StateToString(char* aBuf, int32_t aBufSize) const;
 
   void List(FILE* out, int32_t aIndent, uint32_t aFlags = 0) const;
+  void List(FILE* out = stderr, const char* aPrefix = "", uint32_t aFlags = 0) const;
   nsIFrame* LastChild() const;
 #endif
 
@@ -535,7 +584,38 @@ public:
 
   nsIFrame* mFirstChild;
 
-  nsRect mBounds;
+  mozilla::WritingMode mWritingMode;
+  nscoord mContainerWidth;
+ private:
+  mozilla::LogicalRect mBounds;
+ public:
+  const mozilla::LogicalRect& GetBounds() { return mBounds; }
+  nsRect GetPhysicalBounds() const
+  {
+    if (mBounds.IsAllZero()) {
+      return nsRect(0, 0, 0, 0);
+    }
+
+    NS_ASSERTION(mContainerWidth != -1, "mContainerWidth not initialized");
+    return mBounds.GetPhysicalRect(mWritingMode, mContainerWidth);
+  }
+  void SetBounds(mozilla::WritingMode aWritingMode,
+                 nscoord aIStart, nscoord aBStart,
+                 nscoord aISize, nscoord aBSize,
+                 nscoord aContainerWidth)
+  {
+    mWritingMode = aWritingMode;
+    mContainerWidth = aContainerWidth;
+    mBounds = mozilla::LogicalRect(aWritingMode, aIStart, aBStart,
+                                   aISize, aBSize);
+  }
+  void SetBounds(mozilla::WritingMode aWritingMode,
+                 nsRect aRect, nscoord aContainerWidth)
+  {
+    mWritingMode = aWritingMode;
+    mContainerWidth = aContainerWidth;
+    mBounds = mozilla::LogicalRect(aWritingMode, aRect, aContainerWidth);
+  }
 
   // mFlags.mHasHashedFrames says which one to use
   union {
@@ -565,22 +645,22 @@ public:
   };
 
   struct ExtraData {
-    ExtraData(const nsRect& aBounds) : mOverflowAreas(aBounds, aBounds) {
+    explicit ExtraData(const nsRect& aBounds) : mOverflowAreas(aBounds, aBounds) {
     }
     nsOverflowAreas mOverflowAreas;
   };
 
   struct ExtraBlockData : public ExtraData {
-    ExtraBlockData(const nsRect& aBounds)
+    explicit ExtraBlockData(const nsRect& aBounds)
       : ExtraData(aBounds),
-        mCarriedOutBottomMargin()
+        mCarriedOutBEndMargin()
     {
     }
-    nsCollapsingMargin mCarriedOutBottomMargin;
+    nsCollapsingMargin mCarriedOutBEndMargin;
   };
 
   struct ExtraInlineData : public ExtraData {
-    ExtraInlineData(const nsRect& aBounds) : ExtraData(aBounds) {
+    explicit ExtraInlineData(const nsRect& aBounds) : ExtraData(aBounds) {
     }
     nsFloatCacheList mFloats;
   };
@@ -1625,12 +1705,10 @@ public:
                          bool* aXIsAfterLastFrame) MOZ_OVERRIDE;
 
   NS_IMETHOD GetNextSiblingOnLine(nsIFrame*& aFrame, int32_t aLineNumber) MOZ_OVERRIDE;
-#ifdef IBMBIDI
   NS_IMETHOD CheckLineOrder(int32_t                  aLine,
                             bool                     *aIsReordered,
                             nsIFrame                 **aFirstVisual,
                             nsIFrame                 **aLastVisual) MOZ_OVERRIDE;
-#endif
   nsresult Init(nsLineList& aLines, bool aRightToLeft);
 
 private:

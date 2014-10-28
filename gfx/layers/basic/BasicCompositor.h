@@ -30,7 +30,7 @@ public:
   virtual gfx::SurfaceFormat GetFormat() const MOZ_OVERRIDE
   {
     return mDrawTarget ? mDrawTarget->GetFormat()
-                       : gfx::FORMAT_UNKNOWN;
+                       : gfx::SurfaceFormat(gfx::SurfaceFormat::UNKNOWN);
   }
 
   RefPtr<gfx::DrawTarget> mDrawTarget;
@@ -40,18 +40,19 @@ public:
 class BasicCompositor : public Compositor
 {
 public:
-  BasicCompositor(nsIWidget *aWidget);
+  explicit BasicCompositor(nsIWidget *aWidget);
 
+protected:
   virtual ~BasicCompositor();
 
-
+public:
   virtual bool Initialize() MOZ_OVERRIDE { return true; };
 
   virtual void Destroy() MOZ_OVERRIDE;
 
   virtual TextureFactoryIdentifier GetTextureFactoryIdentifier() MOZ_OVERRIDE
   {
-    return TextureFactoryIdentifier(LAYERS_BASIC,
+    return TextureFactoryIdentifier(LayersBackend::LAYERS_BASIC,
                                     XRE_GetProcessType(),
                                     GetMaxTextureSize());
   }
@@ -65,7 +66,7 @@ public:
                                const gfx::IntPoint &aSourcePoint) MOZ_OVERRIDE;
 
   virtual TemporaryRef<DataTextureSource>
-  CreateDataTextureSource(TextureFlags aFlags = 0) MOZ_OVERRIDE;
+  CreateDataTextureSource(TextureFlags aFlags = TextureFlags::NO_FLAGS) MOZ_OVERRIDE;
 
   virtual bool SupportsEffect(EffectTypes aEffect) MOZ_OVERRIDE;
 
@@ -73,7 +74,7 @@ public:
   {
     mRenderTarget = static_cast<BasicCompositingRenderTarget*>(aSource);
   }
-  virtual CompositingRenderTarget* GetCurrentRenderTarget() MOZ_OVERRIDE
+  virtual CompositingRenderTarget* GetCurrentRenderTarget() const MOZ_OVERRIDE
   {
     return mRenderTarget;
   }
@@ -84,14 +85,15 @@ public:
                         gfx::Float aOpacity,
                         const gfx::Matrix4x4 &aTransform) MOZ_OVERRIDE;
 
+  virtual void ClearRect(const gfx::Rect& aRect) MOZ_OVERRIDE;
+
   virtual void BeginFrame(const nsIntRegion& aInvalidRegion,
                           const gfx::Rect *aClipRectIn,
-                          const gfxMatrix& aTransform,
                           const gfx::Rect& aRenderBounds,
                           gfx::Rect *aClipRectOut = nullptr,
                           gfx::Rect *aRenderBoundsOut = nullptr) MOZ_OVERRIDE;
   virtual void EndFrame() MOZ_OVERRIDE;
-  virtual void EndFrameForExternalComposition(const gfxMatrix& aTransform) MOZ_OVERRIDE
+  virtual void EndFrameForExternalComposition(const gfx::Matrix& aTransform) MOZ_OVERRIDE
   {
     NS_RUNTIMEABORT("We shouldn't ever hit this");
   }
@@ -101,39 +103,36 @@ public:
   virtual bool CanUseCanvasLayerForSize(const gfx::IntSize &aSize) MOZ_OVERRIDE { return true; }
   virtual int32_t GetMaxTextureSize() const MOZ_OVERRIDE { return INT32_MAX; }
   virtual void SetDestinationSurfaceSize(const gfx::IntSize& aSize) MOZ_OVERRIDE { }
-  virtual void SetTargetContext(gfx::DrawTarget* aTarget) MOZ_OVERRIDE
-  {
-    mCopyTarget = aTarget;
-  }
   
   virtual void SetScreenRenderOffset(const ScreenPoint& aOffset) MOZ_OVERRIDE {
   }
 
   virtual void MakeCurrent(MakeCurrentFlags aFlags = 0) { }
 
-  virtual void PrepareViewport(const gfx::IntSize& aSize,
-                               const gfxMatrix& aWorldTransform) MOZ_OVERRIDE { }
-
-  virtual void NotifyLayersTransaction() MOZ_OVERRIDE { }
+  virtual void PrepareViewport(const gfx::IntSize& aSize) MOZ_OVERRIDE { }
 
   virtual const char* Name() const { return "Basic"; }
+
+  virtual LayersBackend GetBackendType() const MOZ_OVERRIDE {
+    return LayersBackend::LAYERS_BASIC;
+  }
 
   virtual nsIWidget* GetWidget() const MOZ_OVERRIDE { return mWidget; }
 
   gfx::DrawTarget *GetDrawTarget() { return mDrawTarget; }
 
 private:
+
+  virtual gfx::IntSize GetWidgetSize() const MOZ_OVERRIDE { return mWidgetSize; }
+
   // Widget associated with this compositor
   nsIWidget *mWidget;
-  nsIntSize mWidgetSize;
+  gfx::IntSize mWidgetSize;
 
   // The final destination surface
   RefPtr<gfx::DrawTarget> mDrawTarget;
   // The current render target for drawing
   RefPtr<BasicCompositingRenderTarget> mRenderTarget;
-  // An optional destination target to copy the results
-  // to after drawing is completed.
-  RefPtr<gfx::DrawTarget> mCopyTarget;
 
   gfx::IntRect mInvalidRect;
   nsIntRegion mInvalidRegion;

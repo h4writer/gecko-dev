@@ -9,9 +9,9 @@
 #define nsDocShell_h__
 
 #include "nsITimer.h"
+#include "nsContentPolicyUtils.h"
 #include "nsIDocShell.h"
 #include "nsIDocShellTreeItem.h"
-#include "nsIDocShellTreeNode.h"
 #include "nsIBaseWindow.h"
 #include "nsIScrollable.h"
 #include "nsITextScroll.h"
@@ -19,6 +19,11 @@
 #include "nsIDOMStorageManager.h"
 #include "nsDocLoader.h"
 #include "mozilla/WeakPtr.h"
+#include "mozilla/TimeStamp.h"
+#include "GeckoProfiler.h"
+#ifdef MOZ_ENABLE_PROFILER_SPS
+#include "ProfilerMarkers.h"
+#endif
 
 // Helper Classes
 #include "nsCOMPtr.h"
@@ -43,13 +48,16 @@
 #include "nsIWebShellServices.h"
 #include "nsILinkHandler.h"
 #include "nsIClipboardCommands.h"
+#include "nsITabParent.h"
 #include "nsCRT.h"
 #include "prtime.h"
 #include "nsRect.h"
+#include "Units.h"
 
 namespace mozilla {
 namespace dom {
 class EventTarget;
+class URLSearchParams;
 }
 }
 
@@ -78,6 +86,7 @@ class nsIURIFixup;
 class nsIURILoader;
 class nsIWebBrowserFind;
 class nsIWidget;
+class ProfilerMarkerTracing;
 
 /* load commands were moved to nsIDocShell.h */
 /* load types were moved to nsDocShellLoadTypes.h */
@@ -122,28 +131,29 @@ typedef enum {
 //***    nsDocShell
 //*****************************************************************************
 
-class nsDocShell : public nsDocLoader,
-                   public nsIDocShell,
-                   public nsIWebNavigation,
-                   public nsIBaseWindow, 
-                   public nsIScrollable, 
-                   public nsITextScroll, 
-                   public nsIDocCharset, 
-                   public nsIContentViewerContainer,
-                   public nsIRefreshURI,
-                   public nsIWebProgressListener,
-                   public nsIWebPageDescriptor,
-                   public nsIAuthPromptProvider,
-                   public nsILoadContext,
-                   public nsIWebShellServices,
-                   public nsILinkHandler,
-                   public nsIClipboardCommands,
-                   public nsIDOMStorageManager,
-                   public mozilla::SupportsWeakPtr<nsDocShell>
+class nsDocShell MOZ_FINAL : public nsDocLoader,
+                             public nsIDocShell,
+                             public nsIWebNavigation,
+                             public nsIBaseWindow,
+                             public nsIScrollable,
+                             public nsITextScroll,
+                             public nsIDocCharset,
+                             public nsIContentViewerContainer,
+                             public nsIRefreshURI,
+                             public nsIWebProgressListener,
+                             public nsIWebPageDescriptor,
+                             public nsIAuthPromptProvider,
+                             public nsILoadContext,
+                             public nsIWebShellServices,
+                             public nsILinkHandler,
+                             public nsIClipboardCommands,
+                             public nsIDOMStorageManager,
+                             public mozilla::SupportsWeakPtr<nsDocShell>
 {
     friend class nsDSURIContentListener;
 
 public:
+    MOZ_DECLARE_REFCOUNTED_TYPENAME(nsDocShell)
     // Object Management
     nsDocShell();
 
@@ -155,7 +165,6 @@ public:
 
     NS_DECL_NSIDOCSHELL
     NS_DECL_NSIDOCSHELLTREEITEM
-    NS_DECL_NSIDOCSHELLTREENODE
     NS_DECL_NSIWEBNAVIGATION
     NS_DECL_NSIBASEWINDOW
     NS_DECL_NSISCROLLABLE
@@ -184,14 +193,14 @@ public:
     // nsILinkHandler
     NS_IMETHOD OnLinkClick(nsIContent* aContent,
         nsIURI* aURI,
-        const PRUnichar* aTargetSpec,
+        const char16_t* aTargetSpec,
         const nsAString& aFileName,
         nsIInputStream* aPostDataStream,
         nsIInputStream* aHeadersDataStream,
         bool aIsTrusted);
     NS_IMETHOD OnLinkClickSync(nsIContent* aContent,
         nsIURI* aURI,
-        const PRUnichar* aTargetSpec,
+        const char16_t* aTargetSpec,
         const nsAString& aFileName,
         nsIInputStream* aPostDataStream = 0,
         nsIInputStream* aHeadersDataStream = 0,
@@ -199,7 +208,7 @@ public:
         nsIRequest** aRequest = 0);
     NS_IMETHOD OnOverLink(nsIContent* aContent,
         nsIURI* aURI,
-        const PRUnichar* aTargetSpec);
+        const char16_t* aTargetSpec);
     NS_IMETHOD OnLeaveLink();
 
     nsDocShellInfoLoadType ConvertLoadTypeToDocShellLoadInfo(uint32_t aLoadType);
@@ -210,11 +219,14 @@ public:
     NS_IMETHOD GetAssociatedWindow(nsIDOMWindow**);
     NS_IMETHOD GetTopWindow(nsIDOMWindow**);
     NS_IMETHOD GetTopFrameElement(nsIDOMElement**);
+    NS_IMETHOD GetNestedFrameId(uint64_t*);
     NS_IMETHOD IsAppOfType(uint32_t, bool*);
     NS_IMETHOD GetIsContent(bool*);
     NS_IMETHOD GetUsePrivateBrowsing(bool*);
     NS_IMETHOD SetUsePrivateBrowsing(bool);
     NS_IMETHOD SetPrivateBrowsing(bool);
+    NS_IMETHOD GetUseRemoteTabs(bool*);
+    NS_IMETHOD SetRemoteTabs(bool);
 
     // Restores a cached presentation from history (mLSHE).
     // This method swaps out the content viewer and simulates loads for
@@ -239,6 +251,26 @@ public:
     }
 
     nsresult HistoryTransactionRemoved(int32_t aIndex);
+
+    // Notify Scroll observers when an async panning/zooming transform
+    // has started being applied
+    void NotifyAsyncPanZoomStarted(const mozilla::CSSIntPoint aScrollPos);
+    // Notify Scroll observers when an async panning/zooming transform
+    // is no longer applied
+    void NotifyAsyncPanZoomStopped(const mozilla::CSSIntPoint aScrollPos);
+
+    // Add new profile timeline markers to this docShell. This will only add
+    // markers if the docShell is currently recording profile timeline markers.
+    // See nsIDocShell::recordProfileTimelineMarkers
+    void AddProfileTimelineMarker(const char* aName,
+                                  TracingMetadata aMetaData);
+    void AddProfileTimelineMarker(const char* aName,
+                                  ProfilerBacktrace* aCause,
+                                  TracingMetadata aMetaData);
+
+    // Global counter for how many docShells are currently recording profile
+    // timeline markers
+    static unsigned long gProfileTimelineRecordingsCount;
 protected:
     // Object Management
     virtual ~nsDocShell();
@@ -289,7 +321,9 @@ protected:
                                bool aIsNewWindowTarget,
                                bool aBypassClassifier,
                                bool aForceAllowCookies,
-                               const nsAString &aSrcdoc);
+                               const nsAString &aSrcdoc,
+                               nsIURI * baseURI,
+                               nsContentPolicyType aContentPolicyType);
     NS_IMETHOD AddHeadersToChannel(nsIInputStream * aHeadersData, 
                                   nsIChannel * aChannel);
     virtual nsresult DoChannelLoad(nsIChannel * aChannel,
@@ -503,14 +537,15 @@ protected:
     nsresult   EnsureTransferableHookData();
     NS_IMETHOD EnsureFind();
     nsresult   RefreshURIFromQueue();
-    NS_IMETHOD LoadErrorPage(nsIURI *aURI, const PRUnichar *aURL,
+    NS_IMETHOD LoadErrorPage(nsIURI *aURI, const char16_t *aURL,
                              const char *aErrorPage,
-                             const PRUnichar *aErrorType,
-                             const PRUnichar *aDescription,
+                             const char16_t *aErrorType,
+                             const char16_t *aDescription,
                              const char *aCSSClass,
                              nsIChannel* aFailedChannel);
-    bool IsNavigationAllowed(bool aDisplayPrintErrorDialog = true);
     bool IsPrintingOrPP(bool aDisplayErrorDialog = true);
+    bool IsNavigationAllowed(bool aDisplayPrintErrorDialog = true,
+                             bool aCheckIfUnloadFired = true);
 
     nsresult SetBaseUrlForWyciwyg(nsIContentViewer * aContentViewer);
 
@@ -636,7 +671,16 @@ protected:
 
     // Convenience method for getting our parent docshell.  Can return null
     already_AddRefed<nsDocShell> GetParentDocshell();
+
+    // Check if we have an app redirect registered for the URI and redirect if
+    // needed. Returns true if a redirect happened, false otherwise.
+    bool DoAppRedirectIfNeeded(nsIURI * aURI,
+                               nsIDocShellLoadInfo * aLoadInfo,
+                               bool aFirstParty);
 protected:
+    nsresult GetCurScrollPos(int32_t scrollOrientation, int32_t * curPos);
+    nsresult SetCurScrollPosEx(int32_t curHorizontalPos, int32_t curVerticalPos);
+
     // Override the parent setter from nsDocLoader
     virtual nsresult SetDocLoaderParent(nsDocLoader * aLoader);
 
@@ -652,7 +696,7 @@ protected:
     class RestorePresentationEvent : public nsRunnable {
     public:
         NS_DECL_NSIRUNNABLE
-        RestorePresentationEvent(nsDocShell *ds) : mDocShell(ds) {}
+        explicit RestorePresentationEvent(nsDocShell *ds) : mDocShell(ds) {}
         void Revoke() { mDocShell = nullptr; }
     private:
         nsRefPtr<nsDocShell> mDocShell;
@@ -660,11 +704,29 @@ protected:
 
     bool JustStartedNetworkLoad();
 
+    nsresult CreatePrincipalFromReferrer(nsIURI*        aReferrer,
+                                         nsIPrincipal** outPrincipal);
+
     enum FrameType {
         eFrameTypeRegular,
         eFrameTypeBrowser,
         eFrameTypeApp
     };
+
+    static const nsCString FrameTypeToString(FrameType aFrameType)
+    {
+      switch (aFrameType) {
+      case FrameType::eFrameTypeApp:
+        return NS_LITERAL_CSTRING("app");
+      case FrameType::eFrameTypeBrowser:
+        return NS_LITERAL_CSTRING("browser");
+      case FrameType::eFrameTypeRegular:
+        return NS_LITERAL_CSTRING("regular");
+      default:
+        NS_ERROR("Unknown frame type");
+        return EmptyCString();
+      }
+    }
 
     FrameType GetInheritedFrameType();
 
@@ -734,6 +796,9 @@ protected:
     nsCOMPtr<nsIURI>           mFailedURI;
     nsCOMPtr<nsIChannel>       mFailedChannel;
     uint32_t                   mFailedLoadType;
+
+    // window.location.searchParams is updated in sync with this object.
+    nsRefPtr<mozilla::dom::URLSearchParams> mURLSearchParams;
 
     // Set in DoURILoad when either the LOAD_RELOAD_ALLOW_MIXED_CONTENT flag or
     // the LOAD_NORMAL_ALLOW_MIXED_CONTENT flag is set.
@@ -813,6 +878,7 @@ protected:
     bool                       mIsAppTab;
     bool                       mUseGlobalHistory;
     bool                       mInPrivateBrowsing;
+    bool                       mUseRemoteTabs;
     bool                       mDeviceSizeIsPageSize;
 
     // Because scriptability depends on the mAllowJavascript values of our
@@ -852,6 +918,7 @@ protected:
 #endif
     bool                       mAffectPrivateSessionLifetime;
     bool                       mInvisible;
+    bool                       mHasLoadedNonBlankURI;
     uint64_t                   mHistoryID;
     uint32_t                   mDefaultLoadFlags;
 
@@ -879,18 +946,49 @@ private:
     nsCOMPtr<nsIPrincipal> mParentCharsetPrincipal;
     nsTObserverArray<nsWeakPtr> mPrivacyObservers;
     nsTObserverArray<nsWeakPtr> mReflowObservers;
+    nsTObserverArray<nsWeakPtr> mScrollObservers;
     nsCString         mOriginalUriString;
+    nsWeakPtr mOpener;
+    nsWeakPtr mOpenedRemote;
+
+    // True if recording profiles.
+    bool mProfileTimelineRecording;
+
+#ifdef MOZ_ENABLE_PROFILER_SPS
+    struct InternalProfileTimelineMarker
+    {
+      InternalProfileTimelineMarker(const char* aName,
+                                    ProfilerMarkerTracing* aPayload,
+                                    DOMHighResTimeStamp aTime)
+        : mName(aName)
+        , mPayload(aPayload)
+        , mTime(aTime)
+      {}
+
+      ~InternalProfileTimelineMarker()
+      {
+        delete mPayload;
+      }
+
+      nsCString mName;
+      ProfilerMarkerTracing* mPayload;
+      DOMHighResTimeStamp mTime;
+    };
+    nsTArray<InternalProfileTimelineMarker*> mProfileTimelineMarkers;
+#endif
+
+    // Get rid of all the timeline markers accumulated so far
+    void ClearProfileTimelineMarkers();
 
     // Separate function to do the actual name (i.e. not _top, _self etc.)
     // searching for FindItemWithName.
-    nsresult DoFindItemWithName(const PRUnichar* aName,
+    nsresult DoFindItemWithName(const char16_t* aName,
                                 nsISupports* aRequestor,
                                 nsIDocShellTreeItem* aOriginalRequestor,
                                 nsIDocShellTreeItem** _retval);
 
-    // Check whether accessing item is sandboxed from the target item.
-    static bool IsSandboxedFrom(nsIDocShellTreeItem* aTargetItem,
-                                nsIDocShellTreeItem* aAccessingItem);
+    // Notify consumers of a search being loaded through the observer service:
+    void MaybeNotifyKeywordSearchLoading(const nsString &aProvider, const nsString &aKeyword);
 
 #ifdef DEBUG
     // We're counting the number of |nsDocShells| to help find leaks
@@ -900,12 +998,12 @@ private:
 public:
     class InterfaceRequestorProxy : public nsIInterfaceRequestor {
     public:
-        InterfaceRequestorProxy(nsIInterfaceRequestor* p);
-        virtual ~InterfaceRequestorProxy();
+        explicit InterfaceRequestorProxy(nsIInterfaceRequestor* p);
         NS_DECL_THREADSAFE_ISUPPORTS
         NS_DECL_NSIINTERFACEREQUESTOR
  
     protected:
+        virtual ~InterfaceRequestorProxy();
         InterfaceRequestorProxy() {}
         nsWeakPtr mWeakPtr;
     };

@@ -9,16 +9,26 @@ const Cr = Components.results;
 
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
+Cu.import("resource://gre/modules/WindowsPrefSync.jsm");
 
 #ifdef MOZ_CRASHREPORTER
 XPCOMUtils.defineLazyServiceGetter(this, "CrashReporter",
   "@mozilla.org/xre/app-info;1", "nsICrashReporter");
 #endif
 
+XPCOMUtils.defineLazyModuleGetter(this, "CrashMonitor",
+  "resource://gre/modules/CrashMonitor.jsm");
+
+XPCOMUtils.defineLazyServiceGetter(this, "gUUIDGenerator",
+  "@mozilla.org/uuid-generator;1", "nsIUUIDGenerator");
+
 XPCOMUtils.defineLazyGetter(this, "NetUtil", function() {
   Cu.import("resource://gre/modules/NetUtil.jsm");
   return NetUtil;
 });
+
+XPCOMUtils.defineLazyModuleGetter(this, "UITelemetry",
+  "resource://gre/modules/UITelemetry.jsm");
 
 // -----------------------------------------------------------------------
 // Session Store
@@ -39,11 +49,17 @@ SessionStore.prototype = {
                                          Ci.nsISupportsWeakReference]),
 
   _windows: {},
+  _tabsFromOtherGroups: [],
+  _selectedWindow: 1,
+  _orderedWindows: [],
   _lastSaveTime: 0,
   _lastSessionTime: 0,
   _interval: 10000,
   _maxTabsUndo: 1,
   _shouldRestore: false,
+
+  // Tab telemetry variables
+  _maxTabsOpen: 1,
 
   init: function ss_init() {
     // Get file references
@@ -57,24 +73,90 @@ SessionStore.prototype = {
     this._loadState = STATE_STOPPED;
 
     try {
+      UITelemetry.addSimpleMeasureFunction("metro-tabs",
+                                          this._getTabStats.bind(this));
+    } catch (ex) {
+      // swallow exception that occurs if metro-tabs measure is already set up
+    }
+
+    CrashMonitor.previousCheckpoints.then(checkpoints => {
+      let previousSessionCrashed = false;
+
+      if (checkpoints) {
+        // If the previous session finished writing the final state, we'll
+        // assume there was no crash.
+        previousSessionCrashed = !checkpoints["sessionstore-final-state-write-complete"];
+      } else {
+        // If no checkpoints are saved, this is the first run with CrashMonitor or the
+        // metroSessionCheckpoints file was corrupted/deleted, so fallback to defining
+        // a crash as init-ing with an unexpected previousExecutionState
+        // 1 == RUNNING, 2 == SUSPENDED
+        previousSessionCrashed = Services.metro.previousExecutionState == 1 ||
+          Services.metro.previousExecutionState == 2;
+      }
+
+      Services.telemetry.getHistogramById("SHUTDOWN_OK").add(!previousSessionCrashed);
+    });
+
+    try {
+      let shutdownWasUnclean = false;
+
       if (this._sessionFileBackup.exists()) {
-        this._shouldRestore = true;
         this._sessionFileBackup.remove(false);
+        shutdownWasUnclean = true;
       }
 
       if (this._sessionFile.exists()) {
-        // Disable crash recovery if we have exceeded the timeout
-        this._lastSessionTime = this._sessionFile.lastModifiedTime;
-        let delta = Date.now() - this._lastSessionTime;
-        let timeout = Services.prefs.getIntPref("browser.sessionstore.resume_from_crash_timeout");
-        if (delta > (timeout * 60000))
-          this._shouldRestore = false;
-
         this._sessionFile.copyTo(null, this._sessionFileBackup.leafName);
+
+        switch(Services.metro.previousExecutionState) {
+          // 0 == NotRunning
+          case 0:
+            // Disable crash recovery if we have exceeded the timeout
+            this._lastSessionTime = this._sessionFile.lastModifiedTime;
+            let delta = Date.now() - this._lastSessionTime;
+            let timeout =
+              Services.prefs.getIntPref(
+                  "browser.sessionstore.resume_from_crash_timeout");
+            this._shouldRestore = shutdownWasUnclean
+                                && (delta < (timeout * 60000));
+            break;
+          // 1 == Running
+          case 1:
+            // We should never encounter this situation
+            Components.utils.reportError("SessionRestore.init called with "
+                                       + "previous execution state 'Running'");
+            this._shouldRestore = true;
+            break;
+          // 2 == Suspended
+          case 2:
+            // We should never encounter this situation
+            Components.utils.reportError("SessionRestore.init called with "
+                                       + "previous execution state 'Suspended'");
+            this._shouldRestore = true;
+            break;
+          // 3 == Terminated
+          case 3:
+            // Terminated means that Windows terminated our already-suspended
+            // process to get back some resources. When we re-launch, we want
+            // to provide the illusion that our process was suspended the
+            // whole time, and never terminated.
+            this._shouldRestore = true;
+            break;
+          // 4 == ClosedByUser
+          case 4:
+            // ClosedByUser indicates that the user performed a "close" gesture
+            // on our tile. We should act as if the browser closed normally,
+            // even if we were closed from a suspended state (in which case
+            // we'll have determined that it was an unclean shtudown)
+            this._shouldRestore = false;
+            break;
+        }
       }
 
-      if (!this._sessionCache.exists() || !this._sessionCache.isDirectory())
+      if (!this._sessionCache.exists() || !this._sessionCache.isDirectory()) {
         this._sessionCache.create(Ci.nsIFile.DIRECTORY_TYPE, 0700);
+      }
     } catch (ex) {
       Cu.reportError(ex); // file was write-locked?
     }
@@ -137,6 +219,13 @@ SessionStore.prototype = {
     })
   },
 
+  _getTabStats: function() {
+    return {
+      currTabCount: this._currTabCount,
+      maxTabCount: this._maxTabsOpen
+    };
+  },
+
   observe: function ss_observe(aSubject, aTopic, aData) {
     let self = this;
     let observerService = Services.obs;
@@ -150,9 +239,14 @@ SessionStore.prototype = {
         observerService.addObserver(this, "quit-application-requested", true);
         observerService.addObserver(this, "quit-application-granted", true);
         observerService.addObserver(this, "quit-application", true);
+        observerService.addObserver(this, "reset-telemetry-vars", true);
         break;
       case "final-ui-startup":
         observerService.removeObserver(this, "final-ui-startup");
+        if (WindowsPrefSync) {
+          // Pulls in Desktop controlled prefs and pushes out Metro controlled prefs
+          WindowsPrefSync.init();
+        }
         this.init();
         break;
       case "domwindowopened":
@@ -213,15 +307,16 @@ SessionStore.prototype = {
         observerService.removeObserver(this, "quit-application-requested");
         observerService.removeObserver(this, "quit-application-granted");
         observerService.removeObserver(this, "quit-application");
+        observerService.removeObserver(this, "reset-telemetry-vars");
 
         // If a save has been queued, kill the timer and save state now
         if (this._saveTimer) {
           this._saveTimer.cancel();
           this._saveTimer = null;
-          this.saveState();
         }
+        this.saveState();
         break;
-      case "browser:purge-session-history": // catch sanitization 
+      case "browser:purge-session-history": // catch sanitization
         this._clearDisk();
 
         // If the browser is shutting down, simply return after clearing the
@@ -244,13 +339,35 @@ SessionStore.prototype = {
         this._saveTimer = null;
         this.saveState();
         break;
+      case "reset-telemetry-vars":
+        // Used in mochitests only.
+        this._maxTabsOpen = 1;
     }
+  },
+
+  updateTabTelemetryVars: function(window) {
+    this._currTabCount = window.Browser.tabs.length;
+      if (this._currTabCount > this._maxTabsOpen) {
+        this._maxTabsOpen = this._currTabCount;
+      }
   },
 
   handleEvent: function ss_handleEvent(aEvent) {
     let window = aEvent.currentTarget.ownerDocument.defaultView;
     switch (aEvent.type) {
+      case "load":
+        browser = aEvent.currentTarget;
+        if (aEvent.target == browser.contentDocument && browser.__SS_tabFormData) {
+          browser.messageManager.sendAsyncMessage("SessionStore:restoreSessionTabData", {
+            formdata: browser.__SS_tabFormData.formdata,
+            scroll: browser.__SS_tabFormData.scroll
+          });
+        }
+        break;
       case "TabOpen":
+        this.updateTabTelemetryVars(window);
+        let browser = aEvent.originalTarget.linkedBrowser;
+        browser.addEventListener("load", this, true);
       case "TabClose": {
         let browser = aEvent.originalTarget.linkedBrowser;
         if (aEvent.type == "TabOpen") {
@@ -262,6 +379,9 @@ SessionStore.prototype = {
         }
         break;
     }
+      case "TabRemove":
+        this.updateTabTelemetryVars(window);
+        break;
       case "TabSelect": {
         let browser = aEvent.originalTarget.linkedBrowser;
         this.onTabSelect(window, browser);
@@ -271,8 +391,19 @@ SessionStore.prototype = {
   },
 
   receiveMessage: function ss_receiveMessage(aMessage) {
-    let window = aMessage.target.ownerDocument.defaultView;
-    this.onTabLoad(window, aMessage.target, aMessage);
+    let browser = aMessage.target;
+    switch (aMessage.name) {
+      case "SessionStore:collectFormdata":
+        browser.__SS_data.formdata = aMessage.json.data;
+        break;
+      case "SessionStore:collectScrollPosition":
+        browser.__SS_data.scroll = aMessage.json.data;
+        break;
+      default:
+        let window = aMessage.target.ownerDocument.defaultView;
+        this.onTabLoad(window, aMessage.target, aMessage);
+        break;
+    }
   },
 
   onWindowOpen: function ss_onWindowOpen(aWindow) {
@@ -284,9 +415,10 @@ SessionStore.prototype = {
     if (aWindow.document.documentElement.getAttribute("windowtype") != "navigator:browser" || this._loadState == STATE_QUITTING)
       return;
 
-    // Assign it a unique identifier (timestamp) and create its data object
-    aWindow.__SSID = "window" + Date.now();
+    // Assign it a unique identifier and create its data object
+    aWindow.__SSID = "window" + gUUIDGenerator.generateUUID().toString();
     this._windows[aWindow.__SSID] = { tabs: [], selected: 0, _closedTabs: [] };
+    this._orderedWindows.push(aWindow.__SSID);
 
     // Perform additional initialization when the first window is loading
     if (this._loadState == STATE_STOPPED) {
@@ -294,7 +426,7 @@ SessionStore.prototype = {
       this._lastSaveTime = Date.now();
 
       // Nothing to restore, notify observers things are complete
-      if (!this._shouldRestore) {
+      if (!this.shouldRestore()) {
         this._clearCache();
         Services.obs.notifyObservers(null, "sessionstore-windows-restored", "");
       }
@@ -309,6 +441,7 @@ SessionStore.prototype = {
     let tabContainer = aWindow.document.getElementById("tabs");
     tabContainer.addEventListener("TabOpen", this, true);
     tabContainer.addEventListener("TabClose", this, true);
+    tabContainer.addEventListener("TabRemove", this, true);
     tabContainer.addEventListener("TabSelect", this, true);
   },
 
@@ -320,6 +453,7 @@ SessionStore.prototype = {
     let tabContainer = aWindow.document.getElementById("tabs");
     tabContainer.removeEventListener("TabOpen", this, true);
     tabContainer.removeEventListener("TabClose", this, true);
+    tabContainer.removeEventListener("TabRemove", this, true);
     tabContainer.removeEventListener("TabSelect", this, true);
 
     if (this._loadState == STATE_RUNNING) {
@@ -343,6 +477,8 @@ SessionStore.prototype = {
   onTabAdd: function ss_onTabAdd(aWindow, aBrowser, aNoNotification) {
     aBrowser.messageManager.addMessageListener("pageshow", this);
     aBrowser.messageManager.addMessageListener("Content:SessionHistory", this);
+    aBrowser.messageManager.addMessageListener("SessionStore:collectFormdata", this);
+    aBrowser.messageManager.addMessageListener("SessionStore:collectScrollPosition", this);
 
     if (!aNoNotification)
       this.saveStateDelayed();
@@ -352,6 +488,8 @@ SessionStore.prototype = {
   onTabRemove: function ss_onTabRemove(aWindow, aBrowser, aNoNotification) {
     aBrowser.messageManager.removeMessageListener("pageshow", this);
     aBrowser.messageManager.removeMessageListener("Content:SessionHistory", this);
+    aBrowser.messageManager.removeMessageListener("SessionStore:collectFormdata", this);
+    aBrowser.messageManager.removeMessageListener("SessionStore:collectScrollPosition", this);
 
     // If this browser is being restored, skip any session save activity
     if (aBrowser.__SS_restore)
@@ -460,9 +598,14 @@ SessionStore.prototype = {
 
   saveState: function ss_saveState() {
     let data = this._getCurrentState();
-    this._writeFile(this._sessionFile, JSON.stringify(data));
+    // sanity check before we overwrite the session file
+    if (data.windows && data.windows.length && data.selectedWindow) {
+      this._writeFile(this._sessionFile, JSON.stringify(data));
 
-    this._lastSaveTime = Date.now();
+      this._lastSaveTime = Date.now();
+    } else {
+      dump("SessionStore: Not saving state with invalid data: " + JSON.stringify(data) + "\n");
+    }
   },
 
   _getCurrentState: function ss_getCurrentState() {
@@ -472,9 +615,9 @@ SessionStore.prototype = {
     });
 
     let data = { windows: [] };
-    let index;
-    for (index in this._windows)
-      data.windows.push(this._windows[index]);
+    for (let i = 0; i < this._orderedWindows.length; i++)
+      data.windows.push(this._windows[this._orderedWindows[i]]);
+    data.selectedWindow = this._selectedWindow;
     return data;
   },
 
@@ -483,7 +626,7 @@ SessionStore.prototype = {
     if (aBrowser.__SS_restore)
       return;
 
-    let aHistory = aHistory || { entries: [{ url: aBrowser.currentURI.spec, title: aBrowser.contentTitle }], index: 1 };
+    aHistory = aHistory || { entries: [{ url: aBrowser.currentURI.spec, title: aBrowser.contentTitle }], index: 1 };
 
     let tabData = {};
     tabData.entries = aHistory.entries;
@@ -493,27 +636,30 @@ SessionStore.prototype = {
     aBrowser.__SS_data = tabData;
   },
 
+  _getTabData: function(aWindow) {
+    return aWindow.Browser.tabs
+      .filter(tab => !tab.isPrivate && tab.browser.__SS_data)
+      .map(tab => {
+        let browser = tab.browser;
+        let tabData = browser.__SS_data;
+        if (browser.__SS_extdata)
+          tabData.extData = browser.__SS_extdata;
+        return tabData;
+      });
+  },
+
   _collectWindowData: function ss__collectWindowData(aWindow) {
     // Ignore windows not tracked by SessionStore
     if (!aWindow.__SSID || !this._windows[aWindow.__SSID])
       return;
 
     let winData = this._windows[aWindow.__SSID];
-    winData.tabs = [];
 
     let index = aWindow.Elements.browsers.selectedIndex;
     winData.selected = parseInt(index) + 1; // 1-based
 
-    let tabs = aWindow.Browser.tabs;
-    for (let i = 0; i < tabs.length; i++) {
-      let browser = tabs[i].browser;
-      if (browser.__SS_data) {
-        let tabData = browser.__SS_data;
-        if (browser.__SS_extdata)
-          tabData.extData = browser.__SS_extdata;
-        winData.tabs.push(tabData);
-      }
-    }
+    let tabData = this._getTabData(aWindow);
+    winData.tabs = tabData.concat(this._tabsFromOtherGroups);
   },
 
   _forEachBrowserWindow: function ss_forEachBrowserWindow(aFunc) {
@@ -546,6 +692,9 @@ SessionStore.prototype = {
     let istream = converter.convertToInputStream(aData);
     NetUtil.asyncCopy(istream, ostream, function(rc) {
       if (Components.isSuccessCode(rc)) {
+        if (Services.startup.shuttingDown) {
+          Services.obs.notifyObservers(null, "sessionstore-final-state-write-complete", "");
+        }
         Services.obs.notifyObservers(null, "sessionstore-state-write-complete", "");
       }
     });
@@ -677,7 +826,7 @@ SessionStore.prototype = {
   },
 
   shouldRestore: function ss_shouldRestore() {
-    return this._shouldRestore;
+    return this._shouldRestore || (3 == Services.prefs.getIntPref("browser.startup.page"));
   },
 
   restoreLastSession: function ss_restoreLastSession(aBringToFront) {
@@ -724,17 +873,46 @@ SessionStore.prototype = {
 
         let window = Services.wm.getMostRecentWindow("navigator:browser");
 
-        let tabs = data.windows[0].tabs;
-        let selected = data.windows[0].selected;
+        if (typeof data.selectedWindow == "number") {
+          this._selectedWindow = data.selectedWindow;
+        }
+        let windowIndex = this._selectedWindow - 1;
+        let tabs = data.windows[windowIndex].tabs;
+        let selected = data.windows[windowIndex].selected;
 
-        if (data.windows[0]._closedTabs)
-          this._windows[window.__SSID]._closedTabs = data.windows[0]._closedTabs;
+        let currentGroupId;
+        try {
+          currentGroupId = JSON.parse(data.windows[windowIndex].extData["tabview-groups"]).activeGroupId;
+        } catch (ex) { /* currentGroupId is undefined if user has no tab groups */ }
+
+        // Move all window data from sessionstore.js to this._windows.
+        this._orderedWindows = [];
+        for (let i = 0; i < data.windows.length; i++) {
+          let SSID;
+          if (i != windowIndex) {
+            SSID = "window" + gUUIDGenerator.generateUUID().toString();
+            this._windows[SSID] = data.windows[i];
+          } else {
+            SSID = window.__SSID;
+            this._windows[SSID].extData = data.windows[i].extData;
+            this._windows[SSID]._closedTabs =
+              this._windows[SSID]._closedTabs.concat(data.windows[i]._closedTabs);
+          }
+          this._orderedWindows.push(SSID);
+        }
 
         if (selected > tabs.length) // Clamp the selected index if it's bogus
           selected = 1;
 
         for (let i=0; i<tabs.length; i++) {
           let tabData = tabs[i];
+          let tabGroupId = (typeof currentGroupId == "number") ?
+            JSON.parse(tabData.extData["tabview-tab"]).groupID : null;
+
+          if (tabGroupId && tabGroupId != currentGroupId) {
+            this._tabsFromOtherGroups.push(tabData);
+            continue;
+          }
 
           // We must have selected tabs as soon as possible, so we let all tabs be selected
           // until we get the real selected tab. Then we stop selecting tabs. The end result
@@ -760,9 +938,10 @@ SessionStore.prototype = {
             tab.chromeTab.updateTitle(tabData.entries[tabData.index - 1].title);
           }
 
+          tab.browser.__SS_tabFormData = tabData
           tab.browser.__SS_extdata = tabData.extData;
         }
-    
+
         notifyObservers();
       }.bind(this));
     } catch (ex) {

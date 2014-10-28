@@ -9,19 +9,20 @@
 #include "RasterImage.h"
 #include "imgDecoderObserver.h"
 #include "mozilla/RefPtr.h"
+#include "DecodeStrategy.h"
 #include "ImageMetadata.h"
 #include "Orientation.h"
 #include "mozilla/Telemetry.h"
 
 namespace mozilla {
+
 namespace image {
 
 class Decoder
 {
 public:
 
-  Decoder(RasterImage& aImage);
-  virtual ~Decoder();
+  explicit Decoder(RasterImage& aImage);
 
   /**
    * Initialize an image decoder. Decoders may not be re-initialized.
@@ -50,7 +51,7 @@ public:
    *
    * Notifications Sent: TODO
    */
-  void Write(const char* aBuffer, uint32_t aCount);
+  void Write(const char* aBuffer, uint32_t aCount, DecodeStrategy aStrategy);
 
   /**
    * Informs the decoder that all the data has been written.
@@ -94,16 +95,13 @@ public:
     mSizeDecode = aSizeDecode;
   }
 
-  bool IsSynchronous() const
-  {
-    return mSynchronous;
-  }
-
   void SetObserver(imgDecoderObserver* aObserver)
   {
     MOZ_ASSERT(aObserver);
     mObserver = aObserver;
   }
+
+  size_t BytesDecoded() const { return mBytesDecoded; }
 
   // The number of frames we have, including anything in-progress. Thus, this
   // is only 0 if we haven't begun any frames.
@@ -155,7 +153,7 @@ public:
   // will be called again with nullptr and 0 as arguments.
   void NeedNewFrame(uint32_t frameNum, uint32_t x_offset, uint32_t y_offset,
                     uint32_t width, uint32_t height,
-                    gfxImageFormat format,
+                    gfx::SurfaceFormat format,
                     uint8_t palette_depth = 0);
 
   virtual bool NeedsNewFrame() const { return mNeedsNewFrame; }
@@ -164,20 +162,21 @@ public:
   // status code from that attempt. Clears mNewFrameData.
   virtual nsresult AllocateFrame();
 
-  // Called when a chunk of decoding has been done and the frame needs to be
-  // marked as dirty. Must be called only on the main thread.
-  void MarkFrameDirty();
-
-  imgFrame* GetCurrentFrame() const { return mCurrentFrame; }
+  already_AddRefed<imgFrame> GetCurrentFrame() const
+  {
+    nsRefPtr<imgFrame> frame = mCurrentFrame;
+    return frame.forget();
+  }
 
 protected:
+  virtual ~Decoder();
 
   /*
    * Internal hooks. Decoder implementations may override these and
    * only these methods.
    */
   virtual void InitInternal();
-  virtual void WriteInternal(const char* aBuffer, uint32_t aCount);
+  virtual void WriteInternal(const char* aBuffer, uint32_t aCount, DecodeStrategy aStrategy);
   virtual void FinishInternal();
 
   /*
@@ -227,7 +226,7 @@ protected:
    *
    */
   RasterImage &mImage;
-  imgFrame* mCurrentFrame;
+  nsRefPtr<imgFrame> mCurrentFrame;
   RefPtr<imgDecoderObserver> mObserver;
   ImageMetadata mImageMetadata;
 
@@ -237,21 +236,11 @@ protected:
   uint32_t mColormapSize;
 
   uint32_t mDecodeFlags;
+  size_t mBytesDecoded;
   bool mDecodeDone;
   bool mDataError;
 
 private:
-  // Decode in synchronous mode. This is unsafe off-main-thread since it may
-  // attempt to allocate frames. To ensure that we never accidentally leave the
-  // decoder in synchronous mode, this should only be called by
-  // AutoSetSyncDecode.
-  void SetSynchronous(bool aSynchronous)
-  {
-    mSynchronous = aSynchronous;
-  }
-
-  friend class AutoSetSyncDecode;
-
   uint32_t mFrameCount; // Number of frames, including anything in-progress
 
   nsIntRect mInvalidRect; // Tracks an invalidation region in the current frame.
@@ -265,7 +254,7 @@ private:
 
     NewFrameData(uint32_t num, uint32_t offsetx, uint32_t offsety,
                  uint32_t width, uint32_t height,
-                 gfxImageFormat format, uint8_t paletteDepth)
+                 gfx::SurfaceFormat format, uint8_t paletteDepth)
       : mFrameNum(num)
       , mOffsetX(offsetx)
       , mOffsetY(offsety)
@@ -279,7 +268,7 @@ private:
     uint32_t mOffsetY;
     uint32_t mWidth;
     uint32_t mHeight;
-    gfxImageFormat mFormat;
+    gfx::SurfaceFormat mFormat;
     uint8_t mPaletteDepth;
   };
   NewFrameData mNewFrameData;
@@ -288,35 +277,6 @@ private:
   bool mSizeDecode;
   bool mInFrame;
   bool mIsAnimated;
-  bool mSynchronous;
-};
-
-// A RAII helper class to automatically pair a call to SetSynchronous(true)
-// with a call to SetSynchronous(false), since failing to do so can lead us
-// to try to allocate frames off-main-thread, which is unsafe. Synchronous
-// decoding may only happen within the scope of an AutoSetSyncDecode. Nested
-// AutoSetSyncDecode's are OK.
-class AutoSetSyncDecode
-{
-public:
-  AutoSetSyncDecode(Decoder* aDecoder)
-    : mDecoder(aDecoder)
-  {
-    MOZ_ASSERT(NS_IsMainThread());
-    MOZ_ASSERT(mDecoder);
-
-    mOriginalValue = mDecoder->IsSynchronous();
-    mDecoder->SetSynchronous(true);
-  }
-
-  ~AutoSetSyncDecode()
-  {
-    mDecoder->SetSynchronous(mOriginalValue);
-  }
-
-private:
-  nsRefPtr<Decoder> mDecoder;
-  bool              mOriginalValue;
 };
 
 } // namespace image

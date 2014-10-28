@@ -10,48 +10,27 @@ function run_test() {
 /**
  * Helper function.
  */
-function newUint8Worker() {
-  let worker = newWorker();
-  let index = 0; // index for read
-  let buf = [];
-
-  worker.Buf.writeUint8 = function (value) {
-    buf.push(value);
-  };
-
-  worker.Buf.readUint8 = function () {
-    return buf[index++];
-  };
-
-  worker.Buf.seekIncoming = function (offset) {
-    index += offset;
-  };
-
-  worker.debug = do_print;
-
-  return worker;
-}
-
 function newUint8SupportOutgoingIndexWorker() {
   let worker = newWorker();
   let index = 4;          // index for read
   let buf = [0, 0, 0, 0]; // Preserved parcel size
+  let context = worker.ContextPool._contexts[0];
 
-  worker.Buf.writeUint8 = function (value) {
-    if (worker.Buf.outgoingIndex >= buf.length) {
+  context.Buf.writeUint8 = function(value) {
+    if (context.Buf.outgoingIndex >= buf.length) {
       buf.push(value);
     } else {
-      buf[worker.Buf.outgoingIndex] = value;
+      buf[context.Buf.outgoingIndex] = value;
     }
 
-    worker.Buf.outgoingIndex++;
+    context.Buf.outgoingIndex++;
   };
 
-  worker.Buf.readUint8 = function () {
+  context.Buf.readUint8 = function() {
     return buf[index++];
   };
 
-  worker.Buf.seekIncoming = function (offset) {
+  context.Buf.seekIncoming = function(offset) {
     index += offset;
   };
 
@@ -66,8 +45,9 @@ function newUint8SupportOutgoingIndexWorker() {
  */
 add_test(function test_if_send_stk_terminal_profile() {
   let worker = newUint8Worker();
+  let context = worker.ContextPool._contexts[0];
   let profileSend = false;
-  worker.RIL.sendStkTerminalProfile = function (data) {
+  context.RIL.sendStkTerminalProfile = function(data) {
     profileSend = true;
   };
 
@@ -80,7 +60,7 @@ add_test(function test_if_send_stk_terminal_profile() {
   };
   worker.RILQUIRKS_SEND_STK_PROFILE_DOWNLOAD = false;
 
-  worker.RIL._processICCStatus(iccStatus);
+  context.RIL._processICCStatus(iccStatus);
 
   do_check_eq(profileSend, false);
 
@@ -92,8 +72,9 @@ add_test(function test_if_send_stk_terminal_profile() {
  */
 add_test(function test_send_stk_terminal_profile() {
   let worker = newUint8Worker();
-  let ril = worker.RIL;
-  let buf = worker.Buf;
+  let context = worker.ContextPool._contexts[0];
+  let ril = context.RIL;
+  let buf = context.Buf;
 
   ril.sendStkTerminalProfile(STK_SUPPORTED_TERMINAL_PROFILE);
 
@@ -112,10 +93,11 @@ add_test(function test_send_stk_terminal_profile() {
  */
 add_test(function test_stk_terminal_response() {
   let worker = newUint8SupportOutgoingIndexWorker();
-  let buf = worker.Buf;
-  let pduHelper = worker.GsmPDUHelper;
+  let context = worker.ContextPool._contexts[0];
+  let buf = context.Buf;
+  let pduHelper = context.GsmPDUHelper;
 
-  buf.sendParcel = function () {
+  buf.sendParcel = function() {
     // Type
     do_check_eq(this.readInt32(), REQUEST_STK_SEND_TERMINAL_RESPONSE);
 
@@ -171,7 +153,82 @@ add_test(function test_stk_terminal_response() {
     input: "Mozilla",
     resultCode: STK_RESULT_OK
   };
-  worker.RIL.sendStkTerminalResponse(response);
+  context.RIL.sendStkTerminalResponse(response);
+});
+
+/**
+ * Verify STK terminal response : GET_INKEY - YES/NO request
+ */
+add_test(function test_stk_terminal_response_get_inkey() {
+  function do_test(isYesNo) {
+    let worker = newUint8SupportOutgoingIndexWorker();
+    let context = worker.ContextPool._contexts[0];
+    let buf = context.Buf;
+    let pduHelper = context.GsmPDUHelper;
+
+    buf.sendParcel = function() {
+      // Type
+      do_check_eq(this.readInt32(), REQUEST_STK_SEND_TERMINAL_RESPONSE);
+
+      // Token : we don't care
+      this.readInt32();
+
+      // Data Size, 32 = 2 * (TLV_COMMAND_DETAILS_SIZE(5) +
+      //                      TLV_DEVICE_ID_SIZE(4) +
+      //                      TLV_RESULT_SIZE(3) +
+      //                      TEXT LENGTH(4))
+      do_check_eq(this.readInt32(), 32);
+
+      // Command Details, Type-Length-Value
+      do_check_eq(pduHelper.readHexOctet(), COMPREHENSIONTLV_TAG_COMMAND_DETAILS |
+                                            COMPREHENSIONTLV_FLAG_CR);
+      do_check_eq(pduHelper.readHexOctet(), 3);
+      do_check_eq(pduHelper.readHexOctet(), 0x01);
+      do_check_eq(pduHelper.readHexOctet(), STK_CMD_GET_INKEY);
+      do_check_eq(pduHelper.readHexOctet(), 0x04);
+
+      // Device Identifies, Type-Length-Value(Source ID-Destination ID)
+      do_check_eq(pduHelper.readHexOctet(), COMPREHENSIONTLV_TAG_DEVICE_ID);
+      do_check_eq(pduHelper.readHexOctet(), 2);
+      do_check_eq(pduHelper.readHexOctet(), STK_DEVICE_ID_ME);
+      do_check_eq(pduHelper.readHexOctet(), STK_DEVICE_ID_SIM);
+
+      // Result
+      do_check_eq(pduHelper.readHexOctet(), COMPREHENSIONTLV_TAG_RESULT |
+                                            COMPREHENSIONTLV_FLAG_CR);
+      do_check_eq(pduHelper.readHexOctet(), 1);
+      do_check_eq(pduHelper.readHexOctet(), STK_RESULT_OK);
+
+      // Yes/No response
+      do_check_eq(pduHelper.readHexOctet(), COMPREHENSIONTLV_TAG_TEXT_STRING |
+                                            COMPREHENSIONTLV_FLAG_CR);
+      do_check_eq(pduHelper.readHexOctet(), 2);
+      do_check_eq(pduHelper.readHexOctet(), STK_TEXT_CODING_GSM_8BIT);
+      do_check_eq(pduHelper.readHexOctet(), isYesNo ? 0x01 : 0x00);
+
+      run_next_test();
+    };
+
+    let response = {
+      command: {
+        commandNumber: 0x01,
+        typeOfCommand: STK_CMD_GET_INKEY,
+        commandQualifier: 0x04,
+        options: {
+          isYesNoRequested: true
+        }
+      },
+      isYesNo: isYesNo,
+      resultCode: STK_RESULT_OK
+    };
+
+    context.RIL.sendStkTerminalResponse(response);
+  };
+
+  // Test "Yes" response
+  do_test(true);
+  // Test "No" response
+  do_test(false);
 });
 
 // Test ComprehensionTlvHelper
@@ -181,8 +238,9 @@ add_test(function test_stk_terminal_response() {
  */
 add_test(function test_write_location_info_tlv() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let tlvHelper = worker.ComprehensionTlvHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let tlvHelper = context.ComprehensionTlvHelper;
 
   // Test with 2-digit mnc, and gsmCellId obtained from UMTS network.
   let loc = {
@@ -270,8 +328,9 @@ add_test(function test_write_location_info_tlv() {
  */
 add_test(function test_write_disconnecting_cause() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let tlvHelper = worker.ComprehensionTlvHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let tlvHelper = context.ComprehensionTlvHelper;
 
   tlvHelper.writeCauseTlv(RIL_ERROR_TO_GECKO_ERROR[ERROR_GENERIC_FAILURE]);
   let tag = pduHelper.readHexOctet();
@@ -291,7 +350,8 @@ add_test(function test_write_disconnecting_cause() {
  */
 add_test(function test_get_size_of_length_octets() {
   let worker = newUint8Worker();
-  let tlvHelper = worker.ComprehensionTlvHelper;
+  let context = worker.ContextPool._contexts[0];
+  let tlvHelper = context.ComprehensionTlvHelper;
 
   let length = 0x70;
   do_check_eq(tlvHelper.getSizeOfLengthOctets(length), 1);
@@ -313,8 +373,9 @@ add_test(function test_get_size_of_length_octets() {
  */
 add_test(function test_write_length() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let tlvHelper = worker.ComprehensionTlvHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let tlvHelper = context.ComprehensionTlvHelper;
 
   let length = 0x70;
   tlvHelper.writeLength(length);
@@ -347,9 +408,10 @@ add_test(function test_write_length() {
  */
 add_test(function test_stk_proactive_command_search_next_tag() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
 
   let tag_test = [
     0xD0,
@@ -389,9 +451,10 @@ add_test(function test_stk_proactive_command_search_next_tag() {
  */
 add_test(function test_stk_proactive_command_refresh() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
 
   let refresh_1 = [
     0xD0,
@@ -422,18 +485,24 @@ add_test(function test_stk_proactive_command_refresh() {
  */
 add_test(function test_stk_proactive_command_play_tone() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
+  let ril = context.RIL;
+  ril.iccInfoPrivate.sst = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x10];
+  ril.appType = CARD_APPTYPE_SIM;
 
   let tone_1 = [
     0xD0,
-    0x1B,
+    0x1F,
     0x81, 0x03, 0x01, 0x20, 0x00,
     0x82, 0x02, 0x81, 0x03,
     0x85, 0x09, 0x44, 0x69, 0x61, 0x6C, 0x20, 0x54, 0x6F, 0x6E, 0x65,
     0x8E, 0x01, 0x01,
-    0x84, 0x02, 0x01, 0x05];
+    0x84, 0x02, 0x01, 0x05,
+    0x9E, 0x02, 0x00, 0x01];
 
   for (let i = 0; i < tone_1.length; i++) {
     pduHelper.writeHexOctet(tone_1[i]);
@@ -456,6 +525,10 @@ add_test(function test_stk_proactive_command_play_tone() {
   do_check_eq(tlv.value.timeUnit, STK_TIME_UNIT_SECOND);
   do_check_eq(tlv.value.timeInterval, 5);
 
+  tlv = stkHelper.searchForTag(COMPREHENSIONTLV_TAG_ICON_ID, ctlvs);
+  do_check_eq(tlv.value.qualifier, 0x00);
+  do_check_eq(tlv.value.identifier, 0x01);
+
   run_next_test();
 });
 
@@ -464,9 +537,10 @@ add_test(function test_stk_proactive_command_play_tone() {
  */
 add_test(function test_stk_proactive_command_poll_interval() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
 
   let poll_1 = [
     0xD0,
@@ -498,18 +572,24 @@ add_test(function test_stk_proactive_command_poll_interval() {
  */
 add_test(function test_read_septets_to_string() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
+  let ril = context.RIL;
+  ril.iccInfoPrivate.sst = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x10];
+  ril.appType = CARD_APPTYPE_SIM;
 
   let display_text_1 = [
     0xd0,
-    0x28,
+    0x2c,
     0x81, 0x03, 0x01, 0x21, 0x80,
     0x82, 0x02, 0x81, 0x02,
     0x0d, 0x1d, 0x00, 0xd3, 0x30, 0x9b, 0xfc, 0x06, 0xc9, 0x5c, 0x30, 0x1a,
     0xa8, 0xe8, 0x02, 0x59, 0xc3, 0xec, 0x34, 0xb9, 0xac, 0x07, 0xc9, 0x60,
     0x2f, 0x58, 0xed, 0x15, 0x9b, 0xb9, 0x40,
+    0x9e, 0x02, 0x00, 0x01
   ];
 
   for (let i = 0; i < display_text_1.length; i++) {
@@ -521,6 +601,10 @@ add_test(function test_read_septets_to_string() {
   let tlv = stkHelper.searchForTag(COMPREHENSIONTLV_TAG_TEXT_STRING, ctlvs);
   do_check_eq(tlv.value.textString, "Saldo 2.04 E. Validez 20/05/13. ");
 
+  tlv = stkHelper.searchForTag(COMPREHENSIONTLV_TAG_ICON_ID, ctlvs);
+  do_check_eq(tlv.value.qualifier, 0x00);
+  do_check_eq(tlv.value.identifier, 0x01);
+
   run_next_test();
 });
 
@@ -529,9 +613,10 @@ add_test(function test_read_septets_to_string() {
  */
 add_test(function test_stk_proactive_command_event_list() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
 
   let event_1 = [
     0xD0,
@@ -565,19 +650,25 @@ add_test(function test_stk_proactive_command_event_list() {
  */
 add_test(function test_stk_proactive_command_get_input() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
-  let stkCmdHelper = worker.StkCommandParamsFactory;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
+  let stkCmdHelper = context.StkCommandParamsFactory;
+  let ril = context.RIL;
+  ril.iccInfoPrivate.sst = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x10];
+  ril.appType = CARD_APPTYPE_SIM;
 
   let get_input_1 = [
     0xD0,
-    0x1E,
+    0x22,
     0x81, 0x03, 0x01, 0x23, 0x8F,
     0x82, 0x02, 0x81, 0x82,
     0x8D, 0x05, 0x04, 0x54, 0x65, 0x78, 0x74,
     0x91, 0x02, 0x01, 0x10,
-    0x17, 0x08, 0x04, 0x44, 0x65, 0x66, 0x61, 0x75, 0x6C, 0x74];
+    0x17, 0x08, 0x04, 0x44, 0x65, 0x66, 0x61, 0x75, 0x6C, 0x74,
+    0x9E, 0x02, 0x00, 0x01];
 
   for (let i = 0; i < get_input_1.length; i++) {
     pduHelper.writeHexOctet(get_input_1[i]);
@@ -599,6 +690,10 @@ add_test(function test_stk_proactive_command_get_input() {
   do_check_eq(input.minLength, 0x01);
   do_check_eq(input.maxLength, 0x10);
   do_check_eq(input.defaultText, "Default");
+
+  tlv = stkHelper.searchForTag(COMPREHENSIONTLV_TAG_ICON_ID, ctlvs);
+  do_check_eq(tlv.value.qualifier, 0x00);
+  do_check_eq(tlv.value.identifier, 0x01);
 
   let get_input_2 = [
     0xD0,
@@ -633,9 +728,10 @@ add_test(function test_stk_proactive_command_get_input() {
  */
 add_test(function test_stk_proactive_command_more_time() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
 
   let more_time_1 = [
     0xD0,
@@ -662,14 +758,19 @@ add_test(function test_stk_proactive_command_more_time() {
  */
 add_test(function test_stk_proactive_command_select_item() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
-  let stkFactory = worker.StkCommandParamsFactory;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
+  let stkFactory = context.StkCommandParamsFactory;
+  let ril = context.RIL;
+  ril.iccInfoPrivate.sst = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x10];
+  ril.appType = CARD_APPTYPE_SIM;
 
   let select_item_1 = [
     0xD0,
-    0x33,
+    0x3C,
     0x81, 0x03, 0x01, 0x24, 0x00,
     0x82, 0x02, 0x81, 0x82,
     0x85, 0x05, 0x54, 0x69, 0x74, 0x6C, 0x65,
@@ -677,7 +778,9 @@ add_test(function test_stk_proactive_command_select_item() {
     0x8F, 0x07, 0x02, 0x69, 0x74, 0x65, 0x6D, 0x20, 0x32,
     0x8F, 0x07, 0x03, 0x69, 0x74, 0x65, 0x6D, 0x20, 0x33,
     0x18, 0x03, 0x10, 0x15, 0x20,
-    0x90, 0x01, 0x01
+    0x90, 0x01, 0x01,
+    0x9E, 0x02, 0x00, 0x01,
+    0x9F, 0x03, 0x00, 0x01, 0x02
   ];
 
   for(let i = 0 ; i < select_item_1.length; i++) {
@@ -703,6 +806,15 @@ add_test(function test_stk_proactive_command_select_item() {
   do_check_eq(menu.nextActionList[1], STK_CMD_LAUNCH_BROWSER);
   do_check_eq(menu.nextActionList[2], STK_CMD_PLAY_TONE);
   do_check_eq(menu.defaultItem, 0x00);
+
+  tlv = stkHelper.searchForTag(COMPREHENSIONTLV_TAG_ICON_ID, ctlvs);
+  do_check_eq(tlv.value.qualifier, 0x00);
+  do_check_eq(tlv.value.identifier, 0x01);
+
+  tlv = stkHelper.searchForTag(COMPREHENSIONTLV_TAG_ICON_ID_LIST, ctlvs);
+  do_check_eq(tlv.value.qualifier, 0x00);
+  do_check_eq(tlv.value.identifiers[0], 0x01);
+  do_check_eq(tlv.value.identifiers[1], 0x02);
 
   let select_item_2 = [
     0xD0,
@@ -749,21 +861,28 @@ add_test(function test_stk_proactive_command_select_item() {
  */
 add_test(function test_stk_proactive_command_set_up_menu() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
-  let stkFactory = worker.StkCommandParamsFactory;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
+  let stkFactory = context.StkCommandParamsFactory;
+  let ril = context.RIL;
+  ril.iccInfoPrivate.sst = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x10];
+  ril.appType = CARD_APPTYPE_SIM;
 
   let set_up_menu_1 = [
     0xD0,
-    0x30,
+    0x39,
     0x81, 0x03, 0x01, 0x25, 0x00,
     0x82, 0x02, 0x81, 0x82,
     0x85, 0x05, 0x54, 0x69, 0x74, 0x6C, 0x65,
     0x8F, 0x07, 0x01, 0x69, 0x74, 0x65, 0x6D, 0x20, 0x31,
     0x8F, 0x07, 0x02, 0x69, 0x74, 0x65, 0x6D, 0x20, 0x32,
     0x8F, 0x07, 0x03, 0x69, 0x74, 0x65, 0x6D, 0x20, 0x33,
-    0x18, 0x03, 0x10, 0x15, 0x20
+    0x18, 0x03, 0x10, 0x15, 0x20,
+    0x9E, 0x02, 0x00, 0x01,
+    0x9F, 0x03, 0x00, 0x01, 0x02
   ];
 
   for(let i = 0 ; i < set_up_menu_1.length; i++) {
@@ -789,6 +908,15 @@ add_test(function test_stk_proactive_command_set_up_menu() {
   do_check_eq(menu.nextActionList[1], STK_CMD_LAUNCH_BROWSER);
   do_check_eq(menu.nextActionList[2], STK_CMD_PLAY_TONE);
 
+  tlv = stkHelper.searchForTag(COMPREHENSIONTLV_TAG_ICON_ID, ctlvs);
+  do_check_eq(tlv.value.qualifier, 0x00);
+  do_check_eq(tlv.value.identifier, 0x01);
+
+  tlv = stkHelper.searchForTag(COMPREHENSIONTLV_TAG_ICON_ID_LIST, ctlvs);
+  do_check_eq(tlv.value.qualifier, 0x00);
+  do_check_eq(tlv.value.identifiers[0], 0x01);
+  do_check_eq(tlv.value.identifiers[1], 0x02);
+
   let set_up_menu_2 = [
     0xD0,
     0x30,
@@ -812,7 +940,7 @@ add_test(function test_stk_proactive_command_set_up_menu() {
   do_check_eq(tlv.value.typeOfCommand, STK_CMD_SET_UP_MENU);
   do_check_eq(tlv.value.commandQualifier, 0x00);
 
-  let menu = stkFactory.createParam(tlv.value, ctlvs);
+  menu = stkFactory.createParam(tlv.value, ctlvs);
   do_check_eq(menu.title, "Title");
   do_check_eq(menu.items[0].identifier, 1);
   do_check_eq(menu.items[0].text, "item 1");
@@ -832,19 +960,25 @@ add_test(function test_stk_proactive_command_set_up_menu() {
  */
 add_test(function test_stk_proactive_command_set_up_call() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
-  let cmdFactory = worker.StkCommandParamsFactory;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
+  let cmdFactory = context.StkCommandParamsFactory;
+  let ril = context.RIL;
+  ril.iccInfoPrivate.sst = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x10];
+  ril.appType = CARD_APPTYPE_SIM;
 
   let set_up_call_1 = [
     0xD0,
-    0x29,
+    0x2d,
     0x81, 0x03, 0x01, 0x10, 0x04,
     0x82, 0x02, 0x81, 0x82,
     0x05, 0x0A, 0x44, 0x69, 0x73, 0x63, 0x6F, 0x6E, 0x6E, 0x65, 0x63, 0x74,
     0x86, 0x09, 0x81, 0x10, 0x32, 0x04, 0x21, 0x43, 0x65, 0x1C, 0x2C,
-    0x05, 0x07, 0x4D, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65];
+    0x05, 0x07, 0x4D, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65,
+    0x9E, 0x02, 0x00, 0x01];
 
   for (let i = 0 ; i < set_up_call_1.length; i++) {
     pduHelper.writeHexOctet(set_up_call_1[i]);
@@ -861,6 +995,10 @@ add_test(function test_stk_proactive_command_set_up_call() {
   do_check_eq(setupCall.confirmMessage, "Disconnect");
   do_check_eq(setupCall.callMessage, "Message");
 
+  tlv = stkHelper.searchForTag(COMPREHENSIONTLV_TAG_ICON_ID, ctlvs);
+  do_check_eq(tlv.value.qualifier, 0x00);
+  do_check_eq(tlv.value.identifier, 0x01);
+
   run_next_test();
 });
 
@@ -869,9 +1007,10 @@ add_test(function test_stk_proactive_command_set_up_call() {
  */
 add_test(function test_stk_proactive_command_timer_management() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
 
   // Timer Management - Start
   let timer_management_1 = [
@@ -931,9 +1070,10 @@ add_test(function test_stk_proactive_command_timer_management() {
  */
 add_test(function test_stk_proactive_command_provide_local_information() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
 
   // Verify IMEI
   let local_info_1 = [
@@ -979,9 +1119,10 @@ add_test(function test_stk_proactive_command_provide_local_information() {
  */
 add_test(function test_stk_proactive_command_open_channel() {
   let worker = newUint8Worker();
-  let pduHelper = worker.GsmPDUHelper;
-  let berHelper = worker.BerTlvHelper;
-  let stkHelper = worker.StkProactiveCmdHelper;
+  let context = worker.ContextPool._contexts[0];
+  let pduHelper = context.GsmPDUHelper;
+  let berHelper = context.BerTlvHelper;
+  let stkHelper = context.StkProactiveCmdHelper;
 
   // Open Channel
   let open_channel = [
@@ -1083,10 +1224,11 @@ add_test(function test_stk_proactive_command_open_channel() {
  */
 add_test(function test_stk_event_download_location_status() {
   let worker = newUint8SupportOutgoingIndexWorker();
-  let buf = worker.Buf;
-  let pduHelper = worker.GsmPDUHelper;
+  let context = worker.ContextPool._contexts[0];
+  let buf = context.Buf;
+  let pduHelper = context.GsmPDUHelper;
 
-  buf.sendParcel = function () {
+  buf.sendParcel = function() {
     // Type
     do_check_eq(this.readInt32(), REQUEST_STK_SEND_ENVELOPE_COMMAND);
 
@@ -1153,7 +1295,7 @@ add_test(function test_stk_event_download_location_status() {
       gsmCellId: 0
     }
   };
-  worker.RIL.sendStkEventDownload({
+  context.RIL.sendStkEventDownload({
     event: event
   });
 });
@@ -1165,11 +1307,12 @@ add_test(function test_stk_event_download_location_status() {
  */
 add_test(function test_stk_event_download_language_selection() {
   let worker = newUint8SupportOutgoingIndexWorker();
-  let buf = worker.Buf;
-  let pduHelper = worker.GsmPDUHelper;
-  let iccHelper = worker.ICCPDUHelper;
+  let context = worker.ContextPool._contexts[0];
+  let buf = context.Buf;
+  let pduHelper = context.GsmPDUHelper;
+  let iccHelper = context.ICCPDUHelper;
 
-  buf.sendParcel = function () {
+  buf.sendParcel = function() {
     // Type
     do_check_eq(this.readInt32(), REQUEST_STK_SEND_ENVELOPE_COMMAND);
 
@@ -1214,7 +1357,7 @@ add_test(function test_stk_event_download_language_selection() {
     eventType: STK_EVENT_TYPE_LANGUAGE_SELECTION,
     language: "zh"
   };
-  worker.RIL.sendStkEventDownload({
+  context.RIL.sendStkEventDownload({
     event: event
   });
 });
@@ -1224,10 +1367,11 @@ add_test(function test_stk_event_download_language_selection() {
  */
 add_test(function test_stk_event_download_user_activity() {
   let worker = newUint8SupportOutgoingIndexWorker();
-  let buf = worker.Buf;
-  let pduHelper = worker.GsmPDUHelper;
+  let context = worker.ContextPool._contexts[0];
+  let buf = context.Buf;
+  let pduHelper = context.GsmPDUHelper;
 
-  buf.sendParcel = function () {
+  buf.sendParcel = function() {
     // Type
     do_check_eq(this.readInt32(), REQUEST_STK_SEND_ENVELOPE_COMMAND);
 
@@ -1262,7 +1406,7 @@ add_test(function test_stk_event_download_user_activity() {
   let event = {
     eventType: STK_EVENT_TYPE_USER_ACTIVITY
   };
-  worker.RIL.sendStkEventDownload({
+  context.RIL.sendStkEventDownload({
     event: event
   });
 });
@@ -1272,10 +1416,11 @@ add_test(function test_stk_event_download_user_activity() {
  */
 add_test(function test_stk_event_download_idle_screen_available() {
   let worker = newUint8SupportOutgoingIndexWorker();
-  let buf = worker.Buf;
-  let pduHelper = worker.GsmPDUHelper;
+  let context = worker.ContextPool._contexts[0];
+  let buf = context.Buf;
+  let pduHelper = context.GsmPDUHelper;
 
-  buf.sendParcel = function () {
+  buf.sendParcel = function() {
     // Type
     do_check_eq(this.readInt32(), REQUEST_STK_SEND_ENVELOPE_COMMAND);
 
@@ -1310,7 +1455,7 @@ add_test(function test_stk_event_download_idle_screen_available() {
   let event = {
     eventType: STK_EVENT_TYPE_IDLE_SCREEN_AVAILABLE
   };
-  worker.RIL.sendStkEventDownload({
+  context.RIL.sendStkEventDownload({
     event: event
   });
 });
@@ -1320,10 +1465,11 @@ add_test(function test_stk_event_download_idle_screen_available() {
  */
 add_test(function test_stk_event_download_browser_termination() {
   let worker = newUint8SupportOutgoingIndexWorker();
-  let buf = worker.Buf;
-  let pduHelper = worker.GsmPDUHelper;
+  let context = worker.ContextPool._contexts[0];
+  let buf = context.Buf;
+  let pduHelper = context.GsmPDUHelper;
 
-  buf.sendParcel = function () {
+  buf.sendParcel = function() {
     // Type
     do_check_eq(this.readInt32(), REQUEST_STK_SEND_ENVELOPE_COMMAND);
 
@@ -1367,7 +1513,7 @@ add_test(function test_stk_event_download_browser_termination() {
     eventType: STK_EVENT_TYPE_BROWSER_TERMINATION,
     terminationCause: STK_BROWSER_TERMINATION_CAUSE_USER
   };
-  worker.RIL.sendStkEventDownload({
+  context.RIL.sendStkEventDownload({
     event: event
   });
 });

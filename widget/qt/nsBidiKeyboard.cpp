@@ -6,11 +6,11 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include <Qt>
-#include <QApplication>
+#include <QGuiApplication>
 
 #include "nsBidiKeyboard.h"
 
-NS_IMPL_ISUPPORTS1(nsBidiKeyboard, nsIBidiKeyboard)
+NS_IMPL_ISUPPORTS(nsBidiKeyboard, nsIBidiKeyboard)
 
 nsBidiKeyboard::nsBidiKeyboard() : nsIBidiKeyboard()
 {
@@ -30,22 +30,13 @@ NS_IMETHODIMP nsBidiKeyboard::IsLangRTL(bool *aIsRTL)
 {
     *aIsRTL = false;
 
-#if (QT_VERSION < QT_VERSION_CHECK(5,0,0))
-    Qt::LayoutDirection layoutDir = QApplication::keyboardInputDirection();
-#else
     QInputMethod* input = qApp->inputMethod();
     Qt::LayoutDirection layoutDir = input ? input->inputDirection() : Qt::LeftToRight;
-#endif
 
     if (layoutDir == Qt::RightToLeft) {
         *aIsRTL = true;
     }
-    
-    return NS_OK;
-}
 
-NS_IMETHODIMP nsBidiKeyboard::SetLangFromBidiLevel(uint8_t aLevel)
-{
     return NS_OK;
 }
 

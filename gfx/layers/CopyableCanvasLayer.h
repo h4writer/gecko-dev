@@ -9,18 +9,16 @@
 #include <stdint.h>                     // for uint32_t
 #include "GLContextTypes.h"             // for GLContext
 #include "Layers.h"                     // for CanvasLayer, etc
-#include "gfxASurface.h"                // for gfxASurface
 #include "gfxContext.h"                 // for gfxContext, etc
 #include "gfxTypes.h"
 #include "gfxPlatform.h"                // for gfxImageFormat
-#include "gfxPoint.h"                   // for gfxIntSize
 #include "mozilla/Assertions.h"         // for MOZ_ASSERT, etc
 #include "mozilla/Preferences.h"        // for Preferences
 #include "mozilla/RefPtr.h"             // for RefPtr
 #include "mozilla/gfx/2D.h"             // for DrawTarget
 #include "mozilla/mozalloc.h"           // for operator delete, etc
 #include "nsAutoPtr.h"                  // for nsRefPtr
-#include "nsTraceRefcnt.h"              // for MOZ_COUNT_CTOR, etc
+#include "nsISupportsImpl.h"            // for MOZ_COUNT_CTOR, etc
 
 namespace mozilla {
 namespace layers {
@@ -35,36 +33,34 @@ class CopyableCanvasLayer : public CanvasLayer
 {
 public:
   CopyableCanvasLayer(LayerManager* aLayerManager, void *aImplData);
-  virtual ~CopyableCanvasLayer();
-
-  virtual void Initialize(const Data& aData);
-
-  virtual bool IsDataValid(const Data& aData);
 
 protected:
-  void PaintWithOpacity(gfxContext* aContext,
-                        float aOpacity,
-                        Layer* aMaskLayer,
-                        gfxContext::GraphicsOperator aOperator = gfxContext::OPERATOR_OVER);
+  virtual ~CopyableCanvasLayer();
 
-  void UpdateSurface(gfxASurface* aDestSurface = nullptr,
-                     Layer* aMaskLayer = nullptr);
+public:
+  virtual void Initialize(const Data& aData) MOZ_OVERRIDE;
 
-  nsRefPtr<gfxASurface> mSurface;
-  nsRefPtr<mozilla::gl::GLContext> mGLContext;
+  virtual bool IsDataValid(const Data& aData) MOZ_OVERRIDE;
+
+  bool IsGLLayer() { return !!mGLContext; }
+
+protected:
+  void UpdateTarget(gfx::DrawTarget* aDestTarget = nullptr);
+
+  RefPtr<gfx::SourceSurface> mSurface;
+  nsRefPtr<gl::GLContext> mGLContext;
+  GLuint mCanvasFrontbufferTexID;
   mozilla::RefPtr<mozilla::gfx::DrawTarget> mDrawTarget;
 
-  uint32_t mCanvasFramebuffer;
+  UniquePtr<gl::SharedSurface> mGLFrontbuffer;
 
-  bool mIsGLAlphaPremult;
+  bool mIsAlphaPremultiplied;
   bool mNeedsYFlip;
-  bool mForceReadback;
 
-  nsRefPtr<gfxImageSurface> mCachedTempSurface;
-  gfxIntSize mCachedSize;
-  gfxImageFormat mCachedFormat;
+  RefPtr<gfx::DataSourceSurface> mCachedTempSurface;
 
-  gfxImageSurface* GetTempSurface(const gfxIntSize& aSize, const gfxImageFormat aFormat);
+  gfx::DataSourceSurface* GetTempSurface(const gfx::IntSize& aSize,
+                                         const gfx::SurfaceFormat aFormat);
 
   void DiscardTempSurface();
 };

@@ -1,4 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim: set ts=2 et sw=2 tw=80: */
 /* Any copyright is dedicated to the Public Domain.
    http://creativecommons.org/publicdomain/zero/1.0/ */
@@ -340,5 +340,50 @@ gTests.push({
     todo(false, "Ensure that a cancelled/aborted download is in the correct state \
       including correct values for state variables (e.g. _downloadCount, _downloadsInProgress) \
       and the existence of the downloaded file.");
+  }
+});
+
+/**
+ * Make sure download notifications are moved when we close tabs.
+ */
+gTests.push({
+  desc: "Download notifications in closed tabs",
+  setUp: function() {
+    // put up a couple notifications on the initial tab
+    let notificationBox = Browser.getNotificationBox();
+    notificationBox.appendNotification("not important", "low-priority-thing", "", notificationBox.PRIORITY_INFO_LOW, []);
+    notificationBox.appendNotification("so important", "high-priority-thing", "", notificationBox.PRIORITY_CRITICAL_HIGH, []);
+
+    // open a new tab where we'll conduct the test
+    yield addTab("about:mozilla");
+  },
+  run: function(){
+    let notificationBox = Browser.getNotificationBox();
+    let notn = MetroDownloadsView.showNotification("download-progress", "test message", [],
+           notificationBox.PRIORITY_WARNING_LOW);
+    Browser.closeTab(Browser.selectedTab);
+
+    yield waitForEvent(Elements.tabList, "TabRemove");
+
+    // expected behavior when a tab is closed while a download notification is showing:
+    // * the notification remains visible as long as a next tab/browser exists
+    // * normal rules about priority apply
+    // * notifications - including any pre-existing ones - display in expected order
+    let nextBox = Browser.getNotificationBox();
+    let currentNotification;
+
+    ok(nextBox.getNotificationWithValue("download-progress"), "notification was moved to next tab");
+
+    currentNotification = nextBox.currentNotification;
+    is(currentNotification.value, "high-priority-thing", "high priority notification is current");
+    currentNotification.close();
+
+    currentNotification = nextBox.currentNotification;
+    is(currentNotification.value, "download-progress", "download notification is next");
+    currentNotification.close();
+
+    currentNotification = nextBox.currentNotification;
+    is(currentNotification.value, "low-priority-thing", "low priority notification is next");
+    currentNotification.close();
   }
 });

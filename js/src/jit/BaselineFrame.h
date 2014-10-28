@@ -7,13 +7,13 @@
 #ifndef jit_BaselineFrame_h
 #define jit_BaselineFrame_h
 
-#ifdef JS_ION
-
 #include "jit/IonFrames.h"
 #include "vm/Stack.h"
 
 namespace js {
 namespace jit {
+
+struct BaselineDebugModeOSRInfo;
 
 // The stack looks like this, fp is the frame pointer:
 //
@@ -26,7 +26,7 @@ namespace jit {
 
 // Eval frames
 //
-// Like js::StackFrame, every BaselineFrame is either a global frame
+// Like js::InterpreterFrame, every BaselineFrame is either a global frame
 // or a function frame. Both global and function frames can optionally
 // be "eval frames". The callee token for eval function frames is the
 // enclosing function. BaselineFrame::evalScript_ stores the eval script
@@ -35,11 +35,8 @@ class BaselineFrame
 {
   public:
     enum Flags {
-        // The frame has a valid return value. See also StackFrame::HAS_RVAL.
+        // The frame has a valid return value. See also InterpreterFrame::HAS_RVAL.
         HAS_RVAL         = 1 << 0,
-
-        // Frame has blockChain_ set.
-        HAS_BLOCKCHAIN   = 1 << 1,
 
         // A call object has been pushed on the scope chain.
         HAS_CALL_OBJ     = 1 << 2,
@@ -47,35 +44,51 @@ class BaselineFrame
         // Frame has an arguments object, argsObj_.
         HAS_ARGS_OBJ     = 1 << 4,
 
-        // See StackFrame::PREV_UP_TO_DATE.
+        // See InterpreterFrame::PREV_UP_TO_DATE.
         PREV_UP_TO_DATE  = 1 << 5,
 
         // Eval frame, see the "eval frames" comment.
         EVAL             = 1 << 6,
 
-        // Frame has hookData_ set.
-        HAS_HOOK_DATA    = 1 << 7,
-
         // Frame has profiler entry pushed.
         HAS_PUSHED_SPS_FRAME = 1 << 8,
 
         // Frame has over-recursed on an early check.
-        OVER_RECURSED    = 1 << 9
+        OVER_RECURSED    = 1 << 9,
+
+        // Frame has a BaselineRecompileInfo stashed in the scratch value
+        // slot. See PatchBaselineFramesForDebugMOde.
+        HAS_DEBUG_MODE_OSR_INFO = 1 << 10,
+
+        // Frame has had its scope chain unwound to a pc during exception
+        // handling that is different from its current pc.
+        //
+        // This flag is intended for use in the DebugEpilogue. Once it is set,
+        // the only way to clear it is to pop the frame. Do *not* set this if
+        // we will resume execution on the frame, such as in a catch or
+        // finally block.
+        HAS_UNWOUND_SCOPE_OVERRIDE_PC = 1 << 11
     };
 
   protected: // Silence Clang warning about unused private fields.
     // We need to split the Value into 2 fields of 32 bits, otherwise the C++
     // compiler may add some padding between the fields.
-    uint32_t loScratchValue_;
-    uint32_t hiScratchValue_;
-    uint32_t loReturnValue_;        // If HAS_RVAL, the frame's return value.
+
+    union {
+        struct {
+            uint32_t loScratchValue_;
+            uint32_t hiScratchValue_;
+        };
+        BaselineDebugModeOSRInfo *debugModeOSRInfo_;
+    };
+    uint32_t loReturnValue_;              // If HAS_RVAL, the frame's return value.
     uint32_t hiReturnValue_;
     uint32_t frameSize_;
-    JSObject *scopeChain_;          // Scope chain (always initialized).
-    StaticBlockObject *blockChain_; // If HAS_BLOCKCHAIN, the static block chain.
-    JSScript *evalScript_;          // If isEvalFrame(), the current eval script.
-    ArgumentsObject *argsObj_;      // If HAS_ARGS_OBJ, the arguments object.
-    void *hookData_;                // If HAS_HOOK_DATA, debugger call hook data.
+    JSObject *scopeChain_;                // Scope chain (always initialized).
+    JSScript *evalScript_;                // If isEvalFrame(), the current eval script.
+    ArgumentsObject *argsObj_;            // If HAS_ARGS_OBJ, the arguments object.
+    void *unused;                         // See static assertion re: sizeof, below.
+    uint32_t unwoundScopeOverrideOffset_; // If HAS_UNWOUND_SCOPE_OVERRIDE_PC.
     uint32_t flags_;
 
   public:
@@ -83,7 +96,7 @@ class BaselineFrame
     // This is the old frame pointer saved in the prologue.
     static const uint32_t FramePointerOffset = sizeof(void *);
 
-    bool initForOsr(StackFrame *fp, uint32_t numStackValues);
+    bool initForOsr(InterpreterFrame *fp, uint32_t numStackValues);
 
     uint32_t frameSize() const {
         return frameSize_;
@@ -111,6 +124,8 @@ class BaselineFrame
     inline void pushOnScopeChain(ScopeObject &scope);
     inline void popOffScopeChain();
 
+    inline void popWith(JSContext *cx);
+
     CalleeToken calleeToken() const {
         uint8_t *pointer = (uint8_t *)this + Size() + offsetOfCalleeToken();
         return *(CalleeToken *)pointer;
@@ -118,6 +133,9 @@ class BaselineFrame
     void replaceCalleeToken(CalleeToken token) {
         uint8_t *pointer = (uint8_t *)this + Size() + offsetOfCalleeToken();
         *(CalleeToken *)pointer = token;
+    }
+    bool isConstructing() const {
+        return CalleeTokenIsConstructing(calleeToken());
     }
     JSScript *script() const {
         if (isEvalFrame())
@@ -139,40 +157,41 @@ class BaselineFrame
     size_t numValueSlots() const {
         size_t size = frameSize();
 
-        JS_ASSERT(size >= BaselineFrame::FramePointerOffset + BaselineFrame::Size());
+        MOZ_ASSERT(size >= BaselineFrame::FramePointerOffset + BaselineFrame::Size());
         size -= BaselineFrame::FramePointerOffset + BaselineFrame::Size();
 
-        JS_ASSERT((size % sizeof(Value)) == 0);
+        MOZ_ASSERT((size % sizeof(Value)) == 0);
         return size / sizeof(Value);
     }
     Value *valueSlot(size_t slot) const {
-        JS_ASSERT(slot < numValueSlots());
+        MOZ_ASSERT(slot < numValueSlots());
         return (Value *)this - (slot + 1);
     }
 
-    Value &unaliasedVar(unsigned i, MaybeCheckAliasing checkAliasing = CHECK_ALIASING) const {
-        JS_ASSERT_IF(checkAliasing, !script()->varIsAliased(i));
-        JS_ASSERT(i < script()->nfixed());
+    Value &unaliasedVar(uint32_t i, MaybeCheckAliasing checkAliasing = CHECK_ALIASING) const {
+        MOZ_ASSERT(i < script()->nfixedvars());
+        MOZ_ASSERT_IF(checkAliasing, !script()->varIsAliased(i));
         return *valueSlot(i);
     }
 
     Value &unaliasedFormal(unsigned i, MaybeCheckAliasing checkAliasing = CHECK_ALIASING) const {
-        JS_ASSERT(i < numFormalArgs());
-        JS_ASSERT_IF(checkAliasing, !script()->argsObjAliasesFormals() &&
-                                    !script()->formalIsAliased(i));
+        MOZ_ASSERT(i < numFormalArgs());
+        MOZ_ASSERT_IF(checkAliasing, !script()->argsObjAliasesFormals() &&
+                                     !script()->formalIsAliased(i));
         return argv()[i];
     }
 
     Value &unaliasedActual(unsigned i, MaybeCheckAliasing checkAliasing = CHECK_ALIASING) const {
-        JS_ASSERT(i < numActualArgs());
-        JS_ASSERT_IF(checkAliasing, !script()->argsObjAliasesFormals());
-        JS_ASSERT_IF(checkAliasing && i < numFormalArgs(), !script()->formalIsAliased(i));
+        MOZ_ASSERT(i < numActualArgs());
+        MOZ_ASSERT_IF(checkAliasing, !script()->argsObjAliasesFormals());
+        MOZ_ASSERT_IF(checkAliasing && i < numFormalArgs(), !script()->formalIsAliased(i));
         return argv()[i];
     }
 
-    Value &unaliasedLocal(unsigned i, MaybeCheckAliasing checkAliasing = CHECK_ALIASING) const {
+    Value &unaliasedLocal(uint32_t i, MaybeCheckAliasing checkAliasing = CHECK_ALIASING) const {
+        MOZ_ASSERT(i < script()->nfixed());
 #ifdef DEBUG
-        CheckLocalUnaliased(checkAliasing, script(), maybeBlockChain(), i);
+        CheckLocalUnaliased(checkAliasing, script(), i);
 #endif
         return *valueSlot(i);
     }
@@ -183,7 +202,7 @@ class BaselineFrame
                              offsetOfNumActualArgs());
     }
     unsigned numFormalArgs() const {
-        return script()->function()->nargs;
+        return script()->functionNonDelazifying()->nargs();
     }
     Value &thisValue() const {
         return *(Value *)(reinterpret_cast<const uint8_t *>(this) +
@@ -201,37 +220,17 @@ class BaselineFrame
     bool hasReturnValue() const {
         return flags_ & HAS_RVAL;
     }
-    Value *returnValue() {
-        return reinterpret_cast<Value *>(&loReturnValue_);
+    MutableHandleValue returnValue() {
+        if (!hasReturnValue())
+            addressOfReturnValue()->setUndefined();
+        return MutableHandleValue::fromMarkedLocation(addressOfReturnValue());
     }
     void setReturnValue(const Value &v) {
+        returnValue().set(v);
         flags_ |= HAS_RVAL;
-        *returnValue() = v;
     }
     inline Value *addressOfReturnValue() {
         return reinterpret_cast<Value *>(&loReturnValue_);
-    }
-
-    bool hasBlockChain() const {
-        return (flags_ & HAS_BLOCKCHAIN) && blockChain_;
-    }
-    StaticBlockObject &blockChain() const {
-        JS_ASSERT(hasBlockChain());
-        return *blockChain_;
-    }
-    StaticBlockObject *maybeBlockChain() const {
-        return hasBlockChain() ? blockChain_ : nullptr;
-    }
-    void setBlockChain(StaticBlockObject &block) {
-        flags_ |= HAS_BLOCKCHAIN;
-        blockChain_ = &block;
-    }
-    void setBlockChainNull() {
-        JS_ASSERT(!hasBlockChain());
-        blockChain_ = nullptr;
-    }
-    StaticBlockObject **addressOfBlockChain() {
-        return &blockChain_;
     }
 
     bool hasCallObj() const {
@@ -259,15 +258,15 @@ class BaselineFrame
         argsObj_ = &argsobj;
     }
     void initArgsObj(ArgumentsObject &argsobj) {
-        JS_ASSERT(script()->needsArgsObj());
+        MOZ_ASSERT(script()->needsArgsObj());
         initArgsObjUnchecked(argsobj);
     }
     bool hasArgsObj() const {
         return flags_ & HAS_ARGS_OBJ;
     }
     ArgumentsObject &argsObj() const {
-        JS_ASSERT(hasArgsObj());
-        JS_ASSERT(script()->needsArgsObj());
+        MOZ_ASSERT(hasArgsObj());
+        MOZ_ASSERT(script()->needsArgsObj());
         return *argsObj_;
     }
 
@@ -279,21 +278,8 @@ class BaselineFrame
     }
 
     JSScript *evalScript() const {
-        JS_ASSERT(isEvalFrame());
+        MOZ_ASSERT(isEvalFrame());
         return evalScript_;
-    }
-
-    bool hasHookData() const {
-        return flags_ & HAS_HOOK_DATA;
-    }
-
-    void *maybeHookData() const {
-        return hasHookData() ? hookData_ : nullptr;
-    }
-
-    void setHookData(void *v) {
-        hookData_ = v;
-        flags_ |= HAS_HOOK_DATA;
     }
 
     bool hasPushedSPSFrame() const {
@@ -316,7 +302,41 @@ class BaselineFrame
         flags_ |= OVER_RECURSED;
     }
 
-    void trace(JSTracer *trc);
+    BaselineDebugModeOSRInfo *debugModeOSRInfo() {
+        MOZ_ASSERT(flags_ & HAS_DEBUG_MODE_OSR_INFO);
+        return debugModeOSRInfo_;
+    }
+
+    BaselineDebugModeOSRInfo *getDebugModeOSRInfo() {
+        if (flags_ & HAS_DEBUG_MODE_OSR_INFO)
+            return debugModeOSRInfo();
+        return nullptr;
+    }
+
+    void setDebugModeOSRInfo(BaselineDebugModeOSRInfo *info) {
+        flags_ |= HAS_DEBUG_MODE_OSR_INFO;
+        debugModeOSRInfo_ = info;
+    }
+
+    void deleteDebugModeOSRInfo();
+
+    jsbytecode *unwoundScopeOverridePc() {
+        MOZ_ASSERT(flags_ & HAS_UNWOUND_SCOPE_OVERRIDE_PC);
+        return script()->offsetToPC(unwoundScopeOverrideOffset_);
+    }
+
+    jsbytecode *getUnwoundScopeOverridePc() {
+        if (flags_ & HAS_UNWOUND_SCOPE_OVERRIDE_PC)
+            return unwoundScopeOverridePc();
+        return nullptr;
+    }
+
+    void setUnwoundScopeOverridePc(jsbytecode *pc) {
+        flags_ |= HAS_UNWOUND_SCOPE_OVERRIDE_PC;
+        unwoundScopeOverrideOffset_ = script()->pcToOffset(pc);
+    }
+
+    void trace(JSTracer *trc, JitFrameIterator &frame);
 
     bool isFunctionFrame() const {
         return CalleeTokenIsFunction(calleeToken());
@@ -383,9 +403,6 @@ class BaselineFrame
     static int reverseOffsetOfScopeChain() {
         return -int(Size()) + offsetof(BaselineFrame, scopeChain_);
     }
-    static int reverseOffsetOfBlockChain() {
-        return -int(Size()) + offsetof(BaselineFrame, blockChain_);
-    }
     static int reverseOffsetOfArgsObj() {
         return -int(Size()) + offsetof(BaselineFrame, argsObj_);
     }
@@ -408,7 +425,5 @@ JS_STATIC_ASSERT(((sizeof(BaselineFrame) + BaselineFrame::FramePointerOffset) % 
 
 } // namespace jit
 } // namespace js
-
-#endif // JS_ION
 
 #endif /* jit_BaselineFrame_h */

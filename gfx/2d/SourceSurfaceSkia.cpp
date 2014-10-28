@@ -65,20 +65,22 @@ SourceSurfaceSkia::InitFromData(unsigned char* aData,
                                 SurfaceFormat aFormat)
 {
   SkBitmap temp;
-  temp.setConfig(GfxFormatToSkiaConfig(aFormat), aSize.width, aSize.height, aStride);
+  SkAlphaType alphaType = (aFormat == SurfaceFormat::B8G8R8X8) ?
+    kOpaque_SkAlphaType : kPremul_SkAlphaType;
+
+  SkImageInfo info = SkImageInfo::Make(aSize.width,
+                                       aSize.height,
+                                       GfxFormatToSkiaColorType(aFormat),
+                                       alphaType);
+  temp.setInfo(info, aStride);
   temp.setPixels(aData);
 
-  if (!temp.copyTo(&mBitmap, GfxFormatToSkiaConfig(aFormat))) {
+  if (!temp.copyTo(&mBitmap, GfxFormatToSkiaColorType(aFormat))) {
     return false;
   }
 
-  if (aFormat == FORMAT_B8G8R8X8) {
-    mBitmap.lockPixels();
-    // We have to manually set the A channel to be 255 as Skia doesn't understand BGRX
-    ConvertBGRXToBGRA(reinterpret_cast<unsigned char*>(mBitmap.getPixels()), aSize, mBitmap.rowBytes());
-    mBitmap.unlockPixels();
-    mBitmap.notifyPixelsChanged();
-    mBitmap.setIsOpaque(true);
+  if (aFormat == SurfaceFormat::B8G8R8X8) {
+    mBitmap.setAlphaType(kIgnore_SkAlphaType);
   }
 
   mSize = aSize;
@@ -108,7 +110,7 @@ SourceSurfaceSkia::DrawTargetWillChange()
     mDrawTarget = nullptr;
     SkBitmap temp = mBitmap;
     mBitmap.reset();
-    temp.copyTo(&mBitmap, temp.getConfig());
+    temp.copyTo(&mBitmap, temp.colorType());
   }
 }
 

@@ -10,8 +10,10 @@
  * liability, trademark and document use rules apply.
  */
 
-[PrefControlled]
 interface MediaElementAudioSourceNode : AudioNode {
 
 };
+
+// Mozilla extensions
+MediaElementAudioSourceNode implements AudioNodePassThrough;
 

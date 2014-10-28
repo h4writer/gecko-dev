@@ -7,11 +7,9 @@
 #include <stdint.h>                     // for uint32_t
 #include "ImageContainer.h"             // for Image, PlanarYCbCrImage, etc
 #include "ImageTypes.h"                 // for ImageFormat::PLANAR_YCBCR, etc
-#include "SharedTextureImage.h"         // for SharedTextureImage::Data, etc
+#include "GLImages.h"                   // for SurfaceTextureImage::Data, etc
 #include "gfx2DGlue.h"                  // for ImageFormatToSurfaceFormat
-#include "gfxASurface.h"                // for gfxASurface, etc
 #include "gfxPlatform.h"                // for gfxPlatform
-#include "gfxPoint.h"                   // for gfxIntSize
 #include "mozilla/Assertions.h"         // for MOZ_ASSERT, etc
 #include "mozilla/RefPtr.h"             // for RefPtr, TemporaryRef
 #include "mozilla/gfx/BaseSize.h"       // for BaseSize
@@ -26,19 +24,22 @@
 #include "mozilla/layers/SharedPlanarYCbCrImage.h"
 #include "mozilla/layers/SharedRGBImage.h"
 #include "mozilla/layers/TextureClient.h"  // for TextureClient, etc
-#include "mozilla/layers/TextureClientOGL.h"  // for SharedTextureClientOGL
+#include "mozilla/layers/TextureClientOGL.h"  // for SurfaceTextureClient
 #include "mozilla/mozalloc.h"           // for operator delete, etc
 #include "nsAutoPtr.h"                  // for nsRefPtr
 #include "nsCOMPtr.h"                   // for already_AddRefed
 #include "nsDebug.h"                    // for NS_WARNING, NS_ASSERTION
 #include "nsISupportsImpl.h"            // for Image::Release, etc
 #include "nsRect.h"                     // for nsIntRect
+#include "mozilla/gfx/2D.h"
 #ifdef MOZ_WIDGET_GONK
 #include "GrallocImages.h"
 #endif
 
 namespace mozilla {
 namespace layers {
+
+using namespace mozilla::gfx;
 
 /* static */ TemporaryRef<ImageClient>
 ImageClient::CreateImageClient(CompositableType aCompositableHostType,
@@ -47,27 +48,24 @@ ImageClient::CreateImageClient(CompositableType aCompositableHostType,
 {
   RefPtr<ImageClient> result = nullptr;
   switch (aCompositableHostType) {
-  case COMPOSITABLE_IMAGE:
-  case BUFFER_IMAGE_SINGLE:
-    if (gfxPlatform::GetPlatform()->UseDeprecatedTextures()) {
-      result = new DeprecatedImageClientSingle(aForwarder, aFlags, BUFFER_IMAGE_SINGLE);
-    } else {
-      result = new ImageClientSingle(aForwarder, aFlags, COMPOSITABLE_IMAGE);
-    }
+  case CompositableType::IMAGE:
+  case CompositableType::BUFFER_IMAGE_SINGLE:
+    result = new ImageClientSingle(aForwarder, aFlags, CompositableType::IMAGE);
     break;
-  case BUFFER_IMAGE_BUFFERED:
-    if (gfxPlatform::GetPlatform()->UseDeprecatedTextures()) {
-      result = new DeprecatedImageClientSingle(aForwarder, aFlags, BUFFER_IMAGE_BUFFERED);
-    } else {
-      result = new ImageClientBuffered(aForwarder, aFlags, COMPOSITABLE_IMAGE);
-    }
+  case CompositableType::BUFFER_IMAGE_BUFFERED:
+    result = new ImageClientBuffered(aForwarder, aFlags, CompositableType::IMAGE);
     break;
-  case BUFFER_BRIDGE:
+  case CompositableType::BUFFER_BRIDGE:
     result = new ImageClientBridge(aForwarder, aFlags);
     break;
-  case BUFFER_UNKNOWN:
+  case CompositableType::BUFFER_UNKNOWN:
     result = nullptr;
     break;
+#ifdef MOZ_WIDGET_GONK
+  case CompositableType::IMAGE_OVERLAY:
+    result = new ImageClientOverlay(aForwarder, aFlags);
+    break;
+#endif
   default:
     MOZ_CRASH("unhandled program type");
   }
@@ -77,11 +75,44 @@ ImageClient::CreateImageClient(CompositableType aCompositableHostType,
   return result.forget();
 }
 
+void
+ImageClient::RemoveTexture(TextureClient* aTexture)
+{
+  RemoveTextureWithTracker(aTexture, nullptr);
+}
+
+void
+ImageClient::RemoveTextureWithTracker(TextureClient* aTexture,
+                                      AsyncTransactionTracker* aAsyncTransactionTracker)
+{
+#ifdef MOZ_WIDGET_GONK
+  if (aAsyncTransactionTracker ||
+      GetForwarder()->IsImageBridgeChild()) {
+    RefPtr<AsyncTransactionTracker> request = aAsyncTransactionTracker;
+    if (!request) {
+      // Create AsyncTransactionTracker if it is not provided as argument.
+      request = new RemoveTextureFromCompositableTracker();
+    }
+    // Hold TextureClient until the transaction complete to postpone
+    // the TextureClient recycle/delete.
+    request->SetTextureClient(aTexture);
+    GetForwarder()->RemoveTextureFromCompositableAsync(request, this, aTexture);
+    return;
+  }
+#endif
+
+  GetForwarder()->RemoveTextureFromCompositable(this, aTexture);
+  if (aAsyncTransactionTracker) {
+    // Do not need to wait a transaction complete message
+    // from the compositor side.
+    aAsyncTransactionTracker->NotifyComplete();
+  }
+}
+
 ImageClientSingle::ImageClientSingle(CompositableForwarder* aFwd,
                                      TextureFlags aFlags,
                                      CompositableType aType)
-  : ImageClient(aFwd, aType)
-  , mTextureFlags(aFlags)
+  : ImageClient(aFwd, aFlags, aType)
 {
 }
 
@@ -94,27 +125,39 @@ ImageClientBuffered::ImageClientBuffered(CompositableForwarder* aFwd,
 
 TextureInfo ImageClientSingle::GetTextureInfo() const
 {
-  return TextureInfo(COMPOSITABLE_IMAGE);
+  return TextureInfo(CompositableType::IMAGE);
+}
+
+TemporaryRef<AsyncTransactionTracker>
+ImageClientSingle::PrepareFlushAllImages()
+{
+  RefPtr<AsyncTransactionTracker> status = new RemoveTextureFromCompositableTracker();
+  return status;
 }
 
 void
-ImageClientSingle::FlushAllImages(bool aExceptFront)
+ImageClientSingle::FlushAllImages(bool aExceptFront,
+                                  AsyncTransactionTracker* aAsyncTransactionTracker)
 {
   if (!aExceptFront && mFrontBuffer) {
-    mFrontBuffer->ForceRemove();
+    RemoveTextureWithTracker(mFrontBuffer, aAsyncTransactionTracker);
     mFrontBuffer = nullptr;
+  } else if(aAsyncTransactionTracker) {
+    // already flushed
+    aAsyncTransactionTracker->NotifyComplete();
   }
 }
 
 void
-ImageClientBuffered::FlushAllImages(bool aExceptFront)
+ImageClientBuffered::FlushAllImages(bool aExceptFront,
+                                    AsyncTransactionTracker* aAsyncTransactionTracker)
 {
   if (!aExceptFront && mFrontBuffer) {
-    mFrontBuffer->ForceRemove();
+    RemoveTexture(mFrontBuffer);
     mFrontBuffer = nullptr;
   }
   if (mBackBuffer) {
-    mBackBuffer->ForceRemove();
+    RemoveTextureWithTracker(mBackBuffer, aAsyncTransactionTracker);
     mBackBuffer = nullptr;
   }
 }
@@ -123,7 +166,16 @@ bool
 ImageClientSingle::UpdateImage(ImageContainer* aContainer,
                                uint32_t aContentFlags)
 {
+  bool isSwapped = false;
+  return UpdateImageInternal(aContainer, aContentFlags, &isSwapped);
+}
+
+bool
+ImageClientSingle::UpdateImageInternal(ImageContainer* aContainer,
+                                       uint32_t aContentFlags, bool* aIsSwapped)
+{
   AutoLockImage autoLock(aContainer);
+  *aIsSwapped = false;
 
   Image *image = autoLock.GetImage();
   if (!image) {
@@ -134,18 +186,13 @@ ImageClientSingle::UpdateImage(ImageContainer* aContainer,
     return true;
   }
 
-  if (image->AsSharedImage() && image->AsSharedImage()->GetTextureClient()) {
+  AutoRemoveTexture autoRemoveTexture(this);
+
+  if (image->AsSharedImage() && image->AsSharedImage()->GetTextureClient(this)) {
     // fast path: no need to allocate and/or copy image data
-    RefPtr<TextureClient> texture = image->AsSharedImage()->GetTextureClient();
-
-    if (texture->IsSharedWithCompositor()) {
-      // XXX - temporary fix for bug 911941
-      // This will be changed with bug 912907
-      return false;
-    }
-
-    if (mFrontBuffer) {
-      mFrontBuffer->ForceRemove();
+    RefPtr<TextureClient> texture = image->AsSharedImage()->GetTextureClient(this);
+    if (texture != mFrontBuffer) {
+      autoRemoveTexture.mTexture = mFrontBuffer;
     }
     mFrontBuffer = texture;
     if (!AddTextureClient(texture)) {
@@ -154,7 +201,7 @@ ImageClientSingle::UpdateImage(ImageContainer* aContainer,
     }
     GetForwarder()->UpdatedTexture(this, texture, nullptr);
     GetForwarder()->UseTexture(this, texture);
-  } else if (image->GetFormat() == PLANAR_YCBCR) {
+  } else if (image->GetFormat() == ImageFormat::PLANAR_YCBCR) {
     PlanarYCbCrImage* ycbcr = static_cast<PlanarYCbCrImage*>(image);
     const PlanarYCbCrData* data = ycbcr->GetData();
     if (!data) {
@@ -162,23 +209,25 @@ ImageClientSingle::UpdateImage(ImageContainer* aContainer,
     }
 
     if (mFrontBuffer && mFrontBuffer->IsImmutable()) {
-      mFrontBuffer->ForceRemove();
+      autoRemoveTexture.mTexture = mFrontBuffer;
       mFrontBuffer = nullptr;
     }
 
     bool bufferCreated = false;
     if (!mFrontBuffer) {
-      mFrontBuffer = CreateBufferTextureClient(gfx::FORMAT_YUV, TEXTURE_FLAGS_DEFAULT);
       gfx::IntSize ySize(data->mYSize.width, data->mYSize.height);
       gfx::IntSize cbCrSize(data->mCbCrSize.width, data->mCbCrSize.height);
-      if (!mFrontBuffer->AsTextureClientYCbCr()->AllocateForYCbCr(ySize, cbCrSize, data->mStereoMode)) {
-        mFrontBuffer = nullptr;
+      mFrontBuffer = TextureClient::CreateForYCbCr(GetForwarder(),
+                                                   ySize, cbCrSize, data->mStereoMode,
+                                                   TextureFlags::DEFAULT|mTextureFlags);
+      if (!mFrontBuffer) {
         return false;
       }
       bufferCreated = true;
     }
 
-    if (!mFrontBuffer->Lock(OPEN_READ_WRITE)) {
+    if (!mFrontBuffer->Lock(OpenMode::OPEN_WRITE_ONLY)) {
+      mFrontBuffer = nullptr;
       return false;
     }
     bool status = mFrontBuffer->AsTextureClientYCbCr()->UpdateYCbCr(*data);
@@ -199,18 +248,40 @@ ImageClientSingle::UpdateImage(ImageContainer* aContainer,
       return false;
     }
 
-  } else if (image->GetFormat() == SHARED_TEXTURE) {
-    SharedTextureImage* sharedImage = static_cast<SharedTextureImage*>(image);
-    const SharedTextureImage::Data *data = sharedImage->GetData();
+  } else if (image->GetFormat() == ImageFormat::SURFACE_TEXTURE ||
+             image->GetFormat() == ImageFormat::EGLIMAGE)
+  {
     gfx::IntSize size = gfx::IntSize(image->GetSize().width, image->GetSize().height);
 
     if (mFrontBuffer) {
-      mFrontBuffer->ForceRemove();
+      autoRemoveTexture.mTexture = mFrontBuffer;
       mFrontBuffer = nullptr;
     }
 
-    RefPtr<SharedTextureClientOGL> buffer = new SharedTextureClientOGL(mTextureFlags);
-    buffer->InitWith(data->mHandle, size, data->mShareType, data->mInverted);
+    RefPtr<TextureClient> buffer;
+
+    if (image->GetFormat() == ImageFormat::EGLIMAGE) {
+      EGLImageImage* typedImage = static_cast<EGLImageImage*>(image);
+      const EGLImageImage::Data* data = typedImage->GetData();
+
+      buffer = new EGLImageTextureClient(mTextureFlags,
+                                         data->mImage,
+                                         size,
+                                         data->mInverted);
+#ifdef MOZ_WIDGET_ANDROID
+    } else if (image->GetFormat() == ImageFormat::SURFACE_TEXTURE) {
+      SurfaceTextureImage* typedImage = static_cast<SurfaceTextureImage*>(image);
+      const SurfaceTextureImage::Data* data = typedImage->GetData();
+
+      buffer = new SurfaceTextureClient(mTextureFlags,
+                                        data->mSurfTex,
+                                        size,
+                                        data->mInverted);
+#endif
+    } else {
+      MOZ_ASSERT(false, "Bad ImageFormat.");
+    }
+
     mFrontBuffer = buffer;
     if (!AddTextureClient(mFrontBuffer)) {
       mFrontBuffer = nullptr;
@@ -218,34 +289,42 @@ ImageClientSingle::UpdateImage(ImageContainer* aContainer,
     }
 
     GetForwarder()->UseTexture(this, mFrontBuffer);
+
   } else {
-    nsRefPtr<gfxASurface> surface = image->GetAsSurface();
+    RefPtr<gfx::SourceSurface> surface = image->GetAsSourceSurface();
     MOZ_ASSERT(surface);
 
-    gfx::IntSize size = gfx::IntSize(image->GetSize().width, image->GetSize().height);
+    gfx::IntSize size = image->GetSize();
 
     if (mFrontBuffer &&
         (mFrontBuffer->IsImmutable() || mFrontBuffer->GetSize() != size)) {
-      mFrontBuffer->ForceRemove();
+      autoRemoveTexture.mTexture = mFrontBuffer;
       mFrontBuffer = nullptr;
     }
 
     bool bufferCreated = false;
     if (!mFrontBuffer) {
-      gfxImageFormat format
-        = gfxPlatform::GetPlatform()->OptimalFormatForContent(surface->GetContentType());
-      mFrontBuffer = CreateBufferTextureClient(gfx::ImageFormatToSurfaceFormat(format),
-                                               TEXTURE_FLAGS_DEFAULT);
-      MOZ_ASSERT(mFrontBuffer->AsTextureClientSurface());
-      mFrontBuffer->AsTextureClientSurface()->AllocateForSurface(size);
-
+      mFrontBuffer = CreateTextureClientForDrawing(surface->GetFormat(), size,
+                                                   gfx::BackendType::NONE, mTextureFlags);
+      if (!mFrontBuffer) {
+        return false;
+      }
+      MOZ_ASSERT(mFrontBuffer->CanExposeDrawTarget());
       bufferCreated = true;
     }
 
-    if (!mFrontBuffer->Lock(OPEN_READ_WRITE)) {
+    if (!mFrontBuffer->Lock(OpenMode::OPEN_WRITE_ONLY)) {
+      mFrontBuffer = nullptr;
       return false;
     }
-    bool status = mFrontBuffer->AsTextureClientSurface()->UpdateSurface(surface);
+
+    {
+      // We must not keep a reference to the DrawTarget after it has been unlocked.
+      DrawTarget* dt = mFrontBuffer->BorrowDrawTarget();
+      MOZ_ASSERT(surface.get());
+      dt->CopySurface(surface, IntRect(IntPoint(), surface->GetSize()), IntPoint());
+    }
+
     mFrontBuffer->Unlock();
 
     if (bufferCreated) {
@@ -255,18 +334,15 @@ ImageClientSingle::UpdateImage(ImageContainer* aContainer,
       }
     }
 
-    if (status) {
-      GetForwarder()->UpdatedTexture(this, mFrontBuffer, nullptr);
-      GetForwarder()->UseTexture(this, mFrontBuffer);
-    } else {
-      return false;
-    }
+    GetForwarder()->UpdatedTexture(this, mFrontBuffer, nullptr);
+    GetForwarder()->UseTexture(this, mFrontBuffer);
   }
 
   UpdatePictureRect(image->GetPictureRect());
 
   mLastPaintedImageSerial = image->GetSerial();
   aContainer->NotifyPaintedImage(image);
+  *aIsSwapped = true;
   return true;
 }
 
@@ -277,7 +353,17 @@ ImageClientBuffered::UpdateImage(ImageContainer* aContainer,
   RefPtr<TextureClient> temp = mFrontBuffer;
   mFrontBuffer = mBackBuffer;
   mBackBuffer = temp;
-  return ImageClientSingle::UpdateImage(aContainer, aContentFlags);
+
+  bool isSwapped = false;
+  bool ret = ImageClientSingle::UpdateImageInternal(aContainer, aContentFlags, &isSwapped);
+
+  if (!isSwapped) {
+    // If buffer swap did not happen at Host side, swap back the buffers.
+    RefPtr<TextureClient> temp = mFrontBuffer;
+    mFrontBuffer = mBackBuffer;
+    mBackBuffer = temp;
+  }
+  return ret;
 }
 
 bool
@@ -285,12 +371,6 @@ ImageClientSingle::AddTextureClient(TextureClient* aTexture)
 {
   MOZ_ASSERT((mTextureFlags & aTexture->GetFlags()) == mTextureFlags);
   return CompositableClient::AddTextureClient(aTexture);
-}
-
-TemporaryRef<BufferTextureClient>
-ImageClientSingle::CreateBufferTextureClient(gfx::SurfaceFormat aFormat, TextureFlags aFlags)
-{
-  return CompositableClient::CreateBufferTextureClient(aFormat, mTextureFlags | aFlags);
 }
 
 void
@@ -306,8 +386,9 @@ ImageClientBuffered::OnDetach()
   mBackBuffer = nullptr;
 }
 
-ImageClient::ImageClient(CompositableForwarder* aFwd, CompositableType aType)
-: CompositableClient(aFwd)
+ImageClient::ImageClient(CompositableForwarder* aFwd, TextureFlags aFlags,
+                         CompositableType aType)
+: CompositableClient(aFwd, aFlags)
 , mType(aType)
 , mLastPaintedImageSerial(0)
 {}
@@ -323,143 +404,9 @@ ImageClient::UpdatePictureRect(nsIntRect aRect)
   GetForwarder()->UpdatePictureRect(this, aRect);
 }
 
-DeprecatedImageClientSingle::DeprecatedImageClientSingle(CompositableForwarder* aFwd,
-                                                         TextureFlags aFlags,
-                                                         CompositableType aType)
-  : ImageClient(aFwd, aType)
-  , mTextureInfo(aType)
-{
-  mTextureInfo.mTextureFlags = aFlags;
-}
-
-bool
-DeprecatedImageClientSingle::EnsureDeprecatedTextureClient(DeprecatedTextureClientType aType)
-{
-  // We should not call this method if using ImageBridge or tiled texture
-  // clients since SupportsType always fails
-  if (mDeprecatedTextureClient && mDeprecatedTextureClient->SupportsType(aType)) {
-    return true;
-  }
-  mDeprecatedTextureClient = CreateDeprecatedTextureClient(aType);
-  return !!mDeprecatedTextureClient;
-}
-
-bool
-DeprecatedImageClientSingle::UpdateImage(ImageContainer* aContainer,
-                               uint32_t aContentFlags)
-{
-  AutoLockImage autoLock(aContainer);
-
-  Image *image = autoLock.GetImage();
-  if (!image) {
-    return false;
-  }
-
-  if (mLastPaintedImageSerial == image->GetSerial()) {
-    return true;
-  }
-
-  if (image->GetFormat() == PLANAR_YCBCR &&
-      EnsureDeprecatedTextureClient(TEXTURE_YCBCR)) {
-    PlanarYCbCrImage* ycbcr = static_cast<PlanarYCbCrImage*>(image);
-
-    if (ycbcr->AsDeprecatedSharedPlanarYCbCrImage()) {
-      AutoLockDeprecatedTextureClient lock(mDeprecatedTextureClient);
-
-      SurfaceDescriptor sd;
-      if (!ycbcr->AsDeprecatedSharedPlanarYCbCrImage()->ToSurfaceDescriptor(sd)) {
-        return false;
-      }
-
-      if (IsSurfaceDescriptorValid(*lock.GetSurfaceDescriptor())) {
-        GetForwarder()->DestroySharedSurface(lock.GetSurfaceDescriptor());
-      }
-
-      *lock.GetSurfaceDescriptor() = sd;
-    } else {
-      AutoLockYCbCrClient clientLock(mDeprecatedTextureClient);
-
-      if (!clientLock.Update(ycbcr)) {
-        NS_WARNING("failed to update DeprecatedTextureClient (YCbCr)");
-        return false;
-      }
-    }
-  } else if (image->GetFormat() == SHARED_TEXTURE &&
-             EnsureDeprecatedTextureClient(TEXTURE_SHARED_GL_EXTERNAL)) {
-    SharedTextureImage* sharedImage = static_cast<SharedTextureImage*>(image);
-    const SharedTextureImage::Data *data = sharedImage->GetData();
-
-    SharedTextureDescriptor texture(data->mShareType,
-                                    data->mHandle,
-                                    data->mSize,
-                                    data->mInverted);
-    mDeprecatedTextureClient->SetDescriptor(SurfaceDescriptor(texture));
-  } else if (image->GetFormat() == SHARED_RGB &&
-             EnsureDeprecatedTextureClient(TEXTURE_SHMEM)) {
-    nsIntRect rect(0, 0,
-                   image->GetSize().width,
-                   image->GetSize().height);
-    UpdatePictureRect(rect);
-
-    AutoLockDeprecatedTextureClient lock(mDeprecatedTextureClient);
-
-    SurfaceDescriptor desc;
-    if (!static_cast<DeprecatedSharedRGBImage*>(image)->ToSurfaceDescriptor(desc)) {
-      return false;
-    }
-    mDeprecatedTextureClient->SetDescriptor(desc);
-#ifdef MOZ_WIDGET_GONK
-  } else if (image->GetFormat() == GRALLOC_PLANAR_YCBCR) {
-    EnsureDeprecatedTextureClient(TEXTURE_SHARED_GL_EXTERNAL);
-
-    nsIntRect rect(0, 0,
-                   image->GetSize().width,
-                   image->GetSize().height);
-    UpdatePictureRect(rect);
-
-    AutoLockDeprecatedTextureClient lock(mDeprecatedTextureClient);
-
-    SurfaceDescriptor desc = static_cast<GrallocImage*>(image)->GetSurfaceDescriptor();
-    if (!IsSurfaceDescriptorValid(desc)) {
-      return false;
-    }
-    mDeprecatedTextureClient->SetDescriptor(desc);
-#endif
-  } else {
-    nsRefPtr<gfxASurface> surface = image->GetAsSurface();
-    MOZ_ASSERT(surface);
-
-    EnsureDeprecatedTextureClient(TEXTURE_SHMEM);
-    MOZ_ASSERT(mDeprecatedTextureClient, "Failed to create texture client");
-
-    AutoLockShmemClient clientLock(mDeprecatedTextureClient);
-    if (!clientLock.Update(image, aContentFlags, surface)) {
-      NS_WARNING("failed to update DeprecatedTextureClient");
-      return false;
-    }
-  }
-
-  Updated();
-
-  if (image->GetFormat() == PLANAR_YCBCR) {
-    PlanarYCbCrImage* ycbcr = static_cast<PlanarYCbCrImage*>(image);
-    UpdatePictureRect(ycbcr->GetData()->GetPictureRect());
-  }
-
-  mLastPaintedImageSerial = image->GetSerial();
-  aContainer->NotifyPaintedImage(image);
-  return true;
-}
-
-void
-DeprecatedImageClientSingle::Updated()
-{
-  mForwarder->UpdateTexture(this, 1, mDeprecatedTextureClient->LockSurfaceDescriptor());
-}
-
 ImageClientBridge::ImageClientBridge(CompositableForwarder* aFwd,
                                      TextureFlags aFlags)
-: ImageClient(aFwd, BUFFER_BRIDGE)
+: ImageClient(aFwd, aFlags, CompositableType::BUFFER_BRIDGE)
 , mAsyncContainerID(0)
 , mLayer(nullptr)
 {
@@ -483,51 +430,75 @@ ImageClientBridge::UpdateImage(ImageContainer* aContainer, uint32_t aContentFlag
 }
 
 already_AddRefed<Image>
-ImageClientSingle::CreateImage(const uint32_t *aFormats,
-                               uint32_t aNumFormats)
+ImageClientSingle::CreateImage(ImageFormat aFormat)
 {
   nsRefPtr<Image> img;
-  for (uint32_t i = 0; i < aNumFormats; i++) {
-    switch (aFormats[i]) {
-      case PLANAR_YCBCR:
-        img = new SharedPlanarYCbCrImage(this);
-        return img.forget();
-      case SHARED_RGB:
-        img = new SharedRGBImage(this);
-        return img.forget();
+  switch (aFormat) {
+    case ImageFormat::PLANAR_YCBCR:
+      img = new SharedPlanarYCbCrImage(this);
+      return img.forget();
+    case ImageFormat::SHARED_RGB:
+      img = new SharedRGBImage(this);
+      return img.forget();
 #ifdef MOZ_WIDGET_GONK
-      case GRALLOC_PLANAR_YCBCR:
-        img = new GrallocImage();
-        return img.forget();
+    case ImageFormat::GRALLOC_PLANAR_YCBCR:
+      img = new GrallocImage();
+      return img.forget();
 #endif
-    }
+    default:
+      return nullptr;
   }
-  return nullptr;
+}
+
+#ifdef MOZ_WIDGET_GONK
+ImageClientOverlay::ImageClientOverlay(CompositableForwarder* aFwd,
+                                       TextureFlags aFlags)
+  : ImageClient(aFwd, aFlags, CompositableType::IMAGE_OVERLAY)
+{
+}
+
+bool
+ImageClientOverlay::UpdateImage(ImageContainer* aContainer, uint32_t aContentFlags)
+{
+  AutoLockImage autoLock(aContainer);
+
+  Image *image = autoLock.GetImage();
+  if (!image) {
+    return false;
+  }
+
+  if (mLastPaintedImageSerial == image->GetSerial()) {
+    return true;
+  }
+
+  AutoRemoveTexture autoRemoveTexture(this);
+  if (image->GetFormat() == ImageFormat::OVERLAY_IMAGE) {
+    OverlayImage* overlayImage = static_cast<OverlayImage*>(image);
+    uint32_t overlayId = overlayImage->GetOverlayId();
+    gfx::IntSize size = overlayImage->GetSize();
+
+    OverlaySource source;
+    source.handle() = OverlayHandle(overlayId);
+    source.size() = size;
+    GetForwarder()->UseOverlaySource(this, source);
+  }
+  UpdatePictureRect(image->GetPictureRect());
+  return true;
 }
 
 already_AddRefed<Image>
-DeprecatedImageClientSingle::CreateImage(const uint32_t *aFormats,
-                                         uint32_t aNumFormats)
+ImageClientOverlay::CreateImage(ImageFormat aFormat)
 {
   nsRefPtr<Image> img;
-  for (uint32_t i = 0; i < aNumFormats; i++) {
-    switch (aFormats[i]) {
-      case PLANAR_YCBCR:
-        img = new DeprecatedSharedPlanarYCbCrImage(GetForwarder());
-        return img.forget();
-      case SHARED_RGB:
-        img = new DeprecatedSharedRGBImage(GetForwarder());
-        return img.forget();
-#ifdef MOZ_WIDGET_GONK
-      case GRALLOC_PLANAR_YCBCR:
-        img = new GrallocImage();
-        return img.forget();
-#endif
-    }
+  switch (aFormat) {
+    case ImageFormat::OVERLAY_IMAGE:
+      img = new OverlayImage();
+      return img.forget();
+    default:
+      return nullptr;
   }
-  return nullptr;
 }
 
-
+#endif
 }
 }

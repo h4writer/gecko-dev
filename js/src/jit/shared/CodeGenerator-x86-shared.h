@@ -14,6 +14,7 @@ namespace jit {
 
 class OutOfLineBailout;
 class OutOfLineUndoALUOperation;
+class OutOfLineLoadTypedArrayOutOfBounds;
 class MulNegativeZeroCheck;
 class ModOverflowCheck;
 class ReturnZero;
@@ -31,6 +32,25 @@ class CodeGeneratorX86Shared : public CodeGeneratorShared
     bool bailout(const T &t, LSnapshot *snapshot);
 
   protected:
+
+    // Load a NaN or zero into a register for an out of bounds AsmJS or static
+    // typed array load.
+    class OutOfLineLoadTypedArrayOutOfBounds : public OutOfLineCodeBase<CodeGeneratorX86Shared>
+    {
+        AnyRegister dest_;
+        bool isFloat32Load_;
+      public:
+        OutOfLineLoadTypedArrayOutOfBounds(AnyRegister dest, bool isFloat32Load)
+          : dest_(dest), isFloat32Load_(isFloat32Load)
+        {}
+
+        AnyRegister dest() const { return dest_; }
+        bool isFloat32Load() const { return isFloat32Load_; }
+        bool accept(CodeGeneratorX86Shared *codegen) {
+            return codegen->visitOutOfLineLoadTypedArrayOutOfBounds(this);
+        }
+    };
+
     // Label for the common return path.
     NonAssertingLabel returnLabel_;
     NonAssertingLabel deoptLabel_;
@@ -49,19 +69,56 @@ class CodeGeneratorX86Shared : public CodeGeneratorShared
         return ToOperand(def->output());
     }
 
-    MoveResolver::MoveOperand toMoveOperand(const LAllocation *a) const;
+    MoveOperand toMoveOperand(const LAllocation *a) const;
 
     bool bailoutIf(Assembler::Condition condition, LSnapshot *snapshot);
     bool bailoutIf(Assembler::DoubleCondition condition, LSnapshot *snapshot);
     bool bailoutFrom(Label *label, LSnapshot *snapshot);
     bool bailout(LSnapshot *snapshot);
 
+    template <typename T1, typename T2>
+    bool bailoutCmpPtr(Assembler::Condition c, T1 lhs, T2 rhs, LSnapshot *snapshot) {
+        masm.cmpPtr(lhs, rhs);
+        return bailoutIf(c, snapshot);
+    }
+    bool bailoutTestPtr(Assembler::Condition c, Register lhs, Register rhs, LSnapshot *snapshot) {
+        masm.testPtr(lhs, rhs);
+        return bailoutIf(c, snapshot);
+    }
+    template <typename T1, typename T2>
+    bool bailoutCmp32(Assembler::Condition c, T1 lhs, T2 rhs, LSnapshot *snapshot) {
+        masm.cmp32(lhs, rhs);
+        return bailoutIf(c, snapshot);
+    }
+    template <typename T1, typename T2>
+    bool bailoutTest32(Assembler::Condition c, T1 lhs, T2 rhs, LSnapshot *snapshot) {
+        masm.test32(lhs, rhs);
+        return bailoutIf(c, snapshot);
+    }
+    bool bailoutIfFalseBool(Register reg, LSnapshot *snapshot) {
+        masm.test32(reg, Imm32(0xFF));
+        return bailoutIf(Assembler::Zero, snapshot);
+    }
+    bool bailoutCvttsd2si(FloatRegister src, Register dest, LSnapshot *snapshot) {
+        // cvttsd2si returns 0x80000000 on failure. Test for it by
+        // subtracting 1 and testing overflow. The other possibility is to test
+        // equality for INT_MIN after a comparison, but 1 costs fewer bytes to
+        // materialize.
+        masm.cvttsd2si(src, dest);
+        masm.cmp32(dest, Imm32(1));
+        return bailoutIf(Assembler::Overflow, snapshot);
+    }
+    bool bailoutCvttss2si(FloatRegister src, Register dest, LSnapshot *snapshot) {
+        // Same trick as explained in the above comment.
+        masm.cvttss2si(src, dest);
+        masm.cmp32(dest, Imm32(1));
+        return bailoutIf(Assembler::Overflow, snapshot);
+    }
+
   protected:
     bool generatePrologue();
     bool generateEpilogue();
     bool generateOutOfLineCode();
-
-    Operand createArrayElementOperand(Register elements, const LAllocation *index);
 
     void emitCompare(MCompare::CompareType type, const LAllocation *left, const LAllocation *right);
 
@@ -71,7 +128,20 @@ class CodeGeneratorX86Shared : public CodeGeneratorShared
                     Assembler::NaNCond ifNaN = Assembler::NaN_HandledByCond);
     void emitBranch(Assembler::DoubleCondition cond, MBasicBlock *ifTrue, MBasicBlock *ifFalse);
 
-    bool emitTableSwitchDispatch(MTableSwitch *mir, const Register &index, const Register &base);
+    void testNullEmitBranch(Assembler::Condition cond, const ValueOperand &value,
+                            MBasicBlock *ifTrue, MBasicBlock *ifFalse)
+    {
+        cond = masm.testNull(cond, value);
+        emitBranch(cond, ifTrue, ifFalse);
+    }
+    void testUndefinedEmitBranch(Assembler::Condition cond, const ValueOperand &value,
+                                 MBasicBlock *ifTrue, MBasicBlock *ifFalse)
+    {
+        cond = masm.testUndefined(cond, value);
+        emitBranch(cond, ifTrue, ifFalse);
+    }
+
+    bool emitTableSwitchDispatch(MTableSwitch *mir, Register index, Register base);
 
   public:
     CodeGeneratorX86Shared(MIRGenerator *gen, LIRGraph *graph, MacroAssembler *masm);
@@ -81,8 +151,10 @@ class CodeGeneratorX86Shared : public CodeGeneratorShared
     virtual bool visitDouble(LDouble *ins);
     virtual bool visitFloat32(LFloat32 *ins);
     virtual bool visitMinMaxD(LMinMaxD *ins);
+    virtual bool visitMinMaxF(LMinMaxF *ins);
     virtual bool visitAbsD(LAbsD *ins);
     virtual bool visitAbsF(LAbsF *ins);
+    virtual bool visitClzI(LClzI *ins);
     virtual bool visitSqrtD(LSqrtD *ins);
     virtual bool visitSqrtF(LSqrtF *ins);
     virtual bool visitPowHalfD(LPowHalfD *ins);
@@ -91,10 +163,9 @@ class CodeGeneratorX86Shared : public CodeGeneratorShared
     virtual bool visitMulI(LMulI *ins);
     virtual bool visitDivI(LDivI *ins);
     virtual bool visitDivPowTwoI(LDivPowTwoI *ins);
-    virtual bool visitDivSelfI(LDivSelfI *ins);
+    virtual bool visitDivOrModConstantI(LDivOrModConstantI *ins);
     virtual bool visitModI(LModI *ins);
     virtual bool visitModPowTwoI(LModPowTwoI *ins);
-    virtual bool visitModSelfI(LModSelfI *ins);
     virtual bool visitBitNotI(LBitNotI *ins);
     virtual bool visitBitOpI(LBitOpI *ins);
     virtual bool visitShiftI(LShiftI *ins);
@@ -116,17 +187,51 @@ class CodeGeneratorX86Shared : public CodeGeneratorShared
     virtual bool visitMathF(LMathF *math);
     virtual bool visitFloor(LFloor *lir);
     virtual bool visitFloorF(LFloorF *lir);
+    virtual bool visitCeil(LCeil *lir);
+    virtual bool visitCeilF(LCeilF *lir);
     virtual bool visitRound(LRound *lir);
+    virtual bool visitRoundF(LRoundF *lir);
     virtual bool visitGuardShape(LGuardShape *guard);
     virtual bool visitGuardObjectType(LGuardObjectType *guard);
     virtual bool visitGuardClass(LGuardClass *guard);
     virtual bool visitEffectiveAddress(LEffectiveAddress *ins);
     virtual bool visitUDivOrMod(LUDivOrMod *ins);
     virtual bool visitAsmJSPassStackArg(LAsmJSPassStackArg *ins);
+    virtual bool visitMemoryBarrier(LMemoryBarrier *ins);
+
+    bool visitOutOfLineLoadTypedArrayOutOfBounds(OutOfLineLoadTypedArrayOutOfBounds *ool);
+
+    bool visitForkJoinGetSlice(LForkJoinGetSlice *ins);
 
     bool visitNegI(LNegI *lir);
     bool visitNegD(LNegD *lir);
     bool visitNegF(LNegF *lir);
+
+    // SIMD operators
+    bool visitSimdValueInt32x4(LSimdValueInt32x4 *lir);
+    bool visitSimdValueFloat32x4(LSimdValueFloat32x4 *lir);
+    bool visitSimdSplatX4(LSimdSplatX4 *lir);
+    bool visitInt32x4(LInt32x4 *ins);
+    bool visitFloat32x4(LFloat32x4 *ins);
+    bool visitInt32x4ToFloat32x4(LInt32x4ToFloat32x4 *ins);
+    bool visitFloat32x4ToInt32x4(LFloat32x4ToInt32x4 *ins);
+    bool visitSimdExtractElementI(LSimdExtractElementI *lir);
+    bool visitSimdExtractElementF(LSimdExtractElementF *lir);
+    bool visitSimdInsertElementI(LSimdInsertElementI *lir);
+    bool visitSimdInsertElementF(LSimdInsertElementF *lir);
+    bool visitSimdSignMaskX4(LSimdSignMaskX4 *ins);
+    bool visitSimdSwizzleI(LSimdSwizzleI *lir);
+    bool visitSimdSwizzleF(LSimdSwizzleF *lir);
+    bool visitSimdShuffle(LSimdShuffle *lir);
+    bool visitSimdUnaryArithIx4(LSimdUnaryArithIx4 *lir);
+    bool visitSimdUnaryArithFx4(LSimdUnaryArithFx4 *lir);
+    bool visitSimdBinaryCompIx4(LSimdBinaryCompIx4 *lir);
+    bool visitSimdBinaryCompFx4(LSimdBinaryCompFx4 *lir);
+    bool visitSimdBinaryArithIx4(LSimdBinaryArithIx4 *lir);
+    bool visitSimdBinaryArithFx4(LSimdBinaryArithFx4 *lir);
+    bool visitSimdBinaryBitwiseX4(LSimdBinaryBitwiseX4 *lir);
+    bool visitSimdShift(LSimdShift *lir);
+    bool visitSimdSelect(LSimdSelect *ins);
 
     // Out of line visitors.
     bool visitOutOfLineBailout(OutOfLineBailout *ool);
@@ -144,7 +249,7 @@ class OutOfLineBailout : public OutOfLineCodeBase<CodeGeneratorX86Shared>
     LSnapshot *snapshot_;
 
   public:
-    OutOfLineBailout(LSnapshot *snapshot)
+    explicit OutOfLineBailout(LSnapshot *snapshot)
       : snapshot_(snapshot)
     { }
 

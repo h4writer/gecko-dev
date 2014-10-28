@@ -8,11 +8,9 @@
 
 extern "C" {
 
-  // Define empty implementations so we can compile when
-  // MOZ_ENABLE_PROFILER_SPS is undefined
-  void MozillaRegisterDebugFD(int fd) {}
-  void MozillaRegisterDebugFILE(FILE *f) {}
-  void MozillaUnRegisterDebugFD(int fd) {}
-  void MozillaUnRegisterDebugFILE(FILE *f) {}
+void MozillaRegisterDebugFD(int aFd) {}
+void MozillaRegisterDebugFILE(FILE* aFile) {}
+void MozillaUnRegisterDebugFD(int aFd) {}
+void MozillaUnRegisterDebugFILE(FILE* aFile) {}
 
-}
+}  // extern "C"

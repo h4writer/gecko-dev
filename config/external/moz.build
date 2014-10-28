@@ -5,15 +5,19 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 external_dirs = []
-if not CONFIG['MOZ_NATIVE_SQLITE']:
-    external_dirs += ['db/sqlite3/src']
 
+DIRS += [
+    'sqlite',
+]
 if not CONFIG['MOZ_NATIVE_JPEG']:
     external_dirs += ['media/libjpeg']
 
 if CONFIG['MOZ_UPDATER']:
     if not CONFIG['MOZ_NATIVE_BZ2']:
         external_dirs += ['modules/libbz2']
+
+# There's no "native brotli" yet, but probably in the future...
+external_dirs += ['modules/brotli']
 
 if CONFIG['MOZ_VORBIS']:
     external_dirs += ['media/libvorbis']
@@ -27,11 +31,11 @@ if CONFIG['MOZ_OPUS']:
 if CONFIG['MOZ_WEBM']:
     external_dirs += ['media/libnestegg']
 
+if CONFIG['MOZ_WEBM_ENCODER']:
+    external_dirs += ['media/libmkv']
+
 if CONFIG['MOZ_VPX'] and not CONFIG['MOZ_NATIVE_LIBVPX']:
     external_dirs += ['media/libvpx']
-
-if CONFIG['MOZ_OGG']:
-    external_dirs += ['media/libogg', 'media/libtheora']
 
 if not CONFIG['MOZ_NATIVE_PNG']:
     external_dirs += ['media/libpng']
@@ -39,8 +43,11 @@ if not CONFIG['MOZ_NATIVE_PNG']:
 external_dirs += [
     'media/kiss_fft',
     'media/libcubeb',
+    'media/libogg',
+    'media/libtheora',
     'media/libspeex_resampler',
+    'media/libstagefright',
     'media/libsoundtouch',
 ]
 
-PARALLEL_DIRS += ['../../' + i for i in external_dirs]
+DIRS += ['../../' + i for i in external_dirs]

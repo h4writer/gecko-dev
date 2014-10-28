@@ -17,7 +17,6 @@
 #include "nsILoadGroup.h"
 #include "nsCOMArray.h"
 #include "nsTObserverArray.h"
-#include "nsVoidArray.h"
 #include "nsString.h"
 #include "nsIChannel.h"
 #include "nsIProgressEventSink.h"
@@ -31,8 +30,6 @@
 #include "nsAutoPtr.h"
 
 #include "mozilla/LinkedList.h"
-
-struct nsListenerInfo;
 
 /****************************************************************************
  * nsDocLoader implementation...
@@ -98,6 +95,20 @@ public:
     nsresult AddChildLoader(nsDocLoader* aChild);
     nsDocLoader* GetParent() const { return mParent; }
 
+    struct nsListenerInfo {
+      nsListenerInfo(nsIWeakReference *aListener, unsigned long aNotifyMask) 
+        : mWeakListener(aListener),
+          mNotifyMask(aNotifyMask)
+      {
+      }
+
+      // Weak pointer for the nsIWebProgressListener...
+      nsWeakPtr mWeakListener;
+
+      // Mask indicating which notifications the listener wants to receive.
+      unsigned long mNotifyMask;
+    };
+
 protected:
     virtual ~nsDocLoader();
 
@@ -146,7 +157,7 @@ protected:
     void FireOnStatusChange(nsIWebProgress *aWebProgress,
                             nsIRequest *aRequest,
                             nsresult aStatus,
-                            const PRUnichar* aMessage);
+                            const char16_t* aMessage);
 
     void FireOnLocationChange(nsIWebProgress* aWebProgress,
                               nsIRequest* aRequest,
@@ -198,7 +209,7 @@ protected:
         // Weak mRequest is ok; we'll be told if it decides to go away.
         nsIRequest * const mRequest;
 
-        nsStatusInfo(nsIRequest* aRequest) :
+        explicit nsStatusInfo(nsIRequest* aRequest) :
             mRequest(aRequest)
         {
             MOZ_COUNT_CTOR(nsStatusInfo);
@@ -211,7 +222,7 @@ protected:
 
     struct nsRequestInfo : public PLDHashEntryHdr
     {
-        nsRequestInfo(const void* key)
+        explicit nsRequestInfo(const void* key)
             : mKey(key), mCurrentProgress(0), mMaxProgress(0), mUploading(false)
             , mLastStatus(nullptr)
         {
@@ -249,7 +260,8 @@ protected:
 
     nsDocLoader*               mParent;                // [WEAK]
 
-    nsVoidArray                mListenerInfoList;
+    typedef nsAutoTObserverArray<nsListenerInfo, 8> ListenerArray;
+    ListenerArray              mListenerInfoList;
 
     nsCOMPtr<nsILoadGroup>        mLoadGroup;
     // We hold weak refs to all our kids
@@ -303,8 +315,6 @@ private:
     // loadgroup has no active requests before checking for "real" emptiness if
     // aFlushLayout is true.
     void DocLoaderIsEmpty(bool aFlushLayout);
-
-    nsListenerInfo *GetListenerInfo(nsIWebProgressListener* aListener);
 
     int64_t GetMaxTotalProgress();
 

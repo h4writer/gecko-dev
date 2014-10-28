@@ -11,6 +11,7 @@
 //
 
 #include "nsScrollbarFrame.h"
+#include "nsSliderFrame.h"
 #include "nsScrollbarButtonFrame.h"
 #include "nsGkAtoms.h"
 #include "nsIScrollableFrame.h"
@@ -19,6 +20,7 @@
 #include "nsThemeConstants.h"
 #include "nsRenderingContext.h"
 #include "nsIContent.h"
+#include "nsIDOMMutationEvent.h"
 
 using namespace mozilla;
 
@@ -40,9 +42,9 @@ NS_QUERYFRAME_HEAD(nsScrollbarFrame)
 NS_QUERYFRAME_TAIL_INHERITING(nsBoxFrame)
 
 void
-nsScrollbarFrame::Init(nsIContent* aContent,
-                       nsIFrame*   aParent,
-                       nsIFrame*   aPrevInFlow)
+nsScrollbarFrame::Init(nsIContent*       aContent,
+                       nsContainerFrame* aParent,
+                       nsIFrame*         aPrevInFlow)
 {
   nsBoxFrame::Init(aContent, aParent, aPrevInFlow);
 
@@ -53,25 +55,22 @@ nsScrollbarFrame::Init(nsIContent* aContent,
   mState |= NS_FRAME_REFLOW_ROOT;
 }
 
-NS_IMETHODIMP
+void
 nsScrollbarFrame::Reflow(nsPresContext*          aPresContext,
                          nsHTMLReflowMetrics&     aDesiredSize,
                          const nsHTMLReflowState& aReflowState,
                          nsReflowStatus&          aStatus)
 {
-  nsresult rv = nsBoxFrame::Reflow(aPresContext, aDesiredSize, aReflowState, aStatus);
-  NS_ENSURE_SUCCESS(rv, rv);
+  nsBoxFrame::Reflow(aPresContext, aDesiredSize, aReflowState, aStatus);
 
   // nsGfxScrollFrame may have told us to shrink to nothing. If so, make sure our
   // desired size agrees.
-  if (aReflowState.availableWidth == 0) {
-    aDesiredSize.width = 0;
+  if (aReflowState.AvailableWidth() == 0) {
+    aDesiredSize.Width() = 0;
   }
-  if (aReflowState.availableHeight == 0) {
-    aDesiredSize.height = 0;
+  if (aReflowState.AvailableHeight() == 0) {
+    aDesiredSize.Height() = 0;
   }
-
-  return NS_OK;
 }
 
 nsIAtom*
@@ -80,7 +79,7 @@ nsScrollbarFrame::GetType() const
   return nsGkAtoms::scrollbarFrame;
 }
 
-NS_IMETHODIMP
+nsresult
 nsScrollbarFrame::AttributeChanged(int32_t aNameSpaceID,
                                    nsIAtom* aAttribute,
                                    int32_t aModType)
@@ -144,22 +143,31 @@ nsScrollbarFrame::SetScrollbarMediatorContent(nsIContent* aMediator)
 nsIScrollbarMediator*
 nsScrollbarFrame::GetScrollbarMediator()
 {
-  if (!mScrollbarMediator)
+  if (!mScrollbarMediator) {
     return nullptr;
-  nsIFrame* f = mScrollbarMediator->GetPrimaryFrame();
-
-  // check if the frame is a scroll frame. If so, get the scrollable frame
-  // inside it.
-  nsIScrollableFrame* scrollFrame = do_QueryFrame(f);
-  if (scrollFrame) {
-    f = scrollFrame->GetScrolledFrame();
   }
+  nsIFrame* f = mScrollbarMediator->GetPrimaryFrame();
+  nsIScrollableFrame* scrollFrame = do_QueryFrame(f);
+  nsIScrollbarMediator* sbm;
 
-  nsIScrollbarMediator* sbm = do_QueryFrame(f);
+  if (scrollFrame) {
+    nsIFrame* scrolledFrame = scrollFrame->GetScrolledFrame();
+    sbm = do_QueryFrame(scrolledFrame);
+    if (sbm) {
+      return sbm;
+    }
+  }
+  sbm = do_QueryFrame(f);
+  if (f && !sbm) {
+    f = f->PresContext()->PresShell()->GetRootScrollFrame();
+    if (f && f->GetContent() == mScrollbarMediator) {
+      return do_QueryFrame(f);
+    }
+  }
   return sbm;
 }
 
-NS_IMETHODIMP
+nsresult
 nsScrollbarFrame::GetMargin(nsMargin& aMargin)
 {
   aMargin.SizeTo(0,0,0,0);
@@ -170,9 +178,7 @@ nsScrollbarFrame::GetMargin(nsMargin& aMargin)
     if (theme) {
       nsIntSize size;
       bool isOverridable;
-      nsRefPtr<nsRenderingContext> rc =
-        presContext->PresShell()->GetReferenceRenderingContext();
-      theme->GetMinimumWidgetSize(rc, this, NS_THEME_SCROLLBAR, &size,
+      theme->GetMinimumWidgetSize(presContext, this, NS_THEME_SCROLLBAR, &size,
                                   &isOverridable);
       if (IsHorizontal()) {
         aMargin.top = -presContext->DevPixelsToAppUnits(size.height);
@@ -190,4 +196,104 @@ nsScrollbarFrame::GetMargin(nsMargin& aMargin)
   }
 
   return nsBox::GetMargin(aMargin);
+}
+
+void
+nsScrollbarFrame::SetIncrementToLine(int32_t aDirection)
+{
+  // get the scrollbar's content node
+  nsIContent* content = GetContent();
+  mSmoothScroll = true;
+  mIncrement = aDirection * nsSliderFrame::GetIncrement(content);
+}
+
+void
+nsScrollbarFrame::SetIncrementToPage(int32_t aDirection)
+{
+  // get the scrollbar's content node
+  nsIContent* content = GetContent();
+  mSmoothScroll = true;
+  mIncrement = aDirection * nsSliderFrame::GetPageIncrement(content);
+}
+
+void
+nsScrollbarFrame::SetIncrementToWhole(int32_t aDirection)
+{
+  // get the scrollbar's content node
+  nsIContent* content = GetContent();
+  if (aDirection == -1)
+    mIncrement = -nsSliderFrame::GetCurrentPosition(content);
+  else
+    mIncrement = nsSliderFrame::GetMaxPosition(content) -
+                 nsSliderFrame::GetCurrentPosition(content);
+  // Don't repeat or use smooth scrolling if scrolling to beginning or end
+  // of a page.
+  mSmoothScroll = false;
+}
+
+int32_t
+nsScrollbarFrame::MoveToNewPosition()
+{
+  // get the scrollbar's content node
+  nsCOMPtr<nsIContent> content = GetContent();
+
+  // get the current pos
+  int32_t curpos = nsSliderFrame::GetCurrentPosition(content);
+
+  // get the max pos
+  int32_t maxpos = nsSliderFrame::GetMaxPosition(content);
+
+  // increment the given amount
+  if (mIncrement) {
+    curpos += mIncrement;
+  }
+
+  // make sure the current position is between the current and max positions
+  if (curpos < 0) {
+    curpos = 0;
+  } else if (curpos > maxpos) {
+    curpos = maxpos;
+  }
+
+  // set the current position of the slider.
+  nsAutoString curposStr;
+  curposStr.AppendInt(curpos);
+
+  nsWeakFrame weakFrame(this);
+  if (mSmoothScroll) {
+    content->SetAttr(kNameSpaceID_None, nsGkAtoms::smooth, NS_LITERAL_STRING("true"), false);
+  }
+  content->SetAttr(kNameSpaceID_None, nsGkAtoms::curpos, curposStr, false);
+  // notify the nsScrollbarFrame of the change
+  AttributeChanged(kNameSpaceID_None, nsGkAtoms::curpos, nsIDOMMutationEvent::MODIFICATION);
+  if (!weakFrame.IsAlive()) {
+    return curpos;
+  }
+  // notify all nsSliderFrames of the change
+  nsIFrame::ChildListIterator childLists(this);
+  for (; !childLists.IsDone(); childLists.Next()) {
+    nsFrameList::Enumerator childFrames(childLists.CurrentList());
+    for (; !childFrames.AtEnd(); childFrames.Next()) {
+      nsIFrame* f = childFrames.get();
+      nsSliderFrame* sliderFrame = do_QueryFrame(f);
+      if (sliderFrame) {
+        sliderFrame->AttributeChanged(kNameSpaceID_None, nsGkAtoms::curpos, nsIDOMMutationEvent::MODIFICATION);
+        if (!weakFrame.IsAlive()) {
+          return curpos;
+        }
+      }
+    }
+  }
+  // See if we have appearance information for a theme.
+  const nsStyleDisplay* disp = StyleDisplay();
+  nsPresContext* presContext = PresContext();
+  if (disp->mAppearance) {
+    nsITheme *theme = presContext->GetTheme();
+    if (theme && theme->ThemeSupportsWidget(presContext, this, disp->mAppearance)) {
+      bool repaint;
+      theme->WidgetStateChanged(this, disp->mAppearance, nsGkAtoms::curpos, &repaint);
+    }
+  }
+  content->UnsetAttr(kNameSpaceID_None, nsGkAtoms::smooth, false);
+  return curpos;
 }

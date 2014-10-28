@@ -36,7 +36,9 @@
 #include "IDBTransaction.h"
 #include "Key.h"
 
-BEGIN_INDEXEDDB_NAMESPACE
+namespace mozilla {
+namespace dom {
+namespace indexedDB {
 
 class ProfilerString : public nsAutoCString
 {
@@ -118,7 +120,7 @@ public:
   ProfilerString(const Key& aKey)
   {
     if (aKey.IsUnset()) {
-      Assign("null");
+      AssignLiteral("null");
     }
     else if (aKey.IsFloat()) {
       AppendPrintf("%g", aKey.ToFloat());
@@ -159,7 +161,9 @@ public:
   }
 };
 
-END_INDEXEDDB_NAMESPACE
+} // namespace indexedDB
+} // namespace dom
+} // namespace mozilla
 
 #define IDB_PROFILER_MARK(_detailedFmt, _conciseFmt, ...)                      \
   do {                                                                         \

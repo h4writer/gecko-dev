@@ -22,6 +22,8 @@
 #include "prio.h"
 #include "prprf.h"
 #include <algorithm>
+#include "nsIContentPolicy.h"
+#include "nsContentUtils.h"
 
 // Default values used to initialize a nsIncrementalDownload object.
 #define DEFAULT_CHUNK_SIZE (4096 * 16)  // bytes
@@ -260,8 +262,15 @@ nsIncrementalDownload::ProcessTimeout()
   // Fetch next chunk
   
   nsCOMPtr<nsIChannel> channel;
-  nsresult rv = NS_NewChannel(getter_AddRefs(channel), mFinalURI, nullptr,
-                              nullptr, this, mLoadFlags);
+  nsresult rv = NS_NewChannel(getter_AddRefs(channel),
+                              mFinalURI,
+                              nsContentUtils::GetSystemPrincipal(),
+                              nsILoadInfo::SEC_NORMAL,
+                              nsIContentPolicy::TYPE_OTHER,
+                              nullptr,   // loadGroup
+                              this,      // aCallbacks
+                              mLoadFlags);
+
   if (NS_FAILED(rv))
     return rv;
 
@@ -330,16 +339,16 @@ nsIncrementalDownload::ReadCurrentSize()
 
 // nsISupports
 
-NS_IMPL_ISUPPORTS9(nsIncrementalDownload,
-                   nsIIncrementalDownload,
-                   nsIRequest,
-                   nsIStreamListener,
-                   nsIRequestObserver,
-                   nsIObserver,
-                   nsIInterfaceRequestor,
-                   nsIChannelEventSink,
-                   nsISupportsWeakReference,
-                   nsIAsyncVerifyRedirectCallback)
+NS_IMPL_ISUPPORTS(nsIncrementalDownload,
+                  nsIIncrementalDownload,
+                  nsIRequest,
+                  nsIStreamListener,
+                  nsIRequestObserver,
+                  nsIObserver,
+                  nsIInterfaceRequestor,
+                  nsIChannelEventSink,
+                  nsISupportsWeakReference,
+                  nsIAsyncVerifyRedirectCallback)
 
 // nsIRequest
 
@@ -780,7 +789,7 @@ nsIncrementalDownload::OnDataAvailable(nsIRequest *request,
 
 NS_IMETHODIMP
 nsIncrementalDownload::Observe(nsISupports *subject, const char *topic,
-                               const PRUnichar *data)
+                               const char16_t *data)
 {
   if (strcmp(topic, NS_XPCOM_SHUTDOWN_OBSERVER_ID) == 0) {
     Cancel(NS_ERROR_ABORT);

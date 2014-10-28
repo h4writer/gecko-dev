@@ -38,12 +38,13 @@ public:
 
   bool IsDirect();
   bool IsHTTP();
+  bool IsHTTPS();
   bool IsSOCKS();
 
 private:
   friend class nsProtocolProxyService;
 
-  nsProxyInfo(const char *type = nullptr)
+  explicit nsProxyInfo(const char *type = nullptr)
     : mType(type)
     , mPort(-1)
     , mFlags(0)

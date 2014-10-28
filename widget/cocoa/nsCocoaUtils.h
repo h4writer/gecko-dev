@@ -24,12 +24,37 @@
 - (CGFloat)backingScaleFactor;
 @end
 
+// When building with a pre-10.7 SDK, NSEventPhase is not defined.
+#if !defined(MAC_OS_X_VERSION_10_7) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_7
+enum {
+  NSEventPhaseNone        = 0,
+  NSEventPhaseBegan       = 0x1 << 0,
+  NSEventPhaseStationary  = 0x1 << 1,
+  NSEventPhaseChanged     = 0x1 << 2,
+  NSEventPhaseEnded       = 0x1 << 3,
+  NSEventPhaseCancelled   = 0x1 << 4,
+};
+typedef NSUInteger NSEventPhase;
+#endif // #if !defined(MAC_OS_X_VERSION_10_7) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_7
+
+#if !defined(MAC_OS_X_VERSION_10_8) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_8
+enum {
+  NSEventPhaseMayBegin    = 0x1 << 5
+};
+#endif // #if !defined(MAC_OS_X_VERSION_10_8) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_8
+
 class nsIWidget;
+
+namespace mozilla {
+namespace gfx {
+class SourceSurface;
+}
+}
 
 // Used to retain a Cocoa object for the remainder of a method's execution.
 class nsAutoRetainCocoaObject {
 public:
-nsAutoRetainCocoaObject(id anObject)
+explicit nsAutoRetainCocoaObject(id anObject)
 {
   mObject = NS_OBJC_TRY_EXPR_ABORT([anObject retain]);
 }
@@ -102,7 +127,9 @@ struct KeyBindingsCommand
 
 class nsCocoaUtils
 {
-  public:
+  typedef mozilla::gfx::SourceSurface SourceSurface;
+
+public:
 
   // Get the backing scale factor from an object that supports this selector
   // (NSView/Window/Screen, on 10.7 or later), returning 1.0 if not supported
@@ -206,7 +233,15 @@ class nsCocoaUtils
   // the event was originally targeted at is still alive!
   static NSPoint EventLocationForWindow(NSEvent* anEvent, NSWindow* aWindow);
 
+  // Compatibility wrappers for the -[NSEvent phase], -[NSEvent momentumPhase],
+  // -[NSEvent hasPreciseScrollingDeltas] and -[NSEvent scrollingDeltaX/Y] APIs
+  // that became availaible starting with the 10.7 SDK.
+  // All of these can be removed once we drop support for 10.6.
+  static NSEventPhase EventPhase(NSEvent* aEvent);
+  static NSEventPhase EventMomentumPhase(NSEvent* aEvent);
   static BOOL IsMomentumScrollEvent(NSEvent* aEvent);
+  static BOOL HasPreciseScrollingDeltas(NSEvent* aEvent);
+  static void GetScrollingDeltas(NSEvent* aEvent, CGFloat* aOutDeltaX, CGFloat* aOutDeltaY);
 
   // Hides the Menu bar and the Dock. Multiple hide/show requests can be nested.
   static void HideOSChromeOnScreen(bool aShouldHide, NSScreen* aScreen);
@@ -226,7 +261,8 @@ class nsCocoaUtils
       @param aResult the resulting CGImageRef
       @return NS_OK if the conversion worked, NS_ERROR_FAILURE otherwise
    */
-  static nsresult CreateCGImageFromSurface(gfxImageSurface *aFrame, CGImageRef *aResult);
+  static nsresult CreateCGImageFromSurface(SourceSurface* aSurface,
+                                           CGImageRef* aResult);
   
   /** Creates a Cocoa <code>NSImage</code> from a <code>CGImageRef</code>.
       Copies the pixel data from the <code>CGImageRef</code> into a new <code>NSImage</code>.

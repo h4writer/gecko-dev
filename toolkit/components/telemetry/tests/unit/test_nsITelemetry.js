@@ -7,11 +7,28 @@ const Cu = Components.utils;
 const INT_MAX = 0x7FFFFFFF;
 
 const Telemetry = Cc["@mozilla.org/base/telemetry;1"].getService(Ci.nsITelemetry);
-Cu.import("resource://gre/modules/Services.jsm");
+Cu.import("resource://gre/modules/Services.jsm", this);
+
+function test_expired_histogram() {
+  var histogram_id = "FOOBAR";
+  var test_expired_id = "TELEMETRY_TEST_EXPIRED";
+  var clone_id = "ExpiredClone";
+  var dummy = Telemetry.newHistogram(histogram_id, "28.0a1", 1, 2, 3, Telemetry.HISTOGRAM_EXPONENTIAL);
+  var dummy_clone = Telemetry.histogramFrom(clone_id, test_expired_id);
+  var rh = Telemetry.registeredHistograms([]);
+
+  dummy.add(1);
+  dummy_clone.add(1);
+
+  do_check_eq(Telemetry.histogramSnapshots["__expired__"], undefined);
+  do_check_eq(Telemetry.histogramSnapshots[histogram_id], undefined);
+  do_check_eq(Telemetry.histogramSnapshots[test_expired_id], undefined);
+  do_check_eq(Telemetry.histogramSnapshots[clone_id], undefined);
+  do_check_eq(rh[test_expired_id], undefined);
+}
 
 function test_histogram(histogram_type, name, min, max, bucket_count) {
-  var h = Telemetry.newHistogram(name, min, max, bucket_count, histogram_type);
-  
+  var h = Telemetry.newHistogram(name, "never", min, max, bucket_count, histogram_type);
   var r = h.snapshot().ranges;
   var sum = 0;
   var log_sum = 0;
@@ -109,7 +126,7 @@ function expect_success(f) {
 
 function test_boolean_histogram()
 {
-  var h = Telemetry.newHistogram("test::boolean histogram", 99,1,4, Telemetry.HISTOGRAM_BOOLEAN);
+  var h = Telemetry.newHistogram("test::boolean histogram", "never", 99,1,4, Telemetry.HISTOGRAM_BOOLEAN);
   var r = h.snapshot().ranges;
   // boolean histograms ignore numeric parameters
   do_check_eq(uneval(r), uneval([0, 1, 2]))
@@ -131,28 +148,45 @@ function test_boolean_histogram()
 
 function test_flag_histogram()
 {
-  var h = Telemetry.newHistogram("test::flag histogram", 130, 4, 5, Telemetry.HISTOGRAM_FLAG);
+  var h = Telemetry.newHistogram("test::flag histogram", "never", 130, 4, 5, Telemetry.HISTOGRAM_FLAG);
   var r = h.snapshot().ranges;
   // Flag histograms ignore numeric parameters.
-  do_check_eq(uneval(r), uneval([0, 1, 2]))
+  do_check_eq(uneval(r), uneval([0, 1, 2]));
   // Should already have a 0 counted.
   var c = h.snapshot().counts;
   var s = h.snapshot().sum;
   do_check_eq(uneval(c), uneval([1, 0, 0]));
-  do_check_eq(s, 1);
+  do_check_eq(s, 0);
   // Should switch counts.
-  h.add(2);
+  h.add(1);
   var c2 = h.snapshot().counts;
   var s2 = h.snapshot().sum;
   do_check_eq(uneval(c2), uneval([0, 1, 0]));
-  do_check_eq(s, 1);
+  do_check_eq(s2, 1);
   // Should only switch counts once.
-  h.add(3);
+  h.add(1);
   var c3 = h.snapshot().counts;
   var s3 = h.snapshot().sum;
   do_check_eq(uneval(c3), uneval([0, 1, 0]));
   do_check_eq(s3, 1);
-  do_check_eq(h.snapshot().histogram_type, Telemetry.FLAG_HISTOGRAM);
+  do_check_eq(h.snapshot().histogram_type, Telemetry.HISTOGRAM_FLAG);
+}
+
+function test_count_histogram()
+{
+  let h = Telemetry.newHistogram("test::count histogram", "never", 1, 2, 3, Telemetry.HISTOGRAM_COUNT);
+  let s = h.snapshot();
+  do_check_eq(uneval(s.ranges), uneval([0, 1, 2]));
+  do_check_eq(uneval(s.counts), uneval([0, 0, 0]));
+  do_check_eq(s.sum, 0);
+  h.add();
+  s = h.snapshot();
+  do_check_eq(uneval(s.counts), uneval([1, 0, 0]));
+  do_check_eq(s.sum, 1);
+  h.add();
+  s = h.snapshot();
+  do_check_eq(uneval(s.counts), uneval([2, 0, 0]));
+  do_check_eq(s.sum, 2);
 }
 
 function test_getHistogramById() {
@@ -200,7 +234,8 @@ function test_histogramFrom() {
       "CYCLE_COLLECTOR",      // EXPONENTIAL
       "GC_REASON_2",          // LINEAR
       "GC_RESET",             // BOOLEAN
-      "TELEMETRY_TEST_FLAG"   // FLAG
+      "TELEMETRY_TEST_FLAG",  // FLAG
+      "TELEMETRY_TEST_COUNT", // COUNT
   ];
 
   for each (let name in names) {
@@ -210,11 +245,16 @@ function test_histogramFrom() {
     compareHistograms(original, clone);
   }
 
-  // Additionally, set the flag on TELEMETRY_TEST_FLAG, and check it gets set on the clone.
+  // Additionally, set TELEMETRY_TEST_FLAG and TELEMETRY_TEST_COUNT
+  // and check they get set on the clone.
   let testFlag = Telemetry.getHistogramById("TELEMETRY_TEST_FLAG");
   testFlag.add(1);
+  let testCount = Telemetry.getHistogramById("TELEMETRY_TEST_COUNT");
+  testCount.add();
   let clone = Telemetry.histogramFrom("FlagClone", "TELEMETRY_TEST_FLAG");
   compareHistograms(testFlag, clone);
+  clone = Telemetry.histogramFrom("CountClone", "TELEMETRY_TEST_COUNT");
+  compareHistograms(testCount, clone);
 }
 
 function test_getSlowSQL() {
@@ -312,7 +352,7 @@ function test_addons() {
 
 // Check that telemetry doesn't record in private mode
 function test_privateMode() {
-  var h = Telemetry.newHistogram("test::private_mode_boolean", 1,2,3, Telemetry.HISTOGRAM_BOOLEAN);
+  var h = Telemetry.newHistogram("test::private_mode_boolean", "never", 1,2,3, Telemetry.HISTOGRAM_BOOLEAN);
   var orig = h.snapshot();
   Telemetry.canRecord = false;
   h.add(1);
@@ -349,10 +389,10 @@ function run_test()
   for each (let histogram_type in kinds) {
     let [min, max, bucket_count] = [1, INT_MAX - 1, 10]
     test_histogram(histogram_type, "test::"+histogram_type, min, max, bucket_count);
-    
+
     const nh = Telemetry.newHistogram;
-    expect_fail(function () nh("test::min", 0, max, bucket_count, histogram_type));
-    expect_fail(function () nh("test::bucket_count", min, max, 1, histogram_type));
+    expect_fail(function () nh("test::min", "never", 0, max, bucket_count, histogram_type));
+    expect_fail(function () nh("test::bucket_count", "never", min, max, 1, histogram_type));
   }
 
   // Instantiate the storage for this histogram and make sure it doesn't
@@ -361,10 +401,13 @@ function run_test()
   do_check_false("NEWTAB_PAGE_PINNED_SITES_COUNT" in Telemetry.histogramSnapshots);
 
   test_boolean_histogram();
+  test_flag_histogram();
+  test_count_histogram();
   test_getHistogramById();
   test_histogramFrom();
   test_getSlowSQL();
   test_privateMode();
   test_addons();
   test_extended_stats();
+  test_expired_histogram();
 }

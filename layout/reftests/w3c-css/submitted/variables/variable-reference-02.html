@@ -5,11 +5,11 @@
 <!DOCTYPE html>
 <title>CSS Test: Test the use of a variable in a non-custom property where the value is invalid at computed-value time due to referencing a non-existent variable.</title>
 <link rel="author" title="Cameron McCormack" href="mailto:cam@mcc.id.au">
-<link rel="help" href="http://dev.w3.org/csswg/css-variables/#invalid-variables">
+<link rel="help" href="http://www.w3.org/TR/css-variables-1/#invalid-variables">
 <link rel="match" href="support/color-green-ref.html">
 <style>
 :root {
-  var-a: crimson;
+  --a: crimson;
   color: red;
 }
 body {
@@ -17,7 +17,7 @@ body {
 }
 p {
   color: orange;
-  color: var(a) var(b);
+  color: var(--a) var(--b);
 }
 </style>
 <p>This text must be green.</p>

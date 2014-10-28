@@ -13,12 +13,10 @@ function test() {
     workerURL: "http://example.com/browser/toolkit/components/social/test/browser/worker_social.js"
   };
 
-  ensureSocialEnabled();
-
   SocialService.addProvider(manifest, function (p) {
     provider = p;
     runTests(tests, undefined, undefined, function () {
-      SocialService.removeProvider(p.origin, function() {
+      SocialService.disableProvider(p.origin, function() {
         ok(!provider.enabled, "removing an enabled provider should have disabled the provider");
         let port = provider.getWorkerPort();
         ok(!port, "should not be able to get a port after removing the provider");
@@ -47,7 +45,7 @@ let tests = {
     provider.enabled = true;
 
     ok(provider.enabled, "provider is re-enabled");
-    let port = provider.getWorkerPort();
+    port = provider.getWorkerPort();
     ok(port, "should be able to get a port from re-enabled provider");
     port.close();
     ok(provider.workerAPI, "should be able to get a workerAPI from re-enabled provider");
@@ -62,8 +60,7 @@ let tests = {
     };
     SocialService.addProvider(manifest, function (provider2) {
       ok(provider.enabled, "provider is initially enabled");
-      is(provider2.enabled, Services.prefs.getBoolPref("social.allowMultipleWorkers"), "provider2 is enabled status is correct");
-      provider2.enabled = true;
+      ok(provider2.enabled, "provider2 is initially enabled");
       let port = provider.getWorkerPort();
       let port2 = provider2.getWorkerPort();
       ok(port, "have port for provider");
@@ -77,7 +74,7 @@ let tests = {
       port2.onmessage = function(e) {
         if (e.data.topic == "test-initialization-complete") {
           ok(true, "second provider initialized");
-          SocialService.removeProvider(provider2.origin, function() {
+          SocialService.disableProvider(provider2.origin, function() {
             next();
           });
         }

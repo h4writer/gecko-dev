@@ -7,9 +7,6 @@
 #ifndef mozilla_dom_indexeddb_indexeddatabasemanager_h__
 #define mozilla_dom_indexeddb_indexeddatabasemanager_h__
 
-#include "mozilla/dom/indexedDB/IndexedDatabase.h"
-
-#include "nsIIndexedDatabaseManager.h"
 #include "nsIObserver.h"
 
 #include "js/TypeDecls.h"
@@ -19,34 +16,34 @@
 #include "nsClassHashtable.h"
 #include "nsHashKeys.h"
 
-#define INDEXEDDB_MANAGER_CONTRACTID "@mozilla.org/dom/indexeddb/manager;1"
-
 class nsPIDOMWindow;
-class nsEventChainPostVisitor;
 
 namespace mozilla {
-namespace dom {
-class TabContext;
-namespace quota {
-class OriginOrPatternString;
-}
-}
-}
 
-BEGIN_INDEXEDDB_NAMESPACE
+class EventChainPostVisitor;
+
+namespace dom {
+
+class TabContext;
+
+namespace quota {
+
+class OriginOrPatternString;
+
+} // namespace quota
+
+namespace indexedDB {
 
 class FileManager;
 class FileManagerInfo;
 
-class IndexedDatabaseManager MOZ_FINAL : public nsIIndexedDatabaseManager,
-                                         public nsIObserver
+class IndexedDatabaseManager MOZ_FINAL : public nsIObserver
 {
   typedef mozilla::dom::quota::OriginOrPatternString OriginOrPatternString;
   typedef mozilla::dom::quota::PersistenceType PersistenceType;
 
 public:
   NS_DECL_ISUPPORTS
-  NS_DECL_NSIINDEXEDDATABASEMANAGER
   NS_DECL_NSIOBSERVER
 
   // Returns a non-owning reference.
@@ -56,10 +53,6 @@ public:
   // Returns a non-owning reference.
   static IndexedDatabaseManager*
   Get();
-
-  // Returns an owning reference! No one should call this but the factory.
-  static IndexedDatabaseManager*
-  FactoryCreate();
 
   static bool
   IsClosed();
@@ -83,6 +76,9 @@ public:
     return !!sLowDiskSpaceMode;
   }
 #endif
+
+  static bool
+  InTestingMode();
 
   already_AddRefed<FileManager>
   GetFileManager(PersistenceType aPersistenceType,
@@ -132,7 +128,7 @@ public:
 
   static nsresult
   FireWindowOnError(nsPIDOMWindow* aOwner,
-                    nsEventChainPostVisitor& aVisitor);
+                    EventChainPostVisitor& aVisitor);
 
   static bool
   TabContextMayAccessOrigin(const mozilla::dom::TabContext& aContext,
@@ -160,15 +156,17 @@ private:
   // protected by any mutex but it is only ever touched on the IO thread.
   nsClassHashtable<nsCStringHashKey, FileManagerInfo> mFileManagerInfos;
 
-  // Lock protecting FileManager.mFileInfos and nsDOMFileBase.mFileInfos
+  // Lock protecting FileManager.mFileInfos and FileImplBase.mFileInfos
   // It's s also used to atomically update FileInfo.mRefCnt, FileInfo.mDBRefCnt
   // and FileInfo.mSliceRefCnt
   mozilla::Mutex mFileMutex;
 
   static bool sIsMainProcess;
-  static mozilla::Atomic<int32_t> sLowDiskSpaceMode;
+  static mozilla::Atomic<bool> sLowDiskSpaceMode;
 };
 
-END_INDEXEDDB_NAMESPACE
+} // namespace indexedDB
+} // namespace dom
+} // namespace mozilla
 
-#endif /* mozilla_dom_indexeddb_indexeddatabasemanager_h__ */
+#endif // mozilla_dom_indexeddb_indexeddatabasemanager_h__

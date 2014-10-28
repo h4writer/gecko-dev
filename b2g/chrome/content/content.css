@@ -10,15 +10,24 @@ xul|window xul|scrollbar {
   display: none;
 }
 
+/* Bug 1041576 - Scrollable with scrollgrab should not have scrollbars */
+@-moz-document domain(system.gaiamobile.org) {
+  .browser-container > xul|scrollbar {
+    display: none;
+  }
+}
+
+html xul|scrollbar[root="true"] {
+  position: relative;
+  z-index: 2147483647;
+}
+
 html xul|scrollbar {
   -moz-appearance: none !important;
-  position: relative;
   background-color: transparent !important;
   background-image: none !important;
   border: 0px solid transparent !important;
-  z-index: 2147483647;
   pointer-events: none;
-  opacity: 1;
 }
 
 xul|scrollbar[orient="vertical"] {
@@ -46,7 +55,6 @@ xul|scrollbar[orient="horizontal"] xul|thumb {
 xul|scrollbar:not([active="true"]),
 xul|scrollbar[disabled] {
   opacity: 0;
-  -moz-transition: opacity 1s ease;
 }
 
 xul|scrollbarbutton {
@@ -69,6 +77,10 @@ xul|thumb {
   -moz-border-left-colors: none !important;
   border: 1px solid rgba(255, 255, 255, 0.4) !important;
   border-radius: 3px;
+}
+
+xul|scrollbarbutton {
+  background-image: none !important;
 }
 
 /* -moz-touch-enabled? media elements */
@@ -164,8 +176,6 @@ button {
 
 input[type="radio"],
 input[type="checkbox"] {
-  max-width: 14px;
-  max-height: 14px;
   border: 1px solid #a7a7a7 !important;
   padding: 2px 1px 2px 1px;
 }
@@ -252,7 +262,7 @@ select[size="1"][disabled] {
 input[type="button"][disabled],
 input[type="submit"][disabled],
 input[type="reset"][disabled],
-button[disabled="true"] {
+button[disabled] {
   padding: 0 7px 0 7px;
   background: transparent linear-gradient(rgba(255,255,255,0.4) 0, rgba(235,235,235,0.4) 3px, rgba(185,185,185,0.4) 100%);
 }
@@ -276,11 +286,9 @@ select[disabled] > button {
 *:-moz-any-link:active,
 *[role=button]:active,
 button:active,
-input:active,
 option:active,
 select:active,
-label:active,
-textarea:active {
+label:active {
   background-color: rgba(141, 184, 216, 0.5);
 }
 

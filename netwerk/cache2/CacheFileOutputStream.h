@@ -38,9 +38,13 @@ public:
 
   void NotifyCloseListener();
 
+  // Memory reporting
+  size_t SizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
+
 private:
   virtual ~CacheFileOutputStream();
 
+  nsresult CloseWithStatusLocked(nsresult aStatus);
   void ReleaseChunk();
   void EnsureCorrectChunk(bool aReleaseOnly);
   void FillHole();

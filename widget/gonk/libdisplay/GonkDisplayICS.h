@@ -25,7 +25,7 @@
 
 namespace mozilla {
 
-class GonkDisplayICS : public GonkDisplay {
+class MOZ_EXPORT GonkDisplayICS : public GonkDisplay {
 public:
     GonkDisplayICS();
     ~GonkDisplayICS();
@@ -49,6 +49,11 @@ public:
     virtual void UpdateFBSurface(EGLDisplay dpy, EGLSurface sur);
 
     virtual void SetFBReleaseFd(int fd);
+
+    virtual int GetPrevFBAcquireFd()
+    {
+        return -1;
+    }
 
 private:
     hw_module_t const*        mModule;

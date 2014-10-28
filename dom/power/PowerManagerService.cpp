@@ -45,7 +45,7 @@ namespace power {
 
 using namespace hal;
 
-NS_IMPL_ISUPPORTS1(PowerManagerService, nsIPowerManagerService)
+NS_IMPL_ISUPPORTS(PowerManagerService, nsIPowerManagerService)
 
 /* static */ StaticRefPtr<PowerManagerService> PowerManagerService::sSingleton;
 
@@ -71,7 +71,7 @@ PowerManagerService::Init()
   // absent, in case the profile might be damaged and we need to
   // restart to repair it.
   mWatchdogTimeoutSecs =
-    Preferences::GetInt("shutdown.watchdog.timeoutSecs", 5);
+    Preferences::GetInt("shutdown.watchdog.timeoutSecs", 10);
 }
 
 PowerManagerService::~PowerManagerService()
@@ -205,22 +205,37 @@ PowerManagerService::GetWakeLockState(const nsAString &aTopic, nsAString &aState
   return NS_OK;
 }
 
+already_AddRefed<WakeLock>
+PowerManagerService::NewWakeLock(const nsAString& aTopic,
+                                 nsIDOMWindow* aWindow,
+                                 mozilla::ErrorResult& aRv)
+{
+  nsRefPtr<WakeLock> wakelock = new WakeLock();
+  aRv = wakelock->Init(aTopic, aWindow);
+  if (aRv.Failed()) {
+    return nullptr;
+  }
+
+  return wakelock.forget();
+}
+
 NS_IMETHODIMP
 PowerManagerService::NewWakeLock(const nsAString &aTopic,
                                  nsIDOMWindow *aWindow,
-                                 nsIDOMMozWakeLock **aWakeLock)
+                                 nsISupports **aWakeLock)
 {
-  nsRefPtr<WakeLock> wakelock = new WakeLock();
-  nsresult rv = wakelock->Init(aTopic, aWindow);
-  NS_ENSURE_SUCCESS(rv, rv);
+  mozilla::ErrorResult rv;
+  nsRefPtr<WakeLock> wakelock = NewWakeLock(aTopic, aWindow, rv);
+  if (rv.Failed()) {
+    return rv.ErrorCode();
+  }
 
-  nsCOMPtr<nsIDOMMozWakeLock> wl(wakelock);
-  wl.forget(aWakeLock);
-
+  nsCOMPtr<nsIDOMEventListener> eventListener = wakelock.get();
+  eventListener.forget(aWakeLock);
   return NS_OK;
 }
 
-already_AddRefed<nsIDOMMozWakeLock>
+already_AddRefed<WakeLock>
 PowerManagerService::NewWakeLockOnBehalfOfProcess(const nsAString& aTopic,
                                                   ContentParent* aContentParent)
 {

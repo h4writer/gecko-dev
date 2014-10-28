@@ -24,7 +24,7 @@ public:
     * @param aContent the content representing this frame
     * @param aParentFrame the parent frame
     */
-  nsFormControlFrame(nsStyleContext*);
+  explicit nsFormControlFrame(nsStyleContext*);
 
   virtual nsIAtom* GetType() const MOZ_OVERRIDE;
 
@@ -41,20 +41,21 @@ public:
     * Respond to a gui event
     * @see nsIFrame::HandleEvent
     */
-  NS_IMETHOD HandleEvent(nsPresContext* aPresContext, 
-                         mozilla::WidgetGUIEvent* aEvent,
-                         nsEventStatus* aEventStatus) MOZ_OVERRIDE;
+  virtual nsresult HandleEvent(nsPresContext* aPresContext, 
+                               mozilla::WidgetGUIEvent* aEvent,
+                               nsEventStatus* aEventStatus) MOZ_OVERRIDE;
 
-  virtual nscoord GetBaseline() const MOZ_OVERRIDE;
+  virtual nscoord GetLogicalBaseline(mozilla::WritingMode aWritingMode)
+    const MOZ_OVERRIDE;
 
   /**
     * Respond to the request to resize and/or reflow
     * @see nsIFrame::Reflow
     */
-  NS_IMETHOD Reflow(nsPresContext*      aCX,
-                    nsHTMLReflowMetrics& aDesiredSize,
-                    const nsHTMLReflowState& aReflowState,
-                    nsReflowStatus&      aStatus) MOZ_OVERRIDE;
+  virtual void Reflow(nsPresContext*      aCX,
+                      nsHTMLReflowMetrics& aDesiredSize,
+                      const nsHTMLReflowState& aReflowState,
+                      nsReflowStatus&      aStatus) MOZ_OVERRIDE;
 
   virtual void DestroyFrom(nsIFrame* aDestructRoot) MOZ_OVERRIDE;
 
@@ -78,8 +79,8 @@ protected:
 
   virtual ~nsFormControlFrame();
 
-  virtual nscoord GetIntrinsicWidth() MOZ_OVERRIDE;
-  virtual nscoord GetIntrinsicHeight() MOZ_OVERRIDE;
+  virtual nscoord GetIntrinsicISize() MOZ_OVERRIDE;
+  virtual nscoord GetIntrinsicBSize() MOZ_OVERRIDE;
 
 //
 //-------------------------------------------------------------------------------------

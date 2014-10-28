@@ -14,9 +14,9 @@ HOST_SOURCES += [
     'mar_extract.c',
     'mar_read.c',
 ]
-HOST_LIBRARY_NAME = 'hostmar'
+HostLibrary('hostmar')
 
-LIBRARY_NAME = 'mar'
+Library('mar')
 
 UNIFIED_SOURCES += [
     'mar_create.c',
@@ -25,3 +25,6 @@ UNIFIED_SOURCES += [
 ]
 
 FORCE_STATIC_LIB = True
+
+if CONFIG['OS_ARCH'] == 'WINNT':
+    USE_STATIC_LIBS = True

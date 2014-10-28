@@ -9,12 +9,13 @@ let outgoingCall;
 
 function dial() {
   log("Make an outgoing call.");
-  outgoingCall = telephony.dial(outNumber);
-
-  outgoingCall.onalerting = function onalerting(event) {
-    log("Received 'alerting' call event.");
-    answer();
-  };
+  telephony.dial(outNumber).then(call => {
+    outgoingCall = call;
+    outgoingCall.onalerting = function onalerting(event) {
+      log("Received 'alerting' call event.");
+      answer();
+    };
+  });
 }
 
 function answer() {
@@ -30,7 +31,7 @@ function answer() {
       return(callDuration >= 2000);
     });
   };
-  emulator.run("gsm accept " + outNumber);
+  emulator.runCmdWithCallback("gsm accept " + outNumber);
 }
 
 function cleanUp(){

@@ -4,10 +4,10 @@
 
 #include "nsISupports.idl"
 
-interface nsIDOMMozConnection;
+interface nsINetworkProperties;
 
-[uuid(7f021f5d-f704-4a29-b166-829595169aaf)]
+[uuid(7956523b-631e-4f80-94a5-3883bcfd6bf3)]
 interface nsIMozNavigatorNetwork : nsISupports
 {
-  readonly attribute nsIDOMMozConnection mozConnection;
+  readonly attribute nsINetworkProperties properties;
 };

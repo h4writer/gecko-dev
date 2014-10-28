@@ -16,6 +16,7 @@
 #include "mozilla/ArrayUtils.h" // ArrayLength
 #include "mozilla/Base64.h"
 #include "ScopedNSSTypes.h"
+#include "NSSErrorsService.h"
 
 #include "nss.h"
 #include "pk11pub.h"
@@ -65,28 +66,6 @@ Base64UrlEncodeImpl(const nsACString & utf8Input, nsACString & result)
   return NS_OK;
 }
 
-nsresult
-Base64UrlDecodeImpl(const nsACString & base64Input, nsACString & result)
-{
-  nsresult rv = Base64Decode(base64Input, result);
-  NS_ENSURE_SUCCESS(rv, rv);
-
-  nsACString::char_type * out = result.BeginWriting();
-  nsACString::size_type length = result.Length();
-  // base64url encoding is defined in RFC 4648. It replaces the last two
-  // alphabet characters of base64 encoding with '-' and '_' respectively.
-  // Reverse that encoding here.
-  for (unsigned int i = 0; i < length; ++i) {
-    if (out[i] == '-') {
-      out[i] = '+';
-    } else if (out[i] == '_') {
-      out[i] = '/';
-    }
-  }
-
-  return NS_OK;
-}
-
 #define DSA_KEY_TYPE_STRING (NS_LITERAL_CSTRING("DS160"))
 #define RSA_KEY_TYPE_STRING (NS_LITERAL_CSTRING("RS256"))
 
@@ -101,6 +80,10 @@ public:
 private:
   ~KeyPair()
   {
+    nsNSSShutDownPreventionLock locker;
+    if (isAlreadyShutDown()) {
+      return;
+    }
     destructorSafeDestroyNSSReference();
     shutdown(calledFromObject);
   }
@@ -112,10 +95,6 @@ private:
 
   void destructorSafeDestroyNSSReference()
   {
-    nsNSSShutDownPreventionLock locker;
-    if (isAlreadyShutDown())
-      return;
-
     SECKEY_DestroyPrivateKey(mPrivateKey);
     mPrivateKey = nullptr;
     SECKEY_DestroyPublicKey(mPublicKey);
@@ -129,7 +108,7 @@ private:
   void operator=(const KeyPair &) MOZ_DELETE;
 };
 
-NS_IMPL_ISUPPORTS1(KeyPair, nsIIdentityKeyPair)
+NS_IMPL_ISUPPORTS(KeyPair, nsIIdentityKeyPair)
 
 class KeyGenRunnable : public nsRunnable, public nsNSSShutDownObject
 {
@@ -141,6 +120,10 @@ public:
 private:
   ~KeyGenRunnable()
   {
+    nsNSSShutDownPreventionLock locker;
+    if (isAlreadyShutDown()) {
+      return;
+    }
     destructorSafeDestroyNSSReference();
     shutdown(calledFromObject);
   }
@@ -152,17 +135,12 @@ private:
 
   void destructorSafeDestroyNSSReference()
   {
-    nsNSSShutDownPreventionLock locker;
-    if (isAlreadyShutDown())
-      return;
-
-     mKeyPair = nullptr;
   }
 
   const KeyType mKeyType; // in
   nsMainThreadPtrHandle<nsIIdentityKeyGenCallback> mCallback; // in
   nsresult mRv; // out
-  nsCOMPtr<KeyPair> mKeyPair; // out
+  nsCOMPtr<nsIIdentityKeyPair> mKeyPair; // out
 
   KeyGenRunnable(const KeyGenRunnable &) MOZ_DELETE;
   void operator=(const KeyGenRunnable &) MOZ_DELETE;
@@ -179,6 +157,10 @@ public:
 private:
   ~SignRunnable()
   {
+    nsNSSShutDownPreventionLock locker;
+    if (isAlreadyShutDown()) {
+      return;
+    }
     destructorSafeDestroyNSSReference();
     shutdown(calledFromObject);
   }
@@ -190,10 +172,6 @@ private:
 
   void destructorSafeDestroyNSSReference()
   {
-    nsNSSShutDownPreventionLock locker;
-    if (isAlreadyShutDown())
-      return;
-
     SECKEY_DestroyPrivateKey(mPrivateKey);
     mPrivateKey = nullptr;
   }
@@ -227,11 +205,12 @@ public:
   }
 
 private:
+  ~IdentityCryptoService() { }
   IdentityCryptoService(const KeyPair &) MOZ_DELETE;
   void operator=(const IdentityCryptoService &) MOZ_DELETE;
 };
 
-NS_IMPL_ISUPPORTS1(IdentityCryptoService, nsIIdentityCryptoService)
+NS_IMPL_ISUPPORTS(IdentityCryptoService, nsIIdentityCryptoService)
 
 NS_IMETHODIMP
 IdentityCryptoService::GenerateKeyPair(
@@ -259,13 +238,6 @@ IdentityCryptoService::Base64UrlEncode(const nsACString & utf8Input,
                                        nsACString & result)
 {
   return Base64UrlEncodeImpl(utf8Input, result);
-}
-
-NS_IMETHODIMP
-IdentityCryptoService::Base64UrlDecode(const nsACString & base64Input,
-                                       nsACString & result)
-{
-  return Base64UrlDecodeImpl(base64Input, result);
 }
 
 KeyPair::KeyPair(SECKEYPrivateKey * privateKey, SECKEYPublicKey * publicKey)
@@ -383,7 +355,7 @@ GenerateKeyPair(PK11SlotInfo * slot,
                                      nullptr /*&pwdata*/);
   if (!*privateKey) {
     MOZ_ASSERT(!*publicKey);
-    return PRErrorCode_to_nsresult(PR_GetError());
+    return mozilla::psm::GetXPCOMFromNSSError(PR_GetError());
   }
   if (!*publicKey) {
 	  SECKEY_DestroyPrivateKey(*privateKey);
@@ -541,9 +513,9 @@ SignRunnable::Run()
       SECItem sig = { siBuffer, nullptr, 0 };
       int sigLength = PK11_SignatureLen(mPrivateKey);
       if (sigLength <= 0) {
-        mRv = PRErrorCode_to_nsresult(PR_GetError());
+        mRv = mozilla::psm::GetXPCOMFromNSSError(PR_GetError());
       } else if (!SECITEM_AllocItem(nullptr, &sig, sigLength)) {
-        mRv = PRErrorCode_to_nsresult(PR_GetError());
+        mRv = mozilla::psm::GetXPCOMFromNSSError(PR_GetError());
       } else {
         uint8_t hash[32]; // big enough for SHA-1 or SHA-256
         SECOidTag hashAlg = mPrivateKey->keyType == dsaKey ? SEC_OID_SHA1

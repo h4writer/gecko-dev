@@ -28,7 +28,8 @@ class NameSpaceRule MOZ_FINAL : public Rule,
                                 public nsIDOMCSSRule
 {
 public:
-  NameSpaceRule(nsIAtom* aPrefix, const nsString& aURLSpec);
+  NameSpaceRule(nsIAtom* aPrefix, const nsString& aURLSpec,
+                uint32_t aLineNumber, uint32_t aColumnNumber);
 private:
   // for |Clone|
   NameSpaceRule(const NameSpaceRule& aCopy);
@@ -64,9 +65,9 @@ private:
   nsString          mURLSpec;
 };
 
+NS_DEFINE_STATIC_IID_ACCESSOR(NameSpaceRule, NS_CSS_NAMESPACE_RULE_IMPL_CID)
+
 } // namespace css
 } // namespace mozilla
-
-NS_DEFINE_STATIC_IID_ACCESSOR(mozilla::css::NameSpaceRule, NS_CSS_NAMESPACE_RULE_IMPL_CID)
 
 #endif /* mozilla_css_NameSpaceRule_h__ */

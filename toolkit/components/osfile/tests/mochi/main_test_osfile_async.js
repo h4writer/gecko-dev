@@ -149,18 +149,14 @@ function toggleDebugTest (pref, consoleListener) {
 let test = maketest("Main", function main(test) {
   return Task.spawn(function() {
     SimpleTest.waitForExplicitFinish();
-    yield test_constants();
-    yield test_path();
     yield test_stat();
     yield test_debug();
     yield test_info_features_detect();
     yield test_read_write();
-    yield test_read_write_all();
     yield test_position();
     yield test_iter();
     yield test_exists();
     yield test_debug_test();
-    yield test_duration();
     info("Test is over");
     SimpleTest.finish();
   });
@@ -171,31 +167,6 @@ let test = maketest("Main", function main(test) {
  */
 let EXISTING_FILE = OS.Path.join("chrome", "toolkit", "components",
   "osfile", "tests", "mochi", "main_test_osfile_async.js");
-
-/**
- * Test that OS.Constants is defined correctly.
- */
-let test_constants = maketest("constants", function constants(test) {
-  return Task.spawn(function() {
-    test.isnot(OS.Constants, null, "OS.Constants exists");
-    test.ok(OS.Constants.Win || OS.Constants.libc, "OS.Constants.Win exists or OS.Constants.Unix exists");
-    test.isnot(OS.Constants.Path, null, "OS.Constants.Path exists");
-    test.isnot(OS.Constants.Sys, null, "OS.Constants.Sys exists");
-  });
-});
-
-/**
- * Test that OS.Constants.Path paths are consistent.
- */
-let test_path = maketest("path",  function path(test) {
-  return Task.spawn(function() {
-    test.ok(OS.Path, "OS.Path exists");
-    test.ok(OS.Constants.Path, "OS.Constants.Path exists");
-    test.is(OS.Constants.Path.tmpDir, Services.dirsvc.get("TmpD", Components.interfaces.nsIFile).path, "OS.Constants.Path.tmpDir is correct");
-    test.is(OS.Constants.Path.profileDir, Services.dirsvc.get("ProfD", Components.interfaces.nsIFile).path, "OS.Constants.Path.profileDir is correct");
-    test.is(OS.Constants.Path.localProfileDir, Services.dirsvc.get("ProfLD", Components.interfaces.nsIFile).path, "OS.Constants.Path.localProfileDir is correct");
-  });
-});
 
 /**
  * Test OS.File.stat and OS.File.prototype.stat
@@ -304,92 +275,6 @@ let test_read_write = maketest("read_write", function read_write(test) {
   });
 });
 
-/**
- * Test OS.File.writeAtomic
- */
-let test_read_write_all = maketest("read_write_all", function read_write_all(test) {
-  return Task.spawn(function() {
-    let pathDest = OS.Path.join(OS.Constants.Path.tmpDir,
-      "osfile async test read writeAtomic.tmp");
-    let tmpPath = pathDest + ".tmp";
-
-    let test_with_options = function(options, suffix) {
-      return Task.spawn(function() {
-        let optionsBackup = JSON.parse(JSON.stringify(options));
-
-        // Check that read + writeAtomic performs a correct copy
-        let currentDir = yield OS.File.getCurrentDirectory();
-        let pathSource = OS.Path.join(currentDir, EXISTING_FILE);
-        let contents = yield OS.File.read(pathSource);
-        test.ok(contents, "Obtained contents");
-        let bytesWritten = yield OS.File.writeAtomic(pathDest, contents, options);
-        test.is(contents.byteLength, bytesWritten, "Wrote the correct number of bytes (" + suffix + ")");
-
-        // Check that options are not altered
-        test.is(Object.keys(options).length, Object.keys(optionsBackup).length,
-          "The number of options was not changed");
-        for (let k in options) {
-          test.is(options[k], optionsBackup[k], "Option was not changed (" + suffix + ")");
-        }
-        yield reference_compare_files(pathSource, pathDest, test);
-
-        // Check that temporary file was removed or doesn't exist
-        test.info("Compare complete");
-        test.ok(!(new FileUtils.File(tmpPath).exists()), "No temporary file at the end of the run (" + suffix + ")");
-
-        // Check that writeAtomic fails if noOverwrite is true and the destination
-        // file already exists!
-        let view = new Uint8Array(contents.buffer, 10, 200);
-        try {
-          let opt = JSON.parse(JSON.stringify(options));
-          opt.noOverwrite = true;
-          yield OS.File.writeAtomic(pathDest, view, opt);
-          test.fail("With noOverwrite, writeAtomic should have refused to overwrite file (" + suffix + ")");
-        } catch (err) {
-          test.info("With noOverwrite, writeAtomic correctly failed (" + suffix + ")");
-          test.ok(err instanceof OS.File.Error, "writeAtomic correctly failed with a file error (" + suffix + ")");
-          test.ok(err.becauseExists, "writeAtomic file error confirmed that the file already exists (" + suffix + ")");
-        }
-        yield reference_compare_files(pathSource, pathDest, test);
-        test.ok(!(new FileUtils.File(tmpPath).exists()), "Temporary file was removed");
-
-        // Now write a subset
-        let START = 10;
-        let LENGTH = 100;
-        view = new Uint8Array(contents.buffer, START, LENGTH);
-        bytesWritten = yield OS.File.writeAtomic(pathDest, view, options);
-        test.is(bytesWritten, LENGTH, "Partial write wrote the correct number of bytes (" + suffix + ")");
-        let array2 = yield OS.File.read(pathDest);
-        let view1 = new Uint8Array(contents.buffer, START, LENGTH);
-        test.is(view1.length, array2.length, "Re-read partial write with the correct number of bytes (" + suffix + ")");
-        let decoder = new TextDecoder();
-        test.is(decoder.decode(view1), decoder.decode(array2), "Comparing re-read of partial write (" + suffix + ")");
-
-        // Write strings, default encoding
-        let ARBITRARY_STRING = "aeiouyâêîôûçß•";
-        yield OS.File.writeAtomic(pathDest, ARBITRARY_STRING, options);
-        let array = yield OS.File.read(pathDest);
-        let IN_STRING = decoder.decode(array);
-        test.is(ARBITRARY_STRING, IN_STRING, "String write + read with default encoding works (" + suffix + ")");
-
-        let opt16 = JSON.parse(JSON.stringify(options));
-        opt16.encoding = "utf-16";
-        yield OS.File.writeAtomic(pathDest, ARBITRARY_STRING, opt16);
-        array = yield OS.File.read(pathDest);
-        IN_STRING = (new TextDecoder("utf-16")).decode(array);
-        test.is(ARBITRARY_STRING, IN_STRING, "String write + read with utf-16 encoding works (" + suffix + ")");
-
-        // Cleanup.
-        OS.File.remove(pathDest);
-      });
-    };
-
-    yield test_with_options({tmpPath: tmpPath}, "Renaming, not flushing");
-    yield test_with_options({tmpPath: tmpPath, flush: true}, "Renaming, flushing");
-    yield test_with_options({}, "Not renaming, not flushing");
-    yield test_with_options({flush: true}, "Not renaming, flushing");
-  });
-});
 
 /**
  * Test file.{getPosition, setPosition}
@@ -616,90 +501,3 @@ let test_debug_test = maketest("debug_test", function debug_test(test) {
 });
 
 
-/**
- * Test optional duration reporting that can be used for telemetry.
- */
-let test_duration = maketest("duration", function duration(test) {
-  return Task.spawn(function() {
-    Services.prefs.setBoolPref("toolkit.osfile.log", true);
-    // Options structure passed to a OS.File copy method.
-    let copyOptions = {
-      // This field should be overridden with the actual duration
-      // measurement.
-      outExecutionDuration: null
-    };
-    let currentDir = yield OS.File.getCurrentDirectory();
-    let pathSource = OS.Path.join(currentDir, EXISTING_FILE);
-    let copyFile = pathSource + ".bak";
-    let testOptions = function testOptions(options, name) {
-      test.info("Checking outExecutionDuration for operation: " + name);
-      test.info(name + ": Gathered method duration time: " +
-        options.outExecutionDuration + "ms");
-      // Making sure that duration was updated.
-      test.ok(typeof options.outExecutionDuration === "number",
-              name + ": Operation duration is a number");
-      test.ok(options.outExecutionDuration >= 0,
-              name + ": Operation duration time is non-negative.");
-    };
-    // Testing duration of OS.File.copy.
-    yield OS.File.copy(pathSource, copyFile, copyOptions);
-    testOptions(copyOptions, "OS.File.copy");
-    yield OS.File.remove(copyFile);
-
-    // Trying an operation where options are cloned.
-    let pathDest = OS.Path.join(OS.Constants.Path.tmpDir,
-      "osfile async test read writeAtomic.tmp");
-    let tmpPath = pathDest + ".tmp";
-    let readOptions = {
-      outExecutionDuration: null
-    };
-    let contents = yield OS.File.read(pathSource, undefined, readOptions);
-    testOptions(readOptions, "OS.File.read");
-    // Options structure passed to a OS.File writeAtomic method.
-    let writeAtomicOptions = {
-      // This field should be first initialized with the actual
-      // duration measurement then progressively incremented.
-      outExecutionDuration: null,
-      tmpPath: tmpPath
-    };
-    yield OS.File.writeAtomic(pathDest, contents, writeAtomicOptions);
-    testOptions(writeAtomicOptions, "OS.File.writeAtomic");
-    yield OS.File.remove(pathDest);
-
-    test.info("Ensuring that we can use outExecutionDuration to accumulate durations");
-
-    let ARBITRARY_BASE_DURATION = 5;
-    copyOptions = {
-      // This field should now be incremented with the actual duration
-      // measurement.
-      outExecutionDuration: ARBITRARY_BASE_DURATION
-    };
-    let backupDuration = ARBITRARY_BASE_DURATION;
-    // Testing duration of OS.File.copy.
-    yield OS.File.copy(pathSource, copyFile, copyOptions);
-    test.ok(copyOptions.outExecutionDuration >= backupDuration, "duration has increased 1");
-
-    backupDuration = copyOptions.outExecutionDuration;
-    yield OS.File.remove(copyFile, copyOptions);
-    test.ok(copyOptions.outExecutionDuration >= backupDuration, "duration has increased 2");
-
-    // Trying an operation where options are cloned.
-    // Options structure passed to a OS.File writeAtomic method.
-    writeAtomicOptions = {
-      // This field should be overridden with the actual duration
-      // measurement.
-      outExecutionDuration: copyOptions.outExecutionDuration,
-      tmpPath: tmpPath
-    };
-    backupDuration = writeAtomicOptions.outExecutionDuration;
-
-    yield OS.File.writeAtomic(pathDest, contents, writeAtomicOptions);
-    test.ok(copyOptions.outExecutionDuration >= backupDuration, "duration has increased 3");
-    OS.File.remove(pathDest);
-
-    // Testing an operation that doesn't take arguments at all
-    let file = yield OS.File.open(pathSource);
-    yield file.stat();
-    yield file.close();
-  });
-});

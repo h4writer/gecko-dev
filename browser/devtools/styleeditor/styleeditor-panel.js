@@ -1,4 +1,4 @@
-/* -*- Mode: Javascript; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+/* -*- indent-tabs-mode: nil; js-indent-level: 2 -*- */
 /* vim: set ft=javascript ts=2 et sw=2 tw=80: */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -9,14 +9,17 @@ const {Cc, Ci, Cu, Cr} = require("chrome");
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import("resource://gre/modules/Services.jsm");
 
-let promise = require("sdk/core/promise");
-let EventEmitter = require("devtools/shared/event-emitter");
+let {Promise: promise} = Cu.import("resource://gre/modules/Promise.jsm", {});
+let EventEmitter = require("devtools/toolkit/event-emitter");
 
 Cu.import("resource:///modules/devtools/StyleEditorUI.jsm");
 Cu.import("resource:///modules/devtools/StyleEditorUtil.jsm");
 
 loader.lazyGetter(this, "StyleSheetsFront",
-  () => require("devtools/server/actors/styleeditor").StyleSheetsFront);
+  () => require("devtools/server/actors/stylesheets").StyleSheetsFront);
+
+loader.lazyGetter(this, "StyleEditorFront",
+  () => require("devtools/server/actors/styleeditor").StyleEditorFront);
 
 this.StyleEditorPanel = function StyleEditorPanel(panelWin, toolbox) {
   EventEmitter.decorate(this);
@@ -54,14 +57,22 @@ StyleEditorPanel.prototype = {
     targetPromise.then(() => {
       this.target.on("close", this.destroy);
 
-      this._debuggee = StyleSheetsFront(this.target.client, this.target.form);
-
+      if (this.target.form.styleSheetsActor) {
+        this._debuggee = StyleSheetsFront(this.target.client, this.target.form);
+      }
+      else {
+        /* We're talking to a pre-Firefox 29 server-side */
+        this._debuggee = StyleEditorFront(this.target.client, this.target.form);
+      }
       this.UI = new StyleEditorUI(this._debuggee, this.target, this._panelDoc);
-      this.UI.on("error", this._showError);
+      this.UI.initialize().then(() => {
+        this.UI.on("error", this._showError);
 
-      this.isReady = true;
-      deferred.resolve(this);
-    })
+        this.isReady = true;
+
+        deferred.resolve(this);
+      });
+    }, console.error);
 
     return deferred.promise;
   },
@@ -72,27 +83,29 @@ StyleEditorPanel.prototype = {
    *
    * @param  {string} event
    *         Type of event
-   * @param  {string} code
-   *         Error code of error to report
-   * @param  {string} message
-   *         Extra message to append to error message
+   * @param  {string} data
+   *         The parameters to customize the error message
    */
-  _showError: function(event, code, message) {
+  _showError: function(event, data) {
     if (!this._toolbox) {
       // could get an async error after we've been destroyed
       return;
     }
 
-    let errorMessage = _(code);
-    if (message) {
-      errorMessage += " " + message;
+    let errorMessage = _(data.key);
+    if (data.append) {
+      errorMessage += " " + data.append;
     }
 
     let notificationBox = this._toolbox.getNotificationBox();
     let notification = notificationBox.getNotificationWithValue("styleeditor-error");
+    let level = (data.level === "info") ?
+                notificationBox.PRIORITY_INFO_LOW :
+                notificationBox.PRIORITY_CRITICAL_LOW;
+
     if (!notification) {
-      notificationBox.appendNotification(errorMessage,
-        "styleeditor-error", "", notificationBox.PRIORITY_CRITICAL_LOW);
+      notificationBox.appendNotification(errorMessage, "styleeditor-error",
+                                         "", level);
     }
   },
 
@@ -124,8 +137,9 @@ StyleEditorPanel.prototype = {
       this._target = null;
       this._toolbox = null;
       this._panelDoc = null;
-
       this._debuggee.destroy();
+      this._debuggee = null;
+
       this.UI.destroy();
     }
 

@@ -28,7 +28,7 @@ function consoleOpened(hud)
 function onExecuteFooObj(msg)
 {
   ok(msg, "output message found");
-  isnot(msg.textContent.indexOf("[object Object]"), -1, "message text check");
+  ok(msg.textContent.contains('{ testProp: "testValue" }'), "message text check");
 
   let anchor = msg.querySelector("a");
   ok(anchor, "object link found");
@@ -175,6 +175,7 @@ function testPropDelete(aProp)
 
   waitForSuccess({
     name: "property deleted",
+    timeout: 60000,
     validatorFn: () => !("testUpdatedProp" in content.wrappedJSObject.fooObj),
     successFn: finishTest,
     failureFn: finishTest,

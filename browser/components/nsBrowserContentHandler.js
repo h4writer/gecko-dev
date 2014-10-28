@@ -48,15 +48,18 @@ function shouldLoadURI(aURI) {
     return true;
 
   dump("*** Preventing external load of chrome: URI into browser window\n");
-  dump("    Use -chrome <uri> instead\n");
+  dump("    Use --chrome <uri> instead\n");
   return false;
 }
 
 function resolveURIInternal(aCmdLine, aArgument) {
   var uri = aCmdLine.resolveURI(aArgument);
+  var urifixup = Components.classes["@mozilla.org/docshell/urifixup;1"]
+                           .getService(nsIURIFixup);
 
   if (!(uri instanceof nsIFileURL)) {
-    return uri;
+    return urifixup.createFixupURI(aArgument,
+                                   urifixup.FIXUP_FLAG_FIX_SCHEME_TYPOS);
   }
 
   try {
@@ -71,9 +74,6 @@ function resolveURIInternal(aCmdLine, aArgument) {
   // doesn't exist. Try URI fixup heuristics: see bug 290782.
  
   try {
-    var urifixup = Components.classes["@mozilla.org/docshell/urifixup;1"]
-                             .getService(nsIURIFixup);
-
     uri = urifixup.createFixupURI(aArgument, 0);
   }
   catch (e) {
@@ -342,86 +342,6 @@ nsBrowserContentHandler.prototype = {
       cmdLine.preventDefault = true;
     }
 
-    try {
-      var remoteCommand = cmdLine.handleFlagWithParam("remote", true);
-    }
-    catch (e) {
-      throw NS_ERROR_ABORT;
-    }
-
-    if (remoteCommand != null) {
-      try {
-        var a = /^\s*(\w+)\(([^\)]*)\)\s*$/.exec(remoteCommand);
-        var remoteVerb;
-        if (a) {
-          remoteVerb = a[1].toLowerCase();
-          var remoteParams = [];
-          var sepIndex = a[2].lastIndexOf(",");
-          if (sepIndex == -1)
-            remoteParams[0] = a[2];
-          else {
-            remoteParams[0] = a[2].substring(0, sepIndex);
-            remoteParams[1] = a[2].substring(sepIndex + 1);
-          }
-        }
-
-        switch (remoteVerb) {
-        case "openurl":
-        case "openfile":
-          // openURL(<url>)
-          // openURL(<url>,new-window)
-          // openURL(<url>,new-tab)
-
-          // First param is the URL, second param (if present) is the "target"
-          // (tab, window)
-          var url = remoteParams[0];
-          var target = nsIBrowserDOMWindow.OPEN_DEFAULTWINDOW;
-          if (remoteParams[1]) {
-            var targetParam = remoteParams[1].toLowerCase()
-                                             .replace(/^\s*|\s*$/g, "");
-            if (targetParam == "new-tab")
-              target = nsIBrowserDOMWindow.OPEN_NEWTAB;
-            else if (targetParam == "new-window")
-              target = nsIBrowserDOMWindow.OPEN_NEWWINDOW;
-            else {
-              // The "target" param isn't one of our supported values, so
-              // assume it's part of a URL that contains commas.
-              url += "," + remoteParams[1];
-            }
-          }
-
-          var uri = resolveURIInternal(cmdLine, url);
-          handURIToExistingBrowser(uri, target, cmdLine);
-          break;
-
-        case "xfedocommand":
-          // xfeDoCommand(openBrowser)
-          if (remoteParams[0].toLowerCase() != "openbrowser")
-            throw NS_ERROR_ABORT;
-
-          // Passing defaultArgs, so use NO_EXTERNAL_URIS
-          openWindow(null, this.chromeURL, "_blank",
-                     "chrome,dialog=no,all" + this.getFeatures(cmdLine),
-                     this.defaultArgs, NO_EXTERNAL_URIS);
-          break;
-
-        default:
-          // Somebody sent us a remote command we don't know how to process:
-          // just abort.
-          throw "Unknown remote command.";
-        }
-
-        cmdLine.preventDefault = true;
-      }
-      catch (e) {
-        Components.utils.reportError(e);
-        // If we had a -remote flag but failed to process it, throw
-        // NS_ERROR_ABORT so that the xremote code knows to return a failure
-        // back to the handling code.
-        throw NS_ERROR_ABORT;
-      }
-    }
-
     var uriparam;
     try {
       while ((uriparam = cmdLine.handleFlagWithParam("new-window", false))) {
@@ -479,11 +399,22 @@ nsBrowserContentHandler.prototype = {
     }
     if (cmdLine.handleFlag("silent", false))
       cmdLine.preventDefault = true;
-    if (cmdLine.handleFlag("private-window", false)) {
-      openWindow(null, this.chromeURL, "_blank",
-        "chrome,dialog=no,private,all" + this.getFeatures(cmdLine),
-        "about:privatebrowsing");
-      cmdLine.preventDefault = true;
+
+    try {
+      var privateWindowParam = cmdLine.handleFlagWithParam("private-window", false);
+      if (privateWindowParam) {
+        var uri = resolveURIInternal(cmdLine, privateWindowParam);
+        handURIToExistingBrowser(uri, nsIBrowserDOMWindow.OPEN_NEWTAB, cmdLine, true);
+        cmdLine.preventDefault = true;
+      }
+    } catch (e if e.result == Components.results.NS_ERROR_INVALID_ARG) {
+      // NS_ERROR_INVALID_ARG is thrown when flag exists, but has no param.
+      if (cmdLine.handleFlag("private-window", false)) {
+        openWindow(null, this.chromeURL, "_blank",
+          "chrome,dialog=no,private,all" + this.getFeatures(cmdLine),
+          "about:privatebrowsing");
+        cmdLine.preventDefault = true;
+      }
     }
 
     var searchParam = cmdLine.handleFlagWithParam("search", false);
@@ -525,15 +456,16 @@ nsBrowserContentHandler.prototype = {
 #endif
   },
 
-  helpInfo : "  -browser           Open a browser window.\n" +
-             "  -new-window  <url> Open <url> in a new window.\n" +
-             "  -new-tab     <url> Open <url> in a new tab.\n" +
+  helpInfo : "  --browser          Open a browser window.\n" +
+             "  --new-window <url> Open <url> in a new window.\n" +
+             "  --new-tab <url>    Open <url> in a new tab.\n" +
+             "  --private-window <url> Open <url> in a new private window.\n" +
 #ifdef XP_WIN
-             "  -preferences       Open Options dialog.\n" +
+             "  --preferences      Open Options dialog.\n" +
 #else
-             "  -preferences       Open Preferences dialog.\n" +
+             "  --preferences      Open Preferences dialog.\n" +
 #endif
-             "  -search     <term> Search <term> with your default search engine.\n",
+             "  --search <term>    Search <term> with your default search engine.\n",
 
   /* nsIBrowserHandler */
 
@@ -685,19 +617,22 @@ nsBrowserContentHandler.prototype = {
 };
 var gBrowserContentHandler = new nsBrowserContentHandler();
 
-function handURIToExistingBrowser(uri, location, cmdLine)
+function handURIToExistingBrowser(uri, location, cmdLine, forcePrivate)
 {
   if (!shouldLoadURI(uri))
     return;
 
-  // Do not open external links in private windows, unless we're in perma-private mode
-  var allowPrivate = PrivateBrowsingUtils.permanentPrivateBrowsing;
+  // Unless using a private window is forced, open external links in private
+  // windows only if we're in perma-private mode.
+  var allowPrivate = forcePrivate || PrivateBrowsingUtils.permanentPrivateBrowsing;
   var navWin = RecentWindow.getMostRecentBrowserWindow({private: allowPrivate});
   if (!navWin) {
     // if we couldn't load it in an existing window, open a new one
-    openWindow(null, gBrowserContentHandler.chromeURL, "_blank",
-               "chrome,dialog=no,all" + gBrowserContentHandler.getFeatures(cmdLine),
-               uri.spec);
+    var features = "chrome,dialog=no,all" + gBrowserContentHandler.getFeatures(cmdLine);
+    if (forcePrivate) {
+      features += ",private";
+    }
+    openWindow(null, gBrowserContentHandler.chromeURL, "_blank", features, uri.spec);
     return;
   }
 
@@ -767,9 +702,7 @@ nsDefaultCommandLineHandler.prototype = {
       Components.utils.reportError(e);
     }
 
-    count = cmdLine.length;
-
-    for (i = 0; i < count; ++i) {
+    for (let i = 0; i < cmdLine.length; ++i) {
       var curarg = cmdLine.getArgument(i);
       if (curarg.match(/^-/)) {
         Components.utils.reportError("Warning: unrecognized command line flag " + curarg + "\n");

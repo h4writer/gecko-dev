@@ -15,6 +15,12 @@
 class nsIScriptContext;
 class nsIScriptGlobalObject;
 
+namespace mozilla {
+namespace dom {
+struct ErrorEventInit;
+} // namespace dom
+} // namespace mozilla
+
 // A helper function for nsIScriptGlobalObject implementations to use
 // when handling a script error.  Generally called by the global when a context
 // notifies it of an error via nsIScriptGlobalObject::HandleScriptError.
@@ -22,13 +28,13 @@ class nsIScriptGlobalObject;
 // aStatus will be filled in with the status.
 bool
 NS_HandleScriptError(nsIScriptGlobalObject *aScriptGlobal,
-                     mozilla::InternalScriptErrorEvent *aErrorEvent,
+                     const mozilla::dom::ErrorEventInit &aErrorEvent,
                      nsEventStatus *aStatus);
 
 
 #define NS_ISCRIPTGLOBALOBJECT_IID \
-{ 0x30c64680, 0x909a, 0x4435, \
-  { 0x90, 0x3b, 0x29, 0x3e, 0xb5, 0x5d, 0xc7, 0xa0 } }
+{ 0x876f83bd, 0x6314, 0x460a, \
+  { 0xa0, 0x45, 0x1c, 0x8f, 0x46, 0x2f, 0xb8, 0xe1 } }
 
 /**
  * The global object which keeps a script context for each supported script
@@ -62,21 +68,12 @@ public:
   }
 
   /**
-   * Called when the global script for a language is finalized, typically as
-   * part of its GC process.  By the time this call is made, the
-   * nsIScriptContext for the language has probably already been removed.
-   * After this call, the passed object is dead - which should generally be the
-   * same object the global is using for a global for that language.
-   */
-  virtual void OnFinalize(JSObject* aObject) = 0;
-
-  /**
    * Handle a script error.  Generally called by a script context.
    */
   virtual nsresult HandleScriptError(
-                     mozilla::InternalScriptErrorEvent *aErrorEvent,
+                     const mozilla::dom::ErrorEventInit &aErrorEventInit,
                      nsEventStatus *aEventStatus) {
-    NS_ENSURE_STATE(NS_HandleScriptError(this, aErrorEvent, aEventStatus));
+    NS_ENSURE_STATE(NS_HandleScriptError(this, aErrorEventInit, aEventStatus));
     return NS_OK;
   }
 

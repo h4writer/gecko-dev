@@ -24,7 +24,7 @@ class nsBMPDecoder : public Decoder
 {
 public:
 
-    nsBMPDecoder(RasterImage &aImage);
+    explicit nsBMPDecoder(RasterImage &aImage);
     ~nsBMPDecoder();
 
     // Specifies whether or not the BMP file will contain alpha data
@@ -45,7 +45,7 @@ public:
     // for 32BPP bitmaps.  Only use after the bitmap has been processed.
     bool HasAlphaData() const;
 
-    virtual void WriteInternal(const char* aBuffer, uint32_t aCount);
+    virtual void WriteInternal(const char* aBuffer, uint32_t aCount, DecodeStrategy aStrategy);
     virtual void FinishInternal();
 
 private:
@@ -54,11 +54,11 @@ private:
      * the bitmasks from mBitFields */
     NS_METHOD CalcBitShift();
 
-    uint32_t mPos;
+    uint32_t mPos; ///< Number of bytes read from aBuffer in WriteInternal()
 
     BMPFILEHEADER mBFH;
     BITMAPV5HEADER mBIH;
-    char mRawBuf[WIN_V3_INTERNAL_BIH_LENGTH];
+    char mRawBuf[WIN_V3_INTERNAL_BIH_LENGTH]; ///< If this is changed, WriteInternal() MUST be updated
 
     uint32_t mLOH; ///< Length of the header
 

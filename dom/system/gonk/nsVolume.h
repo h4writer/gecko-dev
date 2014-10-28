@@ -30,16 +30,18 @@ public:
   nsVolume(const nsAString& aName, const nsAString& aMountPoint,
            const int32_t& aState, const int32_t& aMountGeneration,
            const bool& aIsMediaPresent, const bool& aIsSharing,
-           const bool& aIsFormatting)
+           const bool& aIsFormatting, const bool& aIsFake,
+           const bool& aIsUnmounting)
     : mName(aName),
       mMountPoint(aMountPoint),
       mState(aState),
       mMountGeneration(aMountGeneration),
       mMountLocked(false),
-      mIsFake(false),
+      mIsFake(aIsFake),
       mIsMediaPresent(aIsMediaPresent),
       mIsSharing(aIsSharing),
-      mIsFormatting(aIsFormatting)
+      mIsFormatting(aIsFormatting),
+      mIsUnmounting(aIsUnmounting)
   {
   }
 
@@ -53,7 +55,8 @@ public:
       mIsFake(false),
       mIsMediaPresent(false),
       mIsSharing(false),
-      mIsFormatting(false)
+      mIsFormatting(false),
+      mIsUnmounting(false)
   {
   }
 
@@ -78,11 +81,12 @@ public:
   bool IsMediaPresent() const         { return mIsMediaPresent; }
   bool IsSharing() const              { return mIsSharing; }
   bool IsFormatting() const           { return mIsFormatting; }
+  bool IsUnmounting() const           { return mIsUnmounting; }
 
   typedef nsTArray<nsRefPtr<nsVolume> > Array;
 
 private:
-  ~nsVolume() {}
+  virtual ~nsVolume() {}  // MozExternalRefCountType complains if this is non-virtual
 
   friend class nsVolumeService; // Calls the following XxxMountLock functions
   void UpdateMountLock(const nsAString& aMountLockState);
@@ -91,6 +95,8 @@ private:
   void SetIsFake(bool aIsFake);
   void SetState(int32_t aState);
   static void FormatVolumeIOThread(const nsCString& aVolume);
+  static void MountVolumeIOThread(const nsCString& aVolume);
+  static void UnmountVolumeIOThread(const nsCString& aVolume);
 
   nsString mName;
   nsString mMountPoint;
@@ -101,6 +107,7 @@ private:
   bool     mIsMediaPresent;
   bool     mIsSharing;
   bool     mIsFormatting;
+  bool     mIsUnmounting;
 };
 
 } // system

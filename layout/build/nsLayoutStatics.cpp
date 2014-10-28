@@ -23,13 +23,13 @@
 #include "nsCSSRendering.h"
 #include "mozilla/dom/Attr.h"
 #include "nsDOMClassInfo.h"
-#include "nsEventListenerManager.h"
+#include "nsEditorEventListener.h"
+#include "mozilla/EventListenerManager.h"
 #include "nsFrame.h"
 #include "nsGlobalWindow.h"
 #include "nsGkAtoms.h"
 #include "nsImageFrame.h"
 #include "nsLayoutStylesheetCache.h"
-#include "nsNodeInfo.h"
 #include "nsRange.h"
 #include "nsRegion.h"
 #include "nsRepeatService.h"
@@ -38,7 +38,6 @@
 #include "nsStackLayout.h"
 #include "nsStyleSet.h"
 #include "nsTextControlFrame.h"
-#include "nsXBLWindowKeyHandler.h"
 #include "nsXBLService.h"
 #include "txMozillaXSLTProcessor.h"
 #include "nsTreeSanitizer.h"
@@ -63,8 +62,11 @@
 #include "CacheObserver.h"
 #include "DisplayItemClip.h"
 #include "ActiveLayerTracker.h"
+#include "CounterStyleManager.h"
+#include "FrameLayerBuilder.h"
 
 #include "AudioChannelService.h"
+#include "mozilla/dom/DataStoreService.h"
 
 #ifdef MOZ_XUL
 #include "nsXULPopupManager.h"
@@ -73,6 +75,8 @@
 #include "nsXULTooltipListener.h"
 
 #include "inDOMView.h"
+
+#include "nsMenuBarListener.h"
 #endif
 
 #include "nsHTMLEditor.h"
@@ -82,8 +86,8 @@
 #include "nsSynthVoiceRegistry.h"
 #endif
 
-#ifdef MOZ_MEDIA_PLUGINS
-#include "MediaPluginHost.h"
+#ifdef MOZ_ANDROID_OMX
+#include "AndroidMediaPluginHost.h"
 #endif
 
 #ifdef MOZ_WMF
@@ -94,7 +98,11 @@
 #include "GStreamerFormatHelper.h"
 #endif
 
-#include "AudioStream.h"
+#ifdef MOZ_FFMPEG
+#include "FFmpegRuntimeLinker.h"
+#endif
+
+#include "CubebUtils.h"
 #include "Latency.h"
 #include "WebAudioUtils.h"
 
@@ -120,17 +128,16 @@ using namespace mozilla::system;
 #include "nsCookieService.h"
 #include "nsApplicationCacheService.h"
 #include "mozilla/dom/time/DateCacheCleaner.h"
-#include "nsIMEStateManager.h"
+#include "mozilla/EventDispatcher.h"
+#include "mozilla/IMEStateManager.h"
 #include "nsDocument.h"
 #include "mozilla/dom/HTMLVideoElement.h"
-
-extern void NS_ShutdownEventTargetChainRecycler();
+#include "CameraPreferences.h"
 
 using namespace mozilla;
 using namespace mozilla::net;
 using namespace mozilla::dom;
 using namespace mozilla::dom::ipc;
-using namespace mozilla::dom::time;
 
 nsrefcnt nsLayoutStatics::sLayoutStaticRefcnt = 0;
 
@@ -209,7 +216,6 @@ nsLayoutStatics::Initialize()
 
   nsMathMLOperators::AddRefTable();
 
-  nsEditProperty::RegisterAtoms();
   nsTextServicesDocument::RegisterAtoms();
 
 #ifdef DEBUG
@@ -256,7 +262,7 @@ nsLayoutStatics::Initialize()
   }
 
   AsyncLatencyLogger::InitializeStatics();
-  AudioStream::InitLibrary();
+  CubebUtils::InitLibrary();
 
   nsContentSink::InitializeStatics();
   nsHtml5Module::InitializeStatics();
@@ -280,11 +286,19 @@ nsLayoutStatics::Initialize()
   nsCookieService::AppClearDataObserverInit();
   nsApplicationCacheService::AppClearDataObserverInit();
 
-  InitializeDateCacheCleaner();
-
   HTMLVideoElement::Init();
 
+#ifdef MOZ_XUL
+  nsMenuBarListener::InitializeStatics();
+#endif
+
   CacheObserver::Init();
+
+  CounterStyleManager::InitializeBuiltinCounterStyles();
+
+  CameraPreferences::Initialize();
+
+  IMEStateManager::Init();
 
   return NS_OK;
 }
@@ -303,9 +317,8 @@ nsLayoutStatics::Shutdown()
   DOMStorageObserver::Shutdown();
   txMozillaXSLTProcessor::Shutdown();
   Attr::Shutdown();
-  nsEventListenerManager::Shutdown();
-  nsIMEStateManager::Shutdown();
-  nsComputedDOMStyle::Shutdown();
+  EventListenerManager::Shutdown();
+  IMEStateManager::Shutdown();
   nsCSSParser::Shutdown();
   nsCSSRuleProcessor::Shutdown();
   nsTextFrameTextRunCache::Shutdown();
@@ -344,26 +357,28 @@ nsLayoutStatics::Shutdown()
   nsAttrValue::Shutdown();
   nsContentUtils::Shutdown();
   nsLayoutStylesheetCache::Shutdown();
-  NS_NameSpaceManagerShutdown();
 
   ShutdownJSEnvironment();
   nsGlobalWindow::ShutDown();
   nsDOMClassInfo::ShutDown();
   nsListControlFrame::Shutdown();
-  nsXBLWindowKeyHandler::ShutDown();
   nsXBLService::Shutdown();
   nsAutoCopyListener::Shutdown();
   FrameLayerBuilder::Shutdown();
 
-#ifdef MOZ_MEDIA_PLUGINS
-  MediaPluginHost::Shutdown();
+#ifdef MOZ_ANDROID_OMX
+  AndroidMediaPluginHost::Shutdown();
 #endif
 
 #ifdef MOZ_GSTREAMER
   GStreamerFormatHelper::Shutdown();
 #endif
 
-  AudioStream::ShutdownLibrary();
+#ifdef MOZ_FFMPEG
+  FFmpegRuntimeLinker::Unlink();
+#endif
+
+  CubebUtils::ShutdownLibrary();
   AsyncLatencyLogger::ShutdownLogger();
   WebAudioUtils::Shutdown();
 
@@ -392,7 +407,7 @@ nsLayoutStatics::Shutdown()
 
   nsRegion::ShutdownStatic();
 
-  NS_ShutdownEventTargetChainRecycler();
+  mozilla::EventDispatcher::Shutdown();
 
   HTMLInputElement::DestroyUploadLastDir();
 
@@ -403,6 +418,8 @@ nsLayoutStatics::Shutdown()
 
   AudioChannelService::Shutdown();
 
+  DataStoreService::Shutdown();
+
   ContentParent::ShutDown();
 
   nsRefreshDriver::Shutdown();
@@ -412,4 +429,6 @@ nsLayoutStatics::Shutdown()
   nsDocument::XPCOMShutdown();
 
   CacheObserver::Shutdown();
+
+  CameraPreferences::Shutdown();
 }

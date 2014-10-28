@@ -7,7 +7,6 @@
 #define GFXQTNATIVERENDER_H_
 
 #include "gfxColor.h"
-#include "gfxASurface.h"
 #include "gfxContext.h"
 #include "gfxXlibSurface.h"
 
@@ -30,9 +29,9 @@ public:
      * @param numClipRects the number of rects in the array, or zero if
      * no clipping is required
      */
-    virtual nsresult DrawWithXlib(gfxXlibSurface *xsurf,
-            nsIntPoint offset,
-            nsIntRect* clipRects, uint32_t numClipRects) = 0;
+    virtual nsresult DrawWithXlib(cairo_surface_t* surface,
+                                  nsIntPoint offset,
+                                  nsIntRect* clipRects, uint32_t numClipRects) = 0;
   
     enum {
         // If set, then Draw() is opaque, i.e., every pixel in the intersection
