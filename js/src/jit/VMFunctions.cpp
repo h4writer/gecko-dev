@@ -792,7 +792,7 @@ DebugEpilogueOnBaselineReturn(JSContext *cx, BaselineFrame *frame, jsbytecode *p
         // here before we enter the exception handler.
         TraceLogger *logger = TraceLoggerForMainThread(cx->runtime());
         TraceLogStopEvent(logger, TraceLogger::Baseline);
-        TraceLogStopEvent(logger); // Leave script.
+        TraceLogStopEvent(logger, TraceLogger::Scripts);
         return false;
     }
 
