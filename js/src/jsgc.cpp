@@ -3250,7 +3250,7 @@ GCHelperState::work()
     MOZ_ASSERT(!thread);
     thread = PR_GetCurrentThread();
 
-    TraceLogger *logger = TraceLoggerForCurrentThread();
+    TraceLoggerThread *logger = TraceLoggerForCurrentThread();
 
     switch (state()) {
 
@@ -5798,7 +5798,7 @@ GCRuntime::collect(bool incremental, int64_t budget, JSGCInvocationKind gckind,
     if (rt->mainThread.suppressGC)
         return;
 
-    TraceLogger *logger = TraceLoggerForMainThread(rt);
+    TraceLoggerThread *logger = TraceLoggerForMainThread(rt);
     AutoTraceLog logGC(logger, TraceLogger_GC);
 
 #ifdef JS_GC_ZEAL
@@ -5981,7 +5981,7 @@ void
 GCRuntime::minorGC(JS::gcreason::Reason reason)
 {
 #ifdef JSGC_GENERATIONAL
-    TraceLogger *logger = TraceLoggerForMainThread(rt);
+    TraceLoggerThread *logger = TraceLoggerForMainThread(rt);
     AutoTraceLog logMinorGC(logger, TraceLogger_MinorGC);
     nursery.collect(rt, reason, nullptr);
     MOZ_ASSERT_IF(!rt->mainThread.suppressGC, nursery.isEmpty());
@@ -5994,7 +5994,7 @@ GCRuntime::minorGC(JSContext *cx, JS::gcreason::Reason reason)
     // Alternate to the runtime-taking form above which allows marking type
     // objects as needing pretenuring.
 #ifdef JSGC_GENERATIONAL
-    TraceLogger *logger = TraceLoggerForMainThread(rt);
+    TraceLoggerThread *logger = TraceLoggerForMainThread(rt);
     AutoTraceLog logMinorGC(logger, TraceLogger_MinorGC);
     Nursery::TypeObjectList pretenureTypes;
     nursery.collect(rt, reason, &pretenureTypes);

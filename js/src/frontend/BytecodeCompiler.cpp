@@ -219,7 +219,7 @@ frontend::CompileScript(ExclusiveContext *cx, LifoAlloc *alloc, HandleObject sco
 
     RootedString source(cx, source_);
 
-    js::TraceLogger *logger = nullptr;
+    js::TraceLoggerThread *logger = nullptr;
     if (cx->isJSContext())
         logger = TraceLoggerForMainThread(cx->asJSContext()->runtime());
     else
@@ -474,7 +474,7 @@ frontend::CompileLazyFunction(JSContext *cx, Handle<LazyScript*> lazy, const cha
            .setNoScriptRval(false)
            .setSelfHostingMode(false);
 
-    js::TraceLogger *logger = js::TraceLoggerForMainThread(cx->runtime());
+    js::TraceLoggerThread *logger = js::TraceLoggerForMainThread(cx->runtime());
     uint32_t logId = js::TraceLogCreateTextId(logger, options);
     js::AutoTraceLog scriptLogger(logger, logId);
     js::AutoTraceLog typeLogger(logger, TraceLogger_ParserCompileLazy);
@@ -530,7 +530,7 @@ CompileFunctionBody(JSContext *cx, MutableHandleFunction fun, const ReadOnlyComp
                     const AutoNameVector &formals, SourceBufferHolder &srcBuf,
                     GeneratorKind generatorKind)
 {
-    js::TraceLogger *logger = js::TraceLoggerForMainThread(cx->runtime());
+    js::TraceLoggerThread *logger = js::TraceLoggerForMainThread(cx->runtime());
     uint32_t logId = js::TraceLogCreateTextId(logger, options);
     js::AutoTraceLog scriptLogger(logger, logId);
     js::AutoTraceLog typeLogger(logger, TraceLogger_ParserCompileFunction);

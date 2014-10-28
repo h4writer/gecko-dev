@@ -1300,7 +1300,7 @@ jit::BailoutIonToBaseline(JSContext *cx, JitActivation *activation, JitFrameIter
     MOZ_ASSERT(bailoutInfo != nullptr);
     MOZ_ASSERT(*bailoutInfo == nullptr);
 
-    TraceLogger *logger = TraceLoggerForMainThread(cx->runtime());
+    TraceLoggerThread *logger = TraceLoggerForMainThread(cx->runtime());
     TraceLogStopEvent(logger, TraceLogger_IonMonkey);
     TraceLogStartEvent(logger, TraceLogger_Baseline);
 

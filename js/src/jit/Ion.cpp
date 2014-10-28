@@ -642,7 +642,7 @@ jit::LazyLinkTopActivation(JSContext *cx)
     builder->remove();
 
     if (CodeGenerator *codegen = builder->backgroundCodegen()) {
-        js::TraceLogger *logger = TraceLoggerForMainThread(cx->runtime());
+        js::TraceLoggerThread *logger = TraceLoggerForMainThread(cx->runtime());
         AutoTraceLog logScript(logger, TraceLogCreateTextId(logger, script));
         AutoTraceLog logLink(logger, TraceLogger_IonLinking);
 
@@ -1393,7 +1393,7 @@ bool
 OptimizeMIR(MIRGenerator *mir)
 {
     MIRGraph &graph = mir->graph();
-    TraceLogger *logger;
+    TraceLoggerThread *logger;
     if (GetIonContext()->runtime->onMainThread())
         logger = TraceLoggerForMainThread(GetIonContext()->runtime);
     else
@@ -1714,7 +1714,7 @@ GenerateLIR(MIRGenerator *mir)
 {
     MIRGraph &graph = mir->graph();
 
-    TraceLogger *logger;
+    TraceLoggerThread *logger;
     if (GetIonContext()->runtime->onMainThread())
         logger = TraceLoggerForMainThread(GetIonContext()->runtime);
     else
@@ -1808,7 +1808,7 @@ GenerateLIR(MIRGenerator *mir)
 CodeGenerator *
 GenerateCode(MIRGenerator *mir, LIRGraph *lir)
 {
-    TraceLogger *logger;
+    TraceLoggerThread *logger;
     if (GetIonContext()->runtime->onMainThread())
         logger = TraceLoggerForMainThread(GetIonContext()->runtime);
     else
@@ -1855,7 +1855,7 @@ AttachFinishedCompilations(JSContext *cx)
 
     GlobalHelperThreadState::IonBuilderVector &finished = HelperThreadState().ionFinishedList();
 
-    TraceLogger *logger = TraceLoggerForMainThread(cx->runtime());
+    TraceLoggerThread *logger = TraceLoggerForMainThread(cx->runtime());
 
     // Incorporate any off thread compilations for the compartment which have
     // finished, failed or have been cancelled.
@@ -1992,7 +1992,7 @@ IonCompile(JSContext *cx, JSScript *script,
            ExecutionMode executionMode, bool recompile,
            OptimizationLevel optimizationLevel)
 {
-    TraceLogger *logger = TraceLoggerForMainThread(cx->runtime());
+    TraceLoggerThread *logger = TraceLoggerForMainThread(cx->runtime());
     AutoTraceLog logScript(logger, TraceLogCreateTextId(logger, script));
     AutoTraceLog logCompile(logger, TraceLogger_IonCompilation);
 
